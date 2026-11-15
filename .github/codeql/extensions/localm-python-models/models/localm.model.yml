@@ -17,6 +17,12 @@ extensions:
       - ["localm", "Member[storekit].Member[read_json].ReturnValue", "path-injection"]
       - ["localm", "Member[storekit].Member[read_json_checked].ReturnValue", "path-injection"]
       - ["localm", "Member[storekit].Member[read_json_state].ReturnValue", "path-injection"]
+      # The same files hold the update and bug-report URLs, both owner-only settings.
+      - ["localm", "Member[config].Member[load_config].ReturnValue", "request-forgery"]
+      - ["localm", "Member[config].Member[load_config_checked].ReturnValue", "request-forgery"]
+      - ["localm", "Member[storekit].Member[read_json].ReturnValue", "request-forgery"]
+      - ["localm", "Member[storekit].Member[read_json_checked].ReturnValue", "request-forgery"]
+      - ["localm", "Member[storekit].Member[read_json_state].ReturnValue", "request-forgery"]
       # A plugin id that passed the single-path-component check.
       - ["localm", "Member[plugins].Member[ids].Member[_check_plugin_name].ReturnValue", "path-injection"]
   - addsTo:
