@@ -2425,6 +2425,7 @@ def _release_manifest_gate() -> tuple[list[str], list[str]]:
 # _mm``); a relative import of the same name leaves its calls outside the barrier.
 _CODEQL_BARRIER_NAMES = frozenset({
     "load_registry", "update_registry", "_is_valid_plugin_name", "_check_plugin_name",
+    "confined_name", "confined_file",
 })
 
 

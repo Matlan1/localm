@@ -9,6 +9,7 @@ import inspect
 import itertools
 import json
 import ntpath
+import os
 import posixpath
 from pathlib import Path
 
@@ -109,3 +110,31 @@ def test_accepted_plugin_id_is_one_component_under_any_root():
         for mod, root in ((ntpath, "Q:\\root"), (posixpath, "/root")):
             joined = mod.normpath(mod.join(root, name))
             assert (mod.dirname(joined), mod.basename(joined)) == (root, name), (name, root)
+
+
+def test_confined_name_returns_a_direct_child_of_base_or_refuses(tmp_path):
+    """Every name confined_name accepts resolves to a direct child of *base*
+    with the same name; every other name is refused with a 400."""
+    from fastapi import HTTPException
+
+    from localm.pathsafe import confined_file, confined_name
+    base = tmp_path / "base"
+    base.mkdir()
+    (tmp_path / "outside.png").write_bytes(b"x")
+    (base / "inside.png").write_bytes(b"x")
+    accepted = []
+    for name in itertools.chain(_candidate_ids(), ("../outside.png", "..\\outside.png",
+                                                   str(tmp_path / "outside.png"))):
+        try:
+            got = confined_name(base, name)
+        except HTTPException as e:
+            assert e.status_code == 400, name
+            continue
+        accepted.append(name)
+        assert (got.parent, got.name) == (base.resolve(), name), name
+    assert {"a", "a-a", "a.b", "chat"} <= set(accepted)
+    refused = {"..", "../x", "Q:x", "Q:\\x", "/root", "../outside.png", str(tmp_path / "outside.png")}
+    if os.name == "nt":
+        refused |= {"..\\x", "..\\outside.png"}
+    assert not refused & set(accepted)
+    assert confined_file(base, "inside.png", "image") == (base / "inside.png").resolve()
