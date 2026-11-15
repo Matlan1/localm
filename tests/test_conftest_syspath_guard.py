@@ -31,6 +31,7 @@ import pytest
 pytest_plugins = ["pytester"]
 
 _REAL_CONFTEST = str(Path(__file__).parent / "conftest.py").replace("\\", "/")
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent).replace("\\", "/")
 
 
 def _real_conftest_module():
@@ -55,6 +56,7 @@ def _with_real_conftest(pytester):
     """
     pytester.makeconftest(
         "import importlib.util as _u, sys\n"
+        "sys.path.insert(0, r'" + _REPO_ROOT + "')\n"
         "_s = _u.spec_from_file_location('_localm_real_conftest', r'"
         + _REAL_CONFTEST + "')\n"
         "_m = _u.module_from_spec(_s)\n"
