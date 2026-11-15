@@ -30,10 +30,10 @@ const VENDOR = new URL("../localm/plugins/gui/static/vendor/", import.meta.url);
 
 // Provenance pin. sha256, base64, over CRLF-normalised bytes. Recorded from the
 // npm registry artefact, tarball shasum-verified against the registry's own
-// published dist.shasum (2b1f2aff274503e3ec053c412c6eb979bd7c8194) before
-// extraction:  npm pack marked@18.1.3  ->  package/lib/marked.umd.js
-const VENDORED_VERSION = "18.1.3";
-const PINNED_HASH = "w0oiHciekYM6iIIudxe4oM8nEY+Mmod53/tIpr4x+Xo=";
+// published dist.shasum (58d7f91aa57cab1591bce1be264b1251694a63f3) before
+// extraction:  npm pack marked@18.2.0  ->  package/lib/marked.umd.js
+const VENDORED_VERSION = "18.2.0";
+const PINNED_HASH = "OS9N+JUztQ8drf8/bcCVI1C9Ocnxfe9QoDdO9H1hR+8=";
 
 function readVendored(name) {
   return fs.readFileSync(new URL(name, VENDOR));
@@ -77,7 +77,7 @@ test("marked still exposes NO runtime version, so the byte pin is the only signa
   } finally { win.close(); }
 });
 
-test("the banner comment says 18.1.3", () => {
+test("the banner comment says 18.2.0", () => {
   const banner = readVendored("marked.min.js").toString("latin1").slice(0, 300);
   const m = banner.match(/marked v(\d+\.\d+\.\d+)/);
   assert.ok(m, "no version banner found in the first 300 bytes: "
