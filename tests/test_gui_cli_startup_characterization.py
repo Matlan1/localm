@@ -254,7 +254,8 @@ class _Startup:
 
     def _new_threads(self):
         return [t for t in threading.enumerate()
-                if t not in self._before and t is not threading.current_thread()]
+                if t not in self._before and t is not threading.current_thread()
+                and not _is_log_writer(t)]
 
     def _settle(self):
         """Let what startup set in motion finish while the server is up, so
@@ -266,7 +267,7 @@ class _Startup:
         if me is not threading.main_thread():
             return
         for t in threading.enumerate():
-            if t not in self._before and t is not me:
+            if t not in self._before and t is not me and not _is_log_writer(t):
                 t.join(10.0)
 
     @property
@@ -439,6 +440,12 @@ class _Startup:
             return _Response(self.mount_status, self.mount_body)
         mp.setattr("requests.post", post)
         return self
+
+
+def _is_log_writer(t: threading.Thread) -> bool:
+    """A debug log handler's writer thread: a daemon that lives as long as its
+    handler, started by the first record a handler queues."""
+    return t.name == "localm-log-writer" and t.daemon
 
 
 @pytest.fixture
@@ -1162,3 +1169,18 @@ class TestTray:
         gui.windows[0]["on_quit"]()
         gui.face.kwargs["on_stop"]()
         assert len(stops) == 2 and stops[0] == stops[1]
+
+
+def test_the_log_writer_the_leak_check_skips_is_a_daemon_of_that_name():
+    """_is_log_writer skips only a daemon named localm-log-writer; the debug
+    log's writer must stay exactly that, or the leak check would hide a thread
+    that keeps the process alive."""
+    import io
+    import logging
+
+    from localm import debuglog
+    handler = debuglog._OffThreadStreamHandler(io.StringIO())
+    before = set(threading.enumerate())
+    handler.emit(logging.LogRecord("t", logging.INFO, __file__, 1, "x", None, None))
+    started = [t for t in threading.enumerate() if t not in before]
+    assert started and all(_is_log_writer(t) for t in started), started
