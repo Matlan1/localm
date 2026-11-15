@@ -9,6 +9,7 @@ import inspect
 import itertools
 import json
 import ntpath
+import os
 import posixpath
 from pathlib import Path
 
@@ -132,6 +133,8 @@ def test_confined_name_returns_a_direct_child_of_base_or_refuses(tmp_path):
         accepted.append(name)
         assert (got.parent, got.name) == (base.resolve(), name), name
     assert {"a", "a-a", "a.b", "chat"} <= set(accepted)
-    assert not {"..", "../x", "..\\x", "Q:x", "Q:\\x", "/root", "../outside.png",
-                str(tmp_path / "outside.png")} & set(accepted)
+    refused = {"..", "../x", "Q:x", "Q:\\x", "/root", "../outside.png", str(tmp_path / "outside.png")}
+    if os.name == "nt":
+        refused |= {"..\\x", "..\\outside.png"}
+    assert not refused & set(accepted)
     assert confined_file(base, "inside.png", "image") == (base / "inside.png").resolve()
