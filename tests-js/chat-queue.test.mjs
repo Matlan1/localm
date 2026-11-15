@@ -358,6 +358,7 @@ test("Stop during knowledge retrieval keeps the queue, and the next send keeps F
   assert.ok(doc.querySelector(".msg-row.queued"), "the queued message is still shown");
 
   ctl.kbGate = null;
+  sel.value = "";
   await within(send(window, "third"), "the idle send to return");
   await waitFor(() => streamedCalls(fetchCalls).length === 2, "both completions");
   await settle(window);

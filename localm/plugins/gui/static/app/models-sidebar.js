@@ -3,7 +3,7 @@
 "use strict";
 
 // --- ES module imports ---
-import { lsSetScoped } from "./chat.js";
+import { chat, lsSetScoped } from "./chat.js";
 import { recordGuiError } from "./client-log.js";
 import { $, GIB, SHELL_TOKEN, authHeaders, cancelJob, chooseAsync, confirmDangerAsync, el, fmtDuration, instanceCacheTrusted, openModal, readSSE, streamJob, toast } from "./helpers.js";
 import { applyI18n, t, tn } from "./i18n.js";
@@ -1129,10 +1129,14 @@ export async function refreshModels() {
     if (modelCache.active !== previousActive) _holdLoadFailed = false;
     // A model answered through an accepted peer route stays the selection
     // while the server still holds that route; a cleared route drops it.
+    if (!_peerSelected && _peerRestore && data && data.peer_routes
+        && data.peer_routes[_peerRestore]) _peerSelected = _peerRestore;
+    _peerRestore = null;
     const peerRoute = _peerSelected && data && data.peer_routes
       ? data.peer_routes[_peerSelected] : null;
     if (!peerRoute) _peerSelected = null;
     else modelCache.active = _peerSelected;
+    _storePeerSelected();
     // Don't rebuild the select while the user has it open
     if (document.activeElement !== modelSelect) {
       modelSelect.innerHTML = "";
@@ -1218,6 +1222,7 @@ export async function refreshModels() {
     // its click handler well-defined.
     if (sidebarUnloadBtn) sidebarUnloadBtn.hidden = !modelCache.active || !!peerRoute;
     renderModelSplitLine(data.active_gpu_split);
+    refreshMediaRuntimes();
     // The active model can change from OUTSIDE this tab too - another tab,
     // another device, the CLI, an MCP client - while Settings is already open. A
     // same-tab switch refreshes the Live Tuning VRAM estimate itself (switchModel's
@@ -1274,18 +1279,100 @@ export function renderModelSplitLine(split) {
   line.hidden = false;
 }
 
+// Set once a failed read of the media runtimes was logged.
+let _mediaReadWarned = false;
+// True while an unload of the media runtimes runs.
+let _mediaUnloading = false;
+
+/** Read GET /api/media/runtimes and show the native media runtimes this server
+ *  holds loaded (see renderMediaRuntimes). A server without the route (404)
+ *  shows none. Any other failed read keeps the list as it was and logs one
+ *  console warning per page. Does nothing while an unload runs. Never throws. */
+export async function refreshMediaRuntimes() {
+  if (!document.getElementById("media-runtimes") || _mediaUnloading) return;
+  let rows;
+  try {
+    const r = await fetch("/api/media/runtimes", { headers: authHeaders() });
+    if (r.status === 404) rows = [];
+    else if (!r.ok) throw new Error("HTTP " + r.status);
+    else {
+      const d = await r.json();
+      rows = d && Array.isArray(d.runtimes) ? d.runtimes : [];
+    }
+  } catch (e) {
+    if (!_mediaReadWarned) console.warn("could not read the media runtimes:", e);
+    _mediaReadWarned = true;
+    return;
+  }
+  renderMediaRuntimes(rows);
+}
+
+/** List *rows* (the runtimes of GET /api/media/runtimes: name, state "busy",
+ *  "idle" or "unknown", idle_unload_seconds) under the model status, one line
+ *  each, plus one Unload button while any of them is idle. Hidden when *rows*
+ *  is empty. */
+export function renderMediaRuntimes(rows) {
+  const box = document.getElementById("media-runtimes");
+  if (!box) return;
+  box.replaceChildren();
+  for (const row of rows) {
+    const name = String((row && row.name) || "");
+    const secs = Number(row && row.idle_unload_seconds);
+    const state = row && row.state;
+    const key = state === "busy" ? "sidebar.media.busy"
+      : state !== "idle" ? "sidebar.media.loaded"
+      : secs > 0 ? "sidebar.media.idle" : "sidebar.media.idleNoTimer";
+    box.appendChild(el("div", "media-runtime-row",
+      t(key, { name, minutes: Math.max(1, Math.round(secs / 60)) })));
+  }
+  if (rows.some((row) => row && row.state === "idle")) {
+    const btn = el("button", "btn-secondary", t("sidebar.media.unload"));
+    btn.type = "button";
+    btn.title = t("sidebar.media.unloadTitle");
+    btn.onclick = () => unloadMediaRuntimes(btn);
+    box.appendChild(btn);
+  }
+  box.hidden = rows.length === 0;
+}
+
+/** POST /api/media/runtimes/unload and say per runtime what happened (unloaded,
+ *  kept running for a job, or failed), then read the list again. *btn* is
+ *  disabled while the request runs; a call while one runs does nothing. */
+export async function unloadMediaRuntimes(btn) {
+  if (_mediaUnloading) return;
+  _mediaUnloading = true;
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch("/api/media/runtimes/unload", { method: "POST", headers: authHeaders() });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || r.statusText || "HTTP " + r.status);
+    for (const o of Array.isArray(d.outcomes) ? d.outcomes : []) {
+      if (o.outcome === "stopped") toast(t("sidebar.media.stopped", { name: o.name }));
+      else if (o.outcome === "busy") toast(t("sidebar.media.stillBusy", { name: o.name }));
+      else toast(t("sidebar.media.stopFailed", { name: o.name }), true);
+    }
+  } catch (e) {
+    toast(t("sidebar.media.unloadFailed", { message: e.message }), true);
+  } finally {
+    _mediaUnloading = false;
+    if (btn) btn.disabled = false;
+    await refreshMediaRuntimes();
+  }
+}
+
 // Ask a live sibling instance to be routed to instead of loading a local
-// copy: shows a modal naming the peer and resolves what the user chose.
-// A peer that needs its own API key gets a password input and resolves the
-// entered key; a peer in open mode needs none, so the modal only asks, and
-// resolves "" when accepted. Resolves null on Cancel, Escape or the x
-// (dismiss). Modeled on promptText() in helpers.js.
-function _offerPeerRoute(model, peer) {
+// copy: shows a modal naming the peer and resolves what the user chose:
+// {route: key} for Route / Use it (key "" for a peer in open mode, which gets
+// no key field), "local" for "Load here instead", or null for Cancel, Escape or
+// the x. Route with an empty key field keeps the dialog open and says the key
+// is needed. *error*, when given, is shown in the dialog (a failed earlier try).
+function _offerPeerRoute(model, peer, error = "") {
   const needsKey = peer.requires_key !== false;
   return new Promise((resolve) => {
     let settled = false;
     let watch = null;
     let input;
+    let errLine;
     const finish = (value) => {
       if (settled) return;
       settled = true;
@@ -1298,20 +1385,34 @@ function _offerPeerRoute(model, peer) {
         needsKey ? "sidebar.peerRoute.message" : "sidebar.peerRoute.messageOpen", {
           model, host: peer.host, port: peer.port,
         })));
-      const accept = () => finish(needsKey ? (input.value.trim() || null) : "");
       if (needsKey) {
         input = el("input");
         input.type = "password";
         input.placeholder = t("sidebar.peerRoute.keyPlaceholder");
         body.appendChild(input);
       }
+      errLine = el("p", "key-gate-error peer-route-error", error);
+      errLine.setAttribute("role", "alert");
+      errLine.hidden = !error;
+      body.appendChild(errLine);
+      const accept = () => {
+        if (!needsKey) { finish({ route: "" }); return; }
+        const key = input.value.trim();
+        if (key) { finish({ route: key }); return; }
+        errLine.textContent = t("sidebar.peerRoute.keyRequired");
+        errLine.hidden = false;
+        input.focus();
+      };
       const row = el("div", "actions");
       const cancel = el("button", "btn-secondary", t("common.modal.cancel"));
       cancel.onclick = () => finish(null);
+      const local = el("button", "btn-secondary", t("sidebar.peerRoute.localButton"));
+      local.onclick = () => finish("local");
       const ok = el("button", "btn-secondary",
         t(needsKey ? "sidebar.peerRoute.routeButton" : "sidebar.peerRoute.useButton"));
       ok.onclick = accept;
       row.appendChild(cancel);
+      row.appendChild(local);
       row.appendChild(ok);
       body.appendChild(row);
       const onKey = (e) => {
@@ -1332,45 +1433,58 @@ function _offerPeerRoute(model, peer) {
 
 // Check whether a live sibling instance already has *model* loaded
 // (GET /v1/models/{model}/peer-offer) and, if so, offer the user routing
-// there instead of a local load. Returns the server's route result
-// ({status: "peer_routed", model, peer}) when the user accepts, or null
-// when there is no offer, the offer check itself fails, or the user
-// declines - the caller then proceeds with its own normal local load.
+// there instead of a local load. Returns {routed: <the server's route
+// result>} when the route is accepted, {cancelled: true} when the user
+// cancelled the dialog, or {local: true} when there is no offer, the offer
+// check itself fails, or the user chose to load it here. A refused route asks
+// again with the server's reason shown in the dialog.
 async function _maybeRoutePeer(model) {
   let offer;
   try {
     const r = await fetch(`/v1/models/${encodeURIComponent(model)}/peer-offer`,
                           { headers: authHeaders() });
-    if (!r.ok) return null;
+    if (!r.ok) return { local: true };
     offer = await r.json();
   } catch {
-    return null;
+    return { local: true };
   }
-  if (!offer || !offer.available || !offer.peer) return null;
-  const apiKey = await _offerPeerRoute(model, offer.peer);
-  if (apiKey === null) return null;
-  const r2 = await fetch(`/v1/models/${encodeURIComponent(model)}/peer-route`, {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify({ instance_id: offer.peer.instance_id, api_key: apiKey }),
-  });
-  if (!r2.ok) {
+  if (!offer || !offer.available || !offer.peer) return { local: true };
+  let error = "";
+  let data;
+  for (;;) {
+    const choice = await _offerPeerRoute(model, offer.peer, error);
+    if (choice === null) return { cancelled: true };
+    if (choice === "local") return { local: true };
+    let r2;
+    try {
+      r2 = await fetch(`/v1/models/${encodeURIComponent(model)}/peer-route`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ instance_id: offer.peer.instance_id, api_key: choice.route }),
+      });
+    } catch (e) {
+      error = t("sidebar.peerRoute.routeFailed", { detail: e.message });
+      continue;
+    }
+    if (r2.ok) {
+      data = await r2.json();
+      break;
+    }
     const detail = (await r2.json().catch(() => ({}))).detail || r2.statusText;
-    toast(t("sidebar.peerRoute.routeFailed", { detail }), true);
-    return null;
+    error = t("sidebar.peerRoute.routeFailed", { detail });
   }
-  const data = await r2.json();
   setStatus("note", t("sidebar.peerRoute.routedStatus", {
     model, host: offer.peer.host, port: offer.peer.port,
   }));
   _peerSelected = model;
+  _storePeerSelected();
   const previousActive = modelCache.active;
   modelCache.active = model;
   _publishActiveChange(previousActive);
   _showServedModel();
   toast(t("sidebar.peerRoute.routedToast", { model }));
   window.dispatchEvent(new CustomEvent("localm:model-switched", { detail: { model } }));
-  return data;
+  return { routed: data };
 }
 
 // The model the user chose to answer through a peer instance (its route was
@@ -1378,6 +1492,27 @@ async function _maybeRoutePeer(model) {
 // so refreshModels keeps this selected for as long as the server still holds
 // its route (data.peer_routes).
 let _peerSelected = null;
+
+// sessionStorage key holding _peerSelected for this tab, so a reload keeps the
+// selection while the server still holds the route. Not written while the server
+// is in privacy mode or before its mode is known.
+const PEER_SELECTED_KEY = "localm.peerSelected";
+
+/** Write _peerSelected to sessionStorage, or remove the entry when nothing is
+ *  selected or the server is in privacy mode. */
+function _storePeerSelected() {
+  try {
+    if (!_peerSelected || chat.serverPrivacy) sessionStorage.removeItem(PEER_SELECTED_KEY);
+    else if (chat.modeKnown) sessionStorage.setItem(PEER_SELECTED_KEY, _peerSelected);
+  } catch { /* sessionStorage unavailable: the selection lasts until a reload */ }
+}
+
+// The selection a reload of this tab left in sessionStorage; refreshModels takes
+// it over once when the server still holds its route.
+let _peerRestore = (() => {
+  try { return sessionStorage.getItem(PEER_SELECTED_KEY) || null; }
+  catch { return null; }
+})();
 
 /** True while this tab's selection answers through an accepted peer route, so
  *  modelCache.active names a model that is not loaded on this instance. */
@@ -1490,12 +1625,26 @@ function _endSwitch(model) {
   if (modelCache.loading === model) modelCache.loading = "";
 }
 
+/** Undo switchModel()'s marks after the user declined a dialog of the switch,
+ *  re-read the server's model state, and return {status: "cancelled"}. */
+function _declinedSwitch(model) {
+  _endSwitch(model);
+  setStatus("ok", modelCache.active || t("sidebar.status.noModel"));
+  _showServedModel();
+  refreshModels().then(_showServedModel);
+  return { status: "cancelled", reason: "declined by user", model };
+}
+
 export async function switchModel(model, { local = false, activate = true, select = true } = {}) {
   let data;
   try {
-    const routed = local ? null : await _maybeRoutePeer(model);
-    if (routed) return routed;
-    if (select) _peerSelected = null;
+    const peer = local ? { local: true } : await _maybeRoutePeer(model);
+    if (peer.routed) return peer.routed;
+    if (peer.cancelled) return _declinedSwitch(model);
+    if (select) {
+      _peerSelected = null;
+      _storePeerSelected();
+    }
     setStatus("busy", t("sidebar.status.loading", { model }));
     _switchingTo = model;
     modelCache.loading = model;
@@ -1514,13 +1663,7 @@ export async function switchModel(model, { local = false, activate = true, selec
           { key: "beside", label: t("models.switch.loadBeside") },
           { key: "unload", label: t("models.switch.unloadForThis", { names }), danger: true },
         ]);
-        if (!choice) {
-          _endSwitch(model);
-          setStatus("ok", modelCache.active || t("sidebar.status.noModel"));
-          _showServedModel();
-          refreshModels().then(_showServedModel);
-          return { status: "cancelled", reason: "declined by user", model };
-        }
+        if (!choice) return _declinedSwitch(model);
         if (choice === "beside") keepOthers = true;
         else force = true;
         setStatus("busy", t("sidebar.status.loading", { model }));
@@ -1533,13 +1676,7 @@ export async function switchModel(model, { local = false, activate = true, selec
         confirmLoadText(data),
         t(notChat ? "models.notChat.confirmLabel"
           : unloadAsk ? "models.switch.unloadAskLabel" : "models.switch.confirmLabel"));
-      if (!confirmed) {
-        _endSwitch(model);
-        setStatus("ok", modelCache.active || t("sidebar.status.noModel"));
-        _showServedModel();
-        refreshModels().then(_showServedModel);
-        return { status: "cancelled", reason: "declined by user", model };
-      }
+      if (!confirmed) return _declinedSwitch(model);
       if (notChat) asChat = true;
       else force = true;
       setStatus("busy", t("sidebar.status.loading", { model }));

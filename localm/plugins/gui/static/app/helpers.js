@@ -131,7 +131,20 @@ export function reconcileInstanceId(serverInstanceId) {
 // rides the HttpOnly session cookie (opaque session id, auto-sent same-origin)
 // plus a session-DERIVED CSRF token authHeaders() reads from window.__LOCALM_CSRF__
 // (fetched from GET /api/session).
-export const SHELL_TOKEN = window.__LOCALM_SHELL_TOKEN__ || "";
+export let SHELL_TOKEN = window.__LOCALM_SHELL_TOKEN__ || "";
+
+// Shell tokens this page sent before the current one.
+const _previousShellTokens = new Set();
+
+/** Make *token* the open-mode shell token authHeaders() sends. The token it
+ *  replaces is remembered (see sentPreviousShellToken). An empty *token*, or
+ *  the current one, changes nothing. */
+export function setShellToken(token) {
+  if (!token || token === SHELL_TOKEN) return;
+  if (SHELL_TOKEN) _previousShellTokens.add(SHELL_TOKEN);
+  SHELL_TOKEN = token;
+  window.__LOCALM_SHELL_TOKEN__ = token;
+}
 
 export function readCookie(name) {
   const m = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
@@ -186,6 +199,17 @@ export function sentShellToken(headers) {
     ? headers.get("Authorization")
     : (typeof headers === "object" ? headers["Authorization"] : null);
   return auth === "Bearer " + SHELL_TOKEN;
+}
+
+/** True when *headers* carries, as its bearer, a shell token this page used
+ *  before setShellToken() replaced it. */
+export function sentPreviousShellToken(headers) {
+  if (!headers || !_previousShellTokens.size) return false;
+  const auth = headers instanceof Headers
+    ? headers.get("Authorization")
+    : (typeof headers === "object" ? headers["Authorization"] : null);
+  return typeof auth === "string" && auth.startsWith("Bearer ")
+    && _previousShellTokens.has(auth.slice(7));
 }
 
 // Fetch the CSRF token for the current session and stash it for authHeaders().
@@ -2147,20 +2171,34 @@ export function chooseAsync(title, message, choices, opts = {}) {
 /** Reload the page. When Settings holds unsaved edits, first ask in the
  *  in-page dialog: save them and reload, discard them and reload, or stay
  *  (no reload). A save that leaves any edit unsaved keeps the page and says
- *  so. Resolves true when the reload was started, false when the page stays.
- *  Never opens a native browser dialog. */
+ *  so. The reconnect and stale page overlays are hidden while the dialog is
+ *  open and shown again when the page stays. Resolves true when the reload
+ *  was started, false when the page stays. Never opens a native browser
+ *  dialog. Every reload the GUI starts itself goes through here. */
 export async function reloadApp() {
   if (window.settingsDirty && window.settingsDirty()) {
+    const hidden = [];
+    for (const id of ["reconnect-overlay", "shell-stale-overlay"]) {
+      const ov = $(id);
+      if (ov && ov.style.display !== "none") {
+        hidden.push([ov, ov.style.display]);
+        ov.style.display = "none";
+      }
+    }
+    const stay = () => {
+      for (const [ov, display] of hidden) ov.style.display = display;
+      return false;
+    };
     const pick = await chooseAsync(t("nav.leaveSettings.title"), t("settings.unsaved.reloadBody"), [
       { key: "discard", label: t("settings.unsaved.discard"), danger: true },
       { key: "save", label: t("settings.unsaved.save") },
     ], { cancelLabel: t("settings.unsaved.stay") });
-    if (pick === null) return false;
+    if (pick === null) return stay();
     if (pick === "save") {
       const saved = window.saveDirtySettings ? await window.saveDirtySettings() : false;
       if (!saved) {
         toast(t("settings.unsaved.notSaved"), true);
-        return false;
+        return stay();
       }
     } else if (window.discardSettingsDraft) {
       window.discardSettingsDraft();

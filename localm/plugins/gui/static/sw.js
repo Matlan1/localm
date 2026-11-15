@@ -67,6 +67,8 @@ self.addEventListener("fetch", (e) => {
   // See "the service worker never intercepts the server-state endpoints".
   if (/^\/(api|v1|plugins|localm-ca\.crt|whoami|health|debug)(\/|$)/
       .test(url.pathname)) return;
+  // A request made with cache "no-store" goes to the network and is not cached.
+  if (req.cache === "no-store") return;
 
   // Navigations: network-first, falling back to the cached shell when offline.
   if (req.mode === "navigate") {
