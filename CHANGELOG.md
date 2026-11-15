@@ -115,6 +115,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Image and media request limits match their help text everywhere.** An image-to-image denoise strength outside 0 to 1, a music track outside 1 to 3600 seconds and a video clip outside 1 to 20 seconds are refused before anything loads, from the Images, Music and Video pages, `localm image`, `localm music` and `localm video`, the chat commands, the coding agent and the MCP tool (a denoise was passed on unchecked, and a duration under one second was accepted). When a track, clip or image has a settings file that cannot be read, the server log now names the file instead of saying nothing.
 - On Windows, two localm processes saving the same settings or key store at the same moment no longer crash one of them with "Permission denied" on a `.lock` file; the second one waits its turn.
 - A reply cap (`max_tokens`, `max_completion_tokens`) of `0.0` now means no request cap, like `0`; the chat drawer's Max tokens field explains that blank or 0 uses the Settings value; "Save and reload model" with nothing changed no longer says "Saved"; a failed background job now leaves a warning in the log (with its cause, except in privacy mode).
+- **An open page survives a server restart on the same port.** It picks up the new session token by itself instead of failing every call and reloading, and when a reload is needed while Settings has unsaved changes it asks in the page. Reset and re-enter key signs the browser out on the server first and says when that failed. The sidebar also lists the image, video and music runtimes a job left loaded, with a button to unload them.
 
 ### Added
 - **A supported-models page.** `docs/models.md` lists every model kind localm runs: formats, the GGUF language model architectures of the bundled llama.cpp, Transformers, EXL2 and EXL3, embeddings and rerankers, speech, image, video and music, and the kinds localm recognises but does not run yet.
@@ -133,6 +134,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - Updates now finish the native runtime and media components with the newly installed version at its first start, also from the terminal. If an update's new llama.cpp build does not work on your machine, localm keeps the build you had and finishes the update; `localm doctor` says which build was kept, why, and how to try the new one again.
 - The bundled AMD ROCm runtime for Radeon GPUs moves to lemonade-sdk b1372; an update re-provisions it on its own.
 - Network: with private addresses allowed, link-local and cloud-metadata addresses such as 169.254.169.254 stay refused.
+
+### Security
+- **The GUI no longer resends a refused request to another site.** When a call to a different origin was refused, the page could refresh its session token and retry it there; it now retries only calls to its own server.
 
 ## [0.3.4b2] - 2026-11-11
 
