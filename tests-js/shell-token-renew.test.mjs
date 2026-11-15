@@ -245,3 +245,22 @@ test("a token read that brought no new token is not kept: a later restart is sti
   }
   assert.equal(window.authHeaders().Authorization, "Bearer " + NEW);
 });
+
+test("a refused call to another origin is not retried and reads no page shell", async () => {
+  const server = restartServer();
+  const { window, reload } = await bootOpen(server);
+  server.restarted = true;
+  const reads = server.shellReads;
+  const foreign = ["//other.example/api/stats", window.location.origin + ".evil.example/api/stats"];
+  for (const u of foreign) {
+    const res = await window.fetch(u, { headers: window.authHeaders() });
+    assert.equal(res.status, 403, `${u}: the refusal reaches the caller`);
+    assert.equal(server.refusedUrls.filter((x) => x === u).length, 1, `${u}: sent once, not retried`);
+  }
+  assert.equal(server.shellReads, reads, "no page shell was read for a foreign refusal");
+  assert.equal(recoveryStarted(window), false, "no reload recovery started");
+  assert.equal(reload.reloads, 0, "the page did not reload");
+
+  const own = await window.fetch(window.location.origin + "/api/stats?t=9", { headers: window.authHeaders() });
+  assert.equal(own.status, 200, "control: an absolute URL of this origin is still renewed and retried");
+});
