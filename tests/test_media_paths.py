@@ -645,6 +645,12 @@ def test_a_bare_name_two_roots_hold_is_refused_without_a_path(tmp_path, monkeypa
         home / "uploads" / "same.png").resolve()
 
 
+@pytest.mark.parametrize("raw", ["", ".", "..", "C:auth.key", "a/b.png", "a\\b.png", "/abs.png"])
+def test_only_a_plain_file_name_counts_as_a_bare_name(raw):
+    assert media_paths._is_bare_name(raw) is False
+    assert media_paths._is_bare_name("photo.png") is True
+
+
 @pytest.mark.parametrize("raw", ["absent.png", "..", ".", "auth.key", "C:auth.key"])
 def test_a_bare_name_no_root_holds_is_refused_as_before(tmp_path, monkeypatch, raw):
     home = _input_home(tmp_path, monkeypatch)
