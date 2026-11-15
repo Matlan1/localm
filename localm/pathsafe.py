@@ -87,7 +87,11 @@ def confined_name(base: Path, name: str) -> Path:
     On Windows (:func:`_refuses_device_names`), a reserved device name
     (:func:`is_windows_device_name`: ``con``, ``nul.txt``, ``com1`` ...) is
     rejected lexically too: a write to one goes to the device and its data is
-    discarded. Elsewhere such a name is an ordinary file name."""
+    discarded. Elsewhere such a name is an ordinary file name.
+
+    CONTRACT: *base* itself must ALREADY be trusted: a localm-owned folder, or
+    one chosen by a caller with host filesystem access. Only *name* is
+    validated here; *base* is resolved as given."""
     check_plain_name(name)
     try:
         resolved = (base / name).resolve()

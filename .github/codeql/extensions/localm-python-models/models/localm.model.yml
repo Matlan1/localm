@@ -25,6 +25,9 @@ extensions:
       - ["localm", "Member[storekit].Member[read_json_state].ReturnValue", "request-forgery"]
       # A plugin id that passed the single-path-component check.
       - ["localm", "Member[plugins].Member[ids].Member[_check_plugin_name].ReturnValue", "path-injection"]
+      # A file name resolved to a direct child of a trusted folder (pathsafe.confined_name's contract).
+      - ["localm", "Member[pathsafe].Member[confined_name].ReturnValue", "path-injection"]
+      - ["localm", "Member[pathsafe].Member[confined_file].ReturnValue", "path-injection"]
   - addsTo:
       pack: codeql/python-all
       extensible: barrierGuardModel

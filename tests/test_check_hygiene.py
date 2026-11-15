@@ -1493,6 +1493,19 @@ def test_relative_import_of_a_barrier_accessor_is_flagged(tmp_path, monkeypatch)
     assert "load_registry" in problems[0]
 
 
+def test_relative_import_of_confined_name_is_flagged(tmp_path, monkeypatch):
+    """NEGATIVE: a relative import of pathsafe.confined_name that is then called."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    problems = _barrier_problems(
+        ch, tmp_path, "localm/plugins/builtin/some/plug.py",
+        "from ....pathsafe import confined_name\n"
+        "def f(base, name):\n"
+        "    return confined_name(base, name)\n")
+    assert len(problems) == 1
+    assert "confined_name" in problems[0]
+
+
 def test_relative_module_import_attribute_call_is_flagged(tmp_path, monkeypatch):
     """NEGATIVE: `from .. import config` then `config.load_registry()`."""
     ch = _load_check_hygiene()
