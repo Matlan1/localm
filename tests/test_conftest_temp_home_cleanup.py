@@ -42,6 +42,7 @@ import pytest
 pytest_plugins = ["pytester"]
 
 _REAL_CONFTEST = str(Path(__file__).parent / "conftest.py").replace("\\", "/")
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent).replace("\\", "/")
 
 # Loads the SHIPPED tests/conftest.py by path under its own module name, reports
 # the directory it made, and applies one variation.
@@ -49,6 +50,8 @@ _PROBE = r'''
 import atexit, importlib.util, os, sys
 
 conftest_path, mode, stamped_root = sys.argv[1], sys.argv[2], sys.argv[3]
+# The repository root first on sys.path, as pytest puts it for tests/conftest.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(conftest_path))))
 
 spec = importlib.util.spec_from_file_location("_localm_cleanup_probe", conftest_path)
 module = importlib.util.module_from_spec(spec)
@@ -265,6 +268,7 @@ def _with_real_conftest(pytester, *, node_hook=False):
         exports += "pytest_configure_node = _m.pytest_configure_node\n"
     pytester.makeconftest(
         "import importlib.util as _u, sys\n"
+        "sys.path.insert(0, r'" + _REPO_ROOT + "')\n"
         "_s = _u.spec_from_file_location('_localm_real_conftest', r'"
         + _REAL_CONFTEST + "')\n"
         "_m = _u.module_from_spec(_s)\n"
