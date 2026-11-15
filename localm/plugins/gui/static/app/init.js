@@ -910,7 +910,4 @@ if (chat.conversations.length) {
   renderConvList();
 }
 renderChat();
-// reattachSessions()/reattachActivity() and the deep-link/restore block both
-// moved into the authed IIFE above (P1a) - they fetch authenticated state and
-// used to run here, unguarded in practice, before bootAuthProbe() resolved.
 
