@@ -52,7 +52,21 @@ COMMIT = "abcde"
 FULL = COMMIT + "f" * 35
 CPU_TAG = "b99000"
 OTHER_FULL = "1234567" + "9" * 33
-FAMILIES = ("gfx103X", "gfx110X", "gfx1150", "gfx1151", "gfx120X", "gfx908", "gfx90a")
+_ASSET_RE = re.compile(r"llama-[^-]+-(windows|ubuntu)-rocm-(.+)-x64\.zip")
+
+
+def _pinned_families(view) -> tuple[str, ...]:
+    """The hardware families the real pins file pins, each on both platforms."""
+    seen: dict[str, set[str]] = {}
+    for name in view.rocm_table:
+        m = _ASSET_RE.fullmatch(name)
+        assert m, name
+        seen.setdefault(m.group(2), set()).add(m.group(1))
+    assert seen and all(p == {"windows", "ubuntu"} for p in seen.values()), seen
+    return tuple(sorted(seen))
+
+
+FAMILIES = _pinned_families(REAL_VIEW)
 
 
 def _sha(seed: str) -> str:
@@ -131,8 +145,8 @@ def test_candidate_pairs_the_lemonade_commit_with_its_upstream_release(api):
     assert (c.tag, c.lemonade_commit, c.rocm_version) == (TAG, COMMIT, "10.3.0a20261020")
     assert (c.cpu_tag, c.cpu_commit, c.cpu_asset) == (CPU_TAG, FULL, f"llama-{CPU_TAG}-bin-win-cpu-x64.zip")
     assert c.cpu_sha256 == "c" * 64
-    assert len(c.rocm_assets) == 14 and "not-an-archive.txt" not in c.rocm_assets
-    assert c.gfx103x_sha256 == _sha("w0")
+    assert len(c.rocm_assets) == 2 * len(FAMILIES) and "not-an-archive.txt" not in c.rocm_assets
+    assert c.gfx103x_sha256 == _sha(f"w{FAMILIES.index('gfx103X')}")
 
 
 @pytest.mark.parametrize("tag", ["1342", "b", "b13x2", "v1342", "", "b1342-rc1"])
@@ -627,8 +641,13 @@ def test_a_reshaped_pins_file_is_refused_without_writing(tree, tmp_path, cand, c
     assert tree.read_bytes() == before
 
 
+def test_the_tool_reads_the_shipped_pins_module():
+    import localm.setup_llama.pins as shipped
+    assert bump.PINS_PATH.resolve() == Path(shipped.__file__).resolve()
+
+
 def test_the_real_tree_parses_and_agrees_with_itself():
     assert REAL_VIEW.tag == REAL_VIEW.url_tag == REAL_VIEW.url_file_tag == REAL_VIEW.rocm_block_tag
     assert REAL_VIEW.cpu_tag == REAL_VIEW.cpu_block_tag
     assert REAL_VIEW.url_sha256 == REAL_VIEW.rocm_table[f"llama-{REAL_VIEW.tag}-{bump._GFX103X}"]
-    assert len(REAL_VIEW.rocm_table) == 14
+    assert len(REAL_VIEW.rocm_table) == 2 * len(FAMILIES) and "gfx103X" in FAMILIES
