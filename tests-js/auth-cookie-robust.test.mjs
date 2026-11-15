@@ -95,7 +95,9 @@ test("a 403 from another origin is never retried and never refreshes the CSRF to
   await tick();
   const foreign = ["//other.example/v1/models/unload",
     window.location.origin + ".evil.example/v1/models/unload",
-    "https://other.example/v1/models/unload"];
+    "/\\evil.example/v1/models/unload",
+    "http://localhost:8642@evil.example/v1/models/unload",
+    new window.URL("https://other.example/v1/models/unload")];
   for (const u of foreign) {
     window.__LOCALM_CSRF__ = "STALE";
     const res = await window.fetch(u, { method: "POST", headers: window.authHeaders() });
@@ -111,4 +113,11 @@ test("a 403 from another origin is never retried and never refreshes the CSRF to
     { method: "POST", headers: window.authHeaders() });
   assert.deepEqual(sent.map((s) => s.token), ["STALE", "FRESH"],
     "control: an absolute URL of this origin is still refreshed and retried once");
+
+  window.__LOCALM_CSRF__ = "STALE";
+  sent.length = 0;
+  await window.fetch(new window.URL("/v1/models/unload", window.location.href),
+    { method: "POST", headers: window.authHeaders() });
+  assert.deepEqual(sent.map((s) => s.token), ["STALE", "FRESH"],
+    "control: a URL object of this origin is still refreshed and retried once");
 });

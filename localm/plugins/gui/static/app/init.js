@@ -33,8 +33,16 @@ function _shellTokenRejectedBy(res) {
   catch { return false; }
 }
 
-/** True when *url* resolves, against this page, to this page's origin. */
+/** The URL a fetch *input* (string, URL or Request) names; "" when it names none. */
+function _requestUrl(input) {
+  if (typeof input === "string") return input;
+  if (input instanceof URL) return input.href;
+  return (input && typeof input.url === "string") ? input.url : "";
+}
+
+/** True when *url* is non-empty and resolves, against this page, to this page's origin. */
 function _sameOriginUrl(url) {
+  if (!url) return false;
   try { return new URL(url, location.href).origin === location.origin; }
   catch { return false; }
 }
@@ -48,7 +56,7 @@ window.fetch = async function (input, init) {
     const sent = hdrs instanceof Headers ? hdrs.get("X-CSRF-Token")
                : (hdrs && typeof hdrs === "object") ? hdrs["X-CSRF-Token"] : null;
     if (res.status === 403 && sent) {
-      const url = typeof input === "string" ? input : (input && input.url) || "";
+      const url = _requestUrl(input);
       if (_sameOriginUrl(url)) {
         const fresh = await refreshCsrf();
         if (fresh && fresh !== sent) {
@@ -67,7 +75,7 @@ window.fetch = async function (input, init) {
     // credential open mode actually uses with no recovery path of any kind.
     else if (res.status === 403 && _shellTokenRejectedBy(res)
              && (sentShellToken(hdrs) || sentPreviousShellToken(hdrs))) {
-      const url = typeof input === "string" ? input : (input && input.url) || "";
+      const url = _requestUrl(input);
       if (_sameOriginUrl(url)) {
         const sentToken = String(hdrs instanceof Headers ? hdrs.get("Authorization")
           : hdrs["Authorization"]).slice(7);
