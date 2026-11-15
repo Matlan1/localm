@@ -304,19 +304,20 @@ def comfy_stop() -> None:
     st, pl = server_call(url, headers, "POST", "/v1/comfy/stop",
                          timeout=_STOP_TIMEOUT)
     _report_action(st, pl, "stop ComfyUI")
-    if not all(ok for _, ok, _ in orphans):
+    if not all(result[1] for result in orphans):
         raise SystemExit(1)
 
 
 def _print_stop_results(results) -> bool:
-    """Print one line per ``(api_url, ok, message)``; True when all are ok."""
+    """Print one line per ``(api_url, ok, message, ...)``; True when all are
+    ok."""
     from rich.markup import escape
 
-    for api_url, ok, message in results:
+    for api_url, ok, message, *_ in results:
         colour = "green" if ok else "red"
         console.print(f"[{colour}]ComfyUI at {escape(api_url)}: "
                       f"{escape(str(message))}[/{colour}]")
-    return all(ok for _, ok, _ in results)
+    return all(result[1] for result in results)
 
 
 def _stop_orphaned() -> list:
@@ -332,16 +333,18 @@ def _stop_orphaned() -> list:
 def _stop_without_server() -> None:
     """`comfy stop` with no localm server: stop every ComfyUI localm launched
     from this data dir by its launch record, then run the same stop on the
-    targeted ComfyUI when no record covered it. Exits 1 when any stop failed."""
+    targeted ComfyUI when no record of a running localm-launched ComfyUI
+    covered it, worded as one localm has no record of. Exits 1 when any stop
+    failed."""
     from ..media.comfy_client import default_api_url, stop_comfy, stop_recorded_comfy
 
     console.print("[dim]No localm server is running for this directory; stopping "
                   "ComfyUI from here...[/dim]")
     results = stop_recorded_comfy()
     target = default_api_url().rstrip("/")
-    if target not in {api_url for api_url, _, _ in results}:
-        ok, message = stop_comfy(target)
-        results.append((target, ok, message))
+    if target not in {api_url for api_url, _, _, covered in results if covered}:
+        ok, message = stop_comfy(target, ownership_unknown=True)
+        results.append((target, ok, message, True))
     if not _print_stop_results(results):
         raise SystemExit(1)
 

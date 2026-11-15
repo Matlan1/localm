@@ -414,6 +414,22 @@ def test_purge_in_a_folder_that_already_existed_deletes_only_localm_entries(tmp_
     assert "models" in data["kept_entries"] and "notes.txt" in data["kept_entries"]
 
 
+def test_a_comfyui_launch_record_is_localm_data_and_is_purged(tmp_path):
+    """Break: drop "comfy-launched-*.json" from install_manifest._DATA_PATTERNS."""
+    from localm.media import comfy_launch_record
+    name = comfy_launch_record.record_path("http://127.0.0.1:8189").name
+    assert im.is_data_entry(name), name
+    assert not im.is_data_entry("comfy-launched-notes.txt")
+    shared = tmp_path / "AI"
+    shared.mkdir()
+    (shared / "notes.txt").write_text("mine", encoding="utf-8")
+    im.prepare_data(tmp_path, data_dir=str(shared))
+    (shared / name).write_text("{}", encoding="utf-8")
+    im.uninstall(tmp_path, purge_data=True, force=True)
+    assert not (shared / name).exists()
+    assert (shared / "notes.txt").exists()
+
+
 def test_legacy_custom_folder_keeps_what_might_not_be_localms(tmp_path):
     """A schema 2 record cannot say what was in a custom folder before LocaLM:
     names other programs use too are kept, LocaLM-only ones deleted."""

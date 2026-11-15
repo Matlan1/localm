@@ -8,8 +8,10 @@ per api_url, the launched process's pid, start time, executable and command
 line, plus the pid and start time of the localm process that launched it.
 :func:`adopt` turns a record back into a handle ``stop_comfy`` accepts, only
 when the process under that pid still has the recorded start time, executable
-and command line. :func:`drop` removes a record; callers drop one once its
-process has exited or its pid belongs to a different process.
+and command line. A record is removed (:func:`drop_pid`) when localm ends that
+ComfyUI (``stop_comfy`` and the relaunch path), when the launch fails at once,
+and when a reader finds its process has exited or its pid belongs to a
+different process.
 
 Needs ``psutil`` both to write and to check a record. Without it nothing is
 recorded and :func:`adopt` answers ``UNVERIFIABLE``.
@@ -21,7 +23,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 RECORD_GLOB = "comfy-launched-*.json"
 
@@ -51,10 +53,13 @@ def _identity(pid: int) -> dict:
                 "exe": str(proc.exe()), "cmdline": [str(a) for a in proc.cmdline()]}
 
 
-def write_record(api_url: str, pid: int) -> bool:
+def write_record(api_url: str, pid: Optional[int]) -> tuple[bool, str]:
     """Record process *pid* as the ComfyUI this localm process launched for
-    *api_url*. Returns whether the record was written; a failure to read the
-    process or write the file is logged at WARNING. Never raises."""
+    *api_url*. Returns ``(written, reason)``: ``(True, "")`` once the record is
+    on disk, else ``(False, <why not>)``. An existing record for *api_url* of a
+    different pid is kept, and nothing is written, when :func:`adopt` still
+    finds its process running (``MATCH``). A failure to read the process or
+    write the file is logged at WARNING. Never raises."""
     import os
 
     from localm.debuglog import logger
@@ -63,19 +68,29 @@ def write_record(api_url: str, pid: int) -> bool:
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         logger.debug("not recording the ComfyUI launched for %s: pid %r is not a pid",
                      api_url, pid)
-        return False
+        return False, f"{pid!r} is not a process id"
+    existing = read_record(api_url)
+    if existing is not None and existing["pid"] != pid and adopt(existing)[0] == MATCH:
+        reason = (f"localm already has a record of process {existing['pid']} for this "
+                  "address, and that process is still running")
+        logger.warning("not recording the ComfyUI localm launched for %s (pid %s): %s",
+                       api_url, pid, reason)
+        return False, reason
     try:
         launched = _identity(pid)
         owner = _identity(os.getpid())
         data = {"api_url": api_url, **launched,
                 "owner_pid": owner["pid"], "owner_create_time": owner["create_time"]}
         atomic_write(record_path(api_url), json.dumps(data))
-        return True
+        return True, ""
+    except ImportError:
+        reason = "psutil is not installed"
     except Exception as e:  # noqa: BLE001
-        logger.warning("could not record the ComfyUI localm launched for %s (pid %s): %s; "
-                       "localm comfy stop from another localm process cannot stop it",
-                       api_url, pid, e)
-        return False
+        reason = str(e) or type(e).__name__
+    logger.warning("could not record the ComfyUI localm launched for %s (pid %s): %s; "
+                   "localm comfy stop from another localm process cannot stop it",
+                   api_url, pid, reason)
+    return False, reason
 
 
 def _parse(text: str) -> Optional[dict]:
@@ -129,18 +144,47 @@ def read_records() -> list[dict]:
     return records
 
 
-def drop(record: dict) -> None:
-    """Remove *record*'s file when it still names the same pid. Never raises."""
+def read_record(api_url: str) -> Optional[dict]:
+    """The record for *api_url*, or None when there is none or it cannot be
+    read or parsed. Never raises."""
+    try:
+        return _parse(record_path(api_url).read_text(encoding="utf-8"))
+    except OSError:
+        return None
+
+
+def drop_pid(api_url: str, pid: Optional[int]) -> None:
+    """Remove the record for *api_url* when it names process *pid*. Never
+    raises."""
     from localm.debuglog import logger
-    path = record_path(record["api_url"])
+    if not pid:
+        return
+    path = record_path(api_url)
     try:
         current = _parse(path.read_text(encoding="utf-8"))
-        if current is not None and current["pid"] == record["pid"]:
+        if current is not None and current["pid"] == pid:
             path.unlink()
     except FileNotFoundError:
         pass
     except OSError as e:
         logger.debug("could not remove ComfyUI launch record %s: %s", path, e)
+
+
+def drop(record: dict) -> None:
+    """Remove *record*'s file when it still names the same pid. Never raises."""
+    drop_pid(record["api_url"], record["pid"])
+
+
+def restore(record: dict) -> None:
+    """Write *record* back unchanged. A failure is logged at WARNING. Never
+    raises."""
+    from localm.debuglog import logger
+    from localm.storekit import atomic_write
+    try:
+        atomic_write(record_path(record["api_url"]), json.dumps(record))
+    except OSError as e:
+        logger.warning("could not keep the ComfyUI launch record for %s (pid %s): %s",
+                       record["api_url"], record["pid"], e)
 
 
 def _same_start(a: float, b: float) -> bool:
@@ -168,7 +212,7 @@ class RecordedComfyProcess:
     ``stop_comfy`` and ``_kill_process_tree``: ``pid``, ``poll``,
     ``terminate``, ``kill`` and ``wait``."""
     pid: int
-    _proc: object
+    _proc: Any
 
     def poll(self) -> Optional[int]:
         """None while the process runs (or when that cannot be read), else 0."""
@@ -206,24 +250,32 @@ class RecordedComfyProcess:
 def adopt(record: dict) -> tuple[str, Optional[RecordedComfyProcess]]:
     """``(MATCH, handle)`` when the process under *record*'s pid has the
     recorded start time, executable and command line. Otherwise ``(GONE,
-    None)`` when no process has that pid, ``(MISMATCH, None)`` when the pid
-    belongs to a different process, and ``(UNVERIFIABLE, None)`` when psutil is
-    missing or the process cannot be read. Signals nothing. Never raises."""
+    None)`` when no process has that pid, ``(MISMATCH, None)`` when its start
+    time, executable or command line differs, and ``(UNVERIFIABLE, None)``
+    when psutil is missing, the start time cannot be read, or the start time
+    matches but the executable or command line cannot be read. The start time
+    is compared before the executable and command line are read. Signals
+    nothing. Never raises."""
     try:
         import psutil
     except ImportError:
         return UNVERIFIABLE, None
     try:
         proc = psutil.Process(record["pid"])
-        with proc.oneshot():
-            create_time = float(proc.create_time())
-            exe = str(proc.exe())
-            cmdline = [str(a) for a in proc.cmdline()]
+        create_time = float(proc.create_time())
     except psutil.NoSuchProcess:
         return GONE, None
     except psutil.Error:
         return UNVERIFIABLE, None
-    if (not _same_start(create_time, record["create_time"])
-            or exe != record["exe"] or cmdline != record["cmdline"]):
+    if not _same_start(create_time, record["create_time"]):
+        return MISMATCH, None
+    try:
+        exe = str(proc.exe())
+        cmdline = [str(a) for a in proc.cmdline()]
+    except psutil.NoSuchProcess:
+        return GONE, None
+    except psutil.Error:
+        return UNVERIFIABLE, None
+    if exe != record["exe"] or cmdline != record["cmdline"]:
         return MISMATCH, None
     return MATCH, RecordedComfyProcess(pid=record["pid"], _proc=proc)
