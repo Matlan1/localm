@@ -68,6 +68,9 @@ Run before committing:   python scripts/check_hygiene.py
 Install as a git hook:    python scripts/check_hygiene.py --install-hook
 Warnings as failures:     python scripts/check_hygiene.py --strict
                           (equivalently: set LOCALM_HYGIENE_STRICT=1)
+Worker processes:         python scripts/check_hygiene.py --jobs N
+                          (default: half the logical CPUs, at most 8; 1 runs
+                          every check in this process, one after another)
 
 A line that genuinely needs an absolute-looking example (help text, a doc
 sample) can carry a trailing  hygiene-ok  marker to be skipped by check 3.
@@ -2476,11 +2479,105 @@ def _codeql_barrier_import_violations(files: list[Path]) -> list[str]:
     return problems
 
 
-def main(argv: list[str]) -> int:
+def _scan_all(files: list[Path]) -> list[str]:
+    return [p for f in files for p in _scan(f)]
+
+
+# The checks that each walk the whole tree, longest first so a worker pool starts
+# the long poles early. True: the check takes the tracked file list.
+_TREE_CHECKS = (
+    ("_big_test_write_violations", True),
+    ("_response_key_violations", True),
+    ("_scan_all", True),
+    ("_raw_accessor_violations", True),
+    ("_codeql_barrier_import_violations", True),
+    ("_import_baseline_violations", False),
+    ("_import_direction_violations", False),
+    ("_import_cycle_violations", False),
+)
+
+
+def _default_workers() -> int:
+    """Half the logical CPUs, at most one per tree check."""
+    return max(1, min(len(_TREE_CHECKS), (os.cpu_count() or 1) // 2))
+
+
+def _parse_jobs(argv: list[str]) -> int | None | str:
+    """--jobs N / --jobs=N as an int >= 1, None when absent, or an error text."""
+    for i, arg in enumerate(argv):
+        if arg == "--jobs" or arg.startswith("--jobs="):
+            value = arg.partition("=")[2] if "=" in arg else (
+                argv[i + 1] if i + 1 < len(argv) else "")
+            if value.isdigit() and int(value) >= 1:
+                return int(value)
+            return f"--jobs needs a whole number of at least 1, got {value!r}"
+    return None
+
+
+def _run_check_in_worker(name: str, repo: str, args: tuple) -> list[str]:
+    global REPO
+    REPO = Path(repo)
+    return globals()[name](*args)
+
+
+def _run_tree_checks(tracked: list[Path], workers: int, run_rest) -> tuple[dict, object]:
+    """Run the _TREE_CHECKS, in `workers` processes when above 1, and run_rest()
+    in this process meanwhile. Returns ({check name: problems}, run_rest's result).
+
+    A worker pool that cannot start or breaks is reported on stderr and the
+    affected checks run here instead; an exception raised BY a check propagates
+    exactly as it does when run in this process."""
+    from concurrent.futures import ProcessPoolExecutor
+    from concurrent.futures.process import BrokenProcessPool
+
+    def call(name: str, takes_tracked: bool) -> list[str]:
+        return globals()[name](*((tracked,) if takes_tracked else ()))
+
+    if workers <= 1:
+        results = {n: call(n, t) for n, t in _TREE_CHECKS}
+        return results, run_rest()
+    futures = {}
+    pool = None
+    try:
+        pool = ProcessPoolExecutor(max_workers=workers)
+        for name, takes_tracked in _TREE_CHECKS:
+            futures[name] = pool.submit(_run_check_in_worker, name, str(REPO),
+                                        (tracked,) if takes_tracked else ())
+    except (OSError, RuntimeError, ImportError, NotImplementedError) as e:
+        print(f"Hygiene: could not start worker processes ({type(e).__name__}: {e}); "
+              "running the remaining checks in this process.", file=sys.stderr)
+    results: dict[str, list[str]] = {}
+    try:
+        rest = run_rest()
+        for name, takes_tracked in _TREE_CHECKS:
+            fut = futures.get(name)
+            if fut is None:
+                results[name] = call(name, takes_tracked)
+                continue
+            try:
+                results[name] = fut.result()
+            except BrokenProcessPool as e:
+                print(f"Hygiene: the worker pool broke while running {name} ({e}); "
+                      "running it in this process.", file=sys.stderr)
+                results[name] = call(name, takes_tracked)
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=True, cancel_futures=True)
+    return results, rest
+
+
+def main(argv: list[str], default_workers: int = 1) -> int:
+    """default_workers is the process count for the tree checks when --jobs is not
+    given. In-process callers keep 1, so a monkeypatched check is the one that runs;
+    the command line passes _default_workers()."""
     if "--install-hook" in argv:
         return _install_hook()
     if "--write-import-baseline" in argv:
         return _write_import_baseline()
+    jobs = _parse_jobs(argv)
+    if isinstance(jobs, str):
+        print(f"Hygiene check: {jobs}", file=sys.stderr)
+        return 2
     strict = "--strict" in argv or _strict_env()
     tracked = _tracked_files()
     if not tracked:
@@ -2490,21 +2587,28 @@ def main(argv: list[str]) -> int:
               "- nothing was scanned. Run this from a git checkout.",
               file=sys.stderr)
         return 1
+
+    def run_rest() -> dict:
+        return {
+            "_never_tracked_violations": _never_tracked_violations(),
+            "_changelog_append_only": _changelog_append_only(),
+            "_sw_cache_derivation_violations": _sw_cache_derivation_violations(),
+            "_child_process_console_print_violations":
+                _child_process_console_print_violations(),
+            "_release_manifest_gate": _release_manifest_gate(),
+        }
+
+    tree, rest = _run_tree_checks(tracked, jobs or default_workers, run_rest)
+    found = {**tree, **rest}
     problems: list[str] = []
-    problems.extend(_never_tracked_violations())
-    for f in tracked:
-        problems.extend(_scan(f))
-    problems.extend(_changelog_append_only())
-    problems.extend(_raw_accessor_violations(tracked))
-    problems.extend(_big_test_write_violations(tracked))
-    problems.extend(_sw_cache_derivation_violations())
-    problems.extend(_import_cycle_violations())
-    problems.extend(_import_direction_violations())
-    problems.extend(_import_baseline_violations())
-    problems.extend(_child_process_console_print_violations())
-    problems.extend(_response_key_violations(tracked))
-    problems.extend(_codeql_barrier_import_violations(tracked))
-    manifest_failures, manifest_warnings = _release_manifest_gate()
+    for name in ("_never_tracked_violations", "_scan_all", "_changelog_append_only",
+                 "_raw_accessor_violations", "_big_test_write_violations",
+                 "_sw_cache_derivation_violations", "_import_cycle_violations",
+                 "_import_direction_violations", "_import_baseline_violations",
+                 "_child_process_console_print_violations", "_response_key_violations",
+                 "_codeql_barrier_import_violations"):
+        problems.extend(found[name])
+    manifest_failures, manifest_warnings = found["_release_manifest_gate"]
     problems.extend(manifest_failures)
     # Check 4b is warn-only by default; --strict / LOCALM_HYGIENE_STRICT=1 folds the
     # warnings into the failures.
@@ -2540,4 +2644,4 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    raise SystemExit(main(sys.argv[1:], default_workers=_default_workers()))

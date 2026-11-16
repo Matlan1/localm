@@ -6,6 +6,7 @@ that .html is in that set and that the shipped index.html is clean.
 """
 
 import importlib.util
+import os
 from pathlib import Path
 
 import pytest
@@ -1593,3 +1594,160 @@ def test_barrier_import_check_ignores_files_outside_localm(tmp_path, monkeypatch
 def test_real_tree_has_no_relative_barrier_accessor_calls():
     ch = _load_check_hygiene()
     assert ch._codeql_barrier_import_violations(ch._tracked_files()) == []
+
+
+# ---- the tree checks run in worker processes from the command line -----------
+
+_REST_CHECKS = ("_never_tracked_violations", "_changelog_append_only",
+                "_sw_cache_derivation_violations",
+                "_child_process_console_print_violations")
+
+
+def _stub_every_check(ch, monkeypatch):
+    """Each check reports its own name, so the printed order is visible."""
+    monkeypatch.setattr(ch, "_tracked_files", lambda: [Path("ok.py")])
+    for name, _ in ch._TREE_CHECKS:
+        monkeypatch.setattr(ch, name, lambda *a, _n=name: [_n])
+    for name in _REST_CHECKS:
+        monkeypatch.setattr(ch, name, lambda _n=name: [_n])
+    monkeypatch.setattr(ch, "_release_manifest_gate", lambda: ([], []))
+    monkeypatch.setattr(ch, "_changelog_unreleased_drops", lambda: [])
+    monkeypatch.setattr(ch, "_changelog_unreleased_duplicates", lambda: [])
+    monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
+
+
+class _FailingPool:
+    """A ProcessPoolExecutor stand-in whose every task ends in `exc`."""
+    exc: BaseException = RuntimeError("unset")
+
+    def __init__(self, max_workers):
+        pass
+
+    def submit(self, fn, *args):
+        import concurrent.futures
+        fut = concurrent.futures.Future()
+        fut.set_exception(self.exc)
+        return fut
+
+    def shutdown(self, wait=True, cancel_futures=False):
+        pass
+
+
+def test_problems_print_in_the_sequential_order(monkeypatch, capsys):
+    ch = _load_check_hygiene()
+    _stub_every_check(ch, monkeypatch)
+    assert ch.main([]) == 1
+    lines = [ln.strip() for ln in capsys.readouterr().err.splitlines() if ln.startswith("  ")]
+    assert lines == [
+        "_never_tracked_violations", "_scan_all", "_changelog_append_only",
+        "_raw_accessor_violations", "_big_test_write_violations",
+        "_sw_cache_derivation_violations", "_import_cycle_violations",
+        "_import_direction_violations", "_import_baseline_violations",
+        "_child_process_console_print_violations", "_response_key_violations",
+        "_codeql_barrier_import_violations"]
+
+
+def test_a_pool_that_cannot_start_runs_the_checks_here(monkeypatch, capsys):
+    """NEGATIVE: no worker process can start. The checks still all run, in this
+    process, the output is the sequential one, and stderr says it degraded."""
+    import concurrent.futures
+    ch = _load_check_hygiene()
+    _stub_every_check(ch, monkeypatch)
+    assert ch.main([]) == 1
+    sequential = capsys.readouterr().err
+
+    def _refuse(max_workers):
+        raise OSError("no processes here")
+    monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor", _refuse)
+    assert ch.main([], default_workers=4) == 1
+    err = capsys.readouterr().err
+    note = ("Hygiene: could not start worker processes (OSError: no processes here); "
+            "running the remaining checks in this process.\n")
+    assert err == note + sequential
+
+
+def test_a_broken_pool_reruns_each_check_here(monkeypatch, capsys):
+    import concurrent.futures
+    from concurrent.futures.process import BrokenProcessPool
+    ch = _load_check_hygiene()
+    _stub_every_check(ch, monkeypatch)
+    assert ch.main([]) == 1
+    sequential = capsys.readouterr().err
+    _FailingPool.exc = BrokenProcessPool("a worker died")
+    monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor", _FailingPool)
+    assert ch.main(["--jobs", "3"]) == 1
+    err = capsys.readouterr().err
+    notes = [ln for ln in err.splitlines() if ln.startswith("Hygiene: the worker pool broke")]
+    assert len(notes) == len(ch._TREE_CHECKS), err
+    assert "\n".join(ln for ln in err.splitlines() if ln not in notes) + "\n" == sequential
+
+
+def test_an_exception_raised_by_a_check_in_a_worker_propagates(monkeypatch):
+    """A check that crashes must fail the run as it does in-process, never be
+    retried quietly or reported as a pool problem."""
+    import concurrent.futures
+    ch = _load_check_hygiene()
+    _stub_every_check(ch, monkeypatch)
+    _FailingPool.exc = ValueError("the check itself is broken")
+    monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor", _FailingPool)
+    with pytest.raises(ValueError, match="the check itself is broken"):
+        ch.main([], default_workers=2)
+
+
+@pytest.mark.parametrize("argv, expected", [
+    ([], None), (["--jobs", "3"], 3), (["--jobs=1"], 1), (["--strict", "--jobs", "8"], 8),
+    (["--jobs", "0"], str), (["--jobs"], str), (["--jobs=x"], str), (["--jobs", "-2"], str),
+])
+def test_jobs_argument(argv, expected):
+    got = _load_check_hygiene()._parse_jobs(argv)
+    if expected is str:
+        assert isinstance(got, str) and "--jobs" in got
+    else:
+        assert got == expected
+
+
+def test_a_bad_jobs_value_exits_2_before_scanning(monkeypatch, capsys):
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "_tracked_files", lambda: pytest.fail("scanned"))
+    assert ch.main(["--jobs", "0"]) == 2
+    assert "--jobs needs a whole number" in capsys.readouterr().err
+
+
+def test_the_command_line_runs_workers_with_the_sequential_output(tmp_path):
+    """The script as CI and the pre-commit hook run it: worker processes really
+    start (no fallback note) and print byte for byte what --jobs 1 prints, on a
+    tree where several tree checks fire."""
+    import shutil
+    import sys
+    (tmp_path / "scripts").mkdir()
+    shutil.copy2(REPO_ROOT / "scripts" / "check_hygiene.py", tmp_path / "scripts")
+    files = {
+        "docs/note.md": "a " + chr(0x2014) + " b\n",
+        "tests/test_big.py": "def test_x(tmp_path):\n"
+                             "    (tmp_path / 'f').write_bytes(b'0' * 200_000_000)\n",
+        "localm/__init__.py": "",
+        "localm/config.py": "def load_registry():\n    return {}\n",
+        "localm/thing.py": "from .config import load_registry\n\n\n"
+                           "def f():\n    return load_registry()\n",
+    }
+    for rel, text in files.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    env = {k: v for k, v in os.environ.items() if k != "LOCALM_HYGIENE_STRICT"}
+
+    def run(*args):
+        return subprocess.run([sys.executable, "scripts/check_hygiene.py", *args],
+                              cwd=tmp_path, capture_output=True, env=env, timeout=120)
+
+    workers, sequential = run("--jobs", "2"), run("--jobs", "1")
+    err = workers.stderr.decode("utf-8")
+    assert "Hygiene: " not in err, err
+    assert (workers.returncode, workers.stdout, workers.stderr) == \
+        (sequential.returncode, sequential.stdout, sequential.stderr)
+    assert workers.returncode == 1
+    assert "docs/note.md:1: em-dash" in err
+    assert "tests/test_big.py:2: write_bytes()" in err
+    assert "localm/thing.py:5: calls load_registry() through a relative import" in err
