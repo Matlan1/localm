@@ -135,6 +135,10 @@ def sandbox(tmp_path):
         d = tmp_path / name
         d.mkdir()
         redirected[name] = d
+    if os.name == "nt":
+        (redirected["userprofile"] / "AppData" / "Roaming").mkdir(parents=True)
+        (redirected["userprofile"] / "AppData" / "Local").mkdir()
+    baseline = {name: _listing(d) for name, d in redirected.items()}
     hook_dir = tmp_path / "hook"
     hook_dir.mkdir()
     (hook_dir / "sitecustomize.py").write_text(_HOOK, encoding="utf-8")
@@ -159,7 +163,7 @@ def sandbox(tmp_path):
     })
     try:
         yield {"env": env, "home": home, "redirected": redirected, "log": log,
-               "hook_dir": hook_dir}
+               "hook_dir": hook_dir, "baseline": baseline}
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
         try:
@@ -195,6 +199,17 @@ def test_the_instrument_sees_a_write_outside_the_root(sandbox):
     assert _listing(sandbox["redirected"]["appdata"]) == ["stray.txt"]
 
 
+def test_a_write_inside_the_profile_skeleton_is_still_caught(sandbox):
+    """The profile folders a real Windows profile already has are not a write;
+    a file put inside them is."""
+    up = sandbox["redirected"]["userprofile"]
+    target = up / "AppData" / "Roaming" / "stray.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("x", encoding="utf-8")
+    new = sorted(set(_listing(up)) - set(sandbox["baseline"]["userprofile"]))
+    assert str(Path("AppData") / "Roaming" / "stray.txt") in new
+
+
 def test_a_running_server_writes_only_inside_its_own_root(sandbox):
     env, home = sandbox["env"], sandbox["home"]
     port = _free_port()
@@ -217,7 +232,8 @@ def test_a_running_server_writes_only_inside_its_own_root(sandbox):
     assert home.is_dir(), "the server never created its data folder"
     assert (home / "tmp").is_dir(), "a self-contained install keeps its temp files in its own root"
     for name, folder in sandbox["redirected"].items():
-        assert _listing(folder) == [], f"{name} was written to: {_listing(folder)}"
+        new = sorted(set(_listing(folder)) - set(sandbox["baseline"][name]))
+        assert new == [], f"{name} was written to: {new}"
     bad = _violations(sandbox["log"], [home, sandbox["log"].parent])
     assert bad == [], f"writes outside the root: {bad[:20]}"
     assert sandbox["log"].exists() and sandbox["log"].stat().st_size > 0, (
