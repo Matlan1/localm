@@ -805,6 +805,23 @@ def _reset_comfy_readiness_cache():
     comfy_client._confirmed_alive.clear()
 
 
+_GPU_VISIBILITY_VARS = ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
+
+
+@pytest.fixture(autouse=True)
+def _restore_gpu_visibility_env():
+    """Put the GPU-visibility variables back after every test, as they were
+    before it, including removing one the test set where there was none. See
+    tests/test_conftest_gpu_env_restore.py."""
+    saved = {k: os.environ.get(k) for k in _GPU_VISIBILITY_VARS}
+    yield
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+
+
 @pytest.fixture(autouse=True)
 def _clear_keep_diagnostics_env():
     """`localm gui --keep-diagnostics` sets LOCALM_KEEP_DIAGNOSTICS in-process.
