@@ -106,12 +106,22 @@ yourself - and are written in every session mode, privacy included:
   download writes its own record, which replaces it. A record you dismiss stays until one of those happens. Like the
   model registry, it holds model source details only, never conversation
   content.
+- **ComfyUI launch records.** When localm starts ComfyUI (for a generation or
+  `localm comfy start`), it writes `<data dir>/comfy-launched-<id>.json`, one
+  per ComfyUI address, so `localm comfy stop` can end that ComfyUI from another
+  localm command. A record holds the ComfyUI address, the process id, start
+  time, program path and full command line of the ComfyUI process (the command
+  line can contain folder paths on this machine), and the process id and start
+  time of the localm process that started it. It is removed when localm stops
+  that ComfyUI, when the launch fails at once, and when a later `localm comfy
+  stop` finds the process has exited or its process id now belongs to another
+  program. It holds no prompt or conversation content.
 
 None of this is silent: each is something you explicitly asked localm to
 keep, not a trace of a conversation. But if you are relying on privacy mode
 alone to leave nothing behind, know that a job you scheduled, a document you
-indexed, a persona you saved, a file you uploaded, or a model download that
-stopped before it finished still lands on disk.
+indexed, a persona you saved, a file you uploaded, a model download that
+stopped before it finished, or a ComfyUI localm started still lands on disk.
 
 ### Another localm instance answering for this one
 

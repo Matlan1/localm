@@ -174,6 +174,31 @@ def _generate_or_abort(api_url: str, run):
         raise
 
 
+def _say_comfy_left_running(api_url: str, what: str) -> None:
+    """When this process launched the ComfyUI at *api_url*, say that it keeps
+    running for the next *what*, and how to stop it: `localm comfy stop` when
+    its launch record was written, else that localm could not record it and
+    which process to end."""
+    from rich.markup import escape
+
+    from ..media.comfy_client import launch_record_outcome, spawned_pid
+    outcome = launch_record_outcome(api_url)
+    if outcome is None:
+        return
+    noun = {"music": "track"}.get(what, what)
+    written, reason = outcome
+    if written:
+        console.print(f"[dim]ComfyUI keeps running for the next {noun}; "
+                      "[/dim]localm comfy stop[dim] stops it and frees its VRAM.[/dim]")
+        return
+    pid = spawned_pid(api_url)
+    console.print(f"[yellow]![/yellow]  ComfyUI keeps running for the next {noun} "
+                  f"(process {pid}), but localm could not record it "
+                  f"({escape(reason)}), so localm comfy stop cannot end it from "
+                  f"another command. End process {pid} and its child processes yourself to "
+                  "free its VRAM.")
+
+
 def _via_backend(media_backend, s: dict, prompt: str, out_path: Path, what: str,
                  **gen_kwargs) -> None:
     """``localm image`` / ``localm music`` / ``localm video`` through the
@@ -206,9 +231,10 @@ def _via_backend(media_backend, s: dict, prompt: str, out_path: Path, what: str,
             swap=bool(localm_url), privacy=is_privacy,
             **gen_kwargs)
 
+    comfy_url = None
     try:
         if media_backend.supports(s, "NEEDS_COMFY_SERVER"):
-            api_url = s["api_url"]
+            api_url = comfy_url = s["api_url"]
             ok, message, path = _generate_or_abort(api_url, run)
             if not ok:
                 ok, message = _maybe_apply_func_shim_and_retry(
@@ -221,6 +247,8 @@ def _via_backend(media_backend, s: dict, prompt: str, out_path: Path, what: str,
         raise
     color = "green" if ok else "red"
     console.print(f"[{color}]{escape(str(message))}[/{color}]")
+    if comfy_url is not None:
+        _say_comfy_left_running(comfy_url, what)
     if not ok:
         sys.exit(1)
     _offer_open(path)

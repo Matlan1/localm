@@ -466,9 +466,13 @@ localm comfy stop                  # abort the render, clear the queue, free its
 localm comfy restart               # stop it, then launch a fresh one
 ```
 
-`start`, `stop` and `restart` need a running localm server (`localm gui` or `localm serve`; they exit 1 without one), because the
-handle on a ComfyUI localm launched belongs to the process that launched it -
-only that process can end it. `localm comfy stop` never kills a ComfyUI you
+`start` and `restart` need a running localm server (`localm gui` or `localm serve`; they exit 1 without one), because the
+handle on a ComfyUI localm launched belongs to the process that launched it.
+`stop` also works without a server: localm records each ComfyUI it launches in
+its data folder, so `localm comfy stop` can end the one `localm image`,
+`localm music` or `localm video` started and left running, after checking that
+the recorded process (its pid, start time, program and command line) is still
+that ComfyUI. `localm comfy stop` never kills a ComfyUI you
 started yourself: it aborts the render and frees the VRAM, and says so rather
 than implying the process is gone. When that ComfyUI does not accept the abort, `stop` says so and exits 1. `localm comfy restart` does the same to a
 ComfyUI you started yourself and launches nothing; it relaunches only one localm
@@ -476,7 +480,9 @@ started, or starts one when none is running. A cold start compiles GPU kernels a
 minutes, so `start` and `restart` wait for the configured `comfy_launch_timeout`. `localm comfy status` also works without a server, but then reports whether localm launched the running ComfyUI as unknown.
 
 Pressing Ctrl-C during `localm image` / `localm music` / `localm video` tells
-ComfyUI to abort that render and free its VRAM.
+ComfyUI to abort that render and free its VRAM. A ComfyUI those commands
+started keeps running for the next one, and they say so; `localm comfy stop`
+ends it.
 
 Whether localm targets the managed instance is decided by one setting,
 `comfy_target` (`own` by default, or `user` to force your own ComfyUI) - localm

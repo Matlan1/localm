@@ -1568,6 +1568,24 @@ def stop_all_spawned_comfy() -> int:
     return stopped
 
 
+# api_url -> (pid, written, reason) of the launch record write for the ComfyUI
+# this process launched there.
+_record_outcomes: dict[str, tuple] = {}
+
+
+def launch_record_outcome(api_url: str) -> Optional[tuple[bool, str]]:
+    """``(written, reason)`` of the launch record for the ComfyUI this process
+    launched at *api_url* and still holds (see
+    ``comfy_launch_record.write_record``), or None when this process holds no
+    running ComfyUI there."""
+    api_url = api_url.rstrip("/")
+    pid = spawned_pid(api_url)
+    outcome = _record_outcomes.get(api_url)
+    if pid is None or outcome is None or outcome[0] != pid:
+        return None
+    return bool(outcome[1]), str(outcome[2])
+
+
 def spawned_pid(api_url: Optional[str] = None) -> Optional[int]:
     """The PID of the ComfyUI localm launched for *api_url* if it is still ours
     and running, else None (localm did not launch it, or it has exited)."""
@@ -1650,9 +1668,12 @@ def comfy_port_holder(api_url: str, timeout: float = 1.0) -> Optional[dict]:
     return holder
 
 
-def comfy_port_held_message(api_url: str, holder: dict) -> str:
+def comfy_port_held_message(api_url: str, holder: dict, *,
+                            ownership_unknown: bool = False) -> str:
     """The user-facing sentence for a ``comfy_port_holder`` result, worded by
-    whether the holder is the ComfyUI localm launched (``localm_launched``)."""
+    whether the holder is the ComfyUI localm launched (``localm_launched``).
+    With *ownership_unknown*, a holder that is not localm's is described as one
+    localm has no record of starting, rather than one localm did not start."""
     who = "another process"
     if holder.get("pid"):
         name = f" ({holder['name']})" if holder.get("name") else ""
@@ -1661,11 +1682,12 @@ def comfy_port_held_message(api_url: str, holder: dict) -> str:
         return (f"Port {holder['port']} at {api_url} is still held by the ComfyUI "
                 f"localm launched ({who}), which does not answer as ComfyUI. Stop it "
                 "with: localm comfy stop, then try again.")
+    started = ("localm has no record of starting it, so it will not stop it"
+               if ownership_unknown else "localm did not start it and will not stop it")
     return (f"Port {holder['port']} at {api_url} is held by {who}, which accepts "
             "connections but does not answer as ComfyUI (a ComfyUI that hung after "
-            "a GPU crash looks like this). localm did not start it and will not stop "
-            "it: end that process yourself, or point localm at another port with "
-            "FLUX_API_URL.")
+            f"a GPU crash looks like this). {started}: end that process yourself, or "
+            "point localm at another port with FLUX_API_URL.")
 
 
 # ---------------------------------------------------------------------------
@@ -1964,30 +1986,40 @@ def _kill_process_tree(proc) -> None:
         pass
 
 
-def stop_comfy(api_url: Optional[str] = None) -> tuple[bool, str]:
+def stop_comfy(api_url: Optional[str] = None, *,
+               ownership_unknown: bool = False) -> tuple[bool, str]:
     """Stop ComfyUI. Always aborts the in-flight render + clears the queue and
     frees VRAM first (graceful). Then, IF localm launched this ComfyUI,
-    terminates the process tree localm spawned; if localm did NOT launch it, the
-    process is left alone (only our own are killed) and the caller is told so.
+    terminates the process tree localm spawned and removes its launch record
+    (``comfy_launch_record``); if localm did NOT launch it, the process is left
+    alone (only our own are killed) and the caller is told so.
 
     A port that localm did not launch and whose holder accepts connections but
     does not answer as ComfyUI is refused at once as ``(False, <held-port
     message>)``, before any abort request is sent: nothing is signalled and
-    nothing is waited on."""
+    nothing is waited on.
+
+    With *ownership_unknown*, a ComfyUI this process holds no handle on is
+    described as one localm has no record of launching, rather than one localm
+    did not launch."""
     api_url = (api_url or default_api_url()).rstrip("/")
     mark_comfy_dead(api_url)   # about to stop it either way - the next check must be real
     clear_comfy_device_error(api_url)
     if spawned_pid(api_url) is None and not _comfy_alive(api_url):
         holder = comfy_port_holder(api_url)
         if holder is not None:
-            return False, comfy_port_held_message(api_url, holder)
+            return False, comfy_port_held_message(api_url, holder,
+                                                  ownership_unknown=ownership_unknown)
     interrupted = interrupt_comfy(api_url)         # abort render + clear queue
     freed = free_comfy_vram(api_url)
     proc = _take_spawned(api_url)
     if proc is None:
         if _comfy_alive(api_url, timeout=2.0):
             mark_comfy_alive(api_url)   # localm did not launch it and did not stop it
-            left = ("localm did not launch this ComfyUI, so its process was "
+            left = ("localm has no record of launching this ComfyUI, so its process "
+                    "was left running - stop it where you started it, or end that "
+                    "process yourself." if ownership_unknown else
+                    "localm did not launch this ComfyUI, so its process was "
                     "left running - stop it where you started it.")
             if not interrupted:
                 return False, ("ComfyUI did not accept the request to abort its "
@@ -1997,13 +2029,75 @@ def stop_comfy(api_url: Optional[str] = None) -> tuple[bool, str]:
                     "request failed).")
             return True, f"Aborted the in-flight render. {vram} {left}"
         return True, "ComfyUI is not running."
+    from localm.media import comfy_launch_record
     try:
         if proc.poll() is not None:
+            comfy_launch_record.drop_pid(api_url, getattr(proc, "pid", None))
             return True, "The ComfyUI localm launched had already exited."
         _kill_process_tree(proc)
     except Exception as e:
         return False, f"Could not stop the ComfyUI localm launched: {e}"
+    comfy_launch_record.drop_pid(api_url, getattr(proc, "pid", None))
     return True, "Stopped the ComfyUI that localm launched."
+
+
+_ADOPTED_EXIT_WAIT_S = 10.0
+
+
+def stop_recorded_comfy(*, skip_live_owner: bool = False) -> list[tuple[str, bool, str, bool]]:
+    """Stop each ComfyUI a localm process launched in this data dir, found by
+    its launch record (:mod:`localm.media.comfy_launch_record`) rather than by
+    a handle held in this process.
+
+    A record whose process matches it is adopted into ``_spawned_procs`` and
+    stopped by :func:`stop_comfy` (abort the render, clear the queue, free
+    VRAM, end the process tree); the stop counts as done only once the process
+    has exited, and the record is written back when it has not. A record whose
+    process has exited is dropped silently. A record whose pid now belongs to a
+    different process is dropped and reported, and that process is not
+    signalled. A record that cannot be checked is reported as a failure and
+    kept. With *skip_live_owner*, a record whose launching localm process is
+    still running (or cannot be checked) is left to that process.
+
+    Returns one ``(api_url, ok, message, covered)`` per record acted on or
+    reported, in record order. ``covered`` is False for a dropped record whose
+    pid is now a different process: nothing localm launched was found at that
+    api_url."""
+    from localm.media import comfy_launch_record as rec
+    results: list[tuple[str, bool, str, bool]] = []
+    for record in rec.read_records():
+        api_url, pid = record["api_url"], record["pid"]
+        if skip_live_owner and rec.owner_alive(record):
+            continue
+        state, handle = rec.adopt(record)
+        if state == rec.GONE:
+            rec.drop(record)
+            continue
+        if state == rec.MISMATCH:
+            rec.drop(record)
+            results.append((api_url, True,
+                            f"The ComfyUI localm launched (process {pid}) has exited, "
+                            f"and process {pid} is now a different program, so it was "
+                            "left alone.", False))
+            continue
+        if state != rec.MATCH or handle is None:
+            results.append((api_url, False,
+                            f"localm launched ComfyUI as process {pid}, but could not "
+                            "confirm that process is still that ComfyUI (this needs "
+                            "psutil and permission to read the process), so nothing "
+                            "was stopped.", True))
+            continue
+        _remember_spawned(api_url, handle)
+        ok, message = stop_comfy(api_url)
+        if ok and not handle.gone_within(_ADOPTED_EXIT_WAIT_S):
+            ok, message = False, (f"Asked the ComfyUI localm launched (process {pid}) "
+                                  "to stop, but it is still running.")
+        if ok:
+            rec.drop(record)
+        else:
+            rec.restore(record)
+        results.append((api_url, ok, message, True))
+    return results
 
 
 _PORT_RELEASE_WAIT_S = 10.0
@@ -2289,6 +2383,8 @@ def _stop_own_comfy_for_relaunch(api_url: str) -> tuple[bool, str]:
                 _kill_process_tree(proc)
         except Exception as e:
             return False, f"Could not stop the ComfyUI localm launched: {e}"
+        from localm.media import comfy_launch_record
+        comfy_launch_record.drop_pid(api_url, getattr(proc, "pid", None))
     if not _wait_for_port_release(api_url):
         holder = comfy_port_holder(api_url)
         if holder is not None:
@@ -2473,9 +2569,14 @@ def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
                          stderr=subprocess.STDOUT,
                          **_popen_kw)
         _remember_spawned(api_url, proc)   # retain the handle so Stop can reach it
+        from localm.media import comfy_launch_record
+        _proc_pid = getattr(proc, "pid", None)
+        _record_outcomes[api_url] = (
+            _proc_pid, *comfy_launch_record.write_record(api_url, _proc_pid))
         _t.sleep(0.5)
         if proc.poll() is not None and proc.returncode != 0:
             _take_spawned(api_url)         # it died; drop the dead handle
+            comfy_launch_record.drop_pid(api_url, _proc_pid)
             detail = _launch_log_tail(launch_log_path)
             return False, (
                 f"ComfyUI launcher exited immediately with code {proc.returncode}."

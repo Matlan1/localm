@@ -110,7 +110,7 @@ DATA_DIRS = frozenset({
     "skills", "app-window", "runtimes", "voices",
 })
 DATA_ENTRIES = frozenset({DATA_MARKER}) | DATA_FILES | DATA_DIRS
-_DATA_PATTERNS = ("comfy-launch-*.log",)
+_DATA_PATTERNS = ("comfy-launch-*.log", "comfy-launched-*.json")
 # LocaLM entries whose names other programs use too. In a data folder with no
 # record of what was in it before LocaLM ("legacy"), these are kept.
 _LEGACY_KEPT = frozenset({
@@ -129,7 +129,7 @@ _ALL_KEYS = ("venv", "lib_dir", "lib_entries", "home_cfg", "data_dir",
 
 def is_data_entry(name: str) -> bool:
     """Whether *name* is a top-level entry localm creates in its data folder:
-    one of DATA_ENTRIES, a ``comfy-launch-*.log``, or the ``.lock`` / ``.bak`` /
+    one of DATA_ENTRIES, a ``comfy-launch-*.log`` or ``comfy-launched-*.json``, or the ``.lock`` / ``.bak`` /
     ``.<suffix>.tmp`` companion of one of localm's own files."""
     import fnmatch
     if name in DATA_ENTRIES:

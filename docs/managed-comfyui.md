@@ -167,8 +167,9 @@ localm comfy restart               # stop then start again
 ```
 
 These act on whichever ComfyUI `localm comfy status` reports as the current target
-(managed or your own) and need a running localm server (`localm gui` or `localm
-serve`) to reach it. `start` uses the same launch path a real generation would
+(managed or your own). `start` and `restart` need a running localm server
+(`localm gui` or `localm serve`) to reach it; `stop` also works without one, and
+then ends the ComfyUI a `localm image` / `music` / `video` run started. `start` uses the same launch path a real generation would
 (`comfy_launch_cmd`/`comfy_workdir`, or the managed instance's own), so a cold
 ROCm/ZLUDA start that compiles GPU kernels gets the same generous timeout a real
 generation waits on. If ComfyUI is already running, `start` says so and changes
