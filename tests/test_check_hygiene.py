@@ -1694,9 +1694,106 @@ def test_an_exception_raised_by_a_check_in_a_worker_propagates(monkeypatch):
         ch.main([], default_workers=2)
 
 
+class _InlinePool:
+    """A ProcessPoolExecutor stand-in that runs each task at once, in this process,
+    through the real worker entry point."""
+    last: "_InlinePool | None" = None
+
+    def __init__(self, max_workers):
+        self.max_workers = max_workers
+        self.shut_down = False
+        _InlinePool.last = self
+
+    def submit(self, fn, *args):
+        import concurrent.futures
+        fut = concurrent.futures.Future()
+        fut.set_result(fn(*args))
+        return fut
+
+    def shutdown(self, wait=True, cancel_futures=False):
+        self.shut_down = True
+
+
+def _noisy(name, raises=None):
+    import sys
+
+    def check(*args):
+        print(f"stderr of {name}", file=sys.stderr)
+        if raises is not None:
+            raise raises
+        return [name] if name != "_release_manifest_gate" else ([], [])
+    return check
+
+
+def test_check_stderr_is_written_in_check_order(monkeypatch, capsys):
+    """What a check writes to stderr itself (a parser's SyntaxWarning) comes out in
+    the one-by-one order, wherever and whenever the check ran."""
+    import concurrent.futures
+    ch = _load_check_hygiene()
+    _stub_every_check(ch, monkeypatch)
+    for name in ch._CHECK_ORDER:
+        monkeypatch.setattr(ch, name, _noisy(name))
+    assert ch.main([]) == 1
+    sequential = capsys.readouterr().err
+    assert sequential.startswith("stderr of _never_tracked_violations\nstderr of _scan_all\n")
+    monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor", _InlinePool)
+    assert ch.main(["--jobs", "4"]) == 1
+    assert capsys.readouterr().err == sequential
+    assert _InlinePool.last.shut_down
+
+
+@pytest.mark.parametrize("tree_check_raises", [True, False])
+def test_the_first_check_in_order_that_raises_ends_the_run(
+        monkeypatch, capsys, tree_check_raises):
+    """Two checks raise: the run ends with the exception of the one that comes
+    first in check order, after the stderr of the checks before it, as one by one.
+    A worker's exception carries the worker traceback as a note."""
+    import concurrent.futures
+    ch = _load_check_hygiene()
+    _stub_every_check(ch, monkeypatch)
+    for name in ch._CHECK_ORDER:
+        monkeypatch.setattr(ch, name, _noisy(name))
+    first, later = (("_scan_all", "_sw_cache_derivation_violations") if tree_check_raises
+                    else ("_changelog_append_only", "_codeql_barrier_import_violations"))
+    monkeypatch.setattr(ch, first, _noisy(first, KeyError("first")))
+    monkeypatch.setattr(ch, later, _noisy(later, ValueError("later")))
+    with pytest.raises(KeyError, match="first"):
+        ch.main([])
+    sequential = capsys.readouterr().err
+    monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor", _InlinePool)
+    with pytest.raises(KeyError, match="first") as caught:
+        ch.main(["--jobs", "3"])
+    assert capsys.readouterr().err == sequential
+    notes = getattr(caught.value, "__notes__", [])
+    assert bool(notes) == tree_check_raises
+    if tree_check_raises:
+        assert notes[0].startswith(f"Raised in a worker process by {first}:")
+
+
+def test_ctrl_c_shuts_the_pool_down_and_propagates(monkeypatch):
+    import concurrent.futures
+    ch = _load_check_hygiene()
+    _stub_every_check(ch, monkeypatch)
+    monkeypatch.setattr(ch, "_changelog_append_only", _noisy("x", KeyboardInterrupt()))
+    monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor", _InlinePool)
+    with pytest.raises(KeyboardInterrupt):
+        ch.main([], default_workers=2)
+    assert _InlinePool.last.shut_down
+
+
+def test_jobs_is_capped_at_one_worker_per_tree_check(monkeypatch):
+    import concurrent.futures
+    ch = _load_check_hygiene()
+    _stub_every_check(ch, monkeypatch)
+    monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor", _InlinePool)
+    assert ch.main(["--jobs", "500"]) == 1
+    assert _InlinePool.last.max_workers == len(ch._TREE_CHECKS)
+
+
 @pytest.mark.parametrize("argv, expected", [
     ([], None), (["--jobs", "3"], 3), (["--jobs=1"], 1), (["--strict", "--jobs", "8"], 8),
     (["--jobs", "0"], str), (["--jobs"], str), (["--jobs=x"], str), (["--jobs", "-2"], str),
+    (["--jobs", chr(0xB2)], str), (["--jobs", chr(0x663)], str),
 ])
 def test_jobs_argument(argv, expected):
     got = _load_check_hygiene()._parse_jobs(argv)
@@ -1716,7 +1813,8 @@ def test_a_bad_jobs_value_exits_2_before_scanning(monkeypatch, capsys):
 def test_the_command_line_runs_workers_with_the_sequential_output(tmp_path):
     """The script as CI and the pre-commit hook run it: worker processes really
     start (no fallback note) and print byte for byte what --jobs 1 prints, on a
-    tree where several tree checks fire."""
+    tree where several tree checks fire and several parse a file that makes the
+    parser warn on stderr."""
     import shutil
     import sys
     (tmp_path / "scripts").mkdir()
@@ -1726,6 +1824,7 @@ def test_the_command_line_runs_workers_with_the_sequential_output(tmp_path):
         "tests/test_big.py": "def test_x(tmp_path):\n"
                              "    (tmp_path / 'f').write_bytes(b'0' * 200_000_000)\n",
         "localm/__init__.py": "",
+        "localm/esc.py": 'PATTERN = "\\d+"\n',
         "localm/config.py": "def load_registry():\n    return {}\n",
         "localm/thing.py": "from .config import load_registry\n\n\n"
                            "def f():\n    return load_registry()\n",
@@ -1748,6 +1847,7 @@ def test_the_command_line_runs_workers_with_the_sequential_output(tmp_path):
     assert (workers.returncode, workers.stdout, workers.stderr) == \
         (sequential.returncode, sequential.stdout, sequential.stderr)
     assert workers.returncode == 1
+    assert err.count("SyntaxWarning") >= 2, err
     assert "docs/note.md:1: em-dash" in err
     assert "tests/test_big.py:2: write_bytes()" in err
     assert "localm/thing.py:5: calls load_registry() through a relative import" in err

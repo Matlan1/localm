@@ -2483,6 +2483,17 @@ def _scan_all(files: list[Path]) -> list[str]:
     return [p for f in files for p in _scan(f)]
 
 
+# Every check main() runs, in the order it has always run them and prints their
+# problems. The last one returns (failures, warnings); the others a problem list.
+_CHECK_ORDER = (
+    "_never_tracked_violations", "_scan_all", "_changelog_append_only",
+    "_raw_accessor_violations", "_big_test_write_violations",
+    "_sw_cache_derivation_violations", "_import_cycle_violations",
+    "_import_direction_violations", "_import_baseline_violations",
+    "_child_process_console_print_violations", "_response_key_violations",
+    "_codeql_barrier_import_violations", "_release_manifest_gate",
+)
+
 # The checks that each walk the whole tree, longest first so a worker pool starts
 # the long poles early. True: the check takes the tracked file list.
 _TREE_CHECKS = (
@@ -2508,62 +2519,95 @@ def _parse_jobs(argv: list[str]) -> int | None | str:
         if arg == "--jobs" or arg.startswith("--jobs="):
             value = arg.partition("=")[2] if "=" in arg else (
                 argv[i + 1] if i + 1 < len(argv) else "")
-            if value.isdigit() and int(value) >= 1:
+            if value.isascii() and value.isdigit() and int(value) >= 1:
                 return int(value)
             return f"--jobs needs a whole number of at least 1, got {value!r}"
     return None
 
 
-def _run_check_in_worker(name: str, repo: str, args: tuple) -> list[str]:
+def _captured(fn, args: tuple) -> tuple:
+    """Run fn(*args) with its stderr (a parser's SyntaxWarning, say) held back, so
+    the caller can write it out in check order. Returns (stderr text, result,
+    exception or None, formatted traceback or None)."""
+    import contextlib
+    import io
+    import traceback
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(buf):
+            result = fn(*args)
+    except Exception as e:
+        return buf.getvalue(), None, e, traceback.format_exc()
+    return buf.getvalue(), result, None, None
+
+
+def _run_check_in_worker(name: str, repo: str, args: tuple) -> tuple:
     global REPO
     REPO = Path(repo)
-    return globals()[name](*args)
+    return _captured(globals()[name], args)
 
 
-def _run_tree_checks(tracked: list[Path], workers: int, run_rest) -> tuple[dict, object]:
-    """Run the _TREE_CHECKS, in `workers` processes when above 1, and run_rest()
-    in this process meanwhile. Returns ({check name: problems}, run_rest's result).
+def _run_checks(tracked: list[Path], workers: int) -> dict:
+    """Every check in _CHECK_ORDER, as {name: result}.
 
-    A worker pool that cannot start or breaks is reported on stderr and the
-    affected checks run here instead; an exception raised BY a check propagates
-    exactly as it does when run in this process."""
-    from concurrent.futures import ProcessPoolExecutor
-    from concurrent.futures.process import BrokenProcessPool
+    With workers above 1 the _TREE_CHECKS run in that many processes and the rest
+    in this one meanwhile, each with its stderr held back; then, in _CHECK_ORDER,
+    each check's stderr is written and the first check that raised re-raises. So
+    the output, and which exception ends the run, are those of the one-by-one run.
+    A worker pool that cannot start or breaks is named on stderr and the affected
+    checks run here instead."""
+    tree_args = {name: (tracked,) if takes_tracked else ()
+                 for name, takes_tracked in _TREE_CHECKS}
 
-    def call(name: str, takes_tracked: bool) -> list[str]:
-        return globals()[name](*((tracked,) if takes_tracked else ()))
+    def call(name: str):
+        return globals()[name](*tree_args.get(name, ()))
 
+    workers = min(workers, len(_TREE_CHECKS))
     if workers <= 1:
-        results = {n: call(n, t) for n, t in _TREE_CHECKS}
-        return results, run_rest()
+        return {name: call(name) for name in _CHECK_ORDER}
     futures = {}
     pool = None
+    broken: type[BaseException] = RuntimeError
     try:
+        from concurrent.futures import ProcessPoolExecutor
+        from concurrent.futures.process import BrokenProcessPool
+        broken = BrokenProcessPool
         pool = ProcessPoolExecutor(max_workers=workers)
-        for name, takes_tracked in _TREE_CHECKS:
+        for name, _ in _TREE_CHECKS:
             futures[name] = pool.submit(_run_check_in_worker, name, str(REPO),
-                                        (tracked,) if takes_tracked else ())
-    except (OSError, RuntimeError, ImportError, NotImplementedError) as e:
+                                        tree_args[name])
+    except (OSError, RuntimeError, ImportError, NotImplementedError, ValueError) as e:
         print(f"Hygiene: could not start worker processes ({type(e).__name__}: {e}); "
               "running the remaining checks in this process.", file=sys.stderr)
-    results: dict[str, list[str]] = {}
+    found: dict = {}
     try:
-        rest = run_rest()
-        for name, takes_tracked in _TREE_CHECKS:
-            fut = futures.get(name)
-            if fut is None:
-                results[name] = call(name, takes_tracked)
+        outcomes = {name: _captured(globals()[name], ())
+                    for name in _CHECK_ORDER if name not in tree_args}
+        for name in _CHECK_ORDER:
+            if name in outcomes:
+                outcome = outcomes[name]
+            elif name in futures:
+                try:
+                    outcome = futures[name].result()
+                except broken as e:
+                    print(f"Hygiene: the worker pool broke while running {name} ({e}); "
+                          "running it in this process.", file=sys.stderr)
+                    found[name] = call(name)
+                    continue
+            else:
+                found[name] = call(name)
                 continue
-            try:
-                results[name] = fut.result()
-            except BrokenProcessPool as e:
-                print(f"Hygiene: the worker pool broke while running {name} ({e}); "
-                      "running it in this process.", file=sys.stderr)
-                results[name] = call(name, takes_tracked)
+            text, result, exc, tb = outcome
+            sys.stderr.write(text)
+            if exc is not None:
+                if name in futures:
+                    exc.add_note(f"Raised in a worker process by {name}:\n{tb}")
+                raise exc
+            found[name] = result
     finally:
         if pool is not None:
             pool.shutdown(wait=True, cancel_futures=True)
-    return results, rest
+    return found
 
 
 def main(argv: list[str], default_workers: int = 1) -> int:
@@ -2587,26 +2631,9 @@ def main(argv: list[str], default_workers: int = 1) -> int:
               "- nothing was scanned. Run this from a git checkout.",
               file=sys.stderr)
         return 1
-
-    def run_rest() -> dict:
-        return {
-            "_never_tracked_violations": _never_tracked_violations(),
-            "_changelog_append_only": _changelog_append_only(),
-            "_sw_cache_derivation_violations": _sw_cache_derivation_violations(),
-            "_child_process_console_print_violations":
-                _child_process_console_print_violations(),
-            "_release_manifest_gate": _release_manifest_gate(),
-        }
-
-    tree, rest = _run_tree_checks(tracked, jobs or default_workers, run_rest)
-    found = {**tree, **rest}
+    found = _run_checks(tracked, jobs or default_workers)
     problems: list[str] = []
-    for name in ("_never_tracked_violations", "_scan_all", "_changelog_append_only",
-                 "_raw_accessor_violations", "_big_test_write_violations",
-                 "_sw_cache_derivation_violations", "_import_cycle_violations",
-                 "_import_direction_violations", "_import_baseline_violations",
-                 "_child_process_console_print_violations", "_response_key_violations",
-                 "_codeql_barrier_import_violations"):
+    for name in _CHECK_ORDER[:-1]:
         problems.extend(found[name])
     manifest_failures, manifest_warnings = found["_release_manifest_gate"]
     problems.extend(manifest_failures)
