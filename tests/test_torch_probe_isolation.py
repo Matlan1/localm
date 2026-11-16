@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import pathlib
 import subprocess
 import sys
@@ -1209,6 +1210,8 @@ cuda = _Cuda()
             [interpreter_for_localm_children(), "-u", "-m",
              "localm._torch_gpu_probe"],
             capture_output=True, text=True, timeout=120)
+        assert proc.returncode == 0, (
+            f"the probe exited {proc.returncode}: {proc.stderr[-2000:]}")
         lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
         assert len(lines) == 1, f"child printed {len(lines)} stdout lines"
         devices = json.loads(lines[0])
@@ -1221,7 +1224,10 @@ cuda = _Cuda()
             assert isinstance(d["index"], int) and isinstance(d["name"], str)
             assert d["total"] > 0 and d["free"] >= 0
         if torch.cuda.is_available():
-            assert len(devices) == torch.cuda.device_count()
+            assert len(devices) == torch.cuda.device_count(), (
+                f"child saw {len(devices)} device(s); child env "
+                f"{ {k: os.environ.get(k) for k in ('HIP_VISIBLE_DEVICES', 'CUDA_VISIBLE_DEVICES')} }; "
+                f"stderr: {proc.stderr[-2000:]}")
 
     def test_child_reports_a_torch_failure_rather_than_dying_silently(self):
         """An unimportable torch must still produce a parseable [] plus a cause
