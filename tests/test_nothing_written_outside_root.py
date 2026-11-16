@@ -92,6 +92,25 @@ def _listing(folder: Path) -> list:
     return sorted(str(p.relative_to(folder)) for p in folder.rglob("*"))
 
 
+_POWERSHELL_CACHE = Path("AppData", "Local", "Microsoft", "Windows", "PowerShell",
+                         "StartupProfileData-NonInteractive")
+_ALLOWED_IN_PROFILE = (
+    {str(_POWERSHELL_CACHE), *(str(p) for p in _POWERSHELL_CACHE.parents
+                                if len(p.parts) > 2)}
+    if os.name == "nt" else set())
+
+
+def _new_entries(sandbox, name: str) -> list:
+    """Entries added to a redirected folder since the fixture ran, without Windows
+    PowerShell's own startup cache in the user profile (written by
+    `powershell -NoProfile -Command`, which localm.hwdetect runs to read GPU names).
+    See test_powershell_alone_writes_only_its_startup_cache."""
+    new = set(_listing(sandbox["redirected"][name])) - set(sandbox["baseline"][name])
+    if name == "userprofile":
+        new -= _ALLOWED_IN_PROFILE
+    return sorted(new)
+
+
 def _free_port() -> int:
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
@@ -135,6 +154,10 @@ def sandbox(tmp_path):
         d = tmp_path / name
         d.mkdir()
         redirected[name] = d
+    if os.name == "nt":
+        (redirected["userprofile"] / "AppData" / "Roaming").mkdir(parents=True)
+        (redirected["userprofile"] / "AppData" / "Local").mkdir()
+    baseline = {name: _listing(d) for name, d in redirected.items()}
     hook_dir = tmp_path / "hook"
     hook_dir.mkdir()
     (hook_dir / "sitecustomize.py").write_text(_HOOK, encoding="utf-8")
@@ -159,7 +182,7 @@ def sandbox(tmp_path):
     })
     try:
         yield {"env": env, "home": home, "redirected": redirected, "log": log,
-               "hook_dir": hook_dir}
+               "hook_dir": hook_dir, "baseline": baseline}
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
         try:
@@ -195,6 +218,43 @@ def test_the_instrument_sees_a_write_outside_the_root(sandbox):
     assert _listing(sandbox["redirected"]["appdata"]) == ["stray.txt"]
 
 
+def test_a_write_inside_the_profile_skeleton_is_still_caught(sandbox):
+    """The profile folders a real Windows profile already has are not a write;
+    a file put inside them is."""
+    up = sandbox["redirected"]["userprofile"]
+    target = up / "AppData" / "Roaming" / "stray.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("x", encoding="utf-8")
+    new = sorted(set(_listing(up)) - set(sandbox["baseline"]["userprofile"]))
+    assert str(Path("AppData") / "Roaming" / "stray.txt") in new
+
+
+@pytest.mark.skipif(os.name != "nt" or not shutil.which("powershell"),
+                    reason="Windows PowerShell is a Windows program")
+def test_powershell_alone_writes_only_its_startup_cache(sandbox):
+    """Windows PowerShell started with the sandbox's profile writes nothing in the
+    user profile beyond the entries the server check leaves out."""
+    up = sandbox["redirected"]["userprofile"]
+    r = subprocess.run(
+        [shutil.which("powershell"), "-NoProfile", "-Command", "exit 0"],
+        env=sandbox["env"], capture_output=True, text=True, timeout=120,
+        creationflags=subprocess.CREATE_NO_WINDOW)
+    assert r.returncode == 0, r.stderr
+    new = set(_listing(up)) - set(sandbox["baseline"]["userprofile"])
+    assert new <= _ALLOWED_IN_PROFILE, sorted(new - _ALLOWED_IN_PROFILE)
+    for name in ("appdata", "localappdata", "temp", "xdg"):
+        assert _new_entries(sandbox, name) == [], name
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the allowance exists on Windows only")
+def test_a_file_beside_the_powershell_cache_is_still_caught(sandbox):
+    folder = sandbox["redirected"]["userprofile"] / _POWERSHELL_CACHE.parent
+    folder.mkdir(parents=True)
+    (folder / _POWERSHELL_CACHE.name).write_text("x", encoding="utf-8")
+    (folder / "stray.txt").write_text("x", encoding="utf-8")
+    assert _new_entries(sandbox, "userprofile") == [str(_POWERSHELL_CACHE.parent / "stray.txt")]
+
+
 def test_a_running_server_writes_only_inside_its_own_root(sandbox):
     env, home = sandbox["env"], sandbox["home"]
     port = _free_port()
@@ -216,8 +276,9 @@ def test_a_running_server_writes_only_inside_its_own_root(sandbox):
 
     assert home.is_dir(), "the server never created its data folder"
     assert (home / "tmp").is_dir(), "a self-contained install keeps its temp files in its own root"
-    for name, folder in sandbox["redirected"].items():
-        assert _listing(folder) == [], f"{name} was written to: {_listing(folder)}"
+    for name in sandbox["redirected"]:
+        new = _new_entries(sandbox, name)
+        assert new == [], f"{name} was written to: {new}"
     bad = _violations(sandbox["log"], [home, sandbox["log"].parent])
     assert bad == [], f"writes outside the root: {bad[:20]}"
     assert sandbox["log"].exists() and sandbox["log"].stat().st_size > 0, (
