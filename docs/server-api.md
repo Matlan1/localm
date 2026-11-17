@@ -1236,9 +1236,13 @@ again once it has been reinstalled.
 Move a plugin between the available catalog and the installed set. Install
 copies the plugin from the store into `<data dir>/plugins/` and enables it;
 uninstall removes the installed directory and accepts `?delete_data=` to
-also drop the plugin's stored data. Install returns `{"status": "installed",
-"name", "enabled"}`: `enabled` is false, with the reason in `detail`, when a
-plugin it requires is not installed (it is installed but not enabled).
+also drop the plugin's stored data. Install runs the plugin's install step
+(`on_install`) once; for voice that starts the one-time Whisper model download
+in the background, or, while network access is off, says it did not. Install
+returns `{"status": "installed", "name", "enabled"}`, plus `note` with the
+install step's message for the user when it gave one: `enabled` is false, with
+the reason in `detail`, when a plugin it requires is not installed (it is
+installed but not enabled, and its install step does not run).
 Uninstall returns `{"status": "uninstalled", "name"}`. Uninstalling a
 protected plugin (chat) or a known plugin that is not installed returns 409;
 an unknown plugin returns 404; a failed install or uninstall returns 400; an
@@ -1268,9 +1272,10 @@ failure returns 400. They return `{"status": "enabled" | "disabled", "name"}`.
 `plugins:admin` scope, same as the routes above. Installs a third-party
 plugin from a local directory (`{"source": "/path/to/plugin"}`, which must
 contain a `plugin.toml`; `force` replaces an installed copy) - the HTTP sibling
-of `localm plugin install <dir>`. The plugin is loaded the next time `GET /api/plugins` is called, with no restart.
-Returns `{"status": "installed", "name", "version", "enabled"}` (`enabled` as
-for the install route above); a missing `source`, a directory without a
+of `localm plugin install <dir>`. The plugin's install step (`on_install`), if
+it defines one, runs once at install; the plugin is loaded the next time `GET /api/plugins` is called, with no restart.
+Returns `{"status": "installed", "name", "version", "enabled"}` (`enabled` and
+`note` as for the install route above); a missing `source`, a directory without a
 `plugin.toml`, or a rejected plugin is a 400.
 
 ### `POST /api/plugins/{name}/install-deps` / `GET /api/plugins/{name}/install-deps/events`

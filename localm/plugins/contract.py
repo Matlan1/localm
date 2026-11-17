@@ -316,7 +316,8 @@ class Host(Protocol):
 @runtime_checkable
 class Plugin(Protocol):
     """What a plugin module/object exposes. ``register`` / ``unregister`` are
-    required. Optional lifecycle hooks: ``on_install`` (called once at install),
+    required. Optional lifecycle hooks: ``on_install`` (called once at every
+    install, from any install path; a str it returns is shown to the installer),
     ``on_uninstall(delete_data)`` (called at uninstall), and ``on_first_use``
     (called once the FIRST time the plugin is loaded/activated, persisted so it
     never re-fires on a later server start) are invoked if present."""
