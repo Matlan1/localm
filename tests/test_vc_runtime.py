@@ -392,8 +392,8 @@ def test_sdcpp_load_error_names_the_missing_runtime_dll(tmp_path, monkeypatch):
     from localm.media.sdcpp import _binding, _child
     rt = tmp_path / "sd"
     rt.mkdir()
-    (rt / _binding.lib_filename()).write_bytes(_pe(["MSVCP140.dll", "KERNEL32.dll"]))
     monkeypatch.setattr(vc_runtime.sys, "platform", "win32")
+    (rt / _binding.lib_filename()).write_bytes(_pe(["MSVCP140.dll", "KERNEL32.dll"]))
     monkeypatch.setattr(vc_runtime, "_system_dir", lambda: None)
     monkeypatch.setattr(pe_deps, "_is_loaded", lambda name: name.lower() == "kernel32.dll")
     monkeypatch.setattr(vc_runtime.sys, "base_prefix", str(tmp_path / "py"))
