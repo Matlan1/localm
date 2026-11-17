@@ -1117,6 +1117,7 @@ class PluginManager:
         self._provision_errors: dict[str, str] = {}  # first-run copy / upgrade refresh
         self._store_errors: dict[str, str] = {}      # unparsable bundled manifests
         self._unload_errors: dict[str, str] = {}     # unregister() failures; cleared by a later load
+        self._install_notes: dict[str, str] = {}     # on_install's note, until pop_install_note
         self.last_refresh_failures: dict[str, str] = {}
         self._dep_tasks: dict = {}                   # name -> DepInstallTask (GUI installs)
         self._dep_tasks_lock = threading.Lock()
@@ -1828,21 +1829,66 @@ class PluginManager:
         host.unmount()
         _drop_plugin_modules(uniq)      # a copied plugin re-imports fresh on re-enable
 
-    def _invoke_hook(self, name: str, hook_name: str, **kwargs) -> None:
-        """Call an optional plugin lifecycle hook if the loaded module defines it.
+    def _invoke_hook(self, name: str, hook_name: str, **kwargs):
+        """Call an optional plugin lifecycle hook if the loaded module defines it
+        and return what it returned (None when it is absent or failed).
         Best-effort: a hook error is logged at WARNING and never blocks the
         action."""
         entry = self._loaded.get(name)
         if not entry:
-            return
-        hook = getattr(entry[1], hook_name, None)
-        if callable(hook):
+            return None
+        return self._call_hook(name, entry[1], hook_name, **kwargs)
+
+    def _call_hook(self, name: str, module, hook_name: str, **kwargs):
+        """``_invoke_hook`` for an already imported *module*."""
+        hook = getattr(module, hook_name, None)
+        if not callable(hook):
+            return None
+        try:
+            return self._on_loop(lambda: hook(**kwargs))
+        except Exception as e:
+            # Log a failing plugin hook at WARNING without failing the
+            # install/first-use path that called it.
+            _log.warning("plugin %s: %s hook failed: %s", name, hook_name, e)
+            return None
+
+    def _run_install_hook(self, name: str) -> None:
+        """Run *name*'s optional ``on_install`` hook for the install that just
+        happened. Every install path calls this: the live install routes and
+        the app-free installs (``localm plugin install`` and ``plugin setup``,
+        the MCP install_plugin tool, the install-from-directory route).
+
+        A loaded plugin's own module is used. Otherwise the module is imported
+        for the hook alone, without calling register(), and a third-party
+        module is dropped from sys.modules again afterwards. The hook runs
+        through ``_on_loop``: on the server's event loop during a live install,
+        and inline on the calling thread for an app-free one. A non-empty str
+        the hook returns is kept for ``pop_install_note``. Never raises: an
+        import or hook error is logged at WARNING and the install stands."""
+        self._install_notes.pop(name, None)
+        if name in self._loaded:
+            note = self._invoke_hook(name, "on_install")
+        else:
+            spec = self._specs.get(name)
+            if spec is None or spec.tools_only:
+                return
             try:
-                self._on_loop(lambda: hook(**kwargs))
+                module, _attr, uniq = _import_module(spec)
             except Exception as e:
-                # Log a failing plugin hook at WARNING without failing the
-                # install/first-use path that called it.
-                _log.warning("plugin %s: %s hook failed: %s", name, hook_name, e)
+                _log.warning("plugin %s: could not import it to run its on_install "
+                             "hook: %s", name, e)
+                return
+            try:
+                note = self._call_hook(name, module, "on_install")
+            finally:
+                _drop_plugin_modules(uniq)
+        if isinstance(note, str) and note.strip():
+            self._install_notes[name] = note.strip()
+
+    def pop_install_note(self, name: str) -> Optional[str]:
+        """The note *name*'s ``on_install`` hook returned at its last install
+        (for the person installing), or None; it is returned once."""
+        return self._install_notes.pop(name, None)
 
     # ---- provisioning helpers ----------------------------------------------
     def _installed_dir(self, name: str) -> Path:
@@ -2269,7 +2315,7 @@ class PluginManager:
         try:
             if name not in self._loaded:
                 self._load(self._specs[name])
-            self._invoke_hook(name, "on_install")    # optional lifecycle hook
+            self._run_install_hook(name)             # optional lifecycle hook
             self._enable_or_unload(name)
         except Exception:
             if copied:
@@ -2320,7 +2366,7 @@ class PluginManager:
         try:
             if name not in self._loaded:
                 self._load(self._specs[name])
-            self._invoke_hook(name, "on_install")    # optional lifecycle hook
+            self._run_install_hook(name)             # optional lifecycle hook
             self._enable_or_unload(name)
         except Exception:
             self._unload(name)
@@ -2335,16 +2381,29 @@ class PluginManager:
         directory WITHOUT mounting routes (the app-free sibling of
         ``install_external``, mirroring ``set_installed_state``): validate the
         manifest, copy it into the installed folder, and enable it unless a
-        plugin it requires is not installed. Rolls back a copy that does not
-        parse. A running server loads it the next time its plugin list is read.
+        plugin it requires is not installed, then run its on_install hook
+        (``_run_install_hook``). Rolls back a copy that does not parse. A
+        running server loads it the next time its plugin list is read.
         Returns the parsed PluginSpec."""
         spec0, dest = self._copy_third_party_source(source, force=force)
         name = spec0.name
         self._provision_and_verify(name)
         self._record_event("plugin_installed", name)
-        if enable and not self._left_disabled_for_requires(name):
-            self._set_enabled(name, True)
+        self._enable_and_run_install_hook(name, enable)
         return spec0
+
+    def _enable_and_run_install_hook(self, name: str, enable: bool) -> None:
+        """The app-free installs' last step: enable *name* unless *enable* is
+        False or a plugin it requires is not installed, then run its
+        ``on_install`` hook, which (as on a live install) is skipped while a
+        required plugin is missing."""
+        if enable:
+            if self._left_disabled_for_requires(name):
+                return
+            self._set_enabled(name, True)
+        elif self._requires_problem(name) is not None:
+            return
+        self._run_install_hook(name)
 
     def enable(self, name: str) -> None:
         """Load *name* on the live app and set its enabled flag. Raises
@@ -2537,7 +2596,9 @@ class PluginManager:
         """CLI/headless install/uninstall WITHOUT loading routes: install from
         the store (or remove the installed dir); the GUI server reconciles via
         load_enabled on its next start. Installing also enables by default,
-        unless a plugin it requires is not installed; uninstalling disables.
+        unless a plugin it requires is not installed, then runs the plugin's
+        on_install hook (``_run_install_hook``; its note is kept for
+        ``pop_install_note``); uninstalling disables.
         Honours protection on uninstall. Uninstalling raises PluginNotInstalled
         for a known plugin that is not installed and KeyError for an unknown
         name."""
@@ -2547,8 +2608,7 @@ class PluginManager:
             self._provision_and_verify(name, rollback_on_fail=copied)
             if copied:
                 self._record_event("plugin_installed", name)
-            if enable and not self._left_disabled_for_requires(name):
-                self._set_enabled(name, True)
+            self._enable_and_run_install_hook(name, enable)
         else:
             self.discover()
             if name not in self._installed_set() and not self._installed_dir_on_disk(name):
@@ -2860,11 +2920,15 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
 
     def _installed_reply(name: str, enabled: bool) -> dict:
         """The install routes' answer: ``enabled`` is False, with the reason in
-        ``detail``, when a plugin it requires is not installed. Reads the
+        ``detail``, when a plugin it requires is not installed; ``note`` is the
+        plugin's on_install note when it returned one. Reads the
         installed folder and the store, so it runs off the event loop."""
         out = {"status": "installed", "name": name, "enabled": bool(enabled)}
         if not enabled:
             out["detail"] = manager._requires_problem(name) or ""
+        note = manager.pop_install_note(name)
+        if note:
+            out["note"] = note
         return out
 
     @app.post("/api/plugins/install-external",

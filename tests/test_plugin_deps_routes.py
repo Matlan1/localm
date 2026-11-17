@@ -26,6 +26,11 @@ def app_mgr(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "MODELS_DIR", tmp_path / "models")
     monkeypatch.setattr(cfg, "CONFIG_FILE", tmp_path / "config.json")
     monkeypatch.setattr(cfg, "REGISTRY_FILE", tmp_path / "registry.json")
+    # _install_voice runs voice's on_install hook, which prefetches the Whisper
+    # model inline: stub it, no network here.
+    import localm.voice as voice
+    monkeypatch.setattr(voice, "prefetch_stt_model",
+                        lambda allow_download=None, name=None: (False, "stubbed in tests"))
     from localm.plugins.engine import attach_engine
     app = FastAPI()
     mgr = attach_engine(app)

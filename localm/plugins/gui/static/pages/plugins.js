@@ -326,7 +326,9 @@ export function pluginCatalogAction(action, name, btn = null, title = name) {
         toast(`${action} ${title}: ${msg}`, true);
         return;
       }
-      toast(`${title}: ${d.status || action}`);
+      // An install's note is the plugin's own on_install outcome (voice: the
+      // speech model download, or why it did not start).
+      toast(`${title}: ${d.status || action}` + (d.note ? `. ${d.note}` : ""));
     } catch (e) {
       toast(`${action} ${title} failed: ${e.message}`, true);
       return;
@@ -454,7 +456,8 @@ $("plugin-install").onclick = async () => {
       });
       const data = await r.json().catch(() => ({}));
       if (r.ok) {
-        toast(t("plugins.installedRestartHint", { name: data.name, version: data.version }));
+        toast(t("plugins.installedRestartHint", { name: data.name, version: data.version })
+              + (data.note ? `. ${data.note}` : ""));
         $("plugin-source").value = "";
         refreshPluginsPage();
       } else {

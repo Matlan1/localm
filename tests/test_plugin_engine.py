@@ -199,7 +199,7 @@ def test_host_has_no_scope_stubs(env):
 def test_on_install_hook_fires(env):
     """The optional on_install lifecycle hook is invoked when a plugin is
     installed (symmetric with on_uninstall). Negative-testable: without the
-    engine's _invoke_hook(name, "on_install") call, the marker is never written."""
+    engine's _run_install_hook(name) call, the marker is never written."""
     from localm.plugins.engine import PluginManager
     plugins = env / "plugins"
     body = '''
@@ -963,8 +963,19 @@ def test_parse_spec_accepts_extra_names(tmp_path, extra):
 
 def test_attach_engine_http_install_lifecycle(env, monkeypatch):
     """The /api/plugins/* management surface over the real shipped builtins:
-    nothing installed by default; install -> enable/disable -> uninstall."""
+    nothing installed by default; install -> enable/disable -> uninstall.
+
+    Installing voice starts its on_install prefetch on a background thread:
+    the prefetch is stubbed (no network in a unit test) and the thread joined
+    before the monkeypatch scope ends."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    import threading
+
+    import localm.voice as voice
+    prefetched = []
+    monkeypatch.setattr(voice, "prefetch_stt_model",
+                        lambda allow_download=None, name=None:
+                        prefetched.append(name) or (False, "stubbed in tests"))
     from localm.plugins.engine import attach_engine
     app = FastAPI()
     attach_engine(app)                       # default roots = the real builtins
@@ -973,7 +984,13 @@ def test_attach_engine_http_install_lifecycle(env, monkeypatch):
         assert st["voice"]["installed"] is False        # available, not installed
         assert st["voice"]["loaded"] is False           # nothing active by default
 
-        assert c.post("/api/plugins/voice/install").status_code == 200
+        r = c.post("/api/plugins/voice/install")
+        assert r.status_code == 200
+        for t in threading.enumerate():
+            if t.name == voice.PREFETCH_THREAD_NAME:
+                t.join(timeout=10)
+        assert prefetched == ["base"]
+        assert "in the background" in r.json()["note"]
         st = {p["name"]: p for p in c.get("/api/plugins").json()["plugins"]}
         assert st["voice"]["installed"] and st["voice"]["active"]
 
