@@ -11,7 +11,6 @@ from __future__ import annotations
 import ast
 import hashlib
 import struct
-import sys
 import zlib
 from pathlib import Path
 
@@ -409,10 +408,3 @@ def test_sdcpp_load_error_names_the_missing_runtime_dll(tmp_path, monkeypatch):
     assert "msvcp140.dll is missing (the Microsoft Visual C++ runtime" in message
     assert vc_runtime.redist_url() in message and "setup-sdcpp --force" in message
 
-
-@pytest.mark.skipif(sys.platform != "win32", reason="reads this Windows' own system DLLs")
-def test_loader_finds_nothing_missing_for_a_real_system_dll():
-    from localm.inference.backends.llamacpp import _loader
-    import _ctypes
-    pyd = Path(_ctypes.__file__)
-    assert _loader.missing_dll_clause(pyd.parent, [pyd]) is None

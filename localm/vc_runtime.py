@@ -318,6 +318,8 @@ def place_app_local(folder: Path, download: Callable[[str, Path], object],
     if not (sys.platform == "win32" if on_windows is None else on_windows):
         return []
     missing = needed(folder)
+    if not missing:
+        return []
     sysdir = (_system_dir() if system_dir is _SYSTEM
               else system_dir if isinstance(system_dir, Path) else None)
     missing -= provided_by_system(missing, sysdir)
