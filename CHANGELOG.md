@@ -16,6 +16,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Fixed
 - Saving a different speech model while the speech model was downloading no longer makes the finished download fail with "no model.bin snapshot is present".
+- Installing the voice plugin from the command line, from setup's plugin step or through the MCP `install_plugin` tool now downloads its speech model, as installing it from the Plugins page already did, and says so. With network access off nothing is downloaded and the message says why.
+- An update or rollback that stops your running server no longer tries to stop unrelated system processes, and on Linux and macOS the server now shuts down cleanly before the rest of its processes are ended.
+- After `localm.bat update` or `localm.bat update --rollback` on Windows, the window no longer shows unrelated help text and setup hints and no longer reports failure after a successful update. On Linux and macOS, `./localm.sh` and the other launch scripts keep their execute permission after an update.
+- Model loads and unloads on Windows AMD installs with PyTorch no longer wait several seconds for a GPU check each time, and the unload's VRAM note says why a reading may be stale.
+- On a Windows PC without the Microsoft Visual C++ Redistributable, no model could load and the error did not say why. Setup now offers to install it: it downloads Microsoft's installer, checks it, and runs it (Windows shows one administrator prompt). If you decline or the install cannot happen, setup tells you where to get it and that `localm setup-llama` offers it again, and a load error names the missing DLL and how to fix it.
 
 ## [0.3.4b3] - 2026-11-17
 
