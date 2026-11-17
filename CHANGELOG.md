@@ -119,6 +119,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - On Windows, two localm processes saving the same settings or key store at the same moment no longer crash one of them with "Permission denied" on a `.lock` file; the second one waits its turn.
 - A reply cap (`max_tokens`, `max_completion_tokens`) of `0.0` now means no request cap, like `0`; the chat drawer's Max tokens field explains that blank or 0 uses the Settings value; "Save and reload model" with nothing changed no longer says "Saved"; a failed background job now leaves a warning in the log (with its cause, except in privacy mode).
 - **An open page survives a server restart on the same port.** It picks up the new session token by itself instead of failing every call and reloading, and when a reload is needed while Settings has unsaved changes it asks in the page. Reset and re-enter key signs the browser out on the server first and says when that failed. The sidebar also lists the image, video and music runtimes a job left loaded, with a button to unload them.
+- **Models load again with the "latest" llama.cpp runtime choice and with llama.cpp builds from b12347 on.** Those builds removed functions localm still called, so no model could load on them.
+- **A speech model set to run without GPU layers keeps its voice projector on the CPU too.** Image and speech encoding also report the CPU on a runtime without a GPU, instead of claiming the GPU.
 
 ### Added
 - **A supported-models page.** `docs/models.md` lists every model kind localm runs: formats, the GGUF language model architectures of the bundled llama.cpp, Transformers, EXL2 and EXL3, embeddings and rerankers, speech, image, video and music, and the kinds localm recognises but does not run yet.
