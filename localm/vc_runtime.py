@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import os
 import platform
+import shutil
 import struct
 import sys
 import tempfile
@@ -372,6 +373,20 @@ def place_app_local(folder: Path, download: Callable[[str, Path], object],
                 pass
         raise
     return placed
+
+
+def copy_placed(source: Path, folder: Path) -> list[str]:
+    """Copy the runtime DLLs (and the license notice) present in *source*, a
+    runtime folder they were placed in, into *folder* where it lacks them, so
+    binaries unpacked there load the same way. Returns the names copied."""
+    copied: list[str] = []
+    for f in sorted(Path(source).iterdir()):
+        name = f.name.lower()
+        if (name in RUNTIME_DLLS or f.name == LICENSE_NAME) and f.is_file() \
+                and not (folder / f.name).exists():
+            shutil.copy2(f, folder / f.name)
+            copied.append(f.name)
+    return copied
 
 
 # --------------------------------------------------------------------------- #

@@ -20,6 +20,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+from localm import vc_runtime
 from localm.debuglog import logger
 from localm.setup_llama._common import console
 from localm.setup_llama.download import _extract_archive, _validate_archive
@@ -159,6 +160,8 @@ def _install_overlay(target: Path) -> Optional[str]:
             if not variants:
                 _warn(f"{_ROCM_CPU_ASSET} contains no ggml-cpu variants")
                 return None
+            for folder in sorted({v.parent for v in variants}):
+                vc_runtime.copy_placed(target, folder)
             winner, scores = _best_variant(variants)
             logger.info("amd-rocm CPU backend: variant scores %s", scores)
             if winner is None:

@@ -408,3 +408,45 @@ def test_sdcpp_load_error_names_the_missing_runtime_dll(tmp_path, monkeypatch):
     assert "msvcp140.dll is missing (the Microsoft Visual C++ runtime" in message
     assert vc_runtime.redist_url() in message and "setup-sdcpp --force" in message
 
+
+# --------------------------------------------------------------------------- #
+#  The amd-rocm SIMD CPU overlay scores its variants with the runtime present #
+# --------------------------------------------------------------------------- #
+
+def test_copy_placed_copies_only_the_runtime_and_keeps_what_is_there(tmp_path):
+    src, dest = tmp_path / "src", tmp_path / "dest"
+    src.mkdir()
+    dest.mkdir()
+    for name in ("msvcp140.dll", "vcruntime140.dll", "llama.dll", vc_runtime.LICENSE_NAME):
+        (src / name).write_bytes(name.encode())
+    (dest / "vcruntime140.dll").write_bytes(b"own")
+    assert vc_runtime.copy_placed(src, dest) == [vc_runtime.LICENSE_NAME, "msvcp140.dll"]
+    assert (dest / "vcruntime140.dll").read_bytes() == b"own"
+    assert not (dest / "llama.dll").exists()
+
+
+def test_rocm_overlay_variants_are_scored_beside_the_placed_runtime(tmp_path, monkeypatch):
+    import zipfile
+    from localm.setup_llama import rocm_cpu
+    target = tmp_path / "lib"
+    target.mkdir()
+    (target / "ggml-cpu.dll").write_bytes(b"rocm's own")
+    (target / "msvcp140.dll").write_bytes(b"placed")
+    archive = tmp_path / "overlay.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("ggml-cpu-x64.dll", _pe(["MSVCP140.dll"]))
+
+    def download(url, dest):
+        Path(dest).write_bytes(archive.read_bytes())
+    monkeypatch.setattr(sl, "_download", download)
+    monkeypatch.setattr(rocm_cpu, "_validate_archive", lambda *a, **k: None)
+    seen: list[str] = []
+
+    def best(variants):
+        seen.extend(sorted(p.name for p in variants[0].parent.iterdir()))
+        return None, {}
+    monkeypatch.setattr(rocm_cpu, "_best_variant", best)
+    assert rocm_cpu._install_overlay(target) is None
+    assert "msvcp140.dll" in seen and "ggml-cpu-x64.dll" in seen
+    assert (target / "ggml-cpu.dll").read_bytes() == b"rocm's own"
+
