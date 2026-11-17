@@ -68,7 +68,6 @@ import json
 import os
 import re
 import shutil
-import struct
 import subprocess
 import sys
 import tempfile
@@ -308,66 +307,8 @@ def _fetch_model() -> tuple[str, str]:
 def pe_imports(path: Path) -> list[str]:
     """The DLL names a Windows PE image imports, normal and delay-load, in table
     order without duplicates. [] when *path* is not a readable PE32/PE32+ image."""
-    try:
-        data = Path(path).read_bytes()
-    except OSError:
-        return []
-    try:
-        if data[:2] != b"MZ":
-            return []
-        pe = struct.unpack_from("<I", data, 0x3C)[0]
-        if data[pe:pe + 4] != b"PE\0\0":
-            return []
-        n_sections = struct.unpack_from("<H", data, pe + 6)[0]
-        opt_size = struct.unpack_from("<H", data, pe + 20)[0]
-        opt = pe + 24
-        magic = struct.unpack_from("<H", data, opt)[0]
-        dirs = opt + (112 if magic == 0x20B else 96 if magic == 0x10B else -1)
-        if dirs < opt:
-            return []
-        n_dirs = struct.unpack_from("<I", data, dirs - 4)[0]
-        sections = []
-        sec = opt + opt_size
-        for i in range(n_sections):
-            vsize, va, rsize, raw = struct.unpack_from("<IIII", data, sec + 40 * i + 8)
-            sections.append((va, max(vsize, rsize), raw))
-
-        def offset(rva: int) -> int:
-            for va, size, raw in sections:
-                if va <= rva < va + size:
-                    return raw + rva - va
-            raise ValueError(f"rva {rva:#x} outside every section")
-
-        def cstr(rva: int) -> str:
-            start = offset(rva)
-            return data[start:data.index(b"\0", start)].decode("ascii", "replace")
-
-        names: list[str] = []
-        for index, size, name_at in ((1, 20, 12), (13, 32, 4)):
-            if index >= n_dirs:
-                continue
-            rva = struct.unpack_from("<I", data, dirs + 8 * index)[0]
-            if not rva:
-                continue
-            try:
-                at = offset(rva)
-            except ValueError:
-                continue
-            while True:
-                desc = data[at:at + size]
-                if len(desc) < size or not any(desc):
-                    break
-                name_rva = struct.unpack_from("<I", desc, name_at)[0]
-                try:
-                    name = cstr(name_rva) if name_rva else ""
-                except ValueError:
-                    name = ""
-                if name and name not in names:
-                    names.append(name)
-                at += size
-        return names
-    except struct.error:
-        return []
+    from localm.pe_deps import imported_dlls
+    return imported_dlls(path)
 
 
 # --------------------------------------------------------------------------- #

@@ -304,6 +304,23 @@ def _flatten(staging: Path) -> None:
         shutil.move(str(item), str(staging / item.name))
 
 
+def _place_vc_runtime(staging: Path, say: Progress) -> None:
+    """Windows: put the Microsoft Visual C++ runtime DLLs the build needs and
+    this machine lacks next to it (:func:`localm.vc_runtime.place_app_local`).
+    A failure is reported through *say* and the debug log; the load test that
+    follows then names the missing DLL."""
+    from localm import vc_runtime
+    from localm.debuglog import logger
+    try:
+        vc_runtime.place_app_local(
+            staging, lambda url, dest: _download(url, dest, say, "Visual C++ runtime"), say)
+    except Exception as e:  # noqa: BLE001 - reported, the load test decides
+        logger.warning("sdcpp runtime: could not place the Visual C++ runtime: %s", e)
+        say(f"Could not place the Microsoft Visual C++ runtime next to the {RUNTIME_LABEL} "
+            f"({e}). If it does not load, install the Visual C++ Redistributable: "
+            f"{vc_runtime.redist_url()}")
+
+
 RUNTIME_LABEL = "native image and video runtime"
 
 
@@ -358,6 +375,7 @@ def _install(backend: str, *, force: bool, say: Progress,
         except netpolicy.NetworkPolicyError as e:
             raise DownloadError(refused_download_message(e)) from e
         _flatten(staging)
+        _place_vc_runtime(staging, say)
         if any(name.startswith("cudart-")
                for name, _sha in pins.EXTRA_ASSETS.get((plat, backend), [])):
             (staging / NVIDIA_CUDA_LICENSE).write_text(NVIDIA_CUDA_LICENSE_NOTICE,

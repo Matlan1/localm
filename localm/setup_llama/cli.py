@@ -265,7 +265,6 @@ def _provision_staged_cuda(cuda_line: str, target: Path, lib_name: str,
     if not (target / lib_name).exists():
         console.print(f"[red]The {cuda_line} archive did not contain {lib_name}.[/red]")
         sys.exit(1)
-    _sl._bundle_missing_native_deps(target)
     _sl._install_runtime_wheel(_sl._runtime_pkg_dir())
     _record_provisioned_backend(target, "cuda", build=used_tag)
     _record_backend_choice(target, None)

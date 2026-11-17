@@ -360,7 +360,6 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
         # Downloaded and verified into staging first: a failed attempt leaves the
         # installed runtime as it was. See test_failed_download_keeps_the_runtime.
         used_tag[0] = _sl._replace_target(target, _fill)
-        _sl._bundle_missing_native_deps(target)
         _sl._install_runtime_wheel(_sl._runtime_pkg_dir())
 
     notes = {

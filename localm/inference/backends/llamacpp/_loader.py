@@ -280,6 +280,44 @@ def _preload(path: Path) -> None:
         pass  # already loaded or not needed on this system
 
 
+def missing_dll_clause(binary_dir: Optional[Path], images: list) -> Optional[str]:
+    """Windows: after a library in *images* failed to load, a clause naming the
+    DLLs that neither the runtime folder, the ROCm folders, Python's own folder
+    nor the system folder holds, and that this process has not loaded (for
+    example "msvcp140.dll is missing (the Microsoft Visual C++ runtime; needed
+    by llama.dll)"). None elsewhere, or when every import is found."""
+    if sys.platform != "win32" or binary_dir is None:
+        return None
+    from localm import pe_deps, vc_runtime
+    dirs = [Path(binary_dir), *rocm_runtime_dirs(),
+            Path(sys.base_prefix), Path(sys.executable).parent]
+    system = vc_runtime._system_dir()
+    if system is not None:
+        dirs.append(system)
+    try:
+        missing = pe_deps.unresolved_imports([Path(p) for p in images], dirs)
+    except Exception:
+        logger.warning("could not work out which DLL is missing", exc_info=True)
+        return None
+    return vc_runtime.describe_missing(missing)
+
+
+def _provisioned_backend_name(binary_dir: Path) -> str:
+    """The backend recorded in *binary_dir*'s marker, or ``auto`` without one."""
+    try:
+        from localm.setup_llama.runtime_dir import _provisioned_backend
+        return _provisioned_backend(Path(binary_dir)) or "auto"
+    except Exception:
+        logger.warning("could not read the provisioned backend of %s", binary_dir,
+                       exc_info=True)
+        return "auto"
+
+
+def _vc_redist_url() -> str:
+    from localm import vc_runtime
+    return vc_runtime.redist_url()
+
+
 # ggml shared libraries that are NOT compute backends (do not register them).
 _GGML_NON_BACKENDS = {"ggml-base", "ggml"}
 
@@ -598,8 +636,19 @@ def load_lib() -> ctypes.CDLL:
         else:
             _loaded_lib = ctypes.CDLL(str(lib_path), mode=ctypes.RTLD_GLOBAL)
     except OSError as e:
+        clause = missing_dll_clause(binary_dir, [*ggml, lib_path])
+        if clause and "Visual C++" in clause:
+            raise RuntimeError(
+                f"Failed to load {name} from {lib_path}: {clause}. {e}\n"
+                "Windows does not have the Microsoft Visual C++ runtime this build "
+                "needs. Re-provision, which places it next to the runtime:\n"
+                f"  localm setup-llama --backend {_provisioned_backend_name(binary_dir)} --force\n"
+                "or install the Visual C++ Redistributable from "
+                f"{_vc_redist_url()}"
+            ) from e
         raise RuntimeError(
-            f"Failed to load {name} from {lib_path}: {e}\n"
+            f"Failed to load {name} from {lib_path}: "
+            f"{clause + '. ' if clause else ''}{e}\n"
             "This usually means the provisioned build does not match this "
             "machine - e.g. an AMD ROCm or NVIDIA CUDA build on a box without "
             "that GPU or its runtime. Re-provision a backend that fits:\n"
