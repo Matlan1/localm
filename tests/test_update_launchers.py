@@ -84,7 +84,7 @@ def test_each_command_that_starts_localm_ends_in_exit():
             if depth == 0:
                 break
         assert "exit /b 0" in block[0] or any("exit /b 0" in ln for ln in block)
-        assert block[-2].strip() == "exit /b" and block[-1].strip() == ")", block
+        assert block[-2].strip() == "call exit /b %%RC%%" and block[-1].strip() == ")", block
 
 
 # --------------------------------------------------------------------------- #
@@ -102,10 +102,12 @@ _SWAP_MAIN = (
 
 
 def _swap_run(tmp_path, running: bytes, replacement: bytes, rc: str, args: list,
-              script: str = "localm.bat", extra_env: dict | None = None):
+              script: str = "localm.bat", extra_env: dict | None = None,
+              call: bool = True):
     """Run *running* as *script* in a throwaway install whose fake program
-    replaces it with *replacement* and exits with *rc*. Returns the completed
-    process."""
+    replaces it with *replacement* and exits with *rc*: through ``cmd /c call``
+    (a prompt or another batch file) or, without *call*, ``cmd /c`` alone (a
+    shortcut, Explorer, a scheduled task). Returns the completed process."""
     clone = make_windows_clone(tmp_path, script, text=_crlf(running).decode())
     (clone / script).write_bytes(_crlf(running))
     swap = tmp_path / "replacement.bat"
@@ -119,7 +121,8 @@ def _swap_run(tmp_path, running: bytes, replacement: bytes, rc: str, args: list,
     env.update({"PYTHONPATH": str(tmp_path / "fake"), "PYTHONNOUSERSITE": "1",
                 "SWAP_FROM": str(swap), "SWAP_TO": str(clone / script), "SWAP_RC": rc})
     env.update(extra_env or {})
-    return subprocess.run(["cmd", "/d", "/c", "call", str(clone / script), *args],
+    return subprocess.run(["cmd", "/d", "/c", *(["call"] if call else []), str(clone / script),
+                           *args],
                           capture_output=True, text=True, stdin=subprocess.DEVNULL,
                           cwd=str(tmp_path), env=env, timeout=60,
                           creationflags=CREATE_NO_WINDOW)
@@ -136,13 +139,14 @@ def _check_clean(done, rc: str, *, held: bool):
 
 
 @nt_only
+@pytest.mark.parametrize("call", [True, False])
 @pytest.mark.parametrize("old", OLD_LOCALM_BATS)
 @pytest.mark.parametrize("rc", ["0", "3", ACCESS_VIOLATION])
-def test_an_update_from_an_older_localm_bat_ends_clean(tmp_path, old, rc):
+def test_an_update_from_an_older_localm_bat_ends_clean(tmp_path, old, rc, call):
     """`localm.bat update -y` on an older release, whose updater installs this
     localm.bat: the old file's resume offset lands on a resume line."""
     done = _swap_run(tmp_path, (OLD / old).read_bytes(),
-                     (ROOT / "localm.bat").read_bytes(), rc, ["update", "-y"])
+                     (ROOT / "localm.bat").read_bytes(), rc, ["update", "-y"], call=call)
     _check_clean(done, rc, held=rc != "0")
 
 
@@ -154,8 +158,13 @@ def test_a_chat_ended_after_an_update_from_an_older_localm_bat_ends_clean(tmp_pa
     _check_clean(done, "0", held=False)
 
 
+# Any line read from this file prints STRAY.
+_ALL_STRAY = b"@echo STRAY\r\n" * 600
+
+
 @nt_only
-@pytest.mark.parametrize("replacement", ["localm-0.3.3.bat", "this"])
+@pytest.mark.parametrize("call", [True, False])
+@pytest.mark.parametrize("replacement", ["localm-0.3.3.bat", "stray"])
 @pytest.mark.parametrize("rc,args,held", [
     ("0", ["update", "-y"], False),
     ("0", ["update", "--rollback", "-y"], False),
@@ -164,21 +173,22 @@ def test_a_chat_ended_after_an_update_from_an_older_localm_bat_ends_clean(tmp_pa
     ("0", ["update", "-y", "--debug"], True),
 ])
 def test_this_localm_bat_replaced_while_localm_runs_ends_clean(tmp_path, replacement, rc,
-                                                               args, held):
+                                                               args, held, call):
     """A rollback to an older release, or a later update, replaces this localm.bat
-    while it runs; whatever replaced it, nothing more is read from it."""
-    other = (ROOT / "localm.bat").read_bytes() + b"rem changed\r\necho STRAY\r\n" \
-        if replacement == "this" else (OLD / replacement).read_bytes()
-    done = _swap_run(tmp_path, (ROOT / "localm.bat").read_bytes(), other, rc, args)
+    while it runs; whatever replaced it, nothing more is read from it, and the
+    exit code of localm reaches the caller."""
+    other = _ALL_STRAY if replacement == "stray" else (OLD / replacement).read_bytes()
+    done = _swap_run(tmp_path, (ROOT / "localm.bat").read_bytes(), other, rc, args,
+                     call=call)
     _check_clean(done, rc, held=held)
 
 
 @nt_only
+@pytest.mark.parametrize("call", [True, False])
 @pytest.mark.parametrize("rc", ["0", "2"])
-def test_rollback_bat_replaced_while_it_runs_ends_clean(tmp_path, rc):
-    done = _swap_run(tmp_path, (ROOT / "rollback.bat").read_bytes(),
-                     (OLD / "rollback-0.3.3.bat").read_bytes(), rc, ["--yes"],
-                     script="rollback.bat")
+def test_rollback_bat_replaced_while_it_runs_ends_clean(tmp_path, rc, call):
+    done = _swap_run(tmp_path, (ROOT / "rollback.bat").read_bytes(), _ALL_STRAY, rc,
+                     ["--yes"], script="rollback.bat", call=call)
     _check_clean(done, rc, held=True)
 
 

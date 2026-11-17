@@ -52,8 +52,9 @@ echo %* | findstr /I /C:"--debug" >nul && set "HOLD=1"
     if defined HOLD pause
     exit /b 0
 ) || (
+    call set "RC=%%errorlevel%%"
     pause
-    exit /b
+    call exit /b %%RC%%
 )
 
 :chat
@@ -80,8 +81,9 @@ if "%MODEL%"=="" (
 :run
 echo Starting LocaLM with model: %MODEL%
 "%PY%" -m localm run "%MODEL%" && exit /b 0 || (
+    call set "RC=%%errorlevel%%"
     pause
-    exit /b
+    call exit /b %%RC%%
 )
 
 :resumed

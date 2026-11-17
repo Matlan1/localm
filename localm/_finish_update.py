@@ -7,7 +7,7 @@ The updater that applied the update runs it after the swap::
 
 Outside Windows it gives the launch scripts of the install
 (:data:`localm._apply_update.EXECUTABLES`) their execute permission, which an
-updater that extracts without file modes (localm 0.3.3 and earlier) leaves off.
+updater that extracts without file modes (localm 0.3.3 to 0.3.4b3) leaves off.
 It takes over no built-in step and writes no RESULT file, so the updater runs its
 dependency, runtime and component steps as usual.
 
