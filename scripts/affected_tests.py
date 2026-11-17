@@ -161,6 +161,7 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
                                       "lists the vendored TTS runtime"),
     "tests/test_bump_vendored_js.py": ((_GUI_STATIC + "vendor/*",), "copies the vendored GUI libraries"),
     "tests/test_merge_policy.py": (("*",), "checks every merge-policy pattern against the tracked files"),
+    "tests/test_update_launchers.py": (("*",), "reads the git mode of every tracked file for the executable list"),
     "tests/test_native_stderr_redirect_scope.py": (_LOCALM_PY, "walks the AST of every localm .py for stderr redirects"),
     "tests/test_terminal_control_safety.py": (_LOCALM_PY, "walks the AST of every localm .py for rich Console imports"),
     "tests/test_model_name_gate.py": (_LOCALM_PY, "reads every localm .py for trust_remote_code=True"),
