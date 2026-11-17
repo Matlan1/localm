@@ -476,7 +476,7 @@ def test_transcription_failure_owner_keeps_a_host_folder(home, tmp_path, outside
     from localm.plugins.engine import PluginManager
     target = outside / "w.bin"
     monkeypatch.setattr(voice, "prefetch_stt_model",
-                        lambda allow_download=None: (False, "stubbed in tests"))
+                        lambda allow_download=None, name=None: (False, "stubbed in tests"))
     monkeypatch.setattr(voice, "_stt_plan", lambda language: {
         "name": "base", "language": language, "timeout": 5.0,
         "local_files_only": True, "blocked_reason": None})

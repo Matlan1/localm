@@ -4223,7 +4223,7 @@ def voice_app(tmp_path, monkeypatch):
     monkeypatch.setattr(_cfg, "REGISTRY_FILE", tmp_path / "registry.json")
     import localm.voice as _voice
     monkeypatch.setattr(_voice, "prefetch_stt_model",
-                        lambda allow_download=None: (False, "stubbed in tests"))
+                        lambda allow_download=None, name=None: (False, "stubbed in tests"))
     from localm.plugins.engine import PluginManager
     app = FastAPI()
     PluginManager(app, external_root=tmp_path / "noplugins").install("voice")

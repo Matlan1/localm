@@ -114,7 +114,7 @@ def plugin(home, monkeypatch):
 
     import localm.voice as voice
     monkeypatch.setattr(voice, "prefetch_stt_model",
-                        lambda allow_download=None: (False, "stubbed in tests"))
+                        lambda allow_download=None, name=None: (False, "stubbed in tests"))
     from localm.plugins.engine import PluginManager
     app = FastAPI()
     PluginManager(app, external_root=home / "noplugins").install("voice")

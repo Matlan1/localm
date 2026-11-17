@@ -232,7 +232,8 @@ def _verify_pinned_model(name: str, cache_root) -> Optional[str]:
     repo_dir = _stt_repo_cache_dir(repo, cache_root)
     model_bin = repo_dir / "snapshots" / pin[0] / "model.bin"
     if not model_bin.is_file():
-        return f"Whisper model '{name}' was fetched but the pinned snapshot has no model.bin."
+        return (f"Whisper model '{name}' was downloaded but its model.bin file "
+                "is missing. Start the download again.")
     actual = _sha256_of(model_bin)
     if actual == pin[1]:
         return None
@@ -301,6 +302,18 @@ def _discard_snapshot(repo_dir: Path, commit: str) -> list[str]:
     return leftover
 
 
+def _stt_no_model_bin_reason(name: str, repo: str) -> str:
+    """What to tell the user when a fetch of the Whisper model *name* (from
+    *repo*) left no model.bin in the cache."""
+    if _stt_pin(name) is not None:
+        return (f"Whisper model '{name}' was downloaded but its model.bin file "
+                "is missing. Start the download again.")
+    return (f"Whisper model '{name}' was downloaded from {repo} but has no model.bin "
+            "file. Start the download again; if this repeats, the repository is "
+            "not a faster-whisper (CTranslate2) model and voice_stt_model needs "
+            "another value.")
+
+
 def stt_model_cached() -> tuple[bool, str]:
     """(cached, model_name) - is the configured Whisper model already in localm's
     own model cache (``stt_cache_dir()``)? First use otherwise downloads it; the GUI
@@ -313,22 +326,25 @@ def stt_model_cached() -> tuple[bool, str]:
     because this runs inside the ``async def`` /api/voice/status handler, froze
     the event loop and stalled the whole first /api/* batch (R24). A direct path
     probe keeps it genuinely instant, matching ``stt_available``."""
-    from pathlib import Path
-
     from localm.config import load_config
     name = str(load_config().get("voice_stt_model", "base"))
+    return stt_model_cached_as(name), name
+
+
+def stt_model_cached_as(name: str) -> bool:
+    """Is the Whisper model *name* in localm's own model cache? The probe behind
+    ``stt_model_cached``, for a caller that has already resolved the model name
+    and must keep asking about that same model."""
     if Path(name).expanduser().is_dir():
-        return True, name                       # local model directory
+        return True                             # local model directory
     repo = _stt_repo_for(name)
     # Hub cache layout: <cache>/models--<org>--<repo>/snapshots/<rev>/model.bin.
     # The snapshot entry may be a symlink or a real file; glob matches both.
     try:
-        repo_dir = stt_cache_dir() / ("models--" + repo.replace("/", "--"))
-        snaps = repo_dir / "snapshots"
-        cached = snaps.is_dir() and any(snaps.glob("*/model.bin"))
-        return bool(cached), name
+        snaps = _stt_repo_cache_dir(repo, stt_cache_dir()) / "snapshots"
+        return bool(snaps.is_dir() and any(snaps.glob("*/model.bin")))
     except Exception:
-        return False, name
+        return False
 
 
 # Name of the background thread the voice plugin's on_install hook runs
@@ -342,10 +358,12 @@ _STT_ALLOW_PATTERNS = ("config.json", "preprocessor_config.json", "model.bin",
                        "tokenizer.json", "vocabulary.*")
 
 
-def prefetch_stt_model(allow_download: Optional[bool] = None) -> tuple[bool, str]:
-    """Fetch the configured Whisper model into localm's own cache, gated by the
-    network policy. Returns ``(ok, reason)``: ok True when the model is present
-    afterwards (already cached counts), reason says why when it is not.
+def prefetch_stt_model(allow_download: Optional[bool] = None,
+                       name: Optional[str] = None) -> tuple[bool, str]:
+    """Fetch the Whisper model *name* (default: the configured one, read once at
+    the start) into localm's own cache, gated by the network policy. Returns
+    ``(ok, reason)``: ok True when the model is present afterwards (already
+    cached counts), reason says why when it is not.
 
     The policy rule is bypass-ask-respect-off, with the same parameter shape as
     the embedder's ``_download_known``:
@@ -370,12 +388,18 @@ def prefetch_stt_model(allow_download: Optional[bool] = None) -> tuple[bool, str
     faster-whisper pip extra is installed, and never holds the worker lock for
     the length of a download. The repo and cache root come from the same helpers
     the cached-probe reads (``_stt_repo_for`` / ``stt_cache_dir``), so a
-    successful prefetch flips ``stt_model_cached()`` to True.
+    successful prefetch flips ``stt_model_cached_as(name)`` to True. Every check
+    after the start is made for that same *name*: a change of
+    ``voice_stt_model`` while the download runs does not change which model this
+    call fetches or verifies.
 
     NOT import-free (huggingface_hub is a heavy import): call from a job or a
     background thread, never from an async status handler."""
     from localm.debuglog import logger
-    cached, name = stt_model_cached()
+    if name is None:
+        cached, name = stt_model_cached()
+    else:
+        cached = stt_model_cached_as(name)
     if cached:
         return True, ""
     from localm.netpolicy import (automatic_download_allowed, download_refusal,
@@ -417,11 +441,8 @@ def prefetch_stt_model(allow_download: Optional[bool] = None) -> tuple[bool, str
     # Verify the fetch produced a loadable snapshot: a repo that is not a
     # faster-whisper (CTranslate2) conversion has no model.bin, and
     # snapshot_download still succeeds.
-    cached, _ = stt_model_cached()
-    if not cached:
-        reason = (f"Whisper model '{name}' was fetched but no model.bin "
-                  "snapshot is present - it does not look like a faster-whisper "
-                  "(CTranslate2) model repo.")
+    if not stt_model_cached_as(name):
+        reason = _stt_no_model_bin_reason(name, repo)
         logger.warning(reason)
         return False, reason
     integrity = _verify_pinned_model(name, root)
@@ -991,7 +1012,7 @@ def _stt_plan(language: Optional[str]) -> dict:
     # the worker only executes the decision via local_files_only. A cached model
     # loads offline; a missing one downloads under net_mode=allow, or under
     # net_mode=off when downloads are explicitly allowed while off.
-    cached, _ = stt_model_cached()
+    cached = stt_model_cached_as(name)
     local_files_only = True
     blocked_reason = None
     if not cached:
