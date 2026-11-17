@@ -164,6 +164,13 @@ def vc_runtime_missing(target: Path) -> bool:
     return sys.platform == "win32" and bool(vc_runtime.missing_from_system(target))
 
 
+def vc_runtime_blocks_load(target: Path, error_text: str) -> bool:
+    """Windows: whether a failed load of the runtime in *target*, with
+    *error_text*, is down to the Microsoft Visual C++ runtime
+    (:func:localm.vc_runtime.blocks_load). False off Windows."""
+    return sys.platform == "win32" and vc_runtime.blocks_load(target, error_text)
+
+
 def _bundle_missing_native_deps(target: Path) -> None:
     """After a backend is placed in *target*, provide any native dependency its
     libraries need but neither the archive nor this runtime dir supplies: on

@@ -523,6 +523,8 @@ def _provision_from_url(url: str, target: Path, lib_name: str,
         console.print(f"[red]The archive did not contain {lib_name}.[/red] "
                       "Try a different --url or use --from.")
         sys.exit(1)
+    except click.exceptions.Abort:
+        raise
     except ArtifactError as e:
         console.print(f"[red]Refusing to install:[/red] {escape(str(e))}")
         console.print("Provide a local build with --from instead, or a different "

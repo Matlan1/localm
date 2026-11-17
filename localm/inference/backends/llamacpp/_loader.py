@@ -292,15 +292,16 @@ def missing_dll_clause(binary_dir: Optional[Path], images: list) -> Optional[str
     return vc_runtime.missing_clause(images, [Path(binary_dir), *rocm_runtime_dirs()])
 
 
-def _vc_runtime_short(binary_dir: Optional[Path]) -> bool:
-    """Windows: whether the libraries in *binary_dir* import a Microsoft Visual
-    C++ runtime DLL that the system folder lacks at the version localm checks
-    for (missing or older). False elsewhere, or when the check fails (logged)."""
+def _vc_runtime_short(binary_dir: Optional[Path], error_text: str) -> bool:
+    """Windows: whether a failed load of the libraries in *binary_dir*, with
+    *error_text*, is down to the Microsoft Visual C++ runtime
+    (:func:localm.vc_runtime.blocks_load). False elsewhere, or when the check
+    fails (logged)."""
     if sys.platform != "win32" or binary_dir is None:
         return False
     from localm import vc_runtime
     try:
-        return bool(vc_runtime.missing_from_system(Path(binary_dir)))
+        return vc_runtime.blocks_load(Path(binary_dir), error_text)
     except Exception:
         logger.warning("could not check the Visual C++ runtime for %s", binary_dir,
                        exc_info=True)
@@ -631,7 +632,7 @@ def load_lib() -> ctypes.CDLL:
             _loaded_lib = ctypes.CDLL(str(lib_path), mode=ctypes.RTLD_GLOBAL)
     except OSError as e:
         clause = missing_dll_clause(binary_dir, [*ggml, lib_path])
-        if (clause and "Visual C++" in clause) or _vc_runtime_short(binary_dir):
+        if (clause and "Visual C++" in clause) or _vc_runtime_short(binary_dir, str(e)):
             raise RuntimeError(
                 f"Failed to load {name} from {lib_path}: "
                 f"{clause + '. ' if clause else ''}{e}\n"

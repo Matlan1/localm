@@ -1072,3 +1072,20 @@ def test_a_restored_runtime_with_no_recorded_build_is_kept_and_names_how_to_try_
     assert "could not be installed" not in st["note"]
     assert "tried again on the next start" not in st["note"]
     assert updater_runtime.plan(inst, inst)["reprovision"] is False
+
+
+def test_a_missing_visual_cpp_runtime_does_not_roll_the_runtime_back(install):
+    from localm.setup_spec import VC_RUNTIME_ABSENT_EXIT
+    data, sig = _release()
+    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
+                  defer_runtime=True)
+    placed = _fake_setup_llama(install, "b1355-cpu-b11908")
+
+    def run(cmd):
+        placed(cmd)
+        return VC_RUNTIME_ABSENT_EXIT
+    status = updater_runtime.finish_pending(root=install, runner=run)
+    assert status["state"] == "updated", status
+    assert "Microsoft Visual C++ Redistributable" in status["note"]
+    assert "localm setup-llama" in status["note"]
+    assert _marker(install) == "amd-rocm b1355-cpu-b11908"

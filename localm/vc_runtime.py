@@ -197,15 +197,37 @@ def missing_from_system(folder: Path, system_dir: object = _SYSTEM) -> list[str]
     return sorted(want - provided_by_system(want, _resolve_system(system_dir)))
 
 
+def absent_names(names: Iterable[str], system_dir: object = _SYSTEM) -> list[str]:
+    """The *names* the system folder holds at no version, sorted (an older copy
+    counts as present). *system_dir* as in :func:`missing_from_system`; empty
+    off Windows when it is left at its default."""
+    if system_dir is _SYSTEM and sys.platform != "win32":
+        return []
+    sysdir = _resolve_system(system_dir)
+    return sorted(n for n in names
+                  if sysdir is None or pe_deps.file_version(sysdir / n) is None)
+
+
 def absent_from_system(folder: Path, system_dir: object = _SYSTEM) -> list[str]:
     """The runtime DLLs the binaries in *folder* import that neither *folder*
     nor the system folder holds at any version, sorted (an older copy counts as
     present). *system_dir* as in :func:`missing_from_system`."""
     if system_dir is _SYSTEM and sys.platform != "win32":
         return []
-    sysdir = _resolve_system(system_dir)
-    return sorted(n for n in needed(folder)
-                  if sysdir is None or pe_deps.file_version(sysdir / n) is None)
+    return absent_names(needed(folder), system_dir)
+
+
+def blocks_load(folder: Path, error_text: str, system_dir: object = _SYSTEM) -> bool:
+    """Whether a failed load of the binaries in *folder*, which failed with
+    *error_text*, is down to the Visual C++ runtime: a DLL of it is absent from
+    the system folder, or an older one is there and the error is Windows'
+    "procedure could not be found" (WinError 127). False off Windows when
+    *system_dir* is left at its default."""
+    if absent_from_system(folder, system_dir):
+        return True
+    text = (error_text or "").lower()
+    return (("winerror 127" in text or "procedure could not be found" in text)
+            and bool(missing_from_system(folder, system_dir)))
 
 
 def _older_on_system(names: Iterable[str], system_dir: Optional[Path]) -> bool:
@@ -484,7 +506,7 @@ def ensure(folder: Path, *, download: Callable[[str, Path], object],
     the download) returns a reason: *say* gets :func:`absent_message` and it
     returns False without asking or downloading anything.
     Otherwise *ask(question)* is asked; on yes the installer is downloaded with
-    *download(url, dest)* into a temporary folder inside *folder*, checked
+    *download(url, dest)* into a temporary folder beside *folder*, checked
     (:func:`check_package`), run (:func:`run_installer`) and removed, and the
     system folder is checked again: True when the runtime is now present (with
     a restart note when the installer asked for one), else *say* gets
@@ -522,7 +544,8 @@ def ensure(folder: Path, *, download: Callable[[str, Path], object],
         return False
     code: Optional[int] = None
     try:
-        with tempfile.TemporaryDirectory(prefix=".vcredist-", dir=folder) as tmp:
+        with tempfile.TemporaryDirectory(prefix=".vcredist-", dir=folder.parent,
+                                         ignore_cleanup_errors=True) as tmp:
             exe = Path(tmp) / url.rsplit("/", 1)[-1]
             download(url, exe)
             if not exe.is_file():

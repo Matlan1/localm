@@ -376,6 +376,8 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
     provisioned = True
     try:
         _try(chosen, with_cudart)
+    except click.exceptions.Abort:
+        raise
     except RuntimeInUseError as e:
         # MUST precede the handlers below, and must NOT fall through to the
         # Vulkan fallback. Falling back is right when the CHOSEN BUILD cannot
@@ -404,9 +406,9 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
             _note_vulkan_without_gpu()
         return chosen, used_tag[0]
 
-    # Returns the chosen backend untried by any fallback when the Visual C++
-    # runtime is missing. See test_vc_runtime_missing_skips_the_backend_fallback.
-    if provisioned and _sl.vc_runtime_missing(target):
+    # Returns the chosen backend untried by any fallback when the failed load is
+    # down to the Visual C++ runtime. See test_vc_runtime_missing_skips_the_backend_fallback.
+    if provisioned and _sl.vc_runtime_blocks_load(target, detail or ""):
         console.print(f"[yellow]The {chosen} runtime is installed but cannot load until the "
                       "Microsoft Visual C++ Redistributable is installed. No other "
                       "backend was tried: none loads without it.[/yellow]")

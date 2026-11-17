@@ -40,6 +40,11 @@ class DownloadError(ProvisionError):
     """A download was refused, failed, or did not verify."""
 
 
+#: Written in :func:`runtimes_root` when an install found Visual C++ runtime
+#: DLLs absent: ``{"absent": [dll names]}``.
+VC_MISSING_MARKER = ".vc-runtime-missing"
+
+
 class VcRuntimeMissingError(ProvisionError):
     """Windows lacks the Microsoft Visual C++ Redistributable the runtime needs,
     so no backend of it loads; nothing was installed."""
@@ -318,16 +323,55 @@ def _require_vc_runtime(staging: Path, say: Progress, ask: Optional[Ask]) -> Non
     system folder; *say* has then had the message that names it and the remedy.
     Returns when only an older version is present, and the load test decides."""
     from localm import netpolicy, vc_runtime
+    marker = runtimes_root() / VC_MISSING_MARKER
     if vc_runtime.ensure(
             staging, ask=ask, say=say, refusal=netpolicy.download_refusal,
             download=lambda url, dest: _download(url, dest, say,
                                                  "the Visual C++ Redistributable")):
+        _forget_vc_missing(marker)
         return
-    if not vc_runtime.absent_from_system(staging):
+    absent = vc_runtime.absent_from_system(staging)
+    if not absent:
         return
-    raise VcRuntimeMissingError(
+    try:
+        marker.write_text(json.dumps({"absent": absent}), encoding="utf-8")
+    except OSError as e:
+        from localm.debuglog import logger
+        logger.warning("sdcpp runtime: could not record the missing Visual C++ runtime: %s", e)
+    raise _vc_missing_error()
+
+
+def _vc_missing_error() -> VcRuntimeMissingError:
+    from localm import vc_runtime
+    return VcRuntimeMissingError(
         f"the {RUNTIME_LABEL} needs the Microsoft Visual C++ Redistributable, which this "
         f"Windows lacks. {vc_runtime.install_hint()}")
+
+
+def _vc_known_missing() -> bool:
+    """Windows: whether an earlier install recorded (:data:`VC_MISSING_MARKER`)
+    Visual C++ runtime DLLs that the system folder still lacks. Removes the
+    record once they are present. False when there is no readable record."""
+    from localm import vc_runtime
+    marker = runtimes_root() / VC_MISSING_MARKER
+    try:
+        names = json.loads(marker.read_text(encoding="utf-8"))["absent"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        return False
+    if vc_runtime.absent_names(names):
+        return True
+    _forget_vc_missing(marker)
+    return False
+
+
+def _forget_vc_missing(marker: Path) -> None:
+    try:
+        marker.unlink(missing_ok=True)
+    except OSError as e:
+        from localm.debuglog import logger
+        logger.warning("sdcpp runtime: could not remove %s: %s", marker, e)
 
 
 RUNTIME_LABEL = "native image and video runtime"
@@ -345,7 +389,9 @@ def install(backend: str, *, force: bool = False,
     is kept with ``FAILED_MARKER`` and :class:`ProvisionError` is raised. On
     Windows without the Microsoft Visual C++ Redistributable it is offered
     through *ask* (None: not offered), and :class:`VcRuntimeMissingError` is
-    raised, with nothing installed, when it stays missing. Every progress
+    raised, with nothing installed, when it stays missing; with *ask* None it
+    is raised before any download while the DLLs an earlier install recorded as
+    absent (:data:`VC_MISSING_MARKER`) are still absent. Every progress
     message, and the failure, is also written to the debug log.
     *probe* replaces the real worker load-test (tests only)."""
     from localm.debuglog import logger
@@ -370,6 +416,8 @@ def _install(backend: str, *, force: bool, say: Progress,
         rt = installed(backend)
         if rt is not None:
             return rt
+    if ask is None and sys.platform == "win32" and _vc_known_missing():
+        raise _vc_missing_error()
     from localm import netpolicy
     from localm.folder_swap import ReplaceError, replace_dir
     from localm.media.runtime_files import refused_download_message

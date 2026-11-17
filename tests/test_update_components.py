@@ -288,7 +288,8 @@ def test_update_installs_sdcpp_and_kobold_at_the_new_pins(tmp_path, install, hom
     res = updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
                         runner=_fake_children(home, calls=calls))
     assert [c[3] for c in calls] == ["setup-sdcpp", "setup-music"]
-    assert calls[0] == [sys.executable, "-m", "localm", "setup-sdcpp", "--backend", "vulkan"]
+    assert calls[0] == [sys.executable, "-m", "localm", "setup-sdcpp", "--backend", "vulkan",
+                        "--yes"]
     assert res["components"]["state"] == "updated"
     assert "stable-diffusion.cpp image runtime: master-1999-bbbbbbb -> master-2000-aaaaaaa" \
         in res["components_note"]
@@ -1147,3 +1148,20 @@ def test_a_pytorch_step_the_network_policy_refuses_runs_nothing(tmp_path, torch_
     assert not any("gpu" in c for c in calls)
     assert uc.dists(site)["transformers"]["version"] == "5.15.1"
     assert _v(inst) == "0.3.1"
+
+
+def test_a_missing_visual_cpp_runtime_skips_the_image_runtime_without_a_rollback(
+        tmp_path, install, home):
+    from localm.setup_spec import VC_RUNTIME_ABSENT_EXIT
+    old_sd = _sd_runtime(home, "master-1999-bbbbbbb", "vulkan")
+    _kobold_runtime(home, "v1.123", "nocuda")
+    data, sig = _release(_files("0.3.2", sd="master-2000-aaaaaaa", kobold="v1.123.1"))
+    res = updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
+                        runner=_fake_children(home, also=lambda c: (
+                            VC_RUNTIME_ABSENT_EXIT if "setup-sdcpp" in c else None)))
+    assert _v(install) == "0.3.2"
+    assert res["components"]["state"] == "updated"
+    assert "Microsoft Visual C++ Redistributable" in res["components_note"]
+    assert "master-1999-bbbbbbb -> master-2000-aaaaaaa" not in res["components_note"]
+    assert old_sd.is_dir()
+    assert not (home / "runtimes" / "sdcpp" / "master-2000-aaaaaaa-vulkan").exists()

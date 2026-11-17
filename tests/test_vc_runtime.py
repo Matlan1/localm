@@ -201,6 +201,7 @@ def test_yes_downloads_checks_runs_and_checks_again(rig):
     assert rig.runs == [("VC_redist.x64.exe", vc_runtime.INSTALL_ARGS, True)]
     assert rig.said[-1] == "The Microsoft Visual C++ Redistributable is installed."
     assert sorted(p.name for p in rig.lib.iterdir()) == ["ggml-base.dll", "llama.dll"]
+    assert not [p for p in rig.lib.parent.iterdir() if p.name.startswith(".vcredist-")]
 
 
 def test_an_older_runtime_is_named_as_older(rig):
@@ -431,7 +432,7 @@ def test_vc_runtime_missing_skips_the_backend_fallback(tmp_path, monkeypatch):
     monkeypatch.setattr(sl, "_install_runtime_wheel", lambda d: True)
     monkeypatch.setattr(sl, "_runtime_pkg_dir", lambda: tmp_path / "pkg")
     monkeypatch.setattr(provision, "_chosen_backend_loads", lambda c: (False, "no load"))
-    monkeypatch.setattr(sl, "vc_runtime_missing", lambda t: True)
+    monkeypatch.setattr(sl, "vc_runtime_blocks_load", lambda t, detail: True)
     monkeypatch.setattr(provision, "_fall_back_to_universal",
                         lambda *a, **k: fell_back.append("universal") or ("vulkan", None))
     monkeypatch.setattr(provision, "_universal_backend_failed",
@@ -439,9 +440,24 @@ def test_vc_runtime_missing_skips_the_backend_fallback(tmp_path, monkeypatch):
     assert provision._provision_with_fallback("cuda", target, None, False) == ("cuda", "b9999")
     assert provision._provision_with_fallback("cpu", target, None, False) == ("cpu", "b9999")
     assert fell_back == []
-    monkeypatch.setattr(sl, "vc_runtime_missing", lambda t: False)
+    monkeypatch.setattr(sl, "vc_runtime_blocks_load", lambda t, detail: False)
     provision._provision_with_fallback("cuda", target, None, False)
     assert fell_back == ["universal"]
+
+
+def test_ctrl_c_at_the_question_stops_setup_llama(tmp_path, monkeypatch):
+    import click
+    from localm.setup_llama import provision
+    target = tmp_path / "lib"
+    target.mkdir()
+
+    def abort(t, fill):
+        raise click.exceptions.Abort()
+    monkeypatch.setattr(sl, "_replace_target", abort)
+    monkeypatch.setattr(provision, "_fall_back_to_universal",
+                        lambda *a, **k: pytest.fail("fell back after Ctrl+C"))
+    with pytest.raises(click.exceptions.Abort):
+        provision._provision_with_fallback("cuda", target, None, False)
 
 
 def _run_main(tmp_path, monkeypatch, *, vc_missing: bool, loads: bool = False,
@@ -610,6 +626,9 @@ def test_sdcpp_install_without_the_runtime_raises_and_tries_no_other_backend(mon
 
 def test_sdcpp_requires_the_runtime_and_passes_its_question(tmp_path, monkeypatch):
     from localm.media.sdcpp import runtime as sd
+    root = tmp_path / "runtimes"
+    root.mkdir()
+    monkeypatch.setattr(sd, "runtimes_root", lambda: root)
     seen = {}
 
     def ensure(folder, *, download, refusal, ask, say):
@@ -627,12 +646,37 @@ def test_sdcpp_requires_the_runtime_and_passes_its_question(tmp_path, monkeypatc
     from localm import netpolicy
     assert seen["ask"] is ask and said
     assert seen["refusal"] is netpolicy.download_refusal
+    import json
+    assert json.loads((root / sd.VC_MISSING_MARKER).read_text(encoding="utf-8")) == {
+        "absent": ["msvcp140.dll"]}
     assert vc_runtime.RERUN_HINT in str(e.value)
     monkeypatch.setattr(vc_runtime, "absent_from_system", lambda folder: [])
     sd._require_vc_runtime(tmp_path, said.append, None)
     monkeypatch.setattr(vc_runtime, "ensure", lambda folder, **k: True)
     monkeypatch.setattr(vc_runtime, "absent_from_system", lambda folder: ["msvcp140.dll"])
     sd._require_vc_runtime(tmp_path, said.append, None)
+    assert not (root / sd.VC_MISSING_MARKER).exists()
+
+
+def test_sdcpp_unattended_install_downloads_nothing_while_the_runtime_is_absent(
+        tmp_path, monkeypatch):
+    import json
+    from localm.media.sdcpp import runtime as sd
+    root = tmp_path / "runtimes"
+    root.mkdir()
+    (root / sd.VC_MISSING_MARKER).write_text(json.dumps({"absent": ["msvcp140.dll"]}),
+                                            encoding="utf-8")
+    monkeypatch.setattr(sd, "runtimes_root", lambda: root)
+    monkeypatch.setattr(sd.sys, "platform", "win32")
+    monkeypatch.setattr(sd, "platform_key", lambda: "windows")
+    monkeypatch.setattr(sd, "installed", lambda b: None)
+    monkeypatch.setattr(sd, "_fetch_into", lambda *a, **k: pytest.fail("downloaded"))
+    monkeypatch.setattr(vc_runtime, "absent_names", lambda names: list(names))
+    with pytest.raises(sd.VcRuntimeMissingError):
+        sd._install("vulkan", force=True, say=lambda m: None, probe=None, ask=None)
+    monkeypatch.setattr(vc_runtime, "absent_names", lambda names: [])
+    assert sd._vc_known_missing() is False
+    assert not (root / sd.VC_MISSING_MARKER).exists()
 
 
 # --------------------------------------------------------------------------- #
@@ -699,9 +743,22 @@ def test_loader_names_an_older_system_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(_loader.sys, "platform", "win32")
     monkeypatch.setattr(vc_runtime.sys, "platform", "win32")
     monkeypatch.setattr(vc_runtime, "_system_dir", lambda: system)
-    assert _loader._vc_runtime_short(lib) is True
+    assert _loader._vc_runtime_short(lib, "[WinError 127] The specified procedure could not be found") is True
+    assert _loader._vc_runtime_short(lib, "[WinError 1114] A DLL initialization routine failed") is False
     (system / "msvcp140.dll").write_bytes(_pe(["KERNEL32.dll"], VERSION))
-    assert _loader._vc_runtime_short(lib) is False
+    assert _loader._vc_runtime_short(lib, "[WinError 127]") is False
+
+
+def test_blocks_load_needs_an_absent_dll_or_a_missing_procedure(tmp_path):
+    folder = _runtime_folder(tmp_path, ["MSVCP140.dll"])
+    system = tmp_path / "system"
+    system.mkdir()
+    assert vc_runtime.blocks_load(folder, "anything", system) is True
+    (system / "msvcp140.dll").write_bytes(_pe(["KERNEL32.dll"], (14, 29, 30133, 0)))
+    assert vc_runtime.blocks_load(folder, "[WinError 127] The specified procedure could not be found", system) is True
+    assert vc_runtime.blocks_load(folder, "no CUDA driver", system) is False
+    (system / "msvcp140.dll").write_bytes(_pe(["KERNEL32.dll"], VERSION))
+    assert vc_runtime.blocks_load(folder, "[WinError 127]", system) is False
 
 
 def test_sdcpp_load_error_names_the_missing_runtime_dll(tmp_path, monkeypatch):

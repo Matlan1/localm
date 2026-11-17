@@ -18,7 +18,10 @@ from . import pins, runtime
                    "and falls back to vulkan, then cpu, if it does not load.")
 @click.option("--force", is_flag=True, help="Reinstall even when already installed.")
 @click.option("--status", is_flag=True, help="Show what is installed and exit.")
-def main(backend: str, force: bool, status: bool) -> None:
+@click.option("--yes", "-y", "assume_yes", is_flag=True,
+              help="Non-interactive: ask nothing. The Microsoft Visual C++ "
+                   "Redistributable is then not offered when Windows lacks it.")
+def main(backend: str, force: bool, status: bool, assume_yes: bool = False) -> None:
     """Install the native image generation runtime (stable-diffusion.cpp)."""
     from localm.console import SafeConsole as Console
     from rich.markup import escape
@@ -41,7 +44,8 @@ def main(backend: str, force: bool, status: bool) -> None:
         return
     def confirm(text: str) -> bool:
         return click.confirm(text, default=True)
-    ask = confirm if sys.stdin is not None and sys.stdin.isatty() else None
+    ask = (confirm if not assume_yes and sys.stdin is not None and sys.stdin.isatty()
+           else None)
     try:
         rt = runtime.provision(backend, force=force, ask=ask,
                                on_progress=lambda m: console.print(f"[dim]{escape(m)}[/dim]"))
