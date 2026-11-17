@@ -413,8 +413,8 @@ _START_SLACK_S = 5.0
 
 def _start_epoch(start) -> Optional[float]:
     """A process start from ``install_manifest.list_processes`` as epoch
-    seconds: a FILETIME on Windows, clock ticks since boot on Linux. None when
-    it cannot be converted."""
+    seconds: a FILETIME on Windows, clock ticks since boot on Linux, epoch
+    seconds already elsewhere (ps). None when it cannot be converted."""
     if start is None:
         return None
     try:
@@ -424,9 +424,9 @@ def _start_epoch(start) -> Optional[float]:
             with open("/proc/stat", encoding="utf-8") as fh:
                 btime = next(int(line.split()[1]) for line in fh if line.startswith("btime "))
             return btime + int(start) / os.sysconf("SC_CLK_TCK")
-    except (OSError, ValueError, StopIteration):
+        return float(start)
+    except (OSError, TypeError, ValueError, StopIteration):
         return None
-    return None
 
 
 def _entry_epoch(entry: dict) -> Optional[float]:
@@ -458,34 +458,17 @@ def _registered(home, by_pid: dict) -> dict:
 
 
 def _parent(by_pid: dict, pid: int) -> Optional[int]:
-    """The running parent of *pid*, or None when it has exited (a pid whose
-    process started after *pid* is a reused one, not the parent)."""
-    ppid = by_pid[pid][1]
-    if not ppid or ppid == pid or ppid not in by_pid:
-        return None
-    child_start, parent_start = by_pid[pid][3], by_pid[ppid][3]
-    if child_start is not None and parent_start is not None and parent_start > child_start:
-        return None
-    return ppid
+    """The proven running parent of *pid*
+    (``install_manifest.process_parent``), or None."""
+    from localm import install_manifest
+    return install_manifest.process_parent(by_pid, pid)
 
 
 def _subtree(by_pid: dict, top: int) -> list:
-    """*top* and every running descendant of it, deepest first."""
-    children: dict = {}
-    for pid in by_pid:
-        parent = _parent(by_pid, pid)
-        if parent is not None:
-            children.setdefault(parent, []).append(pid)
-    order, stack = [], [(top, 0)]
-    seen = set()
-    while stack:
-        pid, depth = stack.pop()
-        if pid in seen:
-            continue
-        seen.add(pid)
-        order.append((depth, pid))
-        stack.extend((c, depth + 1) for c in children.get(pid, ()))
-    return [pid for _d, pid in sorted(order, key=lambda x: -x[0])]
+    """*top* and every running descendant of it, deepest first
+    (``install_manifest.descendants``)."""
+    from localm import install_manifest
+    return install_manifest.descendants(by_pid, top)
 
 
 def classify_holders(found: list, root, *, home=None, procs=None,
@@ -551,21 +534,25 @@ def classify_holders(found: list, root, *, home=None, procs=None,
             label = f"the background localm server (pid {entries[0]['pid']})"
         else:
             label = f"the localm process {Path(by_pid[top][2] or '?').name} (pid {top})"
-        tops[top] = {"pid": top, "label": label, "entries": entries, "tree": tree}
+        tops[top] = {"pid": top, "label": label, "entries": entries, "tree": tree,
+                     "starts": {p: by_pid[p][3] for p in tree}}
     return tops, foreign
 
 
-def _stop_tree(tree: list, deadline: float) -> list:
+def _stop_tree(tree: list, deadline: float, starts: Optional[dict] = None) -> list:
     """Terminate every pid of *tree* (deepest first) and wait, until *deadline*,
-    for each to exit. Returns the pids still running."""
+    for each to exit; a pid with a start time in *starts* is ended only while it
+    is still that process (``install_manifest._stop``). Returns the pids still
+    running."""
     import time
 
     from localm import install_manifest
+    starts = starts or {}
     left = []
     for pid in tree:
         budget = max(0.1, min(_STOP_WAIT_S, deadline - time.monotonic()))
         try:
-            gone = install_manifest._stop(pid, timeout=budget)
+            gone = install_manifest._stop(pid, timeout=budget, start=starts.get(pid))
         except Exception as e:
             from localm.debuglog import logger
             logger.warning("update: could not stop process %s: %s", pid, e)
@@ -575,13 +562,48 @@ def _stop_tree(tree: list, deadline: float) -> list:
     return left
 
 
+# Seconds a background server asked to stop (POSIX) gets to finish its own
+# clean shutdown before the rest of its tree is ended.
+_SHUTDOWN_WAIT_S = 15.0
+
+
+def _ask_servers_to_stop(top: dict) -> None:
+    """On POSIX, send SIGTERM to each registered server in *top*'s tree (from
+    :func:`classify_holders`), which a localm server takes as a request for its
+    clean shutdown (``portmux.route_stop_signals``), and wait up to
+    :data:`_SHUTDOWN_WAIT_S` for them to exit. The server then ends its model
+    workers and unregisters its shared memory while the multiprocessing resource
+    tracker it started is still running; ended from the deepest process up, the
+    tracker would go first. Windows has no such request for another process:
+    nothing is done there."""
+    import signal
+    import time
+
+    from localm import install_manifest
+    if sys.platform == "win32":
+        return
+    asked = []
+    for entry in top["entries"]:
+        pid = int(entry["pid"])
+        start = top["starts"].get(pid)
+        if start is not None and install_manifest._signal_same(pid, start, signal.SIGTERM):
+            asked.append(pid)
+    until = time.monotonic() + _SHUTDOWN_WAIT_S
+    while asked and time.monotonic() < until:
+        asked = [p for p in asked if install_manifest._alive(p)]
+        if asked:
+            time.sleep(0.1)
+
+
 def stop_own_holders(lib, root, *, home=None, say: Optional[Callable] = None,
                      wait: float = RELEASE_WAIT_S, stop: bool = True) -> list:
     """Free the runtime at *lib* of the install at *root* by stopping this
     install's own localm processes that hold it (:func:`classify_holders`):
-    each one's whole process tree (server, model workers, probe daemons) is
-    terminated, its registry entry removed and its crash marker cleared, then
-    this waits up to *wait* seconds for the OS to release the files.
+    a registered server is first asked to shut down (:func:`_ask_servers_to_stop`,
+    POSIX), then each one's whole process tree (server, model workers, probe
+    daemons) still running is terminated, its registry entry removed and its
+    crash marker cleared, then this waits up to *wait* seconds for the OS to
+    release the files.
 
     Stops nothing when any holder is not this install's. A holder Windows
     cannot name (pid None, usually a process that is exiting, or this install's
@@ -612,10 +634,12 @@ def stop_own_holders(lib, root, *, home=None, say: Optional[Callable] = None,
             tops, foreign = classify_holders(found, root, home=home)
         if foreign or not stop:
             return foreign
-        deadline = time.monotonic() + max(0.5, wait)
         for top in tops.values():
             say(f"Stopping {top['label']}...")
-            left = _stop_tree(top["tree"], deadline)
+            _ask_servers_to_stop(top)
+        deadline = time.monotonic() + max(0.5, wait)
+        for top in tops.values():
+            left = _stop_tree(top["tree"], deadline, top["starts"])
             if left:
                 from localm.debuglog import logger
                 logger.warning("update: processes %s of %s did not exit", left, top["label"])
@@ -734,8 +758,9 @@ def stop_own_probe_daemons(lib, root) -> Optional[int]:
         if pids is None:
             return None
         pids += [p for p in running_own_probe_daemons(root, procs=procs) if p not in pids]
+        started = {p[0]: p[3] for p in procs}
         for pid in pids:
-            install_manifest._stop(pid, timeout=_STOP_WAIT_S)
+            install_manifest._stop(pid, timeout=_STOP_WAIT_S, start=started.get(pid))
         return len(pids)
     except Exception as e:
         from localm.debuglog import logger
