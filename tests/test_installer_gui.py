@@ -1017,12 +1017,21 @@ def wizard(gui):
         root.destroy()
 
 
+def _to_page(wizard, title):
+    """Click Next until the page called *title* shows; its index."""
+    for _ in range(len(wizard.pages)):
+        if wizard.pages[wizard.index][0] == title:
+            return wizard.index
+        wizard.next_page()
+    raise AssertionError(f"never reached the {title!r} page")
+
+
 class TestWizard:
     """It is a multi-page dialogue, so every question actually gets asked."""
 
     def test_it_has_a_page_per_group_of_questions(self, wizard):
         titles = [t for t, _ in wizard.pages]
-        assert titles == ["Inference runtime", "Where things live",
+        assert titles == ["Python tooling", "Inference runtime", "Where things live",
                           "Optional features", "Options", "Installing"]
 
     def test_next_and_back_walk_the_pages(self, wizard):
@@ -1050,12 +1059,11 @@ class TestWizard:
 
     def test_an_empty_custom_data_folder_is_refused_without_advancing(
             self, wizard):
-        wizard.next_page()
-        assert wizard.pages[wizard.index][0] == "Where things live"
+        here = _to_page(wizard, "Where things live")
         wizard.portable_var.set(False)
         wizard.path_var.set("")
         wizard.next_page()
-        assert wizard.index == 1, "advanced with no data folder chosen"
+        assert wizard.index == here, "advanced with no data folder chosen"
         assert "folder" in wizard.status.cget("text")
 
     @pytest.mark.parametrize("which, says", [
@@ -1070,38 +1078,38 @@ class TestWizard:
         path = {"relative": "some/data",
                 "install folder": str(gui.ROOT),
                 "a file": str(plain)}[which]
-        wizard.next_page()
+        here = _to_page(wizard, "Where things live")
         wizard.portable_var.set(False)
         wizard.path_var.set(path)
         wizard.next_page()
-        assert wizard.index == 1, f"advanced with {which} as the data folder"
+        assert wizard.index == here, f"advanced with {which} as the data folder"
         assert says in wizard.status.cget("text")
 
     def test_a_safe_custom_data_folder_goes_on_and_writes_nothing(self, wizard, tmp_path):
         target = tmp_path.parent / f"{tmp_path.name}-elsewhere" / "data"
-        wizard.next_page()
+        here = _to_page(wizard, "Where things live")
         wizard.portable_var.set(False)
         wizard.path_var.set(str(target))
         wizard.next_page()
-        assert wizard.index == 2
+        assert wizard.index == here + 1
         assert not target.exists()
 
     def test_typing_a_data_folder_selects_the_custom_option(self, wizard):
-        wizard.next_page()
-        assert wizard.pages[wizard.index][0] == "Where things live"
+        _to_page(wizard, "Where things live")
         wizard.path_var.set("D:/Models")
         assert wizard.portable_var.get() is False
         assert wizard.current_plan().portable_data is False
         assert wizard.current_plan().data_path == "D:/Models"
 
     def test_choosing_portable_after_typing_is_not_overridden(self, wizard):
-        wizard.next_page()
+        _to_page(wizard, "Where things live")
         wizard.path_var.set("D:/Models")
         assert wizard.portable_var.get() is False
         wizard.portable_var.set(True)
         assert wizard.current_plan().portable_data is True
 
     def test_an_answer_survives_leaving_its_page(self, wizard):
+        _to_page(wizard, "Inference runtime")
         wizard.backend_var.set("cpu")
         wizard.next_page()
         wizard.prev_page()
@@ -1980,6 +1988,254 @@ class TestLauncherStorePreset:
             assert wizard.current_plan().portable_store is False
         finally:
             root.destroy()
+
+
+class _Errors:
+    """A messagebox stand-in that records errors shown."""
+
+    def __init__(self):
+        self.errors = []
+
+    def showerror(self, title, message):
+        self.errors.append(message)
+
+
+class TestToolingPage:
+    """The first page asks Portable or Shared. Shared on the folder's own
+    tooling ends the window with 46 or 47 for the launcher to open it again on
+    the per-user uv."""
+
+    @pytest.fixture()
+    def home(self, gui, tmp_path, monkeypatch):
+        for name in (gui.STORE_ENV, gui.UV_ENV, gui.UV_INSTALLED_ENV, gui.BOOTSTRAP_ENV,
+                     gui.REPOINTED_ENV, gui.SPLASH_ENV, "XDG_BIN_HOME"):
+            monkeypatch.delenv(name, raising=False)
+        home = tmp_path.parent / f"{tmp_path.name}-home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setenv("PATH", str(tmp_path / "emptypath"))
+        return home
+
+    @staticmethod
+    def _build(gui, monkeypatch, messagebox=None):
+        tk = pytest.importorskip("tkinter")
+        from tkinter import filedialog, ttk
+        root = build_tk_root(tk.Tk)
+        root.withdraw()
+        destroyed = []
+        monkeypatch.setattr(root, "destroy", lambda: destroyed.append(True), raising=False)
+        wizard = gui.Wizard(root, tk, ttk, filedialog, messagebox=messagebox)
+        return root, wizard, destroyed, tk
+
+    @staticmethod
+    def _folder_uv(gui, tmp_path, monkeypatch):
+        exe = TestContainedUv._uv(tmp_path / ".uv", gui)
+        monkeypatch.setenv(gui.UV_ENV, str(exe))
+        return exe
+
+    @staticmethod
+    def _texts(widget) -> list:
+        found, stack = [], [widget]
+        while stack:
+            w = stack.pop()
+            stack.extend(w.winfo_children())
+            try:
+                found.append(str(w.cget("text")))
+            except Exception:
+                continue
+        return found
+
+    @staticmethod
+    def _pump(root, done, timeout=30):
+        import time
+        deadline = time.monotonic() + timeout
+        while not done() and time.monotonic() < deadline:
+            root.update()
+            time.sleep(0.02)
+        root.update()
+
+    def test_the_first_page_asks_the_tooling_question_in_the_spec_words(
+            self, gui, home, monkeypatch):
+        root, wizard, _, tk = self._build(gui, monkeypatch)
+        try:
+            assert wizard.pages[0][0] == "Python tooling" and wizard.index == 0
+            texts = self._texts(wizard.pages[0][1])
+            spec = gui.spec
+            for said in (spec.TOOLING_STORE_TEXT, spec.TOOLING_PORTABLE_TEXT,
+                         spec.tooling_shared_text(),
+                         f"{spec.UV_MISSING_TEXT} {spec.UV_INSTALL_TEXT}"):
+                assert said in texts, said
+            assert wizard.get_uv_var.get() is spec.default_yes("uv-install")
+        finally:
+            tk.Tk.destroy(root)
+
+    def test_portable_goes_on_without_ending_the_window(self, gui, home, tmp_path, monkeypatch):
+        self._folder_uv(gui, tmp_path, monkeypatch)
+        root, wizard, destroyed, tk = self._build(gui, monkeypatch)
+        try:
+            wizard.next_page()
+            assert wizard.index == 1 and wizard.exit_code == 0 and not destroyed
+        finally:
+            tk.Tk.destroy(root)
+
+    def test_shared_with_a_per_user_uv_ends_the_window_for_the_launcher(
+            self, gui, home, tmp_path, monkeypatch):
+        self._folder_uv(gui, tmp_path, monkeypatch)
+        TestContainedUv._uv(home / ".local" / "bin", gui)
+        root, wizard, destroyed, tk = self._build(gui, monkeypatch)
+        try:
+            wizard.store_var.set(False)
+            wizard.next_page()
+            assert wizard.exit_code == gui.EXIT_USE_SHARED_UV == 46
+            assert destroyed, "the window stayed open"
+        finally:
+            tk.Tk.destroy(root)
+
+    def test_the_install_question_shows_only_for_shared_with_no_per_user_uv(
+            self, gui, home, tmp_path, monkeypatch):
+        self._folder_uv(gui, tmp_path, monkeypatch)
+        root, wizard, _, tk = self._build(gui, monkeypatch)
+        try:
+            assert wizard.get_uv_box.winfo_manager() == ""
+            wizard.store_var.set(False)
+            wizard._on_store_changed()
+            assert wizard.get_uv_box.winfo_manager() == "pack"
+            wizard.store_var.set(True)
+            wizard._on_store_changed()
+            assert wizard.get_uv_box.winfo_manager() == ""
+        finally:
+            tk.Tk.destroy(root)
+
+    def test_shared_with_the_install_question_cleared_stays_and_says_why(
+            self, gui, home, tmp_path, monkeypatch):
+        self._folder_uv(gui, tmp_path, monkeypatch)
+        root, wizard, destroyed, tk = self._build(gui, monkeypatch)
+        try:
+            wizard.store_var.set(False)
+            wizard.get_uv_var.set(False)
+            wizard.next_page()
+            assert wizard.index == 0 and wizard.exit_code == 0 and not destroyed
+            assert wizard.status.cget("text") == gui.SHARED_NEEDS_UV
+        finally:
+            tk.Tk.destroy(root)
+
+    def test_shared_installs_the_per_user_uv_and_then_ends_the_window(
+            self, gui, home, tmp_path, monkeypatch):
+        self._folder_uv(gui, tmp_path, monkeypatch)
+        tool = gui.uv_tool()
+        calls = []
+
+        def fake(root, **kw):
+            calls.append(kw.get("shared"))
+            return TestContainedUv._uv(home / ".local" / "bin", gui)
+
+        monkeypatch.setattr(tool, "bootstrap_uv", fake)
+        root, wizard, destroyed, tk = self._build(gui, monkeypatch)
+        try:
+            wizard.store_var.set(False)
+            wizard.next_page()
+            assert wizard.installing, "the window was not locked while uv installs"
+            self._pump(root, lambda: destroyed)
+            assert calls == [True]
+            assert wizard.exit_code == gui.EXIT_USE_NEW_SHARED_UV == 47
+            assert destroyed
+        finally:
+            tk.Tk.destroy(root)
+
+    def test_a_failed_per_user_install_says_so_and_stays(self, gui, home, tmp_path, monkeypatch):
+        self._folder_uv(gui, tmp_path, monkeypatch)
+        tool = gui.uv_tool()
+
+        def failing(root, **kw):
+            raise tool.UvBootstrapError("could not download the uv 9.9.9 installer: offline")
+
+        monkeypatch.setattr(tool, "bootstrap_uv", failing)
+        box = _Errors()
+        root, wizard, destroyed, tk = self._build(gui, monkeypatch, messagebox=box)
+        try:
+            wizard.store_var.set(False)
+            wizard.next_page()
+            self._pump(root, lambda: not wizard.installing)
+            assert not wizard.installing and not destroyed
+            assert wizard.exit_code == 0 and wizard.index == 0
+            assert "offline" in wizard.status.cget("text")
+            assert box.errors and "offline" in box.errors[0]
+            assert str(wizard.action.cget("state")) == "normal"
+        finally:
+            tk.Tk.destroy(root)
+
+    def test_shared_on_tooling_outside_the_folder_just_goes_on(
+            self, gui, home, tmp_path, monkeypatch):
+        outside = TestContainedUv._uv(home / ".local" / "bin", gui)
+        monkeypatch.setenv(gui.UV_ENV, str(outside))
+        root, wizard, destroyed, tk = self._build(gui, monkeypatch)
+        try:
+            wizard.store_var.set(False)
+            wizard.next_page()
+            assert wizard.index == 1 and wizard.exit_code == 0 and not destroyed
+            assert wizard.current_plan().portable_store is False
+        finally:
+            tk.Tk.destroy(root)
+
+    def test_a_reopened_window_starts_on_the_runtime_page_and_names_its_uv(
+            self, gui, home, monkeypatch):
+        outside = TestContainedUv._uv(home / ".local" / "bin", gui)
+        monkeypatch.setenv(gui.UV_ENV, str(outside))
+        monkeypatch.setenv(gui.STORE_ENV, "shared")
+        monkeypatch.setenv(gui.REPOINTED_ENV, "1")
+        monkeypatch.setenv(gui.UV_INSTALLED_ENV, "1")
+        root, wizard, _, tk = self._build(gui, monkeypatch)
+        try:
+            assert wizard.mode == "install" and wizard.index == 1
+            assert wizard.store_var.get() is False
+            note = wizard.tooling_note.cget("text")
+            assert str(outside) in note and "user PATH" in note
+            wizard.prev_page()
+            assert wizard.index == 0
+        finally:
+            tk.Tk.destroy(root)
+
+    def test_the_page_names_what_the_launcher_put_in_the_folder(
+            self, gui, home, tmp_path, monkeypatch):
+        self._folder_uv(gui, tmp_path, monkeypatch)
+        monkeypatch.setenv(gui.BOOTSTRAP_ENV, "uv python cache")
+        root, wizard, _, tk = self._build(gui, monkeypatch)
+        try:
+            note = wizard.tooling_note.cget("text")
+            for name in (".uv", ".python", ".cache"):
+                assert str(tmp_path / name) in note, note
+            assert "Shared removes them again" in note
+        finally:
+            tk.Tk.destroy(root)
+
+    def test_nothing_put_in_the_folder_means_no_note(self, gui, home, monkeypatch):
+        root, wizard, _, tk = self._build(gui, monkeypatch)
+        try:
+            assert wizard.tooling_note.cget("text") == ""
+        finally:
+            tk.Tk.destroy(root)
+
+
+class TestSplash:
+    def test_the_getting_ready_file_in_the_folder_is_removed(self, gui, tmp_path):
+        marker = tmp_path / (gui.SPLASH_PREFIX + "1")
+        marker.write_bytes(b"")
+        assert gui.close_splash({gui.SPLASH_ENV: str(marker)}) is True
+        assert not marker.exists()
+
+    @pytest.mark.parametrize("where", ["elsewhere", "other name"])
+    def test_any_other_file_is_left_alone(self, gui, tmp_path, where):
+        if where == "elsewhere":
+            target = tmp_path.parent / f"{tmp_path.name}-x" / (gui.SPLASH_PREFIX + "1")
+            target.parent.mkdir()
+        else:
+            target = tmp_path / "notes.txt"
+        target.write_bytes(b"keep")
+        assert gui.close_splash({gui.SPLASH_ENV: str(target)}) is False
+        assert target.read_bytes() == b"keep"
+
+    def test_no_file_named_is_nothing_to_do(self, gui):
+        assert gui.close_splash({}) is False
 
 
 def test_cpu_only_selects_the_cpu_runtime_and_gpu_brings_the_recommendation_back(

@@ -1,17 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""setup-gui.sh: the Portable / Shared question and which uv opens the window.
+"""setup-gui.sh: which uv opens the window, with no question in the terminal.
 
-The launcher asks setup.sh's question once, always, before the window: also when
-./.uv already exists and when no uv exists anywhere. Portable uses only ./.uv/uv
-and installs uv there when it is missing; Shared uses the uv on PATH (never
-./.uv) and installs uv at its per-user location when there is none. The answer
-reaches the window as LOCALM_GUI_STORE, the uv as LOCALM_GUI_UV, and a per-user
-install as LOCALM_GUI_UV_INSTALLED=1.
+The launcher asks nothing. It uses the folder's own ./.uv/uv, reuses the
+per-user uv for an earlier Shared install (an install record and no ./.uv), and
+otherwise installs uv into ./.uv. The window's first page asks Portable or
+Shared; when Shared is chosen it exits 46 (the per-user uv was there) or 47 (it
+installed it), and the launcher removes what this run put into the folder and
+opens the window again on the per-user uv.
 
 The real script runs from a throwaway clone with curl and sha256sum replaced by
-stubs (the stub installer drops a fake uv into $UV_INSTALL_DIR, or into
-~/.local/bin when that is unset) and a fake uv on PATH standing in for a system
-one. No network is touched.
+stubs (the stub installer drops a fake uv into $UV_INSTALL_DIR) and a fake uv
+on PATH standing in for a per-user one. Each fake uv stands in for the window:
+it reports what it was given, creates ./.python and ./.cache like `uv run` does,
+and exits with the next code in WINDOW_CODES_FILE. No network is touched.
 """
 
 from __future__ import annotations
@@ -32,7 +33,20 @@ pytestmark = pytest.mark.skipif(_bash() is None, reason="no bash on PATH")
 
 _REPORT = ('#!/bin/sh\necho "WINDOW-UV=$0"\necho "WINDOW-STORE=${LOCALM_GUI_STORE:-}"\n'
            'echo "WINDOW-PYDIR=${UV_PYTHON_INSTALL_DIR:-}"\necho "WINDOW-GUIUV=${LOCALM_GUI_UV:-}"\n'
-           'echo "WINDOW-INSTALLED=${LOCALM_GUI_UV_INSTALLED:-}"\nexit 0\n')
+           'echo "WINDOW-INSTALLED=${LOCALM_GUI_UV_INSTALLED:-}"\n'
+           'echo "WINDOW-BOOTSTRAP=${LOCALM_GUI_BOOTSTRAP:-}"\n'
+           'echo "WINDOW-REPOINTED=${LOCALM_GUI_REPOINTED:-}"\n'
+           'if [ -n "${UV_PYTHON_INSTALL_DIR:-}" ]; then mkdir -p "$UV_PYTHON_INSTALL_DIR"; fi\n'
+           'if [ -n "${UV_CACHE_DIR:-}" ]; then mkdir -p "$UV_CACHE_DIR"; fi\n'
+           'code=0\n'
+           'if [ -n "${WINDOW_CODES_FILE:-}" ] && [ -s "$WINDOW_CODES_FILE" ]; then\n'
+           '  code="$(head -n 1 "$WINDOW_CODES_FILE")"\n'
+           '  tail -n +2 "$WINDOW_CODES_FILE" > "$WINDOW_CODES_FILE.next"\n'
+           '  mv "$WINDOW_CODES_FILE.next" "$WINDOW_CODES_FILE"\n'
+           'fi\n'
+           'if [ "$code" = 47 ]; then d="$PER_USER_BIN"; mkdir -p "$d"; cp "$0" "$d/uv";'
+           ' chmod +x "$d/uv"; fi\n'
+           'exit "$code"\n')
 
 
 def _pinned_sha() -> str:
@@ -67,16 +81,22 @@ def _tools_path() -> list[str]:
     return ["/usr/bin", "/bin"]
 
 
-def _run(tmp_path: Path, *, answers: str, system_uv: bool, contained_uv: bool = False,
-         installer_creates_uv: bool = True, contained_on_path: bool = False):
+def _run(tmp_path: Path, *, system_uv: bool = False, contained_uv: bool = False,
+         installer_creates_uv: bool = True, codes: str = "0", record: bool = False,
+         existing=()):
     clone = tmp_path / "clone"
     clone.mkdir()
     shutil.copy2(ROOT / "setup-gui.sh", clone / "setup-gui.sh")
     shutil.copy2(ROOT / "setup.sh", clone / "setup.sh")
     if contained_uv:
         _write_exec(clone / ".uv" / "uv", _REPORT)
+    if record:
+        (clone / ".localm-install.json").write_text("{}", encoding="utf-8")
+    for name in existing:
+        (clone / name).mkdir()
+        (clone / name / "keep").write_bytes(b"x")
     stubs = tmp_path / "stubs"
-    made = ('dest="${UV_INSTALL_DIR:-$HOME/.local/bin}"\n'
+    made = ('dest="${UV_INSTALL_DIR:-$PER_USER_BIN}"\n'
             'mkdir -p "$dest"\n'
             f"cat > \"$dest/uv\" <<'EOT'\n{_REPORT}EOT\n"
             'chmod +x "$dest/uv"\n') if installer_creates_uv else "exit 0\n"
@@ -93,19 +113,21 @@ def _run(tmp_path: Path, *, answers: str, system_uv: bool, contained_uv: bool = 
     if system_uv:
         _write_exec(system / "uv", _REPORT)
         path_parts.insert(0, str(system))
-    if contained_on_path:
-        path_parts.insert(0, str(clone / ".uv"))
     home = tmp_path / "home"
     home.mkdir()
+    codes_file = tmp_path / "codes.txt"
+    codes_file.write_bytes(("\n".join(codes.split()) + "\n").encode())
     env = dict(os.environ, PATH=os.pathsep.join(path_parts), DISPLAY=":0",
-               HOME=_posix(home))
+               HOME=_posix(home), WINDOW_CODES_FILE=_posix(codes_file),
+               PER_USER_BIN=_posix(home / ".local" / "bin"))
     for var in ("LOCALM_GUI_STORE", "LOCALM_GUI_UV", "LOCALM_GUI_UV_INSTALLED",
+                "LOCALM_GUI_BOOTSTRAP", "LOCALM_GUI_REPOINTED", "XDG_BIN_HOME",
                 "UV_PYTHON_INSTALL_DIR", "UV_CACHE_DIR", "UV_INSTALL_DIR",
                 "UV_UNMANAGED_INSTALL"):
         env.pop(var, None)
     # Bytes, so a Windows text pipe never turns "\n" into "\r\n".
     raw = subprocess.run([_bash(), (clone / "setup-gui.sh").as_posix()], cwd=str(clone),
-                         env=env, input=answers.encode("utf-8"), capture_output=True,
+                         env=env, stdin=subprocess.DEVNULL, capture_output=True,
                          timeout=120)
     out = subprocess.CompletedProcess(raw.args, raw.returncode,
                                       raw.stdout.decode("utf-8", "replace"),
@@ -113,15 +135,19 @@ def _run(tmp_path: Path, *, answers: str, system_uv: bool, contained_uv: bool = 
     return clone, system, home, out
 
 
-def _field(out, name: str) -> str:
-    for line in out.stdout.splitlines():
-        if line.startswith(name + "="):
-            return line.split("=", 1)[1].strip()
-    raise AssertionError(f"{name} not reported:\n{out.stdout}\n{out.stderr}")
+def _fields(out, name: str) -> list:
+    return [line.split("=", 1)[1].strip() for line in out.stdout.splitlines()
+            if line.startswith(name + "=")]
 
 
-def _path_field(out, name: str) -> str:
-    value = _field(out, name)
+def _field(out, name: str, n: int = 0) -> str:
+    found = _fields(out, name)
+    assert len(found) > n, f"{name} not reported:\n{out.stdout}\n{out.stderr}"
+    return found[n]
+
+
+def _path_field(out, name: str, n: int = 0) -> str:
+    value = _field(out, name, n)
     return _native(value) if value else ""
 
 
@@ -129,120 +155,94 @@ def _installer_line(out) -> str:
     return next(ln for ln in out.stdout.splitlines() if ln.startswith("INSTALLER-RAN"))
 
 
-QUESTION = "[1] Portable - everything in this folder"
-NOT_INSTALLED = "[!] uv (the Python package manager localm builds on) is not installed."
-
-
-def test_portable_with_a_contained_uv_still_asks_the_question_and_uses_it(tmp_path):
-    clone, _, _, out = _run(tmp_path, answers="1\n", system_uv=True, contained_uv=True)
-    assert QUESTION in out.stdout, (out.stdout, out.stderr)
-    assert NOT_INSTALLED not in out.stdout and "INSTALLER-RAN" not in out.stdout
+def test_a_fresh_folder_installs_uv_into_the_folder_without_asking(tmp_path):
+    clone, _, _, out = _run(tmp_path, system_uv=True)
+    dirs = re.findall(r"\[([^\]]*)\]", _installer_line(out))
+    assert [_native(d) for d in dirs] == [str(clone / ".uv")] * 2, out.stdout
     assert _path_field(out, "WINDOW-UV") == str(clone / ".uv" / "uv")
     assert _path_field(out, "WINDOW-GUIUV") == str(clone / ".uv" / "uv")
     assert _field(out, "WINDOW-STORE") == "portable"
     assert _path_field(out, "WINDOW-PYDIR") == str(clone / ".python")
-    assert _field(out, "WINDOW-INSTALLED") == ""
+    assert _field(out, "WINDOW-BOOTSTRAP").split() == ["uv", "python", "cache"]
+    assert "Pick 1 or 2" not in out.stdout and "[Y/n]" not in out.stdout
+    assert out.returncode == 0, (out.stdout, out.stderr)
 
 
-def test_portable_ignores_a_system_uv_and_installs_the_contained_one(tmp_path):
-    clone, _, _, out = _run(tmp_path, answers="1\n\n", system_uv=True)
-    assert QUESTION in out.stdout and NOT_INSTALLED in out.stdout, (out.stdout, out.stderr)
-    line = _installer_line(out)
-    dirs = re.findall(r"\[([^\]]*)\]", line)
-    assert [_native(d) for d in dirs] == [str(clone / ".uv")] * 2, line
+def test_a_contained_uv_is_used_and_not_named_as_put_there_by_this_run(tmp_path):
+    clone, _, _, out = _run(tmp_path, system_uv=True, contained_uv=True,
+                            existing=(".python",))
+    assert "INSTALLER-RAN" not in out.stdout
     assert _path_field(out, "WINDOW-UV") == str(clone / ".uv" / "uv")
-    assert _field(out, "WINDOW-STORE") == "portable"
+    assert _field(out, "WINDOW-BOOTSTRAP").split() == ["cache"]
 
 
-def test_with_no_answer_possible_the_default_is_portable(tmp_path):
-    clone, _, _, out = _run(tmp_path, answers="", system_uv=True)
-    assert _path_field(out, "WINDOW-UV") == str(clone / ".uv" / "uv")
-    assert _field(out, "WINDOW-STORE") == "portable"
-
-
-def test_shared_uses_the_system_uv_and_says_so_to_the_window(tmp_path):
-    clone, system, _, out = _run(tmp_path, answers="2\n", system_uv=True)
+def test_an_earlier_shared_install_reuses_the_per_user_uv(tmp_path):
+    clone, system, _, out = _run(tmp_path, system_uv=True, record=True)
     assert "INSTALLER-RAN" not in out.stdout and not (clone / ".uv").exists()
-    assert NOT_INSTALLED not in out.stdout
     assert _path_field(out, "WINDOW-UV") == str(system / "uv")
-    assert _path_field(out, "WINDOW-GUIUV") == str(system / "uv")
     assert _field(out, "WINDOW-STORE") == "shared"
     assert _field(out, "WINDOW-PYDIR") == ""
-    assert _field(out, "WINDOW-INSTALLED") == ""
 
 
-def test_shared_ignores_a_contained_uv(tmp_path):
-    _clone, system, _, out = _run(tmp_path, answers="2\n", system_uv=True, contained_uv=True)
-    assert _path_field(out, "WINDOW-UV") == str(system / "uv")
+def test_shared_removes_what_this_run_put_in_the_folder_and_reopens_on_the_per_user_uv(tmp_path):
+    clone, system, _, out = _run(tmp_path, system_uv=True, codes="46 0")
+    assert _path_field(out, "WINDOW-UV", 0) == str(clone / ".uv" / "uv")
+    assert _path_field(out, "WINDOW-UV", 1) == str(system / "uv")
+    assert _field(out, "WINDOW-STORE", 1) == "shared"
+    assert _field(out, "WINDOW-REPOINTED", 1) == "1"
+    assert _field(out, "WINDOW-PYDIR", 1) == ""
+    assert _field(out, "WINDOW-BOOTSTRAP", 1) == ""
+    for name in (".uv", ".python", ".cache"):
+        assert not (clone / name).exists(), f"{name} was left behind\n{out.stdout}"
+    assert out.returncode == 0, (out.stdout, out.stderr)
 
 
-def test_no_uv_and_shared_asks_and_installs_per_user_without_an_install_dir(tmp_path):
-    clone, _, home, out = _run(tmp_path, answers="2\n\n", system_uv=False)
-    assert QUESTION in out.stdout and NOT_INSTALLED in out.stdout, (out.stdout, out.stderr)
-    assert _installer_line(out) == "INSTALLER-RAN INSTALL_DIR=[] UNMANAGED=[]"
-    per_user = str(home / ".local" / "bin" / "uv")
-    assert _path_field(out, "WINDOW-UV") == per_user
-    assert _path_field(out, "WINDOW-GUIUV") == per_user
-    assert _field(out, "WINDOW-STORE") == "shared"
-    assert _field(out, "WINDOW-PYDIR") == ""
-    assert _field(out, "WINDOW-INSTALLED") == "1"
+def test_shared_keeps_folders_this_run_did_not_create(tmp_path):
+    clone, _, _, out = _run(tmp_path, system_uv=True, contained_uv=True,
+                            existing=(".python", ".cache"), codes="46 0")
+    for name in (".uv", ".python", ".cache"):
+        assert (clone / name).is_dir(), f"{name} was removed but this run did not create it"
+    assert _field(out, "WINDOW-STORE", 1) == "shared"
+
+
+def test_shared_with_a_uv_the_window_installed_says_so_to_the_window(tmp_path):
+    clone, _, home, out = _run(tmp_path, codes="47 0")
+    assert _path_field(out, "WINDOW-UV", 1) == str(home / ".local" / "bin" / "uv")
+    assert _field(out, "WINDOW-INSTALLED", 1) == "1"
     assert not (clone / ".uv").exists()
     assert out.returncode == 0, (out.stdout, out.stderr)
 
 
-def test_shared_never_takes_the_contained_uv_even_from_path(tmp_path):
-    clone, _, home, out = _run(tmp_path, answers="2\nY\n", system_uv=False, contained_uv=True,
-                               contained_on_path=True)
-    assert NOT_INSTALLED in out.stdout and "INSTALLER-RAN" in out.stdout, (out.stdout, out.stderr)
-    assert _path_field(out, "WINDOW-UV") == str(home / ".local" / "bin" / "uv")
-    assert _path_field(out, "WINDOW-UV") != str(clone / ".uv" / "uv")
-
-
-def test_shared_with_only_a_contained_uv_installs_the_per_user_one(tmp_path):
-    _clone, _, home, out = _run(tmp_path, answers="2\nY\n", system_uv=False, contained_uv=True)
-    assert _installer_line(out) == "INSTALLER-RAN INSTALL_DIR=[] UNMANAGED=[]"
-    assert _path_field(out, "WINDOW-UV") == str(home / ".local" / "bin" / "uv")
-    assert _field(out, "WINDOW-INSTALLED") == "1"
-
-
-@pytest.mark.parametrize("store", ["1", "2"])
-def test_declining_the_uv_install_installs_nothing(tmp_path, store):
-    clone, _, _, out = _run(tmp_path, answers=f"{store}\nn\n", system_uv=False)
-    assert "INSTALLER-RAN" not in out.stdout and "WINDOW-UV" not in out.stdout
-    assert "Nothing was installed." in out.stdout
-    assert not (clone / ".uv").exists()
+def test_shared_with_no_per_user_uv_after_all_says_uv_is_not_callable(tmp_path):
+    _clone, _, _, out = _run(tmp_path, codes="46 0")
+    assert len(_fields(out, "WINDOW-UV")) == 1
+    assert "uv still is not callable" in out.stdout and "per-user uv" in out.stdout
     assert out.returncode == 1
 
 
+def test_the_window_asking_for_shared_twice_is_a_failure_not_a_loop(tmp_path):
+    _clone, _, _, out = _run(tmp_path, system_uv=True, codes="46 46 0")
+    assert len(_fields(out, "WINDOW-UV")) == 2
+    assert "The setup window could not run (exit 46)" in out.stdout
+    assert out.returncode == 46
+
+
 def test_portable_never_falls_back_to_the_system_uv_when_the_install_failed(tmp_path):
-    _clone, _, _, out = _run(tmp_path, answers="1\nY\n", system_uv=True,
-                             installer_creates_uv=False)
+    _clone, _, _, out = _run(tmp_path, system_uv=True, installer_creates_uv=False)
     assert "INSTALLER-RAN" in out.stdout
     assert "WINDOW-UV" not in out.stdout, "the window opened on the system uv"
     assert "uv still is not callable" in out.stdout
     assert out.returncode == 1
 
 
-def test_the_questions_are_worded_like_setup_sh():
-    gui = (ROOT / "setup-gui.sh").read_text(encoding="utf-8")
-    console = (ROOT / "setup.sh").read_text(encoding="utf-8")
-    for fragment in ("Keep localm's Python tooling", "[1] Portable - everything in this folder",
-                     "[2] Shared   - reuse/install uv at its normal per-user location",
-                     '"  Pick 1 or 2 [1]: "', NOT_INSTALLED,
-                     "\"  Install it now with Astral's official installer? [Y/n]: \""):
-        assert fragment in gui and fragment in console, fragment
-
-
-def test_each_launcher_question_is_tagged_once():
+def test_the_launcher_asks_no_question():
     lines = (ROOT / "setup-gui.sh").read_text(encoding="utf-8").splitlines()
-    tags = [ln.strip() for ln in lines if ln.strip().startswith("# SETUP-Q:")]
-    assert tags == ["# SETUP-Q: uv-install", "# SETUP-Q: tooling-store"]
-    for i, ln in enumerate(lines):
-        if re.search(r"^\s*read\s+-r\s+-p", ln):
-            assert lines[i - 1].strip().startswith("# SETUP-Q:"), ln
+    code = [ln for ln in lines if not ln.strip().startswith("#")]
+    assert not [ln for ln in code if re.search(r"\bread\b[^;|]*\s-p\b", ln)]
+    assert not [ln for ln in lines if "SETUP-Q:" in ln]
 
 
-def test_no_display_is_refused_before_any_question_or_uv_install(tmp_path):
+def test_no_display_is_refused_before_any_uv_install(tmp_path):
     clone = tmp_path / "clone"
     clone.mkdir()
     shutil.copy2(ROOT / "setup-gui.sh", clone / "setup-gui.sh")
@@ -255,13 +255,12 @@ def test_no_display_is_refused_before_any_question_or_uv_install(tmp_path):
     for var in ("DISPLAY", "WAYLAND_DISPLAY", "UV_INSTALL_DIR", "UV_UNMANAGED_INSTALL"):
         env.pop(var, None)
     raw = subprocess.run([_bash(), (clone / "setup-gui.sh").as_posix()], cwd=str(clone),
-                         env=env, input=b"1\ny\n", capture_output=True, timeout=120)
+                         env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=120)
     out = raw.stdout.decode("utf-8", "replace")
     if "Darwin" in subprocess.run([_bash(), "-c", "uname -s"], capture_output=True,
                                   text=True).stdout:
         pytest.skip("macOS needs no DISPLAY")
     assert raw.returncode == 1, out
     assert "No graphical display was found" in out
-    assert "Keep localm's Python tooling" not in out
     assert "CURL-RAN" not in out
     assert not (clone / ".uv").exists()

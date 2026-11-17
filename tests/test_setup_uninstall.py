@@ -302,7 +302,8 @@ def _gui_finish(clone: Path, tmp_path: Path, *, cwd: Path = None, code: int = 42
     probe = clone / "setup-gui-probe.bat"
     probe.write_text(text.replace(_UV_RUN, f"cmd /c exit {code}").replace("\n", "\r\n"),
                      encoding="utf-8")
-    env = dict(os.environ, PATH=str(stub) + os.pathsep + os.environ.get("PATH", ""))
+    env = dict(os.environ, PATH=str(stub) + os.pathsep + os.environ.get("PATH", ""),
+               LOCALM_SETUP_GUI_INPLACE="1")
     return subprocess.run(["cmd", "/c", str(probe)], cwd=str(cwd or clone), env=env,
                           capture_output=True, text=True, timeout=120,
                           stdin=subprocess.DEVNULL)

@@ -235,6 +235,87 @@ class TestBootstrap:
         assert list(scratch.iterdir()) == []
 
 
+class TestPerUserUv:
+    """The uv the Shared choice switches to: never the folder's own copy."""
+
+    def test_none_when_only_the_folder_has_one(self, machine, monkeypatch):
+        root, _ = machine
+        contained = _uv(root / ".uv")
+        monkeypatch.setenv("PATH", str(contained.parent))
+        assert uv_tool.per_user_uv(root) is None
+
+    def test_path_after_the_contained_copy_is_still_searched(self, machine, tmp_path, monkeypatch):
+        root, _ = machine
+        contained = _uv(root / ".uv")
+        other = _uv(tmp_path / "bin")
+        import os
+        monkeypatch.setenv("PATH", os.pathsep.join([str(contained.parent), str(other.parent)]))
+        assert uv_tool.per_user_uv(root) == str(other)
+
+    def test_the_default_directories_when_path_has_none(self, machine, monkeypatch):
+        root, home = machine
+        monkeypatch.delenv("XDG_BIN_HOME", raising=False)
+        exe = _uv(home / ".local" / "bin")
+        assert uv_tool.per_user_uv(root) == str(exe)
+
+    def test_xdg_bin_home_comes_first_among_the_defaults(self, machine, tmp_path, monkeypatch):
+        root, home = machine
+        _uv(home / ".local" / "bin")
+        xdg = _uv(tmp_path / "xdgbin")
+        monkeypatch.setenv("XDG_BIN_HOME", str(xdg.parent))
+        assert uv_tool.per_user_uv(root) == str(xdg)
+
+
+class TestSharedBootstrap:
+    """bootstrap_uv(shared=True): the pinned installer, told no folder, as
+    setup.bat's and setup.sh's Shared choice runs it."""
+
+    def test_the_installer_gets_no_install_folder_and_the_per_user_uv_is_returned(
+            self, machine, tmp_path, monkeypatch):
+        root, home = machine
+        monkeypatch.delenv("XDG_BIN_HOME", raising=False)
+        monkeypatch.setenv("UV_INSTALL_DIR", str(tmp_path / "inherited"))
+        installer = b"the pinned installer"
+        clone = _clone_with_pin(tmp_path, installer)
+        seen = {}
+
+        def run(script, env):
+            seen["env"] = env
+            _uv(home / ".local" / "bin")
+            return 0
+
+        exe = uv_tool.bootstrap_uv(clone, shared=True, run_installer=run,
+                                   download=lambda u, d: d.write_bytes(installer))
+        assert exe == home / ".local" / "bin" / UV
+        assert "UV_INSTALL_DIR" not in seen["env"]
+        assert "UV_UNMANAGED_INSTALL" not in seen["env"]
+        assert not (clone / ".uv").exists()
+
+    def test_a_checksum_mismatch_never_runs_the_installer(self, machine, tmp_path):
+        clone = _clone_with_pin(tmp_path, b"the pinned installer")
+        ran = []
+        with pytest.raises(uv_tool.UvBootstrapError, match="checksum"):
+            uv_tool.bootstrap_uv(clone, shared=True,
+                                 download=lambda u, d: d.write_bytes(b"tampered"),
+                                 run_installer=lambda s, e: ran.append(s) or 0)
+        assert ran == []
+
+    def test_an_installer_that_leaves_no_per_user_uv_is_not_a_success(self, machine, tmp_path):
+        clone = _clone_with_pin(tmp_path, b"x")
+        with pytest.raises(uv_tool.UvBootstrapError, match="per-user location"):
+            uv_tool.bootstrap_uv(clone, shared=True, download=lambda u, d: d.write_bytes(b"x"),
+                                 run_installer=lambda s, e: 0)
+
+    def test_the_folder_copy_is_never_returned_as_the_per_user_uv(self, machine, tmp_path,
+                                                                   monkeypatch):
+        clone = _clone_with_pin(tmp_path, b"x")
+        contained = _uv(clone / ".uv")
+        monkeypatch.setenv("PATH", str(contained.parent))
+        with pytest.raises(uv_tool.UvBootstrapError, match="per-user location"):
+            uv_tool.bootstrap_uv(clone, shared=True, download=lambda u, d: d.write_bytes(b"x"),
+                                 run_installer=lambda s, e: 0)
+
+
 class TestBundledUv:
     """The uv the ``uv`` Python package installed into this environment."""
 

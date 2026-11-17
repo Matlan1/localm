@@ -3,10 +3,11 @@
 #
 # LocaLM graphical setup - the windowed alternative to setup.sh.
 #
-# Bootstraps uv (the only part that cannot be graphical: something has to
-# provide a Python before a window can exist), then hands the whole install to
-# installer/gui.py, which runs on uv's managed CPython and needs no other
-# dependency - tkinter ships with it.
+# Asks nothing in the terminal: puts uv into ./.uv (and uv puts Python 3.12 into
+# ./.python and its downloads into ./.cache) when they are not there yet, then
+# hands the whole install to installer/gui.py, which runs on that Python and
+# needs no other dependency - tkinter ships with it. The window's first page
+# asks Portable or Shared.
 #
 # setup.sh remains the console installer and is unchanged. This is the same
 # install, asked for in a window.
@@ -44,13 +45,15 @@ echo
 echo "  LocaLM graphical setup"
 echo
 
-# ---- portable vs shared: where localm's Python tooling lives ----------------
-# The question setup.sh asks, asked once, here. The window reads the answer from
-# LOCALM_GUI_STORE (portable or shared), the uv in use from LOCALM_GUI_UV, and
-# LOCALM_GUI_UV_INSTALLED=1 when uv was installed at its per-user location by
-# this run. Portable uses only ./.uv/uv, installing it there when it is missing.
-# Shared uses the uv on PATH, never ./.uv, and installs uv at its normal per-user
-# location when there is none.
+# ---- the uv that opens the window --------------------------------------------
+# The window reads LOCALM_GUI_STORE (the choice its first page starts on:
+# portable or shared), LOCALM_GUI_UV (the uv in use), LOCALM_GUI_BOOTSTRAP
+# (what this run put into the folder to open the window: uv, python, cache)
+# and, once Shared was chosen, LOCALM_GUI_REPOINTED=1 and
+# LOCALM_GUI_UV_INSTALLED=1 when the window installed that per-user uv.
+# The folder's own ./.uv/uv is used when it is there; an earlier Shared install
+# (no ./.uv, an install record) reuses the per-user uv; anything else installs
+# uv into ./.uv without asking.
 shared_uv() {  # prints the first uv on PATH that is not this folder's ./.uv copy
     local d dirs
     IFS=: read -r -a dirs <<< "$PATH"
@@ -62,19 +65,6 @@ shared_uv() {  # prints the first uv on PATH that is not this folder's ./.uv cop
         return 0
     done
     return 0
-}
-ask_install_uv() {  # setup.sh's uv-install question; exits when the user declines
-    local getuv=""
-    echo "  [!] uv (the Python package manager localm builds on) is not installed."
-    # SETUP-Q: uv-install
-    read -r -p "  Install it now with Astral's official installer? [Y/n]: " getuv || getuv=""
-    case "${getuv:-Y}" in
-        [Nn]*)
-            echo
-            echo "  Nothing was installed. Run ./setup.sh for the console installer."
-            exit 1
-            ;;
-    esac
 }
 run_uv_installer() {  # the pinned, checksum-verified Astral installer; exits on failure
     # The installer script and everything Astral's installer downloads (TMPDIR)
@@ -92,85 +82,107 @@ run_uv_installer() {  # the pinned, checksum-verified Astral installer; exits on
     rm -rf "$UVTMP"
     rmdir ./.localm-setup-tmp 2>/dev/null || true
 }
+remove_bootstrap() {  # removes ./.uv ./.python ./.cache as named in LOCALM_GUI_BOOTSTRAP; LEFTOVER lists what stayed
+    local n
+    LEFTOVER=""
+    for n in $LOCALM_GUI_BOOTSTRAP; do
+        case "$n" in uv|python|cache) ;; *) continue ;; esac
+        if [ -e "./.$n" ]; then
+            chmod -R u+w "./.$n" 2>/dev/null || true
+            rm -rf "./.$n" 2>/dev/null || true
+        fi
+        if [ -e "./.$n" ]; then LEFTOVER="$LEFTOVER ./.$n"; fi
+    done
+}
+uv_not_callable() {  # says so and exits 1
+    echo
+    echo "  [!] uv still is not callable, so the graphical setup cannot start."
+    if [ "$LOCALM_GUI_STORE" = portable ]; then
+        echo "      Looked for $PWD/.uv/uv (the installer did not leave one there)."
+    else
+        echo "      Looked on PATH and in ~/.local/bin for the per-user uv."
+    fi
+    echo "      Open a NEW terminal and run ./setup.sh instead."
+    exit 1
+}
 
 # A headless box (no DISPLAY) has no window to show: say so and point at the
-# console installer, before any question is asked or uv is installed.
+# console installer, before uv is installed.
 if [ "$(uname -s)" != "Darwin" ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
     echo "  [!] No graphical display was found (DISPLAY/WAYLAND_DISPLAY are unset)."
     echo "      Use the console installer instead:  ./setup.sh"
     exit 1
 fi
 
-while : ; do
-echo "  Keep localm's Python tooling (uv itself, its runtime, and downloads) inside this folder?"
-echo "    [1] Portable - everything in this folder (self-contained; re-downloads per clone)"
-echo "    [2] Shared   - reuse/install uv at its normal per-user location (faster; lives in ~/.local; a new install adds ~/.local/bin to your shell startup files)"
-STOREPICK=""
-# SETUP-Q: tooling-store
-read -r -p "  Pick 1 or 2 [1]: " STOREPICK || STOREPICK=""
-STOREPICK="${STOREPICK:-1}"
-case "$STOREPICK" in 1|2) break ;; esac
-echo "  [!] Type a number from 1 to 2."
-done
 UVEXE=""
-unset LOCALM_GUI_UV_INSTALLED
-if [ "$STOREPICK" = 1 ]; then
-    export LOCALM_GUI_STORE=portable
-    echo "  Portable: uv, Python, and downloads all under this folder"
-    if [ ! -x "./.uv/uv" ]; then
-        ask_install_uv
-        echo "  Installing uv ..."
-        # UV_UNMANAGED_INSTALL keeps it in ./.uv without editing shell startup
-        # files or writing an install receipt under ~/.config/uv.
-        export UV_INSTALL_DIR="$PWD/.uv"
-        export UV_UNMANAGED_INSTALL="$PWD/.uv"
-        echo "  Portable: installing uv itself under ./.uv"
-        run_uv_installer
-    fi
-    if [ -x "./.uv/uv" ]; then UVEXE="$PWD/.uv/uv"; fi
-else
-    export LOCALM_GUI_STORE=shared
-    echo "  Shared: reusing/installing uv and its Python + cache (outside this folder)."
+LOCALM_GUI_BOOTSTRAP=""
+unset LOCALM_GUI_UV_INSTALLED LOCALM_GUI_REPOINTED
+export LOCALM_GUI_STORE=portable
+if [ -x "./.uv/uv" ]; then
+    UVEXE="$PWD/.uv/uv"
+elif { [ -f ./.localm-install.json ] || [ -f ./.venv/.localm-venv ]; } && [ -n "$(shared_uv)" ]; then
     UVEXE="$(shared_uv)"
-    if [ -z "$UVEXE" ]; then
-        ask_install_uv
-        echo "  Installing uv ..."
-        unset UV_INSTALL_DIR UV_UNMANAGED_INSTALL
-        run_uv_installer
-        export LOCALM_GUI_UV_INSTALLED=1
-        # Prepend both directories the installer may have used, in setup.sh's
-        # own order.
-        export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
-        UVEXE="$(shared_uv)"
+    export LOCALM_GUI_STORE=shared
+else
+    echo "  Installing uv into ./.uv ..."
+    # UV_UNMANAGED_INSTALL keeps it in ./.uv without editing shell startup
+    # files or writing an install receipt under ~/.config/uv.
+    export UV_INSTALL_DIR="$PWD/.uv"
+    export UV_UNMANAGED_INSTALL="$PWD/.uv"
+    run_uv_installer
+    unset UV_INSTALL_DIR UV_UNMANAGED_INSTALL
+    if [ -x "./.uv/uv" ]; then
+        UVEXE="$PWD/.uv/uv"
+        LOCALM_GUI_BOOTSTRAP="uv"
     fi
 fi
-echo
-
-if [ -z "$UVEXE" ]; then
-    echo
-    echo "  [!] uv still is not callable, so the graphical setup cannot start."
-    if [ "$LOCALM_GUI_STORE" = portable ]; then
-        echo "      Looked for $PWD/.uv/uv (the installer did not leave one there)."
-    fi
-    echo "      Open a NEW terminal and run ./setup.sh instead."
-    exit 1
-fi
+if [ -z "$UVEXE" ]; then uv_not_callable; fi
 
 # ---- open the installer window ----------------------------------------------
 # --no-project so uv never resolves this repo as its own project, and an explicit
-# --python so the interpreter is the managed 3.12 the install targets.
-
-export LOCALM_GUI_UV="$UVEXE"
-echo "  Opening the setup window ..."
-# Portable keeps the interpreter this window runs on inside the folder, so the
-# install reuses it rather than downloading a second copy.
-if [ "$LOCALM_GUI_STORE" = portable ]; then
-    export UV_PYTHON_INSTALL_DIR="$PWD/.python"
-    export UV_CACHE_DIR="$PWD/.cache"
-fi
-export UV_SYSTEM_CERTS=1
+# --python so the interpreter is the managed 3.12 the install targets. Portable
+# keeps the interpreter this window runs on inside the folder, so the install
+# reuses it rather than downloading a second copy. 46 and 47: Shared was chosen
+# on the first page and the per-user uv is in place (47: the window installed
+# it); what this run put in the folder is removed and the window opens again on
+# that uv.
 rc=0
-"$UVEXE" run --no-project --isolated --python 3.12 python installer/gui.py || rc=$?
+while : ; do
+    export LOCALM_GUI_UV="$UVEXE"
+    echo "  Opening the setup window ..."
+    if [ "$LOCALM_GUI_STORE" = portable ]; then
+        if [ ! -d ./.python ]; then LOCALM_GUI_BOOTSTRAP="$LOCALM_GUI_BOOTSTRAP python"; fi
+        if [ ! -d ./.cache ]; then LOCALM_GUI_BOOTSTRAP="$LOCALM_GUI_BOOTSTRAP cache"; fi
+        export UV_PYTHON_INSTALL_DIR="$PWD/.python"
+        export UV_CACHE_DIR="$PWD/.cache"
+    fi
+    export LOCALM_GUI_BOOTSTRAP
+    export UV_SYSTEM_CERTS=1
+    rc=0
+    "$UVEXE" run --no-project --isolated --python 3.12 python installer/gui.py || rc=$?
+    if [ "$rc" != 46 ] && [ "$rc" != 47 ]; then break; fi
+    if [ -n "${LOCALM_GUI_REPOINTED:-}" ]; then break; fi
+    if [ "$rc" = 47 ]; then export LOCALM_GUI_UV_INSTALLED=1; fi
+    export LOCALM_GUI_REPOINTED=1
+    unset UV_PYTHON_INSTALL_DIR UV_CACHE_DIR
+    remove_bootstrap
+    LOCALM_GUI_BOOTSTRAP=""
+    export LOCALM_GUI_STORE=shared
+    UVEXE="$(shared_uv)"
+    if [ -z "$UVEXE" ]; then
+        # Every directory the per-user install may have used, in setup.sh's own order.
+        export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+        if [ -n "${XDG_BIN_HOME:-}" ]; then export PATH="$XDG_BIN_HOME:$PATH"; fi
+        UVEXE="$(shared_uv)"
+    fi
+    if [ -z "$UVEXE" ]; then uv_not_callable; fi
+    if [ -n "$LEFTOVER" ]; then
+        echo "  [!] Could not remove$LEFTOVER from this folder."
+        echo "      Setup put them there to open its window; the Shared choice does not use"
+        echo "      them. Delete them by hand."
+    fi
+    echo "  Shared: using $UVEXE"
+done
 # 42 and 43: an uninstall finished in the window; the Python runtime it ran on
 # is removed now that it has closed. 43 and 44: something asked for was kept.
 # 45: the uninstall did not finish.

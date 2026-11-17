@@ -106,6 +106,28 @@ QUESTIONS: tuple = (
 
 _BY_ID = {q.id: q for q in QUESTIONS}
 
+# The tooling-store and uv-install wording every variant shows: setup.bat and
+# setup.sh print it, the window's first page shows it.
+TOOLING_STORE_TEXT = ("Keep localm's Python tooling (uv itself, its runtime, and downloads) "
+                      "inside this folder?")
+TOOLING_PORTABLE_TEXT = "Portable - everything in this folder (self-contained; re-downloads per clone)"
+TOOLING_SHARED_TEXT = {
+    "win32": ("Shared - reuse/install uv at its normal per-user location (faster; lives in "
+              "your user profile; a new install adds it to your user PATH)"),
+    "": ("Shared - reuse/install uv at its normal per-user location (faster; lives in "
+         "~/.local; a new install adds ~/.local/bin to your shell startup files)"),
+}
+UV_MISSING_TEXT = "uv (the Python package manager localm builds on) is not installed."
+UV_INSTALL_TEXT = "Install it now with Astral's official installer?"
+
+
+def tooling_shared_text(plat: str | None = None) -> str:
+    """The Shared choice of the tooling-store question on *plat* (default: this
+    machine): Windows names the user profile and PATH, every other platform
+    ~/.local and the shell startup files."""
+    plat = sys.platform if plat is None else plat
+    return TOOLING_SHARED_TEXT.get(plat, TOOLING_SHARED_TEXT[""])
+
 
 def question(qid: str) -> Question:
     """The question named *qid*. Raises KeyError for an unknown id."""
