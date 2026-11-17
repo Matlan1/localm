@@ -409,9 +409,14 @@ async def test_heartbeat_records_a_real_block_and_ignores_a_healthy_loop(clean_s
 
 
 def _request_loop_lags(tmp_path, monkeypatch, caplog, paths):
-    """Serve `paths` from a real app with the real heartbeat running (pytest
-    hidden from the lifespan gate) and return {path: (logged loop_lag seconds,
-    logged request duration seconds)}."""
+    """Serve `paths` from a real app and return {path: (logged loop_lag
+    seconds, logged request duration seconds)}. The real heartbeat does not
+    run (pytest stays in sys.modules); `_hb_monotonic` is parked far in the
+    future so the overdue-tick term is always 0, and the stalls the request log
+    sees are exactly the ones injected into `_hb_stalls`: a stall dated wholly
+    before the requests, and `/_t/stall/{secs}`, which records a stall of
+    `secs` seconds starting at the handler's entry and then waits `secs`
+    seconds."""
     import localm.config as cfg
     from localm.inference import http_server as hs
 
@@ -422,30 +427,28 @@ def _request_loop_lags(tmp_path, monkeypatch, caplog, paths):
     monkeypatch.setattr(cfg, "HOME_DIR", home)
     monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
     monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
-    monkeypatch.setattr(hs, "_hb_monotonic", None)
     monkeypatch.setattr(hs, "_hb_stalls", type(hs._hb_stalls)(maxlen=512))
-    monkeypatch.delitem(sys.modules, "pytest", raising=False)
 
     app = create_app(None, api_landing=True)
 
-    async def _block(secs: float):
-        time.sleep(secs)
+    async def _stall(secs: float):
+        t0 = time.monotonic()
+        hs._hb_stalls.append((t0, t0 + secs))
+        await asyncio.sleep(secs)
         return {"ok": True}
 
     async def _wait(secs: float):
         await asyncio.sleep(secs)
         return {"ok": True}
 
-    app.add_api_route("/_t/block/{secs}", _block)
+    app.add_api_route("/_t/stall/{secs}", _stall)
     app.add_api_route("/_t/wait/{secs}", _wait)
     out = {}
     with caplog.at_level("DEBUG", logger="localm"):
         with TestClient(app) as c:
-            deadline = time.monotonic() + 3.0
-            while hs._hb_monotonic is None and time.monotonic() < deadline:
-                time.sleep(0.02)
-            assert hs._hb_monotonic is not None, "heartbeat never ticked"
-            time.sleep(0.3)
+            now = time.monotonic()
+            monkeypatch.setattr(hs, "_hb_monotonic", now + 3600.0)
+            hs._hb_stalls.append((now - 3.0, now - 2.0))
             for path in paths:
                 caplog.clear()
                 r = c.get(path, headers={"Authorization": f"Bearer {app.state.shell_token}"})
@@ -460,17 +463,20 @@ def _request_loop_lags(tmp_path, monkeypatch, caplog, paths):
 
 
 def test_request_log_reports_the_stall_that_overlapped_the_request(tmp_path, monkeypatch, caplog):
+    """A request during which a stall was recorded reports at least that
+    stall (less the timer's early-wake slack) and never more than its own
+    duration. A request with a stall recorded wholly before it, and no
+    overdue tick, reports 0.00."""
     readings = _request_loop_lags(
         tmp_path, monkeypatch, caplog,
-        ["/_t/block/0.5", "/_t/block/2", "/_t/wait/2"])
+        ["/_t/stall/0.5", "/_t/stall/1.5", "/_t/wait/0.5"])
     lags = {path: lag for path, (lag, _) in readings.items()}
-    interval = 0.1
     clock_tick = 0.03
-    assert 0.5 - interval - 0.02 <= lags["/_t/block/0.5"], lags
-    assert 2.0 - interval - 0.02 <= lags["/_t/block/2"], lags
+    assert 0.5 - clock_tick <= lags["/_t/stall/0.5"], lags
+    assert 1.5 - clock_tick <= lags["/_t/stall/1.5"], lags
     for path, (lag, request_s) in readings.items():
         assert lag <= request_s + clock_tick, (path, readings)
-    assert lags["/_t/wait/2"] <= 0.3, lags
+    assert lags["/_t/wait/0.5"] == 0.0, lags
 
 
 # --------------------------------------------------------------------------- #
