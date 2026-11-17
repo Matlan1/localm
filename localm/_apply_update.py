@@ -24,7 +24,9 @@ to download, signature verification, and the post-swap step.
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import stat
 import sys
 import zipfile
 from pathlib import Path
@@ -65,6 +67,37 @@ _IN_EVERY_BUILD = ("VERSION", "pyproject.toml", "localm")
 # Files up to this size are compared by content in :func:`runtime_differs`; larger
 # ones by size.
 _SMALL_FILE = 64 * 1024
+
+#: Install-root-relative POSIX paths of every file a build ships with the execute
+#: permission (git mode 100755). See test_executables_match_the_tracked_file_modes.
+EXECUTABLES = (
+    "docker/entrypoint.sh", "docker/healthcheck.sh", "docker/smoke-test.sh", "install.sh",
+    "localm-launcher.sh", "localm.sh", "report-issue.sh", "rollback.sh", "setup-gui.sh",
+    "setup.sh",
+)
+
+
+def _add_exec(path) -> bool:
+    """Give *path* the execute permission wherever it has the read permission (what
+    ``chmod +x`` does under the usual umask). Returns True when the mode changed.
+    Raises OSError."""
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    want = mode | ((mode & 0o444) >> 2)
+    if want == mode:
+        return False
+    os.chmod(path, want)
+    return True
+
+
+def restore_executables(root) -> list:
+    """Give each :data:`EXECUTABLES` file present in the install at *root* its
+    execute permission. Returns the paths it changed. Does nothing on Windows.
+    Raises OSError."""
+    if os.name == "nt":
+        return []
+    root = Path(root)
+    return [rel for rel in EXECUTABLES
+            if (root / rel).is_file() and _add_exec(root / rel)]
 
 
 def _debug_warn(msg, *args) -> None:
@@ -232,7 +265,10 @@ def extract(zip_path, staging) -> Path:
 
     REJECTS any member whose path would escape the staging dir (absolute path, drive
     letter, or ``..`` traversal), so a crafted build cannot write outside staging or
-    plant top-level debris via a sanitized name."""
+    plant top-level debris via a sanitized name.
+
+    Outside Windows, a file the archive records with an execute permission gets it
+    (:func:`_add_exec`); no other permission bit is taken from the archive."""
     staging = Path(staging)
     if staging.exists():
         shutil.rmtree(staging)
@@ -242,6 +278,10 @@ def extract(zip_path, staging) -> Path:
             if _unsafe_member(member):
                 raise ValueError(f"unsafe path in update archive: {member!r}")
         z.extractall(staging)
+        if os.name != "nt":
+            for info in z.infolist():
+                if not info.is_dir() and (info.external_attr >> 16) & 0o111:
+                    _add_exec(staging / info.filename)
     if not (staging / "VERSION").exists():
         entries = list(staging.iterdir())
         if len(entries) == 1 and entries[0].is_dir():
