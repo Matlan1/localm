@@ -786,8 +786,8 @@ def last_known_gpus() -> list:
 
     ``list_gpus`` has no TTL cache - every call re-probes so a live ``free`` is
     never stale - which makes it the wrong thing to call for a second,
-    incidental use right after something else has already probed. A probe spawns
-    a torch-importing subprocess and costs seconds.
+    incidental use right after something else has already probed. A probe can
+    spawn a torch-importing subprocess, which costs seconds.
 
     This is for exactly that case: a caller that has JUST driven a probe (e.g. via
     :func:`vram_capacity`) and wants the per-device detail behind the number it

@@ -509,8 +509,8 @@ def _shape_vram(info: dict, status, devices: list | None = None) -> dict:
     # overstates free, so those devices report total only.
     try:
         # last_known_gpus(), not list_gpus(): vram_capacity() above has just driven
-        # a probe, and list_gpus has no TTL cache, so calling it here would spawn a
-        # second torch subprocess for data already produced.
+        # a probe, and list_gpus has no TTL cache, so calling it here would probe
+        # again (and can spawn a torch subprocess) for data already produced.
         #
         # Source order matters. last_known_gpus() comes from list_gpus(), which
         # enumerates only via torch.cuda or nvidia-smi and never calls the Vulkan
