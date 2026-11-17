@@ -124,9 +124,11 @@ class TestKeptDeviceList:
         """The load/unload path's repeated list_gpus calls start the real torch
         probe child once, and every read still follows the device's live used
         VRAM. Break: drop the kept-list return in _list_gpus_probe and this
-        reports three children."""
+        reports three children. The first read uses the stub's own 2 GB used,
+        which the driver reading off Windows and the device-global correction
+        on Windows both give."""
         seen = []
-        for used in (1, 3, 5):
+        for used in (2, 3, 5):
             torch_free_sources["bytes"] = used * GB
             gpus, status = discover.list_gpus(return_status=True)
             assert status == discover.GPU_PROBE_OK
@@ -134,7 +136,7 @@ class TestKeptDeviceList:
             assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE
             assert gpus[0]["name"] == "STUB GPU 0"
         assert stub_torch_child() == 1
-        assert seen == [7 * GB, 5 * GB, 3 * GB]
+        assert seen == [6 * GB, 5 * GB, 3 * GB]
 
     def test_a_requested_re_enumeration_asks_the_real_child_again(
             self, monkeypatch, torch_free_sources, stub_torch_child):
