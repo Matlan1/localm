@@ -84,8 +84,10 @@ def test_a_protected_process_is_never_taken_for_a_probe_daemons_launcher(tmp_pat
     commands = {10: probe, 11: probe}
     assert updater_runtime.own_probe_daemons(
         [{"pid": 11, "name": "python"}], root, procs=procs, read_command=commands.get) is None
+    # 10 runs from inside the install, so it is one of its daemons by itself; 11,
+    # outside, would be one only through a proven parent.
     assert updater_runtime.running_own_probe_daemons(
-        root, procs=procs, read_command=commands.get) == []
+        root, procs=procs, read_command=commands.get) == [10]
 
 
 def test_the_comfy_stop_walks_the_same_guarded_tree(tmp_path, monkeypatch):
