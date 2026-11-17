@@ -487,8 +487,20 @@ def run_installer(path: Path, args: Iterable[str] = INSTALL_ARGS) -> int:
             ole32.CoUninitialize()
 
 
+# HRESULT exit code of the installer when it is denied administrator rights.
+E_ACCESSDENIED = 0x80070005
+
+
 def _exit_meaning(code: int) -> str:
-    return _EXIT_MEANINGS.get(code, f"the installer exited with code {code}")
+    """Plain words for installer exit *code*; an HRESULT (above 0x7FFFFFFF) is
+    shown in hex."""
+    if code in _EXIT_MEANINGS:
+        return _EXIT_MEANINGS[code]
+    if code == E_ACCESSDENIED:
+        return "the installer was denied administrator rights (0x80070005)"
+    if code > 0x7FFFFFFF:
+        return f"the installer exited with code {code:#010x}"
+    return f"the installer exited with code {code}"
 
 
 def ensure(folder: Path, *, download: Callable[[str, Path], object],

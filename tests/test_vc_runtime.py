@@ -301,6 +301,8 @@ def test_a_failed_download_ends_in_the_message(rig):
     (vc_runtime.ERROR_INSTALL_ALREADY_RUNNING, "another installation is in progress"),
     (vc_runtime.WAIT_TIMEOUT, "the installer was still running after 20 minutes"),
     (1714, "the installer exited with code 1714"),
+    (0x80070005, "the installer was denied administrator rights (0x80070005)"),
+    (0x80070642, "the installer exited with code 0x80070642"),
     (vc_runtime.ERROR_SUCCESS_REBOOT_REQUIRED, "Windows needs a restart"),
     (vc_runtime.ERROR_SUCCESS, "the installer finished but the system folder still lacks it"),
 ])
