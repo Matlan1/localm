@@ -1525,3 +1525,4 @@ def dedup_native_stderr(swap_lock=None):
             if console is not None:
                 with contextlib.suppress(OSError):
                     console.close()
+# End of module.
