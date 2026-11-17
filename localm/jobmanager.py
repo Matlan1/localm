@@ -1294,7 +1294,9 @@ class JobManager:
                     "result": job.result,
                 })
 
-        threading.Thread(target=_run, daemon=True).start()
+        from localm.config import home_bound
+        threading.Thread(target=home_bound(_run, name=f"job {kind}", track=False),
+                         daemon=True).start()
         return job
 
     def start_fn(self, kind: str, fn, *, result_path: str | None = None,
@@ -1358,7 +1360,9 @@ class JobManager:
                 })
                 log_job_end(job, err)
 
-        threading.Thread(target=_run, daemon=True).start()
+        from localm.config import home_bound
+        threading.Thread(target=home_bound(_run, name=f"job {kind}", track=False),
+                         daemon=True).start()
         return job
 
     def snapshot(self, visible=None) -> list:
