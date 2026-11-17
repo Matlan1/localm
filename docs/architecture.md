@@ -120,7 +120,8 @@ The plan splits the selection into shards: one per 75 selected test files,
 at most 5. `python-pr-gate-shard` runs each shard on ubuntu-latest and on
 windows-latest (`tests/_shard.py`, the split the full matrix uses), so a wide
 selection runs in parallel and a test that skips on Linux (`skipif` not win32)
-runs on every pull request that selects it. A docs-only change runs no shard.
+runs on every pull request that selects it. A change that selects no test
+file runs no shard.
 `python-pr-gate` (the Linux shards) and `python-pr-gate-windows` (the Windows
 shards) are the verdicts: each fails unless the plan job succeeded and either
 nothing was selected and no shard ran, or every shard of its platform
