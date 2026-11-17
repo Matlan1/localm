@@ -119,6 +119,61 @@ class TestPrefetch:
         assert voice.prefetch_stt_model(allow_download=True) == (True, "")
         assert "revision" not in hub.calls[0][1]
 
+    def test_a_model_change_saved_during_the_download_does_not_fail_it(
+            self, monkeypatch, pinned_to_body):
+        cfg = {"voice_stt_model": "base", "net_mode": "allow"}
+        set_config(monkeypatch, lambda: dict(cfg))
+        fetched = []
+
+        def snapshot_download(repo_id, **kw):
+            fetched.append(repo_id)
+            _lay(kw["revision"])
+            cfg["voice_stt_model"] = "medium"
+            return "unused"
+
+        monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot_download)
+        assert voice.prefetch_stt_model(allow_download=True) == (True, "")
+        assert fetched == [REPO]
+        assert voice.stt_model_cached_as("base") is True
+        assert voice.stt_model_cached() == (False, "medium")
+
+    def test_a_named_prefetch_fetches_that_model_whatever_the_config_says(
+            self, monkeypatch, pinned_to_body):
+        set_config(monkeypatch, lambda: {"voice_stt_model": "medium", "net_mode": "allow"})
+        fetched = []
+
+        def snapshot_download(repo_id, **kw):
+            fetched.append(repo_id)
+            _lay(kw["revision"])
+            return "unused"
+
+        monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot_download)
+        assert voice.prefetch_stt_model(allow_download=True, name="base") == (True, "")
+        assert fetched == [REPO]
+
+    def test_a_fetch_that_leaves_no_model_bin_says_to_download_again(self, monkeypatch):
+        monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda repo_id, **kw: "unused")
+        ok, reason = voice.prefetch_stt_model(allow_download=True)
+        assert ok is False
+        assert "Start the download again" in reason
+        assert "does not look like" not in reason
+
+
+def test_a_transcription_plan_asks_about_the_model_it_will_load(monkeypatch, pinned_to_body):
+    import importlib.util
+    real_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec",
+                        lambda mod, *a, **k: object() if mod == "faster_whisper"
+                        else real_find_spec(mod, *a, **k))
+    monkeypatch.setattr("localm.netpolicy._check_public_address", lambda host: None)
+    _lay(PIN_COMMIT)
+    reads = iter([{"voice_stt_model": "base", "net_mode": "allow"}])
+    later = {"voice_stt_model": "medium", "net_mode": "allow"}
+    set_config(monkeypatch, lambda: next(reads, later))
+    plan = voice._stt_plan(None)
+    assert plan["name"] == "base"
+    assert plan["local_files_only"] is True
+
 
 class SimpleHub:
     def __init__(self, calls, state):

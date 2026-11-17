@@ -370,10 +370,12 @@ def voice_client(tmp_path, monkeypatch):
     home = _isolated_home(tmp_path, monkeypatch)
     import localm.voice as _voice
     hook_calls = []
+    hook_names = []
     monkeypatch.setattr(
         _voice, "prefetch_stt_model",
-        lambda allow_download=None: (hook_calls.append(allow_download)
-                                     or (False, "stubbed")))
+        lambda allow_download=None, name=None: (hook_calls.append(allow_download)
+                                                or hook_names.append(name)
+                                                or (False, "stubbed")))
     from localm import auth
     voice_only = auth.create_key("mic", ["voice"], allow_privileged=True)["key"]
     voice_writer = auth.create_key(
@@ -386,7 +388,8 @@ def voice_client(tmp_path, monkeypatch):
     with TestClient(app) as c:
         yield types.SimpleNamespace(c=c, home=home, voice_only=voice_only,
                                     voice_writer=voice_writer,
-                                    hook_calls=hook_calls, app=app)
+                                    hook_calls=hook_calls, hook_names=hook_names,
+                                    app=app)
 
 
 def _hdr(key):
@@ -499,6 +502,17 @@ class TestVoiceRoutes:
         assert load_config()["net_mode"] == "ask"
         # The stubbed prefetch reports failure, so the job status is "failed".
         assert job.status == "failed"
+
+    def test_download_route_job_fetches_the_model_named_at_the_request(
+            self, voice_client):
+        from localm.config import update_config
+        update_config(lambda c: c.__setitem__("voice_stt_model", "small"))
+        r = voice_client.c.post("/api/voice/model/download",
+                                headers=_hdr(OWNER_KEY))
+        assert r.status_code == 200, r.text
+        assert r.json()["model"] == "small"
+        _wait_job(voice_client.app, r.json()["job_id"])
+        assert voice_client.hook_names[-1] == "small"
 
     def test_download_route_short_circuits_when_cached(self, voice_client,
                                                        monkeypatch):

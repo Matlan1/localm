@@ -61,7 +61,7 @@ def home(tmp_path, monkeypatch):
 def voice_app(home, monkeypatch):
     import localm.voice as voice
     monkeypatch.setattr(voice, "prefetch_stt_model",
-                        lambda allow_download=None: (False, "stubbed in tests"))
+                        lambda allow_download=None, name=None: (False, "stubbed in tests"))
     from localm.plugins.engine import PluginManager
     app = FastAPI()
     PluginManager(app, external_root=home / "noplugins").install("voice")
@@ -416,7 +416,7 @@ class TestKernelOriginGate:
     def kernel_client(self, home, monkeypatch, worker):
         import localm.voice as voice
         monkeypatch.setattr(voice, "prefetch_stt_model",
-                            lambda allow_download=None: (False, "stubbed in tests"))
+                            lambda allow_download=None, name=None: (False, "stubbed in tests"))
         from localm.inference.http_server import create_app
         from localm.plugins.engine import PluginManager
         app = create_app(None)

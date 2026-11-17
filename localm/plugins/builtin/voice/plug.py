@@ -97,8 +97,10 @@ async def voice_status(request: Request):
 
 @_router.post("/api/voice/model/download")
 async def voice_model_download(request: Request):
-    """One-time download of the CONFIGURED Whisper model, for when the network
-    policy does not download it automatically (net_mode=ask).
+    """One-time download of the Whisper model configured when this request
+    arrives, for when the network policy does not download it automatically
+    (net_mode=ask). The job fetches and verifies that model even if
+    voice_stt_model is changed while it runs.
 
     This is an explicit consent for exactly ONE download: the authorization is
     a call argument consumed by the job (``prefetch_stt_model(allow_download=
@@ -131,7 +133,7 @@ async def voice_model_download(request: Request):
     def _run(job):
         job.push({"type": "line",
                   "text": f"Downloading Whisper model '{name}' (one-time)..."})
-        ok, reason = prefetch_stt_model(allow_download=True)
+        ok, reason = prefetch_stt_model(allow_download=True, name=name)
         if not ok:
             job.push({"type": "line", "text": f"error: {reason}"})
             return False
