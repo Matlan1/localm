@@ -923,18 +923,22 @@ def _stop_comfy(root: Path, say: Callable) -> list:
     import time
 
     from localm import install_manifest, updater_runtime
-    found = _running_in(root)
-    if not found:
+    if not root.is_dir():
         return []
     procs = install_manifest.list_processes() or []
+    found = install_manifest.running_from([root], procs=procs)
+    if not found:
+        return []
     by_pid = {p[0]: p for p in procs}
+    starts = {p[0]: p[3] for p in procs}
     deadline = time.monotonic() + _STOP_WAIT_S
     left = []
     for pid, _exe in found:
         if pid not in by_pid:
             continue
         say(f"Stopping the managed ComfyUI (pid {pid})...")
-        left += updater_runtime._stop_tree(updater_runtime._subtree(by_pid, pid), deadline)
+        left += updater_runtime._stop_tree(install_manifest.descendants(by_pid, pid), deadline,
+                                           starts)
     return [{"pid": pid, "name": "the managed ComfyUI"} for pid in left]
 
 
