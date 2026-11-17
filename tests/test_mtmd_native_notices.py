@@ -75,6 +75,14 @@ def test_a_projector_clip_places_on_the_cpu_is_marked_and_reported(monkeypatch, 
     assert _warned(caplog)
 
 
+def test_the_current_mtmd_cpu_backend_line_is_recognised(monkeypatch, caplog):
+    _runtime_gpu(monkeypatch, True)
+    with caplog.at_level("INFO", logger="localm"):
+        inst = _load(monkeypatch, "mtmd_backends: using CPU backend\n")
+    assert inst._mtmd.on_gpu is False
+    assert _warned(caplog)
+
+
 def test_a_cpu_only_machine_with_the_offload_flag_set_is_marked_but_not_warned(
         monkeypatch, caplog):
     _runtime_gpu(monkeypatch, False, offload_flag=True)

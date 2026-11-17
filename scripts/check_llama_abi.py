@@ -36,6 +36,13 @@ else ``mtmd_gen_state_init`` declared = state, else legacy), every struct localm
 same total size, and every function localm binds must take as many arguments as
 localm declares, with the same structs passed or returned by value.
 
+IT ALSO CHECKS THAT EVERY FUNCTION LOCALM BINDS IS STILL DECLARED, read from
+localm's own source (``bound_functions``) and from ``llama.h``, the mtmd headers
+and the ggml headers at the pinned release and at ``--ref``: a function localm
+calls unconditionally that a header no longer declares fails, as does one the
+pinned headers declare that ``--ref`` dropped; a function upstream marks
+DEPRECATED is reported, since upstream removes those in bulk.
+
 It complements the runtime guard ``_abi.verify_abi`` (which validates whatever DLL
 is actually loaded on a user's machine) and the CI load test: this one catches
 header-level drift before a build is even shipped.
@@ -776,6 +783,225 @@ def check_speech(mtmd_text: str, label: str, seen: set) -> int:
     return problems
 
 
+# --------------------------------------------------------------------------- #
+#  Bound functions (every native function localm calls must still be declared)
+# --------------------------------------------------------------------------- #
+
+# Header groups, keyed by the function-name prefix they declare.
+_FUNCTION_HEADERS = {
+    "llama": ("include/llama.h",),
+    "mtmd": _MTMD_HEADERS,
+    "ggml": ("ggml/include/ggml.h", "ggml/include/ggml-backend.h"),
+}
+_NATIVE_NAME = re.compile(r"^(llama|mtmd|ggml)_[a-z0-9_]+$")
+_API_MACRO = re.compile(r"\b(LLAMA_API|MTMD_API|GGML_API|GGML_BACKEND_API)\b")
+
+# Calls that take a native function name and fail without it, and calls that
+# take one and answer "absent" instead. getattr is a probe only with a default.
+_BIND_CALLS = frozenset({"_bind", "_read_raw", "getattr"})
+_PROBE_CALLS = frozenset({"hasattr", "_has_symbol", "_ggml_sym", "_sym",
+                          "_resolve_staging"})
+# Python modules whose attributes share the C names; their attributes are not bindings.
+_PYTHON_ALIASES = frozenset({"api", "_api"})
+# Packages whose tuples of native names are probe lists.
+_PROBE_LIST_DIRS = (("localm", "inference", "backends", "llamacpp"),)
+# A different native library with its own headers.
+_SKIP_DIRS = (("localm", "media"),)
+
+
+class BoundFunction(NamedTuple):
+    """A native function localm references, where, and whether a missing one
+    fails a call (some binding of it sits in a function that does not probe for
+    it first)."""
+    name: str
+    required: bool
+    sites: tuple
+
+
+def _under(parts: tuple, prefix: tuple) -> bool:
+    return parts[:len(prefix)] == prefix
+
+
+def _scopes(tree) -> dict:
+    """node -> the innermost function definition containing it, or *tree*."""
+    import ast
+
+    scope_of: dict = {}
+    stack = [(tree, tree)]
+    while stack:
+        node, scope = stack.pop()
+        for child in ast.iter_child_nodes(node):
+            inner = (child if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                     else scope)
+            scope_of[child] = inner
+            stack.append((child, inner))
+    return scope_of
+
+
+def _native_references(tree, probe_lists: bool):
+    """(name, node, is_bind) for every native function name *tree* binds or
+    probes; tuples of names count as probes when *probe_lists*."""
+    import ast
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            fname = (func.id if isinstance(func, ast.Name)
+                     else func.attr if isinstance(func, ast.Attribute) else None)
+            if fname not in _BIND_CALLS and fname not in _PROBE_CALLS:
+                continue
+            is_bind = fname in _BIND_CALLS and not (
+                fname == "getattr" and len(node.args) > 2)
+            for arg in node.args:
+                if (isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                        and _NATIVE_NAME.match(arg.value)):
+                    yield arg.value, node, is_bind
+        elif isinstance(node, ast.Attribute) and _NATIVE_NAME.match(node.attr):
+            base = node.value
+            if not (isinstance(base, ast.Name) and base.id in _PYTHON_ALIASES):
+                yield node.attr, node, True
+        elif probe_lists and isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+            for elt in node.elts:
+                if (isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+                        and _NATIVE_NAME.match(elt.value)):
+                    yield elt.value, elt, False
+
+
+def bound_functions(root: Path) -> dict:
+    """name -> BoundFunction for every llama/mtmd/ggml function the localm
+    package under *root* binds or probes, read from its source: string
+    arguments of the binding helpers and of hasattr/getattr, attributes read
+    off a loaded library, and (inside the llama.cpp backend) tuples of names
+    used as probe lists. A binding is guarded when the function containing it
+    (or the module, at top level) also probes that name."""
+    import ast
+
+    sites: dict = {}
+    binds: dict = {}     # name -> scopes holding a binding
+    probes: dict = {}    # name -> scopes holding a probe
+    for path in sorted((root / "localm").rglob("*.py")):
+        parts = path.relative_to(root).parts
+        if any(_under(parts, d) for d in _SKIP_DIRS):
+            continue
+        rel = "/".join(parts)
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        scope_of = _scopes(tree)
+        probe_lists = any(_under(parts, d) for d in _PROBE_LIST_DIRS)
+        for name, node, is_bind in _native_references(tree, probe_lists):
+            sites.setdefault(name, []).append(f"{rel}:{node.lineno}")
+            key = (rel, getattr(scope_of[node], "lineno", 0))
+            (binds if is_bind else probes).setdefault(name, set()).add(key)
+    return {name: BoundFunction(name, bool(binds.get(name, set()) - probes.get(name, set())),
+                                tuple(where))
+            for name, where in sites.items()}
+
+
+def declared_functions(text: str) -> dict:
+    """name -> True when deprecated, for every function a header *text*
+    declares with an API export macro."""
+    text = re.sub(r"^[ \t]*#(?:[^\n]*\\\n)*[^\n]*", "", _strip_comments(text), flags=re.M)
+    text = re.sub(r'"(?:\\.|[^"\\\n])*"', '""', text)
+    out: dict = {}
+    for m in re.finditer(r"\b((?:llama|mtmd|ggml)_[A-Za-z0-9_]*)\s*\(", text):
+        start = max(text.rfind(c, 0, m.start()) for c in ";{}") + 1
+        statement = text[start:m.start()]
+        outside = re.sub(r"\b\w*DEPRECATED\(", "", statement, count=1)
+        if not _API_MACRO.search(statement) or outside.count("(") != outside.count(")"):
+            continue
+        out[m.group(1)] = out.get(m.group(1), False) or "DEPRECATED" in statement
+    return out
+
+
+def _fetch_function_headers(ref: str) -> dict:
+    """prefix -> concatenated header text at *ref* for each _FUNCTION_HEADERS group."""
+    out = {}
+    for prefix, paths in _FUNCTION_HEADERS.items():
+        parts = []
+        for path in paths:
+            url = f"https://raw.githubusercontent.com/{_REPO}/{ref}/{path}"
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "localm-abi-check"})
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    parts.append(r.read().decode("utf-8", errors="replace"))
+            except Exception as e:  # noqa: BLE001
+                raise SystemExit(f"could not fetch {path} for ref {ref!r}: {e}") from e
+        out[prefix] = "\n".join(parts)
+    return out
+
+
+def check_functions(bound: dict, headers: dict, label: str,
+                    pinned: dict | None = None, deprecated: list | None = None) -> int:
+    """Check every function in *bound* against *headers* (prefix -> header text;
+    a prefix with no text is not checked). A FAIL for a required function the
+    headers do not declare and for any function the *pinned* headers declare
+    that these no longer do. A NOTE for a probed function the headers do not
+    declare, and for one declared DEPRECATED (upstream's notice that it will
+    be removed), which is also appended to *deprecated* as "name (label)"."""
+    print(f"\n############ Checking the functions localm binds against {label} "
+          "############")
+    declared = {p: declared_functions(t) for p, t in headers.items() if t}
+    was_declared = ({p: declared_functions(t) for p, t in pinned.items() if t}
+                    if pinned else {})
+    problems = 0
+    checked = 0
+    for name in sorted(bound):
+        fn = bound[name]
+        prefix = name.split("_", 1)[0]
+        if prefix not in declared:
+            continue
+        checked += 1
+        where = ", ".join(fn.sites[:3]) + (" ..." if len(fn.sites) > 3 else "")
+        if name in declared[prefix]:
+            if declared[prefix][name]:
+                print(f"  NOTE  {name} is DEPRECATED upstream and will be removed ({where})")
+                if deprecated is not None:
+                    deprecated.append(f"{name} ({label})")
+            continue
+        if fn.required:
+            print(f"  FAIL  {name} is not declared; every load that reaches it raises "
+                  f"AttributeError ({where})")
+            problems += 1
+        elif name in was_declared.get(prefix, {}):
+            print(f"  FAIL  {name} was declared at the pin and is gone; what it "
+                  f"gates turns off without an error ({where})")
+            problems += 1
+        else:
+            print(f"  NOTE  {name} is probed for and not declared here ({where})")
+    print(f"  {checked} function(s) checked, {problems} problem(s)")
+    if not checked:
+        print("  FAIL  no bound function was checked: the scan or the headers are empty")
+        problems += 1
+    return problems
+
+
+def _check_bound_functions(args, deprecated: list) -> int:
+    """The bound-function check for one run: against the local headers given
+    (only the groups given), or else against the pinned release and, with
+    --ref, that ref too, which must keep everything the pin declares."""
+    bound = bound_functions(Path(__file__).resolve().parent.parent)
+    if args.header:
+        headers = {"llama": Path(args.header).read_text(encoding="utf-8", errors="replace")}
+        if args.mtmd_header:
+            headers["mtmd"] = "\n".join(
+                Path(h).read_text(encoding="utf-8", errors="replace")
+                for h in args.mtmd_header)
+        return check_functions(bound, headers, args.header, deprecated=deprecated)
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import check_llama_pin
+    pin = check_llama_pin.pinned_tag()
+    pinned = _fetch_function_headers(pin)
+    total = check_functions(bound, pinned, f"{_REPO}@{pin} (the pin)",
+                            deprecated=deprecated)
+    if args.ref:
+        ref = _resolve_ref(args.ref)
+        if ref != pin:
+            total += check_functions(bound, _fetch_function_headers(ref),
+                                     f"{_REPO}@{ref}", pinned, deprecated)
+    return total
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -843,6 +1069,8 @@ def main() -> int:
     seen_speech = set()
     for label, text in speech:
         total += check_speech(text, label, seen_speech)
+    deprecated: list = []
+    total += _check_bound_functions(args, deprecated)
     if (not args.header and not args.ref and not args.mtmd_header
             and seen_speech != set(MTMD_SPEECH_REFS)):
         print(f"\nFAIL: expected to check every speech generation interface, only "
@@ -877,16 +1105,27 @@ def main() -> int:
               "  So on seeing this: bind the member, then re-probe a real build's "
               "llama_*_default_params() rather than reading the header alone.")
 
+    if deprecated:
+        print(f"\nDEPRECATED UPSTREAM function(s) localm binds ({len(deprecated)}):")
+        for item in deprecated:
+            print(f"  - {item}")
+        print("  Still declared, so this does NOT fail the check. Once upstream "
+              "removes one, every call to it fails: move each to its replacement "
+              "before that release.")
+
     print()
     if total:
         print(f"ABI CHECK FAILED: {total} mismatch(es). A mid-struct reorder/insert "
-              "corrupts memory, and a changed enum value silently redefines what a "
-              "field means - update _structs.py (and _abi anchors) or the speech "
-              "binding in mtmd_gen.py to match, then re-probe a real build.")
+              "corrupts memory, a changed enum value silently redefines what a "
+              "field means, and a function that is no longer declared fails every "
+              "call - update _structs.py (and _abi anchors), the speech binding in "
+              "mtmd_gen.py or the function binding in _api.py to match, then "
+              "re-probe a real build.")
         return 1
     print(f"ABI check passed: localm's named fields match upstream offsets "
-          f"for layout(s) {sorted(seen_layouts)}, and every enum member localm "
-          f"binds still has its upstream value.")
+          f"for layout(s) {sorted(seen_layouts)}, every enum member localm "
+          f"binds still has its upstream value, and every function localm "
+          f"binds is still declared.")
     return 0
 
 

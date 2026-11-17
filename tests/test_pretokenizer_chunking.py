@@ -541,7 +541,7 @@ PROSE = ("Der schnelle braune Fuchs springt \u00fcber den Hund.\n\nZweite Zeile 
 def tokenizer(path):
     p = api.llama_model_default_params()
     p.vocab_only = True
-    model = api.llama_load_model_from_file(path, p)
+    model = api.llama_model_load_from_file(path, p)
     assert model, "vocabulary-only load failed"
     vocab = api.llama_model_get_vocab(model)
 

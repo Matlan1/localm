@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Crash-containment tests for _embedder_runner.py's EmbedderRunner.
 
-llama_load_model_from_file (and llama_decode, called by every embed()) can
+llama_model_load_from_file (and llama_decode, called by every embed()) can
 hard-abort the whole process on a native CUDA/HIP driver failure: no Python
 try/except can catch it. The embedder therefore runs its whole lifecycle in
 an isolated worker process (mirroring the chat backend's containment in
@@ -63,7 +63,7 @@ _DUMMY_LOAD_PARAMS = dict(
 
 def test_native_fault_bypasses_try_except():
     # A child that wraps a genuine native abort in `except BaseException` still
-    # dies, so an in-process llama_load_model_from_file / llama_decode crash
+    # dies, so an in-process llama_model_load_from_file / llama_decode crash
     # takes the whole process down.
     import subprocess
     import sys

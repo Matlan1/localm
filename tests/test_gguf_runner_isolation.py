@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Crash-containment tests for llamacpp/_runner.py's ModelRunner.
 
-llama_load_model_from_file (and every subsequent llama_init_from_model /
+llama_model_load_from_file (and every subsequent llama_init_from_model /
 llama_decode call - context growth, token-by-token generation) can hard-abort
 the whole process on a native CUDA/HIP driver failure: no Python try/except
 can catch it. localm therefore runs the entire GGUF model lifecycle in an

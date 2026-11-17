@@ -229,7 +229,7 @@ class TestLoadFailureDetailSurvivesUnlink:
         monkeypatch.setattr(llama_mod.api, "llama_backend_init", _fake_backend_init)
         monkeypatch.setattr(llama_mod.api, "llama_model_default_params",
                             _fake_default_params)
-        monkeypatch.setattr(llama_mod.api, "llama_load_model_from_file",
+        monkeypatch.setattr(llama_mod.api, "llama_model_load_from_file",
                             _fake_load_model_from_file)
         with patch("localm.discover.apply_main_gpu", lambda mp: None), \
              patch("localm.discover.apply_gpu_split", lambda mp, ratios_override=None: None):
@@ -296,7 +296,7 @@ class TestMergedNativeCallScope:
         monkeypatch.setattr(llama_mod.api, "llama_backend_init", _fake_backend_init)
         monkeypatch.setattr(llama_mod.api, "llama_model_default_params",
                             _fake_default_params)
-        monkeypatch.setattr(llama_mod.api, "llama_load_model_from_file",
+        monkeypatch.setattr(llama_mod.api, "llama_model_load_from_file",
                             _fake_load_model_from_file)
         with patch("localm.discover.apply_main_gpu", lambda mp: None), \
              patch("localm.discover.apply_gpu_split", lambda mp, ratios_override=None: None):
@@ -405,7 +405,7 @@ class TestConsoleMirrorGenuinelySilentDuringMoeLoad:
             monkeypatch.setattr(llama_mod.api, "llama_backend_init", _fake_backend_init)
             monkeypatch.setattr(llama_mod.api, "llama_model_default_params",
                                 _fake_default_params)
-            monkeypatch.setattr(llama_mod.api, "llama_load_model_from_file",
+            monkeypatch.setattr(llama_mod.api, "llama_model_load_from_file",
                                 _fake_load_model_from_file)
             with patch("localm.discover.apply_main_gpu", lambda mp: None), \
                  patch("localm.discover.apply_gpu_split", lambda mp, ratios_override=None: None):

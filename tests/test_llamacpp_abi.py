@@ -732,7 +732,7 @@ def test_v3_dispatch_reaches_every_consumer(monkeypatch):
     assert isinstance(mp, LlamaModelParamsV3)
     assert (mp.load_mode, mp.lazy_mode, mp.main_gpu) == (-1, 1, 0)
     with pytest.raises(TypeError):
-        _api.llama_load_model_from_file("model.gguf", good_model_v2())
+        _api.llama_model_load_from_file("model.gguf", good_model_v2())
 
 
 def test_model_params_class_refuses_an_unknown_layout():

@@ -642,7 +642,7 @@ class TestVisionPathIsGuardedToo:
         with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
             del obj
             gc.collect()
-        mock_api.llama_free_model.assert_not_called()
+        mock_api.llama_model_free.assert_not_called()
         mock_api.llama_free.assert_not_called()
 
 

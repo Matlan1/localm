@@ -955,7 +955,7 @@ class GGUFEmbedder:
             set_use_mmap(mp, False)
         # Multi-GPU: honour the configured main_gpu_index / gpu_split_indices.
         # The returned buffer must stay alive through
-        # llama_load_model_from_file below. VRAM preflight lives in the PARENT
+        # llama_model_load_from_file below. VRAM preflight lives in the PARENT
         # (IsolatedEmbedder, below), not here.
         from localm.discover import apply_gpu_split, apply_main_gpu
         if main_gpu is not None:
@@ -968,14 +968,14 @@ class GGUFEmbedder:
         _tensor_split_keepalive = apply_gpu_split(
             mp, ratios_override=gpu_split_ratios)
         # One contiguous scope over both native calls below, entered once per
-        # load. It groups and repeat-collapses llama_load_model_from_file's
+        # load. It groups and repeat-collapses llama_model_load_from_file's
         # per-tensor lines and llama_init_from_model's reserve lines, which
         # otherwise go straight to this child's inherited fd 2. It writes to a
         # plain utf-8 file object with errors backslashreplace and touches
         # neither stdout nor stdin, so it cannot corrupt this child's
         # multiprocessing-Queue IPC.
         with dedup_native_stderr():
-            self._model = api.llama_load_model_from_file(model_path, mp)
+            self._model = api.llama_model_load_from_file(model_path, mp)
             if not self._model:
                 raise RuntimeError(f"failed to load embedding model: {model_path}")
             self._vocab = api.llama_model_get_vocab(self._model)
@@ -986,7 +986,7 @@ class GGUFEmbedder:
             self._pre_type = pretokenizer_guard.read_pre_type(self._model, api)
             refusal = pretokenizer_guard.load_refusal(self._pre_type)
             if refusal is not None:
-                api.llama_free_model(self._model)
+                api.llama_model_free(self._model)
                 self._model = None
                 raise pretokenizer_guard.PretokenizerUnusableModelError(refusal)
             hazard = pretokenizer_guard.hazard_note(self._pre_type)
@@ -1015,7 +1015,7 @@ class GGUFEmbedder:
                                     self.pooling_type)
             self._ctx = api.llama_init_from_model(self._model, cp)
             if not self._ctx:
-                api.llama_free_model(self._model)
+                api.llama_model_free(self._model)
                 self._model = None
                 raise RuntimeError("failed to create embedding context")
         self._mem = api.llama_get_memory(self._ctx) if api.has_memory_api() else None
@@ -1350,7 +1350,7 @@ class GGUFEmbedder:
                     self._ctx = None
             if self._model is not None:
                 try:
-                    api.llama_free_model(self._model)
+                    api.llama_model_free(self._model)
                 finally:
                     self._model = None
 
