@@ -39,10 +39,9 @@ def main(backend: str, force: bool, status: bool) -> None:
             else:
                 console.print(f"  {b}: not installed")
         return
-    ask = None
-    if sys.stdin is not None and sys.stdin.isatty():
-        def ask(text: str) -> bool:
-            return click.confirm(text, default=True)
+    def confirm(text: str) -> bool:
+        return click.confirm(text, default=True)
+    ask = confirm if sys.stdin is not None and sys.stdin.isatty() else None
     try:
         rt = runtime.provision(backend, force=force, ask=ask,
                                on_progress=lambda m: console.print(f"[dim]{escape(m)}[/dim]"))

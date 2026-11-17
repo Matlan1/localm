@@ -268,7 +268,7 @@ def _hold_open(path: Path):
 
 def _close(handle) -> None:
     """Close a handle from :func:`_hold_open`; None is ignored."""
-    if handle is None:
+    if handle is None or sys.platform != "win32":
         return
     import ctypes
     from ctypes import wintypes
