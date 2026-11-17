@@ -1370,9 +1370,10 @@ jobs:
   # with LOCALM_REQUIRE_OPTIONAL naming the packages: a skip for a missing one
   # then FAILS (tests/_require_optional.py). Not required here, on purpose:
   # tkinter (needs a display), playwright and webview (a browser or a window),
-  # and the private manifest checker. Same triggers as the test matrix: the
-  # nightly and weekly schedules, a manual dispatch, or a pull request
-  # labelled full-ci. Not part of merge-policy.
+  # and the private manifest checker. Runs on the nightly and weekly
+  # schedules, a manual dispatch, a pull request labelled full-ci, and a pull
+  # request that changes the dependencies (pyproject.toml, uv.lock,
+  # .github/requirements/) or this workflow. Not part of merge-policy.
   optional-stacks:
     name: optional stacks (tests that need torch, transformers, ... must run, not skip)
     runs-on: ubuntu-latest
@@ -1380,23 +1381,44 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
-      (github.event_name == 'pull_request' &&
-       contains(github.event.pull_request.labels.*.name, 'full-ci'))
+      github.event_name == 'pull_request'
     env:
       LOCALM_REQUIRE_OPTIONAL: torch,transformers,tokenizers,accelerate,psutil,PIL,pypdf,numpy,soundfile,av,packaging,xgrammar
     steps:
+      # fetch-depth: 2 so a pull request's merge commit has its base as HEAD^1.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           persist-credentials: false
+          fetch-depth: 2
+
+      # On a pull request without the full-ci label the remaining steps run
+      # only when it changes the dependencies or this workflow; otherwise the
+      # job ends with a notice saying it was not needed.
+      - name: Does this pull request change the dependencies?
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          FULL_CI: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+        run: |
+          if [ "$EVENT" != "pull_request" ] || [ "$FULL_CI" = "true" ]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if git diff --name-only HEAD^1 HEAD | grep -qE '^(pyproject\.toml|uv\.lock|\.github/requirements/|\.github/workflows/ci\.yml)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No dependency file changed in this pull request; the optional stacks run nightly."
+          fi
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        if: steps.scope.outputs.run == 'true'
         with:
           python-version: "3.12"
 
       - name: Install uv
+        if: steps.scope.outputs.run == 'true'
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
       # torch first, from the CPU index, so no later install pulls a CUDA build.
       - name: Install the optional stacks
+        if: steps.scope.outputs.run == 'true'
         run: |
           pip install --require-hashes --no-deps -r .github/requirements/editable.txt
           pip install --require-hashes --no-deps -r .github/requirements/torch-cpu.txt
@@ -1405,9 +1427,11 @@ jobs:
           pip install --no-deps --no-build-isolation -e .
 
       - name: Show the resolved versions
+        if: steps.scope.outputs.run == 'true'
         run: pip list 2>/dev/null | grep -i -E "^(torch|transformers|tokenizers|accelerate|psutil|pillow|pypdf|numpy|soundfile|av|xgrammar|faster-whisper) "
 
       - name: Run every test file that gates on one of these packages
+        if: steps.scope.outputs.run == 'true'
         run: |
           FILES=$(grep -rlE "importorskip\(.(torch|transformers|tokenizers|accelerate|psutil|PIL|pypdf|numpy|soundfile|av|packaging|xgrammar)" tests --include='*.py' | sort)
           echo "$FILES" | wc -l

@@ -28,9 +28,10 @@ The two enum outcomes are DISTINCT:
 
 IT ALSO CHECKS THE LIBMTMD SPEECH GENERATION BINDING (``mtmd_gen.py``) against
 ``tools/mtmd/mtmd.h`` and ``tools/mtmd/mtmd-helper.h`` at the same ref: the
-interface is read from the headers (``mtmd_gen_audio_voice_name`` declared =
-state_v3, or state_v4 when ``mtmd_helper_gen_audio_inp`` also has a ``temp``
-field, else ``mtmd_helper_gen_audio_next_is_text`` declared = state_v2,
+interface is read from the headers (``mtmd_helper_gen_audio_max_frames``
+declared = state_v7, else ``mtmd_gen_audio_voice_name`` declared = state_v3,
+state_v4, state_v5 or state_v6 by the fields of ``mtmd_helper_gen_audio_inp``,
+else ``mtmd_helper_gen_audio_next_is_text`` declared = state_v2,
 else ``mtmd_gen_state_init`` declared = state, else legacy), every struct localm allocates must match field for field with the
 same total size, and every function localm binds must take as many arguments as
 localm declares, with the same structs passed or returned by value.
@@ -71,13 +72,16 @@ LLAMA_ABI_REF = LLAMA_ABI_REFS["v3"]
 _REPO = "ggml-org/llama.cpp"
 
 # One upstream ref per libmtmd speech generation interface localm binds
-# (localm.inference.backends.llamacpp.mtmd_gen). The default run checks all five.
+# (localm.inference.backends.llamacpp.mtmd_gen). The default run checks all eight.
 MTMD_SPEECH_REFS = {
     "legacy": "b11757",    # stateless: seed and state_data in mtmd_gen_inp/out
     "state": "b11908",     # mtmd_gen_state, 4-argument mtmd_gen_audio_process
     "state_v2": "b11941",  # n_past/out_mode/voice in the helper input, penalty pair in mtmd_gen_inp
     "state_v3": "b12061",  # no voice in the helper input, n_voices in mtmd_gen_audio_info
     "state_v4": "b12219",  # temp before seed in the helper input
+    "state_v5": "b12424",  # speed and loudness after seed in the helper input
+    "state_v6": "b12452",  # speaker_ref_text after speaker_ref in the helper input
+    "state_v7": "b12458",  # cfg_scale/flow_steps, n_channels, backbone state in mtmd_gen_inp
 }
 _MTMD_HEADERS = ("tools/mtmd/mtmd.h", "tools/mtmd/mtmd-helper.h")
 
@@ -570,20 +574,32 @@ def _header_speech_interface(mtmd_text: str):
     """Which speech generation interface mtmd headers declare: the first
     interface in ``mtmd_gen._INTERFACE_MARKERS`` (the runtime's own table)
     whose marker function the headers declare, None when they declare none.
-    The state_v3 marker is state_v4 when ``mtmd_helper_gen_audio_inp`` has a
-    ``temp`` field: the header-side reading of what the runtime tells apart by
-    the seed offset in ``mtmd_helper_gen_audio_inp_default``."""
+    A marker with several layouts in ``mtmd_gen._HELPER_INPUT_FAMILIES`` is
+    the layout whose helper input has the fields ``mtmd_helper_gen_audio_inp``
+    declares, else the one sharing most of them, the newer on a tie: the
+    header-side reading of what the runtime tells apart by the bytes
+    ``mtmd_helper_gen_audio_inp_default`` returns."""
     _ensure_localm_importable()
     from localm.inference.backends.llamacpp import mtmd_gen as G
 
     text = _strip_comments(mtmd_text)
     for marker, interface in G._INTERFACE_MARKERS:
-        if _prototype(text, marker) is not None:
-            if interface == G.INTERFACE_STATE_V3:
-                body = _extract_block_body(text, "struct", "mtmd_helper_gen_audio_inp")
-                if body is not None and "temp" in dict(_parse_field_decls(body)):
-                    return G.INTERFACE_STATE_V4
-            return interface
+        if _prototype(text, marker) is None:
+            continue
+        family = G._HELPER_INPUT_FAMILIES.get(interface, (interface,))
+        body = _extract_block_body(text, "struct", "mtmd_helper_gen_audio_inp")
+        if len(family) == 1 or body is None:
+            return family[-1]
+        declared = set(dict(_parse_field_decls(body)))
+
+        def fields(candidate):
+            cls = G._INTERFACE_STRUCTS[candidate]["mtmd_helper_gen_audio_inp"]
+            return {name for name, _t in cls._fields_}
+
+        for candidate in family:
+            if fields(candidate) == declared:
+                return candidate
+        return max(reversed(family), key=lambda c: len(fields(c) & declared))
     return None
 
 
@@ -744,7 +760,7 @@ def check_speech(mtmd_text: str, label: str, seen: set) -> int:
           f"[interface: {interface}] ############")
     if interface is None:
         print("  FAIL  no speech generation interface localm binds is declared "
-              "(none of mtmd_gen_audio_voice_name, "
+              "(none of mtmd_helper_gen_audio_max_frames, mtmd_gen_audio_voice_name, "
               "mtmd_helper_gen_audio_next_is_text, mtmd_gen_state_init "
               "or mtmd_gen_inp_default); speech is refused on this runtime")
         return 1
@@ -831,7 +847,7 @@ def main() -> int:
             and seen_speech != set(MTMD_SPEECH_REFS)):
         print(f"\nFAIL: expected to check every speech generation interface, only "
               f"saw {sorted(seen_speech)} - the refs in MTMD_SPEECH_REFS no longer "
-              "cover all five.")
+              f"cover all {len(MTMD_SPEECH_REFS)}.")
         total += 1
 
     # Both layout axes must have been exercised.
