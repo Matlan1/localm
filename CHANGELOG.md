@@ -11,6 +11,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+## [0.3.4b3] - 2026-11-17
+
 ### Fixed
 - **`localm comfy stop` stops the ComfyUI that `localm image` started, without a running server.** `localm image`, `localm music` and `localm video` keep ComfyUI running for the next generation and now say so. `localm comfy stop` ends that ComfyUI and frees its VRAM even when no `localm gui` or `localm serve` is running, after checking the process is still the one localm started; it never stops a ComfyUI you started yourself.
 - **A crash record that cannot be read no longer files a bug report on the next start.** When the record a run leaves to detect a crash was damaged (for example, the run died while writing it), the next start saved a bug report with that run's log tail even if the run was in privacy mode. Such a record is now cleared without a report, and the debug log says it could not be read.
