@@ -6,7 +6,7 @@ transformers 5.14/5.14.1 imports `transformers/distributed/fsdp.py` on the
 ordinary `from transformers import AutoTokenizer` path (via generation ->
 GenerationMixin), and fsdp needs torch's distributed C extension
 `torch._C._distributed_c10d`. The ROCm Windows torch this project pins
-(torch==2.9.1+rocm7.13.0) is built WITHOUT distributed, so that makes EVERY HF
+(torch==2.11.0+rocm7.13.0) is built WITHOUT distributed, so that makes EVERY HF
 model load die at "loading processor..." - and the lazy-import layer reports it
 as "Could not import module 'AutoTokenizer'", hiding the real cause.
 
@@ -31,7 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # The first version not yet verified against the pinned ROCm torch. Raise only
 # after a cold-install re-verify.
-_TRANSFORMERS_BREAKS_AT = "5.23"
+_TRANSFORMERS_BREAKS_AT = "5.24"
 
 
 def _extra_requirements(extra: str) -> list[str]:

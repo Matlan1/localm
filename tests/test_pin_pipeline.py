@@ -732,11 +732,21 @@ def test_wait_for_ci_resets_the_stable_count_when_a_check_starts_running(monkeyp
 
 
 def test_the_ci_wait_outlasts_the_longest_pull_request_gate_job():
-    ci = (Path(__file__).resolve().parent.parent / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    """The gate's verdict jobs wait for the plan and the shards, so the wait
+    must outlast the sum of the timeouts along the longest chain of needs."""
+    import yaml
+    ci = yaml.safe_load((Path(__file__).resolve().parent.parent / ".github" / "workflows"
+                         / "ci.yml").read_text(encoding="utf-8"))
+    jobs = ci["jobs"]
+
+    def chain_minutes(name):
+        job = jobs[name]
+        needs = job.get("needs", [])
+        return job["timeout-minutes"] + max((chain_minutes(n) for n in needs), default=0)
+
     for name in ("python-pr-gate", "python-pr-gate-windows"):
-        job = ci[ci.index(f"  {name}:"):]
-        minutes = int(job[job.index("timeout-minutes:"):].split(":", 1)[1].split()[0])
-        assert pipeline.CI_WAIT_TIMEOUT_SECONDS > minutes * 60, name
+        assert "python-pr-gate-shard" in jobs[name]["needs"], name
+        assert pipeline.CI_WAIT_TIMEOUT_SECONDS > chain_minutes(name) * 60, name
 
 
 def _expire_after_two_polls(monkeypatch):

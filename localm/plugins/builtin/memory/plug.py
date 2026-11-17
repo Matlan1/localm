@@ -1505,7 +1505,10 @@ def _maybe_auto_consolidate(principal: str | None = None) -> None:
         # Stamp immediately so a burst of concurrent turns cannot each spawn a pass
         # before the first finishes (the finally-stamp refreshes it).
         _auto_stamp(now)
-    _threading.Thread(target=lambda: _auto_consolidate_bg(principal), daemon=True).start()
+    from localm.config import home_bound
+    _threading.Thread(target=home_bound(lambda: _auto_consolidate_bg(principal),
+                                        name="memory auto-consolidate"),
+                      daemon=True).start()
 
 
 # ------------------------------------------------------------------ #
@@ -1621,7 +1624,9 @@ def _maybe_sweep_backfill() -> None:
         # Stamp immediately, same burst guard as auto-consolidate above; the
         # finally-stamp in _backfill_sweep_bg refreshes it on completion.
         _sweep_stamp(now)
-    _threading.Thread(target=_backfill_sweep_bg, daemon=True).start()
+    from localm.config import home_bound
+    _threading.Thread(target=home_bound(_backfill_sweep_bg, name="memory backfill sweep"),
+                      daemon=True).start()
 
 
 # ------------------------------------------------------------------ #

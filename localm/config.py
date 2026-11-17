@@ -211,9 +211,79 @@ def _detect_home() -> Path:
     return fallback
 
 
+_home_pin = threading.local()
+
+
+class HomeBoundRun:
+    """One call of a tracked ``home_bound`` callable that is in progress.
+
+    ``name`` is the name given to ``home_bound``, ``thread`` the thread running
+    the call, and ``done`` an event set once the call has returned or raised."""
+
+    __slots__ = ("name", "thread", "done")
+
+    def __init__(self, name: str, thread: threading.Thread) -> None:
+        self.name = name
+        self.thread = thread
+        self.done = threading.Event()
+
+
+_home_bound_runs: set = set()
+_home_bound_runs_lock = threading.Lock()
+
+
 def home_dir() -> Path:
-    """Lazy variant of HOME_DIR - resolves the data dir at call time."""
+    """Lazy variant of HOME_DIR - resolves the data dir at call time.
+
+    On a thread inside a ``home_bound`` call, the home that was in effect when
+    that callable was made."""
+    pinned = getattr(_home_pin, "home", None)
+    if pinned is not None:
+        return pinned
     return _detect_home()
+
+
+def home_bound(fn: Callable[[], object], *, name: str,
+               track: bool = True) -> Callable[[], object]:
+    """Return a callable that runs *fn* with ``home_dir()`` answering the home in
+    effect NOW, on whichever thread it later runs.
+
+    For work handed to a background thread: every ``home_dir()`` call inside *fn*,
+    including the path a late write resolves, answers the home of the code that
+    started the work, whatever ``LOCALM_HOME`` says by then. Only ``home_dir()``
+    is pinned; ``HOME_DIR`` and the other module constants are not.
+
+    With *track* (the default), each call in progress is listed by
+    ``home_bound_runs()`` under *name* from the moment it starts until it returns
+    or raises. The returned callable takes no arguments and returns what *fn*
+    returns."""
+    home = home_dir()
+
+    def run():
+        previous = getattr(_home_pin, "home", None)
+        _home_pin.home = home
+        entry = None
+        if track:
+            entry = HomeBoundRun(name, threading.current_thread())
+            with _home_bound_runs_lock:
+                _home_bound_runs.add(entry)
+        try:
+            return fn()
+        finally:
+            _home_pin.home = previous
+            if entry is not None:
+                with _home_bound_runs_lock:
+                    _home_bound_runs.discard(entry)
+                entry.done.set()
+
+    return run
+
+
+def home_bound_runs() -> list:
+    """The tracked ``home_bound`` calls in progress, as ``HomeBoundRun`` objects,
+    in no particular order."""
+    with _home_bound_runs_lock:
+        return list(_home_bound_runs)
 
 
 def cache_dir() -> Path:

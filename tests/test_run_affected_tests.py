@@ -9,12 +9,17 @@ one still wide there runs in full with the selector's limit lifted, and fails
 only when the selection is every test file; a depth-0 retry that is empty or
 failed fails, a selector crash fails, an empty selection fails, a path that is
 not an existing tests/**/test_*.py fails, and only the nothing-affected
-sentinel on its own skips pytest. The last section binds the wrapper to the
-real tree and pins the shape of the ci.yml job so the gate cannot be quietly
+sentinel on its own skips pytest. The sharded gate's plan, shards and verdict
+are pinned next: the shard count, the shard's pytest command, and a verdict
+that fails on a missing or failed shard, a test run twice or outside the plan,
+and a plan job that did not succeed. The last section binds the wrapper to the
+real tree and pins the shape of the ci.yml jobs so the gate cannot be quietly
 narrowed, label-gated or made non-blocking.
 """
 
+import fnmatch
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -359,12 +364,14 @@ def test_main_fails_on_an_unresolvable_base_without_running_pytest(rat, repo, mo
 # --- main: exit status and the summary ----------------------------------------
 
 def _drive(rat, monkeypatch, tmp_path, selector, pytest_status=0, argv=(), base_resolves=True):
-    """Run main() with the selector, the base-ref check and pytest replaced;
-    returns (exit status, the pytest mock, the step summary text)."""
+    """Run main() with the selector (a CompletedProcess for every call, or a
+    function of the selector's arguments), the base-ref check and pytest
+    replaced; returns (exit status, the pytest mock, the step summary text)."""
     summary = tmp_path / "summary.md"
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
     monkeypatch.setattr(rat, "REPO", tmp_path)
-    monkeypatch.setattr(rat, "_run_selector", lambda depth, base, files, max_share=None: selector)
+    monkeypatch.setattr(rat, "_run_selector", selector if callable(selector)
+                        else lambda depth, base, files, max_share=None: selector)
     monkeypatch.setattr(rat, "_base_resolves", lambda base: base_resolves)
     run_pytest = MagicMock(return_value=pytest_status)
     monkeypatch.setattr(rat, "_run_pytest", run_pytest)
@@ -551,6 +558,331 @@ def test_without_a_summary_file_the_summary_still_prints(rat, repo, monkeypatch,
     assert "No test file is affected" in capsys.readouterr().out
 
 
+# --- the sharded gate: the plan ------------------------------------------------
+
+@pytest.mark.parametrize("files,count", [(1, 1), (75, 1), (76, 2), (150, 2), (151, 3),
+                                         (300, 4), (301, 5), (376, 5), (2000, 5)])
+def test_the_shard_count_grows_by_one_per_75_files_up_to_five(rat, files, count):
+    selection = rat.Selection("selected", paths=[f"tests/test_{i}.py" for i in range(files)])
+    assert rat.shard_count(selection) == count
+
+
+@pytest.mark.parametrize("mode", ["nothing", "wide", "failed"])
+def test_a_selection_that_runs_nothing_plans_one_shard(rat, mode):
+    assert rat.shard_count(rat.Selection(mode)) == 1
+
+
+def _many(repo, n):
+    """*n* real test files in *repo*, as the selector's `--why` output."""
+    lines = []
+    for i in range(n):
+        (repo / "tests" / f"test_m{i:04d}.py").write_text("def test_m():\n    pass\n")
+        lines.append(f"tests/test_m{i:04d}.py  # imports localm.hub")
+    return _why(*lines)
+
+
+def _plan(rat, monkeypatch, repo, selector, argv=()):
+    """main() with --plan-out and the selector replaced; returns (exit status,
+    the pytest mock, the step summary, the plan file, the GITHUB_OUTPUT outputs)."""
+    plan = repo / "plan" / "plan.json"
+    out = repo / "github_output.txt"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    status, run_pytest, text = _drive(rat, monkeypatch, repo, selector,
+                                      argv=["--plan-out", str(plan), *argv])
+    outputs = dict(ln.split("=", 1) for ln in out.read_text(encoding="utf-8").splitlines())
+    return status, run_pytest, text, json.loads(plan.read_text(encoding="utf-8")), outputs
+
+
+def test_a_narrow_plan_runs_one_shard_and_no_pytest(rat, repo, monkeypatch):
+    status, run_pytest, text, plan, outputs = _plan(
+        rat, monkeypatch, repo,
+        _cp(0, "tests/test_a.py  # imports localm.a\ntests/sub/test_b.py  # changed\n",
+            "2 of 3 test files affected by 2 changed file(s)"))
+    assert status == 0
+    run_pytest.assert_not_called()
+    assert outputs == {"run": "true", "count": "1", "shards": "[1]"}
+    assert (plan["mode"], plan["depth"], plan["count"]) == ("selected", 1, 1)
+    assert plan["paths"] == ["tests/test_a.py", "tests/sub/test_b.py"]
+    assert "**2 test file(s)** selected at `--depth 1`" in text
+    assert "tests/test_a.py  # imports localm.a" in text
+    assert "Split into **1 shard(s)**" in text
+    assert plan["summary"] == text
+
+
+def test_a_wide_plan_runs_five_shards(rat, repo, monkeypatch):
+    """The hub-module case: wide at depths 1 and 0, selected with the limit
+    lifted; 400 test files plan five shards."""
+    lifted = _many(repo, 400)
+
+    def selector(depth, base, files, max_share=None):
+        if max_share is None:
+            return _cp(3, "tests/SELECTION_TOO_WIDE_FOR_A_TARGETED_RUN_SEE_STDERR\n",
+                       f"WIDE: 52% at depth {depth}")
+        return _cp(0, lifted, "400 of 800 test files affected by 1 changed file(s)")
+
+    status, run_pytest, text, plan, outputs = _plan(rat, monkeypatch, repo, selector)
+    assert status == 0
+    run_pytest.assert_not_called()
+    assert outputs == {"run": "true", "count": "5", "shards": "[1, 2, 3, 4, 5]"}
+    assert (plan["mode"], plan["depth"], plan["count"], len(plan["paths"])) == ("selected", 0, 5, 400)
+    assert "This change is wide" in text and "Split into **5 shard(s)**" in text
+
+
+def test_a_selection_of_every_test_file_fails_the_plan_with_no_shard_to_run(rat, repo, monkeypatch):
+    status, run_pytest, text, plan, outputs = _plan(
+        rat, monkeypatch, repo,
+        _cp(3, "tests/SELECTION_TOO_WIDE_FOR_A_TARGETED_RUN_SEE_STDERR\n", "WIDE: 100% ..."))
+    assert status == 1
+    run_pytest.assert_not_called()
+    assert outputs == {"run": "false", "count": "1", "shards": "[1]"}
+    assert (plan["mode"], plan["paths"]) == ("wide", [])
+    assert "needs the full suite" in text and "Split into" not in text
+
+
+def test_a_failed_selection_fails_the_plan_with_no_shard_to_run(rat, repo, monkeypatch):
+    status, run_pytest, text, plan, outputs = _plan(
+        rat, monkeypatch, repo, _cp(1, "tests/AFFECTED_TESTS_FAILED_SEE_STDERR\n", "Traceback"))
+    assert status == 1
+    run_pytest.assert_not_called()
+    assert outputs["run"] == "false" and plan["mode"] == "failed"
+    assert "could not be computed" in text
+
+
+def test_nothing_affected_passes_the_plan_with_no_shard_to_run(rat, repo, monkeypatch):
+    status, run_pytest, text, plan, outputs = _plan(
+        rat, monkeypatch, repo, _cp(0, "tests/NO_TEST_FILE_IS_AFFECTED\n", "0 of 3 ..."))
+    assert status == 0
+    run_pytest.assert_not_called()
+    assert outputs == {"run": "false", "count": "1", "shards": "[1]"}
+    assert (plan["mode"], plan["paths"], plan["count"]) == ("nothing", [], 1)
+    assert "No test file is affected" in text
+
+
+# --- the sharded gate: one shard ---------------------------------------------
+
+def _write_plan(path, mode, paths, count, depth=1):
+    path.write_text(json.dumps({"mode": mode, "depth": depth, "paths": paths, "count": count,
+                                "summary": "### Affected tests (python-pr-gate)\n\nTHE SELECTION\n"}),
+                    encoding="utf-8")
+    return path
+
+
+def _shard(rat, monkeypatch, repo, plan, argv, pytest_status=0):
+    """main() for one shard with pytest replaced; (exit status, the pytest mock, the summary)."""
+    summary = repo / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.setattr(rat, "REPO", repo)
+    run_pytest = MagicMock(return_value=pytest_status)
+    monkeypatch.setattr(rat, "_run_pytest", run_pytest)
+    status = rat.main(["--plan", str(plan), "--shard-out", str(repo / "shard-out"), *argv])
+    return status, run_pytest, summary.read_text(encoding="utf-8") if summary.exists() else ""
+
+
+def test_a_shard_runs_the_plan_selection_with_the_shard_plugin(rat, repo, monkeypatch):
+    plan = _write_plan(repo / "plan.json", "selected", ["tests/test_a.py", "tests/sub/test_b.py"], 1)
+    status, run_pytest, text = _shard(rat, monkeypatch, repo, plan, ["--shard", "1", "--", "-x"])
+    assert status == 0
+    run_pytest.assert_called_once_with(
+        ["tests/test_a.py", "tests/sub/test_b.py", "-m", "not integration", "-n", "auto", "-x"],
+        ["-p", "tests._shard", "--shard", "1/1", "--shard-ids-out",
+         str((repo / "shard-out" / "ids-1.json").resolve())])
+    assert "shard 1/1" in text and "-p tests._shard --shard 1/1" in text
+
+
+def test_the_shard_number_can_come_from_the_environment(rat, repo, monkeypatch):
+    plan = _write_plan(repo / "plan.json", "selected", ["tests/test_a.py"], 1)
+    monkeypatch.setenv("PR_GATE_SHARD", "1")
+    status, run_pytest, _ = _shard(rat, monkeypatch, repo, plan, ["--shard-env", "PR_GATE_SHARD"])
+    assert status == 0
+    assert run_pytest.call_args.args[1][:4] == ["-p", "tests._shard", "--shard", "1/1"]
+    for bad in ("", "x", "-1"):
+        monkeypatch.setenv("PR_GATE_SHARD", bad)
+        with pytest.raises(SystemExit) as exc:
+            _shard(rat, monkeypatch, repo, plan, ["--shard-env", "PR_GATE_SHARD"])
+        assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("pytest_status,expected", [(0, 0), (5, 0), (1, 1), (2, 2)])
+def test_a_shard_left_with_no_test_passes_and_any_other_status_is_the_shard_status(
+        rat, repo, monkeypatch, pytest_status, expected):
+    plan = _write_plan(repo / "plan.json", "selected", ["tests/test_a.py"], 1)
+    status, run_pytest, text = _shard(rat, monkeypatch, repo, plan, ["--shard", "1"],
+                                      pytest_status=pytest_status)
+    assert status == expected
+    run_pytest.assert_called_once()
+    assert ("No test is left in this shard" in text) == (pytest_status == 5)
+
+
+@pytest.mark.parametrize("mode,paths,count,index,why", [
+    ("nothing", [], 1, 1, "selects no test file"),
+    ("wide", [], 1, 1, "selects no test file"),
+    ("selected", ["tests/test_a.py"], 1, 2, "outside the plan's 1..1"),
+    ("selected", ["tests/test_a.py"], 1, 0, "outside the plan's 1..1"),
+    ("selected", ["tests/test_a.py"], 5, 1, "its selection needs 1"),
+    ("selected", ["tests/test_ghost.py"], 1, 1, "not an existing"),
+    ("selected", [], 1, 1, "with no paths"),
+    ("bogus", [], 1, 1, "unknown mode"),
+])
+def test_a_shard_of_a_plan_it_cannot_run_fails_without_pytest(
+        rat, repo, monkeypatch, mode, paths, count, index, why):
+    plan = _write_plan(repo / "plan.json", mode, paths, count)
+    status, run_pytest, text = _shard(rat, monkeypatch, repo, plan, ["--shard", str(index)])
+    assert status == 1
+    run_pytest.assert_not_called()
+    assert "No test ran" in text and why in text
+
+
+def test_the_shard_plugin_stays_on_the_command_line_when_the_paths_go_to_an_argfile(
+        rat, monkeypatch):
+    """pytest loads -p plugins from the command line before it expands an
+    @file, so the shard options never go into the file."""
+    seen = []
+
+    def fake_run(cmd, cwd=None):
+        seen.append(list(cmd))
+        if cmd[-1].startswith("@"):
+            seen.append(Path(cmd[-1][1:]).read_text(encoding="utf-8").splitlines())
+        return CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(rat.subprocess, "run", fake_run)
+    inline = ["-p", "tests._shard", "--shard", "2/5", "--shard-ids-out", "ids-2.json"]
+    paths = [f"tests/test_{i:05d}.py" for i in range(rat.ARGS_INLINE_MAX // 10)]
+    assert rat._run_pytest(paths, inline) == 0
+    cmd, filed = seen
+    assert cmd[1:3] == ["-m", "pytest"] and cmd[3:9] == inline
+    assert len(cmd) == 10 and cmd[9].startswith("@")
+    assert filed == paths
+    seen.clear()
+    assert rat._run_pytest(["tests/test_a.py"], inline) == 0
+    assert seen == [[sys.executable, "-m", "pytest", *inline, "tests/test_a.py"]]
+
+
+# --- the sharded gate: the verdict --------------------------------------------
+
+_REAL_FILES = sorted(p.relative_to(REPO_ROOT).as_posix() for p in (REPO_ROOT / "tests").glob("test_*.py"))
+
+
+def _ids(index, count, everything, selected):
+    from tests import _shard
+    return json.dumps({"index": index, "count": count, "all_total": len(set(everything)),
+                       "all_sha256": _shard.digest(everything), "selected": sorted(selected)})
+
+
+def _collect(rat, monkeypatch, tmp_path, plan, files, plan_result="success"):
+    """main() --collect over *files* (name: text) written to a shard-out
+    directory, against *plan* (mode, paths, count); the real tests._shard
+    verify runs. Returns (exit status, the step summary, stdout)."""
+    plan_path = _write_plan(tmp_path / "plan.json", *plan)
+    out = tmp_path / "shard-out"
+    out.mkdir()
+    for name, text in files.items():
+        (out / name).write_text(text, encoding="utf-8")
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    status = rat.main(["--collect", str(out), "--plan", str(plan_path), "--plan-result", plan_result])
+    return status, summary.read_text(encoding="utf-8")
+
+
+def _two_shards():
+    """A plan of 76 real test files (two shards) and the node ids it collects."""
+    paths = _REAL_FILES[:76]
+    assert len(paths) == 76
+    return ("selected", paths, 2), [f"{p}::test_x" for p in paths]
+
+
+def test_the_verdict_passes_when_every_selected_test_ran_in_exactly_one_shard(
+        rat, monkeypatch, tmp_path):
+    plan, nodes = _two_shards()
+    status, text = _collect(rat, monkeypatch, tmp_path, plan, {
+        "ids-1.json": _ids(1, 2, nodes, nodes[::2]), "status-1.txt": "success\n",
+        "ids-2.json": _ids(2, 2, nodes, nodes[1::2]), "status-2.txt": "success\n"})
+    assert status == 0, text
+    assert "THE SELECTION" in text, "the verdict repeats the plan's summary"
+    assert "The gate passes" in text and "2 shards ran 76 tests, each exactly once" in text
+
+
+def test_a_shard_that_selects_nothing_is_fine(rat, monkeypatch, tmp_path):
+    plan, nodes = _two_shards()
+    status, text = _collect(rat, monkeypatch, tmp_path, plan, {
+        "ids-1.json": _ids(1, 2, nodes, nodes), "status-1.txt": "success\n",
+        "ids-2.json": _ids(2, 2, nodes, []), "status-2.txt": "success\n"})
+    assert status == 0, text
+
+
+def test_the_verdict_fails_on_a_missing_shard(rat, monkeypatch, tmp_path):
+    plan, nodes = _two_shards()
+    status, text = _collect(rat, monkeypatch, tmp_path, plan, {
+        "ids-1.json": _ids(1, 2, nodes, nodes[::2]), "status-1.txt": "success\n"})
+    assert status == 1
+    assert "The gate fails" in text and "shard 2 recorded no result" in text
+
+
+def test_the_verdict_fails_on_a_failed_shard(rat, monkeypatch, tmp_path):
+    plan, nodes = _two_shards()
+    status, text = _collect(rat, monkeypatch, tmp_path, plan, {
+        "ids-1.json": _ids(1, 2, nodes, nodes[::2]), "status-1.txt": "success\n",
+        "ids-2.json": _ids(2, 2, nodes, nodes[1::2]), "status-2.txt": "failure\n"})
+    assert status == 1
+    assert "shard 2 ended 'failure'" in text
+
+
+def test_the_verdict_fails_on_a_test_run_twice(rat, monkeypatch, tmp_path):
+    plan, nodes = _two_shards()
+    status, text = _collect(rat, monkeypatch, tmp_path, plan, {
+        "ids-1.json": _ids(1, 2, nodes, nodes[::2]), "status-1.txt": "success\n",
+        "ids-2.json": _ids(2, 2, nodes, [nodes[0], *nodes[1::2]]), "status-2.txt": "success\n"})
+    assert status == 1
+    assert f"{nodes[0]} ran in shards 1 and 2" in text
+
+
+def test_the_verdict_fails_on_a_test_outside_the_plan(rat, monkeypatch, tmp_path):
+    plan, nodes = _two_shards()
+    stranger = f"{_REAL_FILES[100]}::test_y"
+    everything = [*nodes, stranger]
+    status, text = _collect(rat, monkeypatch, tmp_path, plan, {
+        "ids-1.json": _ids(1, 2, everything, nodes[::2]), "status-1.txt": "success\n",
+        "ids-2.json": _ids(2, 2, everything, [*nodes[1::2], stranger]), "status-2.txt": "success\n"})
+    assert status == 1
+    assert "outside the plan's selection" in text and _REAL_FILES[100] in text
+
+
+@pytest.mark.parametrize("plan_result", ["failure", "skipped", "cancelled", ""])
+def test_the_verdict_fails_when_the_plan_job_did_not_succeed(rat, monkeypatch, tmp_path, plan_result):
+    verify = MagicMock(return_value=(0, "fine"))
+    monkeypatch.setattr(rat, "_verify_shards", verify)
+    status, text = _collect(rat, monkeypatch, tmp_path, ("wide", [], 1), {}, plan_result=plan_result)
+    assert status == 1
+    verify.assert_not_called()
+    assert f"the plan job ended {plan_result!r}" in text
+
+
+def test_the_verdict_fails_without_a_plan(rat, monkeypatch, tmp_path):
+    out = tmp_path / "shard-out"
+    out.mkdir()
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
+    assert rat.main(["--collect", str(out), "--plan", str(tmp_path / "absent.json"),
+                     "--plan-result", "success"]) == 1
+    assert "no plan at" in (tmp_path / "summary.md").read_text(encoding="utf-8")
+
+
+def test_nothing_affected_passes_the_verdict_only_with_no_shard_result(rat, monkeypatch, tmp_path):
+    (tmp_path / "none").mkdir()
+    (tmp_path / "stray").mkdir()
+    status, text = _collect(rat, monkeypatch, tmp_path / "none", ("nothing", [], 1), {})
+    assert status == 0, text
+    assert "no test file is affected and no shard ran" in text
+    status, text = _collect(rat, monkeypatch, tmp_path / "stray", ("nothing", [], 1),
+                            {"status-1.txt": "success\n"})
+    assert status == 1
+    assert "selected no test file, yet 1 shard result file(s)" in text
+
+
+def test_a_plan_job_that_succeeded_with_a_refused_plan_fails_the_verdict(rat, monkeypatch, tmp_path):
+    status, text = _collect(rat, monkeypatch, tmp_path, ("wide", [], 1), {})
+    assert status == 1
+    assert "succeeded with a `wide` plan" in text
+
+
 # --- the real tree and the real job -------------------------------------------
 
 def test_a_change_to_the_wrapper_selects_this_file_in_the_real_tree():
@@ -577,18 +909,26 @@ def _norm(expr):
     return " ".join(str(expr).split())
 
 
-def test_the_ci_job_runs_on_every_pull_request_and_cannot_be_skipped_green():
+_GATE_IF = _norm("""
+    github.event_name == 'pull_request' &&
+    !contains(github.event.pull_request.labels.*.name, 'full-ci')""")
+_VERDICTS = (("python-pr-gate", "ubuntu-latest"), ("python-pr-gate-windows", "windows-latest"))
+
+
+def _by_name(job, name):
+    hits = [s for s in job["steps"] if s.get("name") == name]
+    assert len(hits) == 1, f"{name!r} must appear exactly once in {job.get('name')}"
+    return hits[0]
+
+
+def test_the_plan_job_runs_the_checks_once_and_the_selection_on_every_unlabelled_pull_request():
     ci = _load_workflow(_CI)
-    job = ci["jobs"]["python-pr-gate"]
+    job = ci["jobs"]["python-pr-gate-plan"]
     assert job["runs-on"] == "ubuntu-latest"
-    assert _norm(job["if"]) == _norm("""
-        github.event_name == 'pull_request' &&
-        !contains(github.event.pull_request.labels.*.name, 'full-ci')"""), (
+    assert _norm(job["if"]) == _GATE_IF, (
         "every unlabelled PR, and never a labelled one, whose whole suite the matrix runs")
     assert isinstance(job.get("timeout-minutes"), int)
-    assert job["timeout-minutes"] >= ci["jobs"]["test-shard"]["timeout-minutes"], (
-        "a change to a hub module runs most of what the matrix job runs, on one host")
-    assert "strategy" not in job, "one host: a subset cannot be measured per platform"
+    assert "strategy" not in job, "the checks and the selection run once"
 
     checkout = job["steps"][0]
     assert checkout["uses"].startswith("actions/checkout@")
@@ -599,54 +939,129 @@ def test_the_ci_job_runs_on_every_pull_request_and_cannot_be_skipped_green():
 
     runs = [s.get("run", "") for s in job["steps"]]
     wanted = ["uv lock --check", "python scripts/check_hygiene.py", "ruff check .",
-              "python scripts/run_affected_tests.py --depth 1"]
+              "python scripts/run_affected_tests.py --depth 1 --plan-out"]
     positions = []
     for cmd in wanted:
         hits = [i for i, r in enumerate(runs) if cmd in r]
         assert len(hits) == 1, f"{cmd!r} must appear exactly once, got {hits}"
         positions.append(hits[0])
-    assert positions == sorted(positions), "lock, hygiene, ruff, then the tests"
+    assert positions == sorted(positions), "lock, hygiene, ruff, then the selection"
+    upload = _by_name(job, "Upload the plan")
     for step in job["steps"]:
         assert not step.get("continue-on-error"), f"{step.get('name')} must be able to fail the job"
-        assert step.get("if") is None, f"{step.get('name')} must run unconditionally"
-    tests_step = [r for r in runs if "run_affected_tests.py" in r][0]
-    assert "--wide" not in tests_step and "pytest tests" not in tests_step, (
+        if step is not upload:
+            assert step.get("if") is None, f"{step.get('name')} must run unconditionally"
+    plan_step = job["steps"][positions[-1]]
+    assert plan_step["id"] == "plan"
+    assert job["outputs"] == {k: "${{ steps.plan.outputs.%s }}" % k for k in ("run", "count", "shards")}
+    assert "--wide" not in plan_step["run"] and "pytest tests" not in plan_step["run"], (
         "the gate runs the selection only, never the whole suite")
+    assert '"$RUNNER_TEMP/pr-gate-plan/plan.json"' in plan_step["run"]
+    assert upload["if"] == "always()", "a refused plan still reaches the verdict jobs"
+    assert upload["with"]["name"] == "pr-gate-plan"
+    assert upload["with"]["path"] == "${{ runner.temp }}/pr-gate-plan/plan.json"
+
+
+def test_every_shard_runs_its_slice_of_the_one_plan():
+    ci = _load_workflow(_CI)
+    job = ci["jobs"]["python-pr-gate-shard"]
+    assert job["needs"] == ["python-pr-gate-plan"]
+    assert _norm(job["if"]) == _norm(
+        "${{ needs.python-pr-gate-plan.result == 'success' && "
+        "needs.python-pr-gate-plan.outputs.run == 'true' }}")
+    matrix = job["strategy"]["matrix"]
+    assert matrix["shard"] == "${{ fromJSON(needs.python-pr-gate-plan.outputs.shards) }}"
+    assert job["strategy"]["fail-fast"] is False
+    assert job["timeout-minutes"] >= ci["jobs"]["test-shard"]["timeout-minutes"], (
+        "a shard of a hub-module change runs as much as a matrix shard")
+    checkout = job["steps"][0]
+    assert checkout["with"]["fetch-depth"] == 0 and checkout["with"]["persist-credentials"] is False
+
+    tests = _by_name(job, "Affected tests (this shard)")
+    assert tests["env"] == {"PR_GATE_SHARD": "${{ matrix.shard }}"}
+    assert _norm(tests["run"]) == (
+        'python scripts/run_affected_tests.py --plan "${{ runner.temp }}/pr-gate-plan/plan.json" '
+        "--shard-env PR_GATE_SHARD --shard-out shard-out")
+    download = _by_name(job, "Download the plan")
+    assert download["with"] == {"pattern": "pr-gate-plan", "merge-multiple": True,
+                                "path": "${{ runner.temp }}/pr-gate-plan"}
+    for step in job["steps"]:
+        assert "--plan-out" not in step.get("run", "") and "--depth" not in step.get("run", ""), (
+            "a shard never selects: it runs the plan's selection")
+        assert not step.get("continue-on-error"), f"{step.get('name')} must be able to fail the job"
+
+    record = _by_name(job, "Record this shard's result")
+    assert record["if"] == "always()"
+    assert record["env"] == {"JOB_STATUS": "${{ job.status }}", "SHARD": "${{ matrix.shard }}"}
+    assert 'shard-out/status-$SHARD.txt' in record["run"]
+    upload = _by_name(job, "Upload this shard's results")
+    assert upload["if"] == "always()"
+    assert upload["with"]["name"] == "pr-gate-shard-${{ matrix.os }}-${{ matrix.shard }}"
+    assert upload["with"]["path"].rstrip("/") == "shard-out"
+    assert upload["with"]["overwrite"] is True, "re-running one failed shard must replace its artifact"
+
+
+def test_the_gate_verdict_cannot_pass_over_a_missing_or_failed_shard():
+    ci = _load_workflow(_CI)
+    upload = _by_name(ci["jobs"]["python-pr-gate-shard"], "Upload this shard's results")
+    oses = ci["jobs"]["python-pr-gate-shard"]["strategy"]["matrix"]["os"]
+    assert sorted(oses) == sorted(os_ for _, os_ in _VERDICTS), "one verdict per shard OS"
+    steps_without_pattern = []
+    for name, os_ in _VERDICTS:
+        job = ci["jobs"][name]
+        assert sorted(job["needs"]) == ["python-pr-gate-plan", "python-pr-gate-shard"]
+        assert _norm(job["if"]) == "!cancelled() && " + _GATE_IF, (
+            "without a status function a skipped or failed shard skips the verdict, which "
+            "merge-policy would read as a skipped gate instead of a red one")
+        assert isinstance(job.get("timeout-minutes"), int)
+        assert "strategy" not in job
+        for step in job["steps"]:
+            assert not step.get("continue-on-error"), f"{step.get('name')} must be able to fail the job"
+            assert step.get("if") is None, f"{step.get('name')} must run unconditionally"
+        download = _by_name(job, "Download this platform's shard results")
+        pattern = download["with"]["pattern"]
+        assert pattern == f"pr-gate-shard-{os_}-*"
+        own = upload["with"]["name"].replace("${{ matrix.os }}", os_).replace("${{ matrix.shard }}", "3")
+        other = upload["with"]["name"].replace("${{ matrix.os }}", [o for o in oses if o != os_][0])
+        assert fnmatch.fnmatchcase(own, pattern) and not fnmatch.fnmatchcase(other, pattern)
+        assert download["with"]["merge-multiple"] is True and download["with"]["path"] == "shard-out"
+        plan = _by_name(job, "Download the plan")
+        assert plan["with"] == _by_name(ci["jobs"]["python-pr-gate-shard"], "Download the plan")["with"]
+        verify = _by_name(job, "Every selected test ran in exactly one shard")
+        assert verify["env"] == {"PLAN_RESULT": "${{ needs.python-pr-gate-plan.result }}"}
+        assert _norm(verify["run"]) == (
+            'python scripts/run_affected_tests.py --collect shard-out '
+            '--plan "$RUNNER_TEMP/pr-gate-plan/plan.json" --plan-result "$PLAN_RESULT"')
+        steps_without_pattern.append([{**s, "with": {**s.get("with", {}), "pattern": None}}
+                                      if s is download else s for s in job["steps"]])
+    assert steps_without_pattern[0] == steps_without_pattern[1], (
+        "the two verdicts differ only in the platform whose shards they read")
 
 
 def test_the_windows_gate_runs_the_linux_gate_selection_on_windows():
     ci = _load_workflow(_CI)
-    linux = ci["jobs"]["python-pr-gate"]
-    win = ci["jobs"]["python-pr-gate-windows"]
-    assert win["runs-on"] == "windows-latest"
-    assert _norm(win["if"]) == _norm(linux["if"]), "the same pull requests as the Linux gate"
-    assert win["timeout-minutes"] == linux["timeout-minutes"]
-    assert "strategy" not in win
-    checkout = win["steps"][0]
-    assert checkout["uses"] == linux["steps"][0]["uses"]
-    assert checkout["with"]["fetch-depth"] == 0
-    assert checkout["with"]["persist-credentials"] is False
-
-    def by_name(job, name):
-        hits = [s for s in job["steps"] if s.get("name") == name]
-        assert len(hits) == 1, f"{name!r} must appear exactly once in {job.get('name')}"
-        return hits[0]
-    for name in ("Create the project venv", "Install", "Affected tests"):
-        assert by_name(win, name)["run"] == by_name(linux, name)["run"], (
-            f"{name!r} must stay identical to the Linux gate's step")
-    shard = ci["jobs"]["test-shard"]
-    shard_path = by_name(shard, "Put the venv on PATH (Windows)")
-    win_path = by_name(win, "Put the venv on PATH")
-    assert (win_path["run"], win_path.get("shell")) == (shard_path["run"], shard_path.get("shell")), (
-        "the venv goes on PATH the way the Windows test shard puts it there")
-    assert by_name(win, "Install").get("shell") == by_name(shard, "Install").get("shell")
-    assert "defaults" not in win and "defaults" not in shard
-    assert by_name(win, "Affected tests").get("shell") is None, (
+    plan = ci["jobs"]["python-pr-gate-plan"]
+    shard = ci["jobs"]["python-pr-gate-shard"]
+    test_shard = ci["jobs"]["test-shard"]
+    assert plan["runs-on"] == "ubuntu-latest", "the selection is computed once, on Linux"
+    assert shard["strategy"]["matrix"]["os"] == ["ubuntu-latest", "windows-latest"]
+    assert shard["runs-on"] == "${{ matrix.os }}"
+    assert ci["jobs"]["python-pr-gate-windows"]["name"] == "Python PR gate, Windows (affected tests)"
+    for name in ("Create the project venv", "Install", "Download the plan", "Affected tests (this shard)"):
+        assert _by_name(shard, name).get("if") is None, f"{name!r} runs the same on both platforms"
+    for name in ("Create the project venv", "Install"):
+        assert _by_name(shard, name)["run"] == _by_name(plan, name)["run"], (
+            f"{name!r} must stay identical to the plan job's step")
+    for name in ("Put the venv on PATH (POSIX)", "Put the venv on PATH (Windows)", "Install"):
+        mine, theirs = _by_name(shard, name), _by_name(test_shard, name)
+        assert (mine.get("if"), mine.get("shell")) == (theirs.get("if"), theirs.get("shell")), (
+            f"{name!r}: the venv goes on PATH and installs the way the test shard does it")
+    assert _by_name(shard, "Put the venv on PATH (Windows)")["run"] == \
+        _by_name(test_shard, "Put the venv on PATH (Windows)")["run"]
+    assert "defaults" not in shard and "defaults" not in test_shard
+    assert _by_name(shard, "Affected tests (this shard)").get("shell") is None, (
         "pytest runs under the runner's default shell, as in the Windows test shard")
-    assert by_name(shard, "Tests (this shard)").get("shell") is None
-    for step in win["steps"]:
-        assert not step.get("continue-on-error"), f"{step.get('name')} must be able to fail the job"
-        assert step.get("if") is None, f"{step.get('name')} must run unconditionally"
+    assert _by_name(test_shard, "Tests (this shard)").get("shell") is None
 
 
 def test_the_full_ci_matrix_is_left_in_place_as_its_own_gate():
