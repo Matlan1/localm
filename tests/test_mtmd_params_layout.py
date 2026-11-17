@@ -80,7 +80,9 @@ def _ctx(runtime, *, on_gpu=True):
 def test_a_known_layout_is_found_and_its_offsets_are_used(layout):
     rt = _FakeRuntime(layout)
     found = lmtmd._params_layout(rt, rt.mtmd_context_params_default())
-    assert found == lmtmd._ParamLayout(layout[1], layout[2])
+    assert (found.n_threads, found.image_min_tokens) == (layout[1], layout[2])
+    # The newer layout has the device pointer at 8, after use_gpu.
+    assert found.device == (8 if layout is NEW else None)
     _ctx(rt)._open(use_gpu=True)
     assert rt.opened[-1]["n_threads"] == lmtmd._encode_threads()
     assert rt.opened[-1]["min"] == -1

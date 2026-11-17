@@ -11,7 +11,7 @@ Naming convention mirrors the C API exactly (llama_xyz → llama_xyz).
 from __future__ import annotations
 
 import ctypes
-from typing import Optional
+from typing import Any, Optional
 
 from ._loader import load_lib
 from ._structs import (
@@ -717,8 +717,18 @@ class LlamaEmbd(ctypes.Structure):
 class _BatchExt:
     """The extended batch functions of one loaded runtime, bound once."""
 
-    init = free = add_token = add_seq = add_embd = set_embd_token = None
-    set_embd_state = set_pos = set_output = process = get_memory = seq_pos_max = None
+    init: Any
+    free: Any
+    add_token: Any
+    add_seq: Any
+    add_embd: Any
+    set_embd_token: Any
+    set_embd_state: Any
+    set_pos: Any
+    set_output: Any
+    process: Any
+    get_memory: Any
+    seq_pos_max: Any
 
 
 def _bind_batch_ext(lib) -> Optional[_BatchExt]:
