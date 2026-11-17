@@ -7,6 +7,7 @@ so a cold start's model-load time is never charged against the generation rate.
 
 import json
 import os
+import threading
 import time
 
 from unittest.mock import MagicMock
@@ -93,16 +94,30 @@ def _make_engine():
 
 class _FakeClockTime:
     """Stands in for http_server's ``time`` module: ``perf_counter`` reads a clock
-    that only :meth:`advance` moves; every other attribute is the real ``time``."""
+    that only :meth:`advance` moves; every other attribute is the real ``time``.
+    Thread-safe: each ``perf_counter`` call counts as a read, and
+    :meth:`wait_for_read` blocks until a read later than a given count happens."""
 
     def __init__(self):
         self.now = 1000.0
+        self.reads = 0
+        self._cond = threading.Condition()
 
     def advance(self, seconds):
-        self.now += seconds
+        with self._cond:
+            self.now += seconds
 
     def perf_counter(self):
-        return self.now
+        with self._cond:
+            self.reads += 1
+            self._cond.notify_all()
+            return self.now
+
+    def wait_for_read(self, after, timeout=10.0):
+        """Block until ``reads`` exceeds *after*; raise AssertionError on timeout."""
+        with self._cond:
+            if not self._cond.wait_for(lambda: self.reads > after, timeout):
+                raise AssertionError("the server never read the clock")
 
     def __getattr__(self, name):
         return getattr(time, name)
@@ -116,7 +131,7 @@ def fake_clock(monkeypatch):
 
 
 def _slow_load_engine(load_delay=0.4, reported_tokens=20, pieces=6, decode_gap=0.005,
-                      clock=None):
+                      clock=None, wait_for_first_stamp=False):
     """An engine whose first token is preceded by a big synthetic load delay, then
     emits its remaining pieces quickly. This is the cold-start shape: a long wait
     before the first token (model load + prefill), then fast decode. Used to prove
@@ -127,7 +142,10 @@ def _slow_load_engine(load_delay=0.4, reported_tokens=20, pieces=6, decode_gap=0
     floor (see _MIN_SEC_PER_TOKEN) and fast relative to the 400ms load.
 
     With *clock* (a :class:`_FakeClockTime`), the load and the gaps advance that
-    clock instead of sleeping, so the measured times are exactly those values."""
+    clock instead of sleeping, so the measured times are exactly those values.
+    *wait_for_first_stamp* (streaming, where a producer thread fills a queue the
+    server reads): after the first piece the generator waits until the server
+    has read the clock again (its first-token stamp) before advancing the gaps."""
     engine = MagicMock()
     engine.display_name = "slow-model"
     engine.count_tokens.return_value = reported_tokens
@@ -138,7 +156,10 @@ def _slow_load_engine(load_delay=0.4, reported_tokens=20, pieces=6, decode_gap=0
         for i in range(pieces):
             if i:
                 wait(decode_gap)         # small inter-token gap (decode)
+            reads = clock.reads if clock is not None else 0
             yield f"t{i} "
+            if i == 0 and wait_for_first_stamp and clock is not None:
+                clock.wait_for_read(reads)
 
     engine.chat_stream.side_effect = _stream
     type(engine).loaded = property(lambda self: True)
@@ -284,16 +305,24 @@ class TestUsageMetricsInResponses:
         assert usage["tokens_per_sec"] > usage["completion_tokens"] / ttft_s, usage
 
     def test_streaming_chat_rate_excludes_load(self, fake_clock):
-        with TestClient(create_app(_slow_load_engine(clock=fake_clock))) as client:
+        engine = _slow_load_engine(clock=fake_clock, wait_for_first_stamp=True)
+        with TestClient(create_app(engine)) as client:
             r = client.post("/v1/chat/completions",
                             json={**CHAT_PAYLOAD, "stream": True})
-        self._assert_rate_excludes_load(_final_usage(r))
+        usage = _final_usage(r)
+        self._assert_rate_excludes_load(usage)
+        assert usage["ttft_ms"] == 400.0, usage
+        assert usage["tokens_per_sec"] == pytest.approx(20 / 0.025), usage
 
     def test_streaming_completion_rate_excludes_load(self, fake_clock):
-        with TestClient(create_app(_slow_load_engine(clock=fake_clock))) as client:
+        engine = _slow_load_engine(clock=fake_clock, wait_for_first_stamp=True)
+        with TestClient(create_app(engine)) as client:
             r = client.post("/v1/completions",
                             json={"model": "test-model", "prompt": "hi", "stream": True})
-        self._assert_rate_excludes_load(_final_usage(r))
+        usage = _final_usage(r)
+        self._assert_rate_excludes_load(usage)
+        assert usage["ttft_ms"] == 400.0, usage
+        assert usage["tokens_per_sec"] == pytest.approx(20 / 0.025), usage
 
     def test_non_streaming_chat_rate_excludes_load(self, fake_clock):
         with TestClient(create_app(_slow_load_engine(clock=fake_clock))) as client:
