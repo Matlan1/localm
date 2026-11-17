@@ -553,7 +553,10 @@ def _replace_target(target: Path, fill):
     aside (RuntimeInUseError, nothing touched); call ``fill(staging)``; only when
     it returns, clear *target*
     (:func:`_clear_target_or_refuse`, which keeps the choice record and the git
-    sentinels) and move the staged files in. When *fill* raises (a failed or
+    sentinels) and move the staged files in. Between the two,
+    ``_bundle_missing_native_deps(staging)`` adds the native dependencies the
+    staged libraries need and the archive lacks, so every way of placing a
+    runtime gets them. When *fill* raises (a failed or
     refused download, an archive that does not verify), the exception
     propagates and *target* is exactly as it was. The staging directory is
     removed in every case."""
@@ -566,6 +569,7 @@ def _replace_target(target: Path, fill):
     staging.mkdir(parents=True)
     try:
         result = fill(staging)
+        _sl._bundle_missing_native_deps(staging)
         _move_into_backup(target)
         _sl._clear_target_or_refuse(target)
         target.mkdir(parents=True, exist_ok=True)

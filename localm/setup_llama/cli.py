@@ -24,6 +24,7 @@ from localm.setup_llama.versions import (_apply_version_request, _pin_note_for_b
                                          _record_runtime_history)
 from localm.setup_llama.cuda import _ARM64_CUDA_LINES, _CUDA_LINE
 from localm.setup_llama.provision import _provision_with_fallback
+from localm.setup_llama.rocm_cpu import installed_cpu_overlay
 import localm.setup_llama as _sl
 
 # The complete set of values --backend accepts, and the ONE place that decides
@@ -122,6 +123,7 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
     """
     lib_name = _sl._lib_name()
     target = _sl._repo_runtime_lib()
+    _sl.set_vc_unattended(assume_yes)
     if cuda_line:
         cuda_line = cuda_line.lower()
         _require_staging_context(backend, cuda_line, from_dir, url, rollback)
@@ -159,6 +161,7 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
     # by the cross-process provisioning lock: two processes provisioning the same
     # target must not interleave. Above this point only the "already provisioned"
     # short-circuit runs, which at most removes the choice record.
+    vc_absent = False
     try:
         with _sl._provisioning_lock(target), _sl.keep_previous_runtime(
                 target, on_failure=lambda: _restore_pin(pin_before)):
@@ -175,10 +178,53 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
                                    keep_choice=keep_choice)
 
             _refresh_install_record(target)
-            _sl._verify()
+            vc_absent = (_sl.vc_runtime_missing(target)
+                         and not _sl._native_loads_ok()[0])
+            if not vc_absent:
+                _sl._verify()
     except ProvisioningBusyError as e:
         _restore_pin(pin_before)
         _exit_provisioning_busy(e)
+    if vc_absent:
+        _exit_vc_runtime_absent()
+
+
+def _exit_vc_runtime_absent() -> None:
+    """Exit with :data:`localm.setup_spec.VC_RUNTIME_ABSENT_EXIT`: the runtime is
+    in place and recorded, and cannot load until Windows has the Microsoft
+    Visual C++ Redistributable (the message saying so is already printed)."""
+    from localm.setup_spec import VC_RUNTIME_ABSENT_EXIT
+    sys.exit(VC_RUNTIME_ABSENT_EXIT)
+
+
+def _vc_runtime_for_kept_install(target: Path, have: Optional[str]) -> None:
+    """Windows, when the installed runtime is kept: when the Microsoft Visual
+    C++ runtime it needs is missing, offer it (:func:`localm.setup_llama.offer_vc_runtime`);
+    after an install, add the amd-rocm SIMD CPU backend when it is not in place
+    and load-test the runtime again. When it is not installed, exits with
+    :data:`localm.setup_spec.VC_RUNTIME_ABSENT_EXIT` unless the installed
+    runtime loads anyway (an older Visual C++ runtime). Exits 1 when the
+    runtime still does not load after an install. Returns when nothing is
+    missing or the runtime loads."""
+    if not _sl.vc_runtime_missing(target):
+        return
+    if not _sl.offer_vc_runtime(target):
+        if _sl._native_loads_ok()[0]:
+            return
+        _exit_vc_runtime_absent()
+    if have == "amd-rocm" and installed_cpu_overlay(target) is None:
+        try:
+            with _sl._provisioning_lock(target):
+                _sl.install_rocm_simd_cpu(target)
+                _record_provisioned_backend(target, "amd-rocm", build=_sl.rocm_build(target))
+        except ProvisioningBusyError as e:
+            _exit_provisioning_busy(e)
+    loaded, detail = _sl._native_loads_ok()
+    if not loaded:
+        console.print(f"[red]The installed runtime still does not load:[/red] "
+                      f"{escape(str(detail))}")
+        sys.exit(1)
+    console.print("[green]OK - the installed runtime loads on this machine now.[/green]")
 
 
 def _stored_pin() -> Optional[str]:
@@ -265,7 +311,6 @@ def _provision_staged_cuda(cuda_line: str, target: Path, lib_name: str,
     if not (target / lib_name).exists():
         console.print(f"[red]The {cuda_line} archive did not contain {lib_name}.[/red]")
         sys.exit(1)
-    _sl._bundle_missing_native_deps(target)
     _sl._install_runtime_wheel(_sl._runtime_pkg_dir())
     _record_provisioned_backend(target, "cuda", build=used_tag)
     _record_backend_choice(target, None)
@@ -321,6 +366,7 @@ def _keeps_existing_install(target: Path, lib_name: str, backend: str, force: bo
                 else:
                     _print_pending_choice(target)
                 _sl._ensure_importable()
+                _vc_runtime_for_kept_install(target, have)
                 return True
         if not from_dir:
             _refuse_when_net_off()
@@ -443,6 +489,9 @@ def _provision_from_dir(from_dir: str, target: Path, lib_name: str) -> None:
         console.print("[green]OK - the provided build loads on this machine.[/green]")
         _record_provisioned_backend(target, "custom")
         _record_backend_choice(target, None)
+    elif _sl.vc_runtime_missing(target):
+        _record_provisioned_backend(target, "custom")
+        _record_backend_choice(target, None)
     else:
         # The user pinned this build, so we do NOT fall back - but we must not
         # report success on a library that will not load. Exit non-zero with a
@@ -475,6 +524,8 @@ def _provision_from_url(url: str, target: Path, lib_name: str,
         console.print(f"[red]The archive did not contain {lib_name}.[/red] "
                       "Try a different --url or use --from.")
         sys.exit(1)
+    except click.exceptions.Abort:
+        raise
     except ArtifactError as e:
         console.print(f"[red]Refusing to install:[/red] {escape(str(e))}")
         console.print("Provide a local build with --from instead, or a different "
@@ -488,6 +539,9 @@ def _provision_from_url(url: str, target: Path, lib_name: str,
     loaded, detail = _sl._native_loads_ok()
     if loaded:
         console.print("[green]OK - the fetched build loads on this machine.[/green]")
+        _record_provisioned_backend(target, "custom")
+        _record_backend_choice(target, None)
+    elif _sl.vc_runtime_missing(target):
         _record_provisioned_backend(target, "custom")
         _record_backend_choice(target, None)
     else:

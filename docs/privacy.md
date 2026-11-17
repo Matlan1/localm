@@ -367,6 +367,20 @@ policy](network.md) instead.
 
 ---
 
+## The Microsoft Visual C++ Redistributable download (Windows)
+
+On a Windows PC without the Microsoft Visual C++ Redistributable (or with an
+older one), setup and `localm setup-llama` ask before they download
+Microsoft's installer from `download.visualstudio.microsoft.com`. It is a plain
+download of a fixed file: besides a User-Agent naming localm it sends nothing
+about you or your install, and Microsoft's server sees your IP address and the
+time, as with any download. The installer runs only after its size, sha256 and Microsoft
+signature check out, and Windows shows one administrator prompt for it. If you
+decline, nothing is downloaded. It obeys `net_mode`: under `off` it is refused
+unless `net_allow_model_downloads` is on.
+
+---
+
 ## The management log (log and full mode only)
 
 localm appends one line to `logs/management.jsonl` in the data folder when an API key is created or revoked, a login with a wrong key is refused, an update is applied, a setting is saved or a plugin is installed or removed. A line holds the time, the kind of event, a key id or a fixed label (never a key), the names of the settings a save changed (never their values), the plugin name and versions, and for a refused login only whether the client was on this machine. It holds no conversation content and no secret. It is written in log and full mode only; privacy mode writes nothing. The file is capped at 1 MB and one earlier file (`management.jsonl.1`) is kept. If it cannot be written, localm logs a warning and carries on with the operation.

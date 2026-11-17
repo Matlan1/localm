@@ -336,8 +336,17 @@ def _load_lib(payload):
     try:
         return b.load_library(runtime_dir, extra)
     except OSError as e:
+        from localm import vc_runtime
+        clause = vc_runtime.missing_clause(
+            [*sorted(runtime_dir.glob("ggml*.dll")), runtime_dir / b.lib_filename()],
+            [runtime_dir, *extra])
+        if clause and "Visual C++" in clause:
+            raise RuntimeError(
+                f"could not load the stable-diffusion.cpp runtime from {runtime_dir}: "
+                f"{clause} ({e}). {vc_runtime.install_hint()}") from e
         raise RuntimeError(
-            f"could not load the stable-diffusion.cpp runtime from {runtime_dir} ({e}). "
+            f"could not load the stable-diffusion.cpp runtime from {runtime_dir} "
+            f"({clause + '; ' if clause else ''}{e}). "
             "Reinstall it with 'localm setup-sdcpp --force', or pick another runtime "
             "backend ('localm setup-sdcpp --backend vulkan').") from e
 

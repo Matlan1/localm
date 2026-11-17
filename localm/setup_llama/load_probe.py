@@ -54,6 +54,27 @@ _KNOWN_SHARED_LIB_PACKAGES = {
 _MISSING_SO_RE = re.compile(r"([\w.+-]+\.so(?:\.[\w.]+)?): cannot open shared object file")
 
 
+# The clause localm.vc_runtime.describe_missing writes into the loader's error
+# on Windows: "<a.dll>[, <b.dll>...] is|are missing (the Microsoft Visual C++
+# runtime; needed by ...)" or the same without the runtime label.
+_MISSING_DLL_RE = re.compile(
+    r"((?:[\w.+-]+\.dll)(?:, [\w.+-]+\.dll)*) (?:is|are) missing "
+    r"\((the Microsoft Visual C\+\+ runtime; )?needed by ([^)]*)\)", re.IGNORECASE)
+
+
+def _name_missing_dll(detail: str) -> Optional[str]:
+    """The Windows half of :func:`_name_missing_shared_lib`."""
+    m = _MISSING_DLL_RE.search(detail or "")
+    if not m:
+        return None
+    names, vc, users = m.group(1), m.group(2), m.group(3)
+    if vc:
+        from localm import vc_runtime
+        return f"{names} (the Microsoft Visual C++ runtime) - {vc_runtime.install_hint()}"
+    return (f"{names} (needed by {users}) - install the driver or program that "
+            "provides it, then retry")
+
+
 def _name_missing_shared_lib(detail: str) -> Optional[str]:
     """A plain-words description of the OS shared library a dlopen failure in
     *detail* named, or None when *detail* is not that shape.
@@ -62,7 +83,11 @@ def _name_missing_shared_lib(detail: str) -> Optional[str]:
     _informative_error_line produces (e.g. ``RuntimeError: Failed to load
     libllama.so from ...: libgomp.so.1: cannot open shared object file: No
     such file or directory``); this pulls the soname back out of it rather
-    than re-running the load probe."""
+    than re-running the load probe. On Windows the loader's error names the
+    missing DLL itself (see ``_loader.missing_dll_clause``)."""
+    named = _name_missing_dll(detail)
+    if named:
+        return named
     m = _MISSING_SO_RE.search(detail or "")
     if not m:
         return None
@@ -127,7 +152,7 @@ sys.stdout.write(", ".join(name for name, _ in devices) or "none")
 import ctypes
 d = _loader.runtime_binary_dir()
 for p in sorted(d.glob(_loader._ggml_glob())) if d is not None else []:
-    kind = next((k for k in ("cuda", "hip", "sycl") if "ggml-" + k in p.name.lower()), None)
+    kind = next((k for k in ("cuda", "hip", "sycl", "vulkan") if "ggml-" + k in p.name.lower()), None)
     if kind is None:
         continue
     try:
@@ -135,7 +160,7 @@ for p in sorted(d.glob(_loader._ggml_glob())) if d is not None else []:
     except OSError as e:
         msg = str(e).splitlines()[0] if str(e) else type(e).__name__
         if "Could not find module" in msg:
-            msg = "it or a library it needs is missing"
+            msg = _loader.missing_dll_clause(d, [p]) or "it or a library it needs is missing"
         sys.stdout.write("\\n" + p.name + " did not load: " + msg)
     if kind == "cuda":
         lib = "nvcuda.dll" if sys.platform == "win32" else "libcuda.so.1"

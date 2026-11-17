@@ -51,6 +51,12 @@ RECOMMENDED_PLUGINS = ("coder", "rag", "web", "tts")
 ASK_ENV = "LOCALM_SETUP_ASK"
 ASK_PREFIX = "@@localm-ask "
 
+# The exit code of `localm setup-llama` when the runtime is in place but cannot
+# load because Windows lacks the Microsoft Visual C++ Redistributable (declined,
+# refused, failed, or not offered in an unattended run). setup.bat tests the
+# same number.
+VC_RUNTIME_ABSENT_EXIT = 3
+
 
 @dataclass(frozen=True)
 class Question:

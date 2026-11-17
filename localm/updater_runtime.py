@@ -924,7 +924,10 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
     ``failed`` status also has ``"why"``, the note without what to do next.
     ``state`` is:
 
-    - ``"updated"``: the runtime now is the release's build;
+    - ``"updated"``: the runtime now is the release's build; when setup-llama
+      exited with :data:`localm.setup_spec.VC_RUNTIME_ABSENT_EXIT` it is in
+      place but cannot load yet, and the note names the missing Microsoft
+      Visual C++ Redistributable and how to install it;
     - ``"current"``: it already was, or the user has since chosen a build;
     - ``"waiting"``: a process that is not this install's (or did not exit)
       holds the runtime files; nothing was changed and the re-provision stays
@@ -1009,9 +1012,12 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
     if env is None:
         env = updater._deps_env(root)
     run = runner or (lambda c: subprocess.run(c, cwd=str(root), env=env).returncode)
+    from localm.setup_spec import VC_RUNTIME_ABSENT_EXIT
+    vc_absent = False
     try:
         rc = int(run(cmd))
-        problem = None if rc == 0 else f"setup-llama exited {rc}"
+        vc_absent = rc == VC_RUNTIME_ABSENT_EXIT
+        problem = None if rc == 0 or vc_absent else f"setup-llama exited {rc}"
     except Exception as e:
         problem = f"could not run setup-llama: {e}"
     setup_finished = problem is None
@@ -1023,8 +1029,12 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
         problem = f"setup-llama installed {now_build or 'an unrecorded build'}, not {target}"
     clear_pending()
     if problem is None:
-        status.update(state="updated", note=f"re-provisioned the {backend} runtime: "
-                                            f"{pending.get('from')} -> {now_build or target}")
+        note = (f"re-provisioned the {backend} runtime: "
+                f"{pending.get('from')} -> {now_build or target}")
+        if vc_absent:
+            note += ("; no model can load until the Microsoft Visual C++ Redistributable is "
+                     "installed: run 'localm setup-llama', which offers to install it")
+        status.update(state="updated", note=note)
         _write_status(status)
         return status
     held_by = holders(lib)
