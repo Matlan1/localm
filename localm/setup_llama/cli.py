@@ -24,6 +24,7 @@ from localm.setup_llama.versions import (_apply_version_request, _pin_note_for_b
                                          _record_runtime_history)
 from localm.setup_llama.cuda import _ARM64_CUDA_LINES, _CUDA_LINE
 from localm.setup_llama.provision import _provision_with_fallback
+from localm.setup_llama.rocm_cpu import installed_cpu_overlay
 import localm.setup_llama as _sl
 
 # The complete set of values --backend accepts, and the ONE place that decides
@@ -211,7 +212,7 @@ def _vc_runtime_for_kept_install(target: Path, have: Optional[str]) -> None:
         if _sl._native_loads_ok()[0]:
             return
         _exit_vc_runtime_absent()
-    if have == "amd-rocm" and _sl.installed_cpu_overlay(target) is None:
+    if have == "amd-rocm" and installed_cpu_overlay(target) is None:
         try:
             with _sl._provisioning_lock(target):
                 _sl.install_rocm_simd_cpu(target)

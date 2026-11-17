@@ -356,7 +356,7 @@ def _vc_known_missing() -> bool:
     marker = runtimes_root() / VC_MISSING_MARKER
     try:
         names = json.loads(marker.read_text(encoding="utf-8"))["absent"]
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
         return False
     if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
         return False

@@ -52,7 +52,7 @@ def _done_lines() -> str:
     return "\n".join(ln for ln in BAT.splitlines() if ln.startswith('if "%RUNTIME_OK%"=="0" '))
 
 
-def _run(tmp_path: Path, *, backend: str, answers: str, rc: int = 3):
+def _run(tmp_path: Path, *, backend: str, answers: str, rc: int = 1):
     script = (
         "@echo off\n"
         "setlocal EnableDelayedExpansion\n"
@@ -129,6 +129,21 @@ def test_a_successful_provision_asks_nothing_and_prints_no_warning(tmp_path):
     assert "Continue the rest of setup" not in out and "REPORT" not in out
     assert "AFTER RUNTIME_OK=1" in out
     assert "No model can load yet" not in out
+
+
+@pytest.mark.parametrize("backend,answers", [("vulkan", ""), ("own", "C:\\build\n")])
+def test_exit_3_is_a_missing_visual_cpp_runtime_not_a_failure(tmp_path, backend, answers):
+    from localm.setup_spec import VC_RUNTIME_ABSENT_EXIT
+    done = _run(tmp_path, backend=backend, answers=answers, rc=VC_RUNTIME_ABSENT_EXIT)
+    out = _out(done)
+    assert done.returncode == 0, out
+    assert "failed during setup" not in out and "REPORT" not in out
+    assert "Continue the rest of setup" not in out
+    tail = out[out.index("AFTER RUNTIME_OK=0"):]
+    assert "[!] No model can load yet - Windows lacks the Microsoft Visual C++ Redistributable." in tail
+    assert "https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist" in tail
+    assert tail.rstrip().endswith(".venv\\Scripts\\localm setup-llama")
+    assert "did not finish" not in tail
 
 
 def test_the_runtime_flag_starts_set():

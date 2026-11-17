@@ -182,7 +182,7 @@ def _bundle_missing_native_deps(target: Path) -> None:
     Never raises, except ``click.Abort`` from the Visual C++ question. A
     failure is logged as a warning, never silently treated as success."""
     if sys.platform == "win32":
-        offer_vc_runtime(target)
+        _sl.offer_vc_runtime(target)
         return
     if sys.platform == "darwin":
         return
