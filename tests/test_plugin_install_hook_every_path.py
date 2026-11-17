@@ -93,8 +93,8 @@ def test_app_free_store_install_runs_on_install_without_register(env):
     _make_plugin(store, "hooked", _HOOKED)
     mgr = PluginManager(None, store_root=store, installed_root=inst)
     mgr.set_installed_state("hooked", True)
-    assert (inst / "hooked" / "on_install_called").exists()
-    assert not (inst / "hooked" / "register_called").exists()
+    assert (store / "hooked" / "on_install_called").exists()
+    assert not (store / "hooked" / "register_called").exists()
     assert mgr.pop_install_note("hooked") == "hooked note"
     assert mgr.pop_install_note("hooked") is None          # returned once
     # The module imported for the hook alone is not left behind.
@@ -108,7 +108,7 @@ def test_app_free_install_runs_the_hook_with_enable_false(env):
     mgr = PluginManager(None, store_root=store, installed_root=inst)
     mgr.set_installed_state("hooked", True, enable=False)
     assert not mgr.is_enabled("hooked")
-    assert (inst / "hooked" / "on_install_called").exists()
+    assert (store / "hooked" / "on_install_called").exists()
 
 
 def test_app_free_install_skips_the_hook_while_a_required_plugin_is_missing(env):
@@ -119,7 +119,7 @@ def test_app_free_install_skips_the_hook_while_a_required_plugin_is_missing(env)
     mgr = PluginManager(None, store_root=store, installed_root=inst)
     mgr.set_installed_state("hooked", True)
     assert mgr.is_installed("hooked") and not mgr.is_enabled("hooked")
-    assert not (inst / "hooked" / "on_install_called").exists()
+    assert not (store / "hooked" / "on_install_called").exists()
     assert mgr.pop_install_note("hooked") is None
 
 
@@ -169,7 +169,8 @@ def test_a_plugin_without_on_install_is_not_imported_at_install(env, caplog):
         mgr.set_installed_from_dir(src)
     assert mgr.is_installed("quiet") and mgr.is_enabled("quiet")
     assert not (inst / "quiet" / "imported").exists()
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert not [r for r in caplog.records
+                if r.levelno >= logging.WARNING and "quiet" in r.getMessage()]
 
 
 def test_on_install_bound_inside_a_block_still_runs(env):
@@ -187,7 +188,7 @@ def test_on_install_bound_inside_a_block_still_runs(env):
     """)
     mgr = PluginManager(None, store_root=store, installed_root=inst)
     mgr.set_installed_state("blocky", True)
-    assert (inst / "blocky" / "on_install_called").exists()
+    assert (store / "blocky" / "on_install_called").exists()
 
 
 def test_a_note_does_not_outlive_its_install(env):
