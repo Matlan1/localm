@@ -21,9 +21,12 @@ from localm.memory.record import MemoryRecord
 from localm.memory.store import MemoryStore
 from tests._home_bound_guard import unfinished_home_bound_runs
 
+# threading.Thread as imported, before a test below replaces it.
+_Thread = threading.Thread
+
 
 def _run_on_a_thread(fn) -> None:
-    t = threading.Thread(target=fn, daemon=True)
+    t = _Thread(target=fn, daemon=True)
     t.start()
     t.join(10.0)
     assert not t.is_alive(), "the background call never finished"
