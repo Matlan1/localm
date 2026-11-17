@@ -743,6 +743,75 @@ def _state_v4_headers() -> str:
 
 _MTMD_STATE_V4 = _state_v4_headers()
 
+_V5_DELIVERY_LINES = (
+    "    float speed;    // speaking speed relative to a typical pace, > 0 "
+    "(default: 1.0 = the model's own pace)\n"
+    "    float loudness; // target loudness in LUFS, < 0 "
+    "(default: 0.0 = the model's own loudness)\n")
+
+
+def _state_v5_headers() -> str:
+    """The b12424 change: speed and loudness after seed in the helper input,
+    no new function."""
+    text = _MTMD_STATE_V4.replace(_V4_SEED_LINE, _V4_SEED_LINE + _V5_DELIVERY_LINES)
+    assert text.count("float speed;") == 1
+    return text
+
+
+_MTMD_STATE_V5 = _state_v5_headers()
+
+_V6_SPEAKER_REF_LINE = "    mtmd_bitmap * speaker_ref; // optional, can be NULL\n"
+_V6_SPEAKER_REF_TEXT_LINE = (
+    "    const char * speaker_ref_text; // optional, can be NULL: transcript of "
+    "speaker_ref\n")
+
+
+def _state_v6_headers() -> str:
+    """The b12452 change: speaker_ref_text after speaker_ref in the helper
+    input, no new function."""
+    assert _MTMD_STATE_V5.count(_V6_SPEAKER_REF_LINE) == 1
+    text = _MTMD_STATE_V5.replace(_V6_SPEAKER_REF_LINE,
+                                  _V6_SPEAKER_REF_LINE + _V6_SPEAKER_REF_TEXT_LINE)
+    assert text.count("speaker_ref_text;") == 1
+    return text
+
+
+_MTMD_STATE_V6 = _state_v6_headers()
+
+_V7_OUT_TYPE_LINE = "    enum mtmd_helper_gen_audio_outtype out_type;\n"
+_V7_GUIDANCE_LINES = ("    float cfg_scale;\n"
+                      "    int32_t flow_steps;\n")
+_V7_SAMPLE_RATE_LINE = "    int32_t sample_rate; // in Hz\n"
+_V7_N_CHANNELS_LINE = "    int32_t n_channels;  // 1 = mono, 2 = stereo\n"
+_V7_GEN_INPUT = _V2_GEN_INPUT.replace("    size_t        n_feats;\n};\n", """\
+    size_t        n_feats;
+    const uint8_t * backbone_state;
+    size_t          backbone_state_size;
+    int32_t         backbone_n_past;
+    int32_t n_steps;
+};
+""")
+
+
+def _state_v7_headers() -> str:
+    """The b12458 change: cfg_scale and flow_steps before out_type in the
+    helper input, n_channels after sample_rate in mtmd_gen_audio_info, the
+    backbone state fields and n_steps at the end of mtmd_gen_inp, and the new
+    function mtmd_helper_gen_audio_max_frames."""
+    assert _MTMD_STATE_V6.count(_V7_OUT_TYPE_LINE) == 1
+    assert _MTMD_STATE_V6.count(_V7_SAMPLE_RATE_LINE) == 1
+    assert _MTMD_STATE_V6.count(_V2_GEN_INPUT) == 1 and _V7_GEN_INPUT != _V2_GEN_INPUT
+    text = (_MTMD_STATE_V6
+            .replace(_V7_OUT_TYPE_LINE, _V7_GUIDANCE_LINES + _V7_OUT_TYPE_LINE)
+            .replace(_V7_SAMPLE_RATE_LINE, _V7_SAMPLE_RATE_LINE + _V7_N_CHANNELS_LINE)
+            .replace(_V2_GEN_INPUT, _V7_GEN_INPUT))
+    return text + (
+        "MTMD_API int32_t mtmd_helper_gen_audio_max_frames("
+        "const mtmd_helper_gen_audio * ctx);\n")
+
+
+_MTMD_STATE_V7 = _state_v7_headers()
+
 _MTMD_LEGACY = _MTMD_SPEECH_COMMON + """
 struct mtmd_helper_gen_audio_inp {
     llama_seq_id seq_id;
@@ -788,11 +857,17 @@ MTMD_API int32_t mtmd_gen_audio_process(mtmd_context * ctx,
 """
 
 
-@pytest.mark.parametrize("text, interface", [(_MTMD_STATE, "state"),
-                                             (_MTMD_STATE_V2, "state_v2"),
-                                             (_MTMD_STATE_V3, "state_v3"),
-                                             (_MTMD_STATE_V4, "state_v4"),
-                                             (_MTMD_LEGACY, "legacy")])
+_SPEECH_FIXTURES = [(_MTMD_STATE, "state"),
+                    (_MTMD_STATE_V2, "state_v2"),
+                    (_MTMD_STATE_V3, "state_v3"),
+                    (_MTMD_STATE_V4, "state_v4"),
+                    (_MTMD_STATE_V5, "state_v5"),
+                    (_MTMD_STATE_V6, "state_v6"),
+                    (_MTMD_STATE_V7, "state_v7"),
+                    (_MTMD_LEGACY, "legacy")]
+
+
+@pytest.mark.parametrize("text, interface", _SPEECH_FIXTURES)
 def test_speech_binding_matches_each_interface(text, interface, capsys):
     seen = set()
     assert abichk.check_speech(text, "fixture", seen) == 0
@@ -801,13 +876,51 @@ def test_speech_binding_matches_each_interface(text, interface, capsys):
     assert f"[interface: {interface}]" in out and "FAIL" not in out
 
 
-@pytest.mark.parametrize("text, interface", [(_MTMD_STATE, "state"),
-                                             (_MTMD_STATE_V2, "state_v2"),
-                                             (_MTMD_STATE_V3, "state_v3"),
-                                             (_MTMD_STATE_V4, "state_v4"),
-                                             (_MTMD_LEGACY, "legacy")])
+@pytest.mark.parametrize("text, interface", _SPEECH_FIXTURES)
 def test_the_headers_are_classified_by_their_interface_marker(text, interface):
     assert abichk._header_speech_interface(text) == interface
+
+
+def test_the_fixtures_cover_every_speech_interface():
+    assert {i for _t, i in _SPEECH_FIXTURES} == set(abichk.MTMD_SPEECH_REFS)
+
+
+@pytest.mark.parametrize("bound, text, want", [
+    ("state_v4", _MTMD_STATE_V5, "FAIL  size: upstream 80 != localm 72"),
+    ("state_v5", _MTMD_STATE_V4, "FAIL  size: upstream 72 != localm 80"),
+    ("state_v5", _MTMD_STATE_V6, "FAIL  lang: upstream offset 48 size 8 != localm offset 40"),
+    ("state_v6", _MTMD_STATE_V5, "FAIL  size: upstream 80 != localm 88"),
+    ("state_v6", _MTMD_STATE_V7, "FAIL  out_type: upstream offset 88 size 4 != localm offset 80"),
+    ("state_v7", _MTMD_STATE_V6, "FAIL  size: upstream 88 != localm 96"),
+])
+def test_each_delivery_binding_fails_against_its_neighbours_headers(
+        bound, text, want, monkeypatch, capsys):
+    binding = abichk._localm_speech_binding(bound)
+    monkeypatch.setattr(abichk, "_localm_speech_binding", lambda interface: binding)
+    assert abichk.check_speech(text, "fixture", set()) > 0
+    out = capsys.readouterr().out
+    assert "FAIL  fields differ" in out and want in out
+
+
+def test_the_state_v7_audio_info_and_gen_input_are_checked(monkeypatch, capsys):
+    v6 = abichk._localm_speech_binding("state_v6")
+    v7_signatures = abichk._localm_speech_binding("state_v7")[1]
+    monkeypatch.setattr(abichk, "_localm_speech_binding",
+                        lambda interface: (v6[0], v7_signatures))
+    assert abichk.check_speech(_MTMD_STATE_V7, "fixture", set()) > 0
+    out = capsys.readouterr().out
+    assert "FAIL  size: upstream 32 != localm 24" in out
+    assert "FAIL  size: upstream 96 != localm 72" in out
+
+
+def test_an_unknown_field_in_a_state_v3_family_helper_input_fails(capsys):
+    anchor = _V6_SPEAKER_REF_TEXT_LINE
+    grown = _MTMD_STATE_V6.replace(anchor, anchor + "    const char * style;\n")
+    assert grown != _MTMD_STATE_V6
+    assert abichk._header_speech_interface(grown) == "state_v6"
+    assert abichk.check_speech(grown, "fixture", set()) > 0
+    out = capsys.readouterr().out
+    assert "FAIL  fields differ" in out and "style" in out
 
 
 def test_the_state_binding_fails_against_the_state_v2_headers(monkeypatch, capsys):
@@ -1099,21 +1212,15 @@ def offline_main(monkeypatch):
 
 def test_the_default_run_checks_every_speech_interface(offline_main):
     refs = abichk.MTMD_SPEECH_REFS
-    assert offline_main([], {refs["legacy"]: _MTMD_LEGACY,
-                             refs["state"]: _MTMD_STATE,
-                             refs["state_v2"]: _MTMD_STATE_V2,
-                             refs["state_v3"]: _MTMD_STATE_V3,
-                             refs["state_v4"]: _MTMD_STATE_V4}) == 0
+    assert offline_main([], {refs[i]: text for text, i in _SPEECH_FIXTURES}) == 0
     assert sorted(offline_main.fetched) == sorted(refs.values())
 
 
 def test_the_default_run_fails_when_an_interface_goes_unchecked(offline_main, capsys):
     refs = abichk.MTMD_SPEECH_REFS
-    assert offline_main([], {refs["legacy"]: _MTMD_STATE,
-                             refs["state"]: _MTMD_STATE,
-                             refs["state_v2"]: _MTMD_STATE_V2,
-                             refs["state_v3"]: _MTMD_STATE_V3,
-                             refs["state_v4"]: _MTMD_STATE_V4}) == 1
+    headers = {refs[i]: text for text, i in _SPEECH_FIXTURES}
+    headers[refs["legacy"]] = _MTMD_STATE
+    assert offline_main([], headers) == 1
     assert "expected to check every speech generation interface" in (
         capsys.readouterr().out)
 

@@ -10,21 +10,26 @@ codebook-0 token for every frame with the sampler chain llama.cpp's
 ``llama-tts`` uses, and drives the helper one frame at a time so a caller can
 report progress and stop between frames.
 
-Five generation interfaces are bound: the legacy one (builds exporting
+Eight generation interfaces are bound: the legacy one (builds exporting
 ``mtmd_gen_inp_default`` but not ``mtmd_gen_state_init``), the state one (builds
 exporting ``mtmd_gen_state_init``, whose helper input starts with a ``stream``
 flag and whose ``mtmd_gen_audio_process`` takes a generation state), the
 state_v2 one (builds also exporting ``mtmd_helper_gen_audio_next_is_text``,
 whose helper input adds ``n_past``, ``out_mode`` and ``voice`` and whose
-generation input adds the code repetition penalty) and the state_v3 one (builds
+generation input adds the code repetition penalty), the state_v3 one (builds
 also exporting ``mtmd_gen_audio_voice_name``, whose helper input drops
-``voice`` and whose ``mtmd_gen_audio_info`` adds ``n_voices``) and the state_v4
-one (the state_v3 exports, with a ``temp`` field inserted before ``seed`` in the
-helper input; told apart from state_v3 by where
-``mtmd_helper_gen_audio_inp_default`` puts its default seed). An mtmd exporting
-none of the four markers lays the input struct out differently and is refused
-with :class:`SpeechUnavailable`, as is a state_v3-marker mtmd whose default
-helper input matches neither the state_v3 nor the state_v4 layout.
+``voice`` and whose ``mtmd_gen_audio_info`` adds ``n_voices``), three more
+helper input layouts with the state_v3 exports (state_v4 inserts ``temp``
+before ``seed``, state_v5 adds ``speed`` and ``loudness`` after ``seed``,
+state_v6 adds ``speaker_ref_text`` after ``speaker_ref``), told apart by the
+bytes ``mtmd_helper_gen_audio_inp_default`` returns, and the state_v7 one
+(builds also exporting ``mtmd_helper_gen_audio_max_frames``: the state_v6 helper
+input with ``cfg_scale`` and ``flow_steps`` before ``out_type``,
+``n_channels`` in ``mtmd_gen_audio_info`` and the backbone state fields in
+``mtmd_gen_inp``). An mtmd exporting none of the markers lays the input struct
+out differently and is refused with :class:`SpeechUnavailable`, as is a
+state_v3-marker or state_v7-marker mtmd whose default helper input matches no
+layout of its marker, or more than one.
 
 Runs inside the isolated speech worker (``localm/inference/_speech_runner.py``),
 never in the server process.
@@ -168,6 +173,16 @@ class _GenAudioInfoV3(ctypes.Structure):
                 ("n_voices", ctypes.c_int32)]
 
 
+class _GenAudioInfoV7(ctypes.Structure):
+    """``mtmd_gen_audio_info`` of the state_v7 interface: the state_v3 info
+    with ``n_channels`` after ``sample_rate``."""
+    _fields_ = [("type", ctypes.c_int),
+                ("sample_rate", ctypes.c_int32),
+                ("n_channels", ctypes.c_int32),
+                ("model_variant", ctypes.c_char_p),
+                ("n_voices", ctypes.c_int32)]
+
+
 _HELPER_INPUT_FIELDS = [("seq_id", ctypes.c_int32),
                         ("prompt", ctypes.c_char_p),
                         ("prompt_len", ctypes.c_size_t),
@@ -246,8 +261,84 @@ class _HelperInputV4(ctypes.Structure):
                 ("out_type", ctypes.c_int)]
 
 
+class _HelperInputV5(ctypes.Structure):
+    """``mtmd_helper_gen_audio_inp`` of the state_v5 interface: the state_v4
+    input with ``speed`` (relative to the model's own pace, above 0) and
+    ``loudness`` (LUFS, 0 the model's own) after ``seed``. The library refuses
+    the 0 a zeroed input holds in ``speed``, so every request sets it to
+    :data:`_HELPER_SPEED_MODEL_DEFAULT`; 0 is upstream's ``loudness``
+    default."""
+    _fields_ = [("stream", ctypes.c_bool),
+                ("seq_id", ctypes.c_int32),
+                ("prompt", ctypes.c_char_p),
+                ("prompt_len", ctypes.c_size_t),
+                ("n_past", ctypes.c_int32),
+                ("out_mode", ctypes.c_int),
+                ("speaker_ref", ctypes.c_void_p),
+                ("lang", ctypes.c_char_p),
+                ("top_k", ctypes.c_int32),
+                ("top_p", ctypes.c_float),
+                ("temp", ctypes.c_float),
+                ("seed", ctypes.c_uint32),
+                ("speed", ctypes.c_float),
+                ("loudness", ctypes.c_float),
+                ("out_type", ctypes.c_int)]
+
+
+class _HelperInputV6(ctypes.Structure):
+    """``mtmd_helper_gen_audio_inp`` of the state_v6 interface: the state_v5
+    input with ``speaker_ref_text`` (the transcript of ``speaker_ref``; NULL,
+    upstream's default) after ``speaker_ref``."""
+    _fields_ = [("stream", ctypes.c_bool),
+                ("seq_id", ctypes.c_int32),
+                ("prompt", ctypes.c_char_p),
+                ("prompt_len", ctypes.c_size_t),
+                ("n_past", ctypes.c_int32),
+                ("out_mode", ctypes.c_int),
+                ("speaker_ref", ctypes.c_void_p),
+                ("speaker_ref_text", ctypes.c_char_p),
+                ("lang", ctypes.c_char_p),
+                ("top_k", ctypes.c_int32),
+                ("top_p", ctypes.c_float),
+                ("temp", ctypes.c_float),
+                ("seed", ctypes.c_uint32),
+                ("speed", ctypes.c_float),
+                ("loudness", ctypes.c_float),
+                ("out_type", ctypes.c_int)]
+
+
+class _HelperInputV7(ctypes.Structure):
+    """``mtmd_helper_gen_audio_inp`` of the state_v7 interface: the state_v6
+    input with ``cfg_scale`` and ``flow_steps`` before ``out_type``. 0 in
+    both is upstream's default (the model's own)."""
+    _fields_ = [("stream", ctypes.c_bool),
+                ("seq_id", ctypes.c_int32),
+                ("prompt", ctypes.c_char_p),
+                ("prompt_len", ctypes.c_size_t),
+                ("n_past", ctypes.c_int32),
+                ("out_mode", ctypes.c_int),
+                ("speaker_ref", ctypes.c_void_p),
+                ("speaker_ref_text", ctypes.c_char_p),
+                ("lang", ctypes.c_char_p),
+                ("top_k", ctypes.c_int32),
+                ("top_p", ctypes.c_float),
+                ("temp", ctypes.c_float),
+                ("seed", ctypes.c_uint32),
+                ("speed", ctypes.c_float),
+                ("loudness", ctypes.c_float),
+                ("cfg_scale", ctypes.c_float),
+                ("flow_steps", ctypes.c_int32),
+                ("out_type", ctypes.c_int)]
+
+
 # The helper input's temp for "use the model's default temperature".
 _HELPER_TEMP_MODEL_DEFAULT = -1.0
+# The helper input's speed for "the model's own pace".
+_HELPER_SPEED_MODEL_DEFAULT = 1.0
+# The helper input fields whose upstream default is not the 0 a zeroed input
+# holds and that localm does not otherwise set, with that default.
+_HELPER_INPUT_DEFAULTS = (("temp", _HELPER_TEMP_MODEL_DEFAULT),
+                          ("speed", _HELPER_SPEED_MODEL_DEFAULT))
 
 
 class _HelperInputProbe(ctypes.Structure):
@@ -321,6 +412,28 @@ class _GenInpV2(ctypes.Structure):
                 ("n_feats", ctypes.c_size_t)]
 
 
+class _GenInpV7(ctypes.Structure):
+    """``mtmd_gen_inp`` of the state_v7 interface: the state_v2 input with the
+    backbone state fields and ``n_steps`` at the end. localm only receives it
+    from ``mtmd_gen_inp_default``, so those hold the library's defaults."""
+    _fields_ = [("type", ctypes.c_int),
+                ("code0", ctypes.c_int32),
+                ("embd", ctypes.POINTER(ctypes.c_float)),
+                ("top_k", ctypes.c_int32),
+                ("top_p", ctypes.c_float),
+                ("temp", ctypes.c_float),
+                ("penalty_repeat", ctypes.c_float),
+                ("penalty_last_n", ctypes.c_int32),
+                ("codes", ctypes.POINTER(ctypes.c_int32)),
+                ("n_codes", ctypes.c_size_t),
+                ("feats", ctypes.POINTER(ctypes.c_float)),
+                ("n_feats", ctypes.c_size_t),
+                ("backbone_state", ctypes.c_void_p),
+                ("backbone_state_size", ctypes.c_size_t),
+                ("backbone_n_past", ctypes.c_int32),
+                ("n_steps", ctypes.c_int32)]
+
+
 class _GenOut(ctypes.Structure):
     """``mtmd_gen_out`` of the state and state_v2 interfaces."""
     _fields_ = [("codes", ctypes.POINTER(ctypes.c_int32)),
@@ -353,23 +466,33 @@ _FloatPtr = ctypes.POINTER(ctypes.c_float)
 # generation runs on an mtmd_gen_state the helper creates per request from its
 # seed), "state_v2" (the state interface with the structs of llama.cpp
 # b11941: n_past, out_mode and voice in the helper input, the repetition
-# penalty pair in the generation input) and "state_v3" (the structs of llama.cpp
-# b12061: no voice in the helper input, n_voices in mtmd_gen_audio_info) and
+# penalty pair in the generation input), "state_v3" (the structs of llama.cpp
+# b12061: no voice in the helper input, n_voices in mtmd_gen_audio_info),
 # "state_v4" (the structs of llama.cpp b12219: temp before seed in the helper
-# input). A library has the first interface in _INTERFACE_MARKERS whose marker
-# it exports; the v2 and v3 markers are functions added by the same upstream
-# changes as the struct fields. state_v4 added no function, so a state_v3-marker
-# library is state_v3 or state_v4 by _helper_input_interface.
+# input), "state_v5" (b12424: speed and loudness after seed in the helper
+# input), "state_v6" (b12452: speaker_ref_text after speaker_ref in the helper
+# input) and "state_v7" (b12458: cfg_scale and flow_steps before out_type in the
+# helper input, n_channels in mtmd_gen_audio_info, the backbone state fields in
+# mtmd_gen_inp). A library has the first interface in _INTERFACE_MARKERS whose
+# marker it exports; the v2, v3 and v7 markers are functions added by the same
+# upstream changes as the struct fields. state_v4, state_v5 and state_v6 added
+# no function, so a state_v3-marker library is one of the layouts its
+# _HELPER_INPUT_FAMILIES entry lists, chosen by _helper_input_interface.
 INTERFACE_LEGACY = "legacy"
 INTERFACE_STATE = "state"
 INTERFACE_STATE_V2 = "state_v2"
 INTERFACE_STATE_V3 = "state_v3"
 INTERFACE_STATE_V4 = "state_v4"
+INTERFACE_STATE_V5 = "state_v5"
+INTERFACE_STATE_V6 = "state_v6"
+INTERFACE_STATE_V7 = "state_v7"
+_STATE_V7_MARKER = "mtmd_helper_gen_audio_max_frames"
 _STATE_V3_MARKER = "mtmd_gen_audio_voice_name"
 _STATE_V2_MARKER = "mtmd_helper_gen_audio_next_is_text"
 _STATE_MARKER = "mtmd_gen_state_init"
 _LEGACY_MARKER = "mtmd_gen_inp_default"
-_INTERFACE_MARKERS = ((_STATE_V3_MARKER, INTERFACE_STATE_V3),
+_INTERFACE_MARKERS = ((_STATE_V7_MARKER, INTERFACE_STATE_V7),
+                      (_STATE_V3_MARKER, INTERFACE_STATE_V3),
                       (_STATE_V2_MARKER, INTERFACE_STATE_V2),
                       (_STATE_MARKER, INTERFACE_STATE),
                       (_LEGACY_MARKER, INTERFACE_LEGACY))
@@ -409,13 +532,35 @@ _INTERFACE_STRUCTS = {
         "mtmd_gen_out": _GenOut,
         "mtmd_gen_state_params": _GenStateParams,
     },
+    INTERFACE_STATE_V5: {
+        "mtmd_gen_audio_info": _GenAudioInfoV3,
+        "mtmd_helper_gen_audio_inp": _HelperInputV5,
+        "mtmd_gen_inp": _GenInpV2,
+        "mtmd_gen_out": _GenOut,
+        "mtmd_gen_state_params": _GenStateParams,
+    },
+    INTERFACE_STATE_V6: {
+        "mtmd_gen_audio_info": _GenAudioInfoV3,
+        "mtmd_helper_gen_audio_inp": _HelperInputV6,
+        "mtmd_gen_inp": _GenInpV2,
+        "mtmd_gen_out": _GenOut,
+        "mtmd_gen_state_params": _GenStateParams,
+    },
+    INTERFACE_STATE_V7: {
+        "mtmd_gen_audio_info": _GenAudioInfoV7,
+        "mtmd_helper_gen_audio_inp": _HelperInputV7,
+        "mtmd_gen_inp": _GenInpV7,
+        "mtmd_gen_out": _GenOut,
+        "mtmd_gen_state_params": _GenStateParams,
+    },
 }
 
-# Where each layout of the state_v3 family keeps the seed, whose upstream
-# default is UINT32_MAX (random).
-_HELPER_SEED_OFFSETS = {
-    INTERFACE_STATE_V3: _HelperInputV3.seed.offset,
-    INTERFACE_STATE_V4: _HelperInputV4.seed.offset,
+# The helper input layouts a library exporting a marker can have, oldest
+# first, told apart by the bytes mtmd_helper_gen_audio_inp_default returns.
+_HELPER_INPUT_FAMILIES = {
+    INTERFACE_STATE_V3: (INTERFACE_STATE_V3, INTERFACE_STATE_V4,
+                         INTERFACE_STATE_V5, INTERFACE_STATE_V6),
+    INTERFACE_STATE_V7: (INTERFACE_STATE_V7,),
 }
 
 
@@ -436,6 +581,16 @@ def _state_signatures(helper_input, gen_inp,
     }
 
 
+def _state_v3_signatures(helper_input, gen_inp: type[ctypes.Structure] = _GenInpV2,
+                         gen_audio_info: type[ctypes.Structure] = _GenAudioInfoV3) -> dict:
+    return {
+        **_state_signatures(helper_input, gen_inp, gen_audio_info),
+        "mtmd_helper_gen_audio_next_is_text": (ctypes.c_bool, [ctypes.c_void_p]),
+        "mtmd_gen_audio_voice_name": (ctypes.c_char_p, [ctypes.c_void_p, ctypes.c_int32]),
+        "mtmd_helper_gen_audio_inp_default": (helper_input, []),
+    }
+
+
 _INTERFACE_SIGNATURES = {
     INTERFACE_LEGACY: {
         "mtmd_gen_audio_get_info": (_GenAudioInfo, [ctypes.c_void_p]),
@@ -451,17 +606,13 @@ _INTERFACE_SIGNATURES = {
         **_state_signatures(_HelperInputV2, _GenInpV2),
         "mtmd_helper_gen_audio_next_is_text": (ctypes.c_bool, [ctypes.c_void_p]),
     },
-    INTERFACE_STATE_V3: {
-        **_state_signatures(_HelperInputV3, _GenInpV2, _GenAudioInfoV3),
-        "mtmd_helper_gen_audio_next_is_text": (ctypes.c_bool, [ctypes.c_void_p]),
-        "mtmd_gen_audio_voice_name": (ctypes.c_char_p, [ctypes.c_void_p, ctypes.c_int32]),
-        "mtmd_helper_gen_audio_inp_default": (_HelperInputV3, []),
-    },
-    INTERFACE_STATE_V4: {
-        **_state_signatures(_HelperInputV4, _GenInpV2, _GenAudioInfoV3),
-        "mtmd_helper_gen_audio_next_is_text": (ctypes.c_bool, [ctypes.c_void_p]),
-        "mtmd_gen_audio_voice_name": (ctypes.c_char_p, [ctypes.c_void_p, ctypes.c_int32]),
-        "mtmd_helper_gen_audio_inp_default": (_HelperInputV4, []),
+    INTERFACE_STATE_V3: _state_v3_signatures(_HelperInputV3),
+    INTERFACE_STATE_V4: _state_v3_signatures(_HelperInputV4),
+    INTERFACE_STATE_V5: _state_v3_signatures(_HelperInputV5),
+    INTERFACE_STATE_V6: _state_v3_signatures(_HelperInputV6),
+    INTERFACE_STATE_V7: {
+        **_state_v3_signatures(_HelperInputV7, _GenInpV7, _GenAudioInfoV7),
+        "mtmd_helper_gen_audio_max_frames": (ctypes.c_int32, [ctypes.c_void_p]),
     },
 }
 
@@ -490,8 +641,9 @@ class GenerationApi:
     the library's shared attributes that other bindings set.
 
     :attr:`interface` is :data:`INTERFACE_LEGACY`, :data:`INTERFACE_STATE`,
-    :data:`INTERFACE_STATE_V2`, :data:`INTERFACE_STATE_V3` or
-    :data:`INTERFACE_STATE_V4`;
+    :data:`INTERFACE_STATE_V2`, :data:`INTERFACE_STATE_V3`,
+    :data:`INTERFACE_STATE_V4`, :data:`INTERFACE_STATE_V5`,
+    :data:`INTERFACE_STATE_V6` or :data:`INTERFACE_STATE_V7`;
     :attr:`helper_input` is the
     ``mtmd_helper_gen_audio_inp`` structure of that interface. The
     ``mtmd_gen_state_*`` functions are bound on the state interfaces only."""
@@ -519,17 +671,29 @@ class GenerationApi:
     mtmd_helper_gen_audio_next_is_text: Any
     mtmd_gen_audio_voice_name: Any
     mtmd_helper_gen_audio_inp_default: Any
+    mtmd_helper_gen_audio_max_frames: Any
 
 
-def _helper_input_interface(m) -> str:
-    """:data:`INTERFACE_STATE_V3` or :data:`INTERFACE_STATE_V4` for the mtmd
-    library *m*, which exports the state_v3 marker: the layout whose seed
-    offset holds UINT32_MAX in the bytes ``mtmd_helper_gen_audio_inp_default``
-    returns (the state_v4 ``temp`` default, -1.0, and the state_v3
-    ``out_type`` default, WAV, both differ from it).
+def _default_input_matches(raw: bytes, layout: type[ctypes.Structure]) -> bool:
+    """True when *raw*, read as *layout*, holds upstream's defaults in the
+    fields that tell the layouts apart: UINT32_MAX (random) in ``seed``, WAV
+    in ``out_type`` and, where the layout has it, 1.0 in ``speed``."""
+    inp = layout.from_buffer_copy(raw)
+    return (inp.seed == _UINT32_MAX and inp.out_type == _OUTTYPE_WAV
+            and getattr(inp, "speed", _HELPER_SPEED_MODEL_DEFAULT)
+            == _HELPER_SPEED_MODEL_DEFAULT)
+
+
+def _helper_input_interface(m, marker_interface: str) -> str:
+    """The interface of the mtmd library *m*, which exports the marker of
+    *marker_interface*: the one layout in its :data:`_HELPER_INPUT_FAMILIES`
+    entry whose defaults (see :func:`_default_input_matches`) are in the
+    bytes ``mtmd_helper_gen_audio_inp_default`` returns. Where one layout
+    keeps ``seed``, ``speed`` or ``out_type``, every other layout of a family
+    keeps a field whose default differs.
 
     Raises :class:`SpeechUnavailable` when *m* lacks that function, or when
-    the default seed is at neither offset or at both."""
+    no layout or more than one matches."""
     try:
         fn = m["mtmd_helper_gen_audio_inp_default"]
     except (AttributeError, KeyError) as e:
@@ -540,8 +704,9 @@ def _helper_input_interface(m) -> str:
     fn.restype = _HelperInputProbe
     fn.argtypes = []
     raw = bytes(fn().b)
-    hits = [interface for interface, off in _HELPER_SEED_OFFSETS.items()
-            if struct.unpack_from("<I", raw, off)[0] == _UINT32_MAX]
+    hits = [interface for interface in _HELPER_INPUT_FAMILIES[marker_interface]
+            if _default_input_matches(
+                raw, _INTERFACE_STRUCTS[interface]["mtmd_helper_gen_audio_inp"])]
     if len(hits) != 1:
         raise SpeechUnavailable(
             "The installed llama.cpp runtime's speech generation input has a "
@@ -556,16 +721,17 @@ _bound: dict[int, tuple] = {}
 
 def bind_generation_api(m) -> GenerationApi:
     """The speech generation functions of the loaded mtmd library *m*, bound
-    for the interface it exports: state_v3 or state_v4 (see
-    :func:`_helper_input_interface`) when it exports
-    ``mtmd_gen_audio_voice_name``, else state_v2 when it exports
-    ``mtmd_helper_gen_audio_next_is_text``, else state when it exports
-    ``mtmd_gen_state_init``, else legacy when it exports
-    ``mtmd_gen_inp_default``.
+    for the interface it exports: state_v7 when it exports
+    ``mtmd_helper_gen_audio_max_frames``, else state_v3, state_v4, state_v5
+    or state_v6 when it exports ``mtmd_gen_audio_voice_name``, else state_v2
+    when it exports ``mtmd_helper_gen_audio_next_is_text``, else state when it
+    exports ``mtmd_gen_state_init``, else legacy when it exports
+    ``mtmd_gen_inp_default``. The state_v3 and state_v7 markers' layouts are
+    confirmed by :func:`_helper_input_interface`.
 
     Raises :class:`SpeechUnavailable` when *m* exports no marker, lacks a
-    function of its interface, or exports the state_v3 marker with a helper
-    input layout that is neither state_v3 nor state_v4."""
+    function of its interface, or exports the state_v3 or state_v7 marker
+    with a helper input layout that is not one of that marker's."""
     with _bind_lock:
         cached = _bound.get(id(m))
         if cached is not None and cached[0] is m:
@@ -583,8 +749,8 @@ def bind_generation_api(m) -> GenerationApi:
                 "The installed llama.cpp runtime predates the speech generation "
                 "interface localm supports. Install the runtime localm pins with "
                 "'localm setup-llama'.")
-        if interface == INTERFACE_STATE_V3:
-            interface = _helper_input_interface(m)
+        if interface in _HELPER_INPUT_FAMILIES:
+            interface = _helper_input_interface(m, interface)
         ns = GenerationApi()
         ns.interface = interface
         ns.helper_input = _INTERFACE_STRUCTS[interface]["mtmd_helper_gen_audio_inp"]
@@ -974,8 +1140,9 @@ class SpeechSynthesizer:
                                  lang=(lang or "").encode("ascii"), top_k=sp.top_k,
                                  top_p=projector_top_p(sp.top_p),
                                  seed=seed, out_type=_OUTTYPE_WAV)
-            if hasattr(inp, "temp"):
-                inp.temp = _HELPER_TEMP_MODEL_DEFAULT
+            for field, value in _HELPER_INPUT_DEFAULTS:
+                if hasattr(inp, field):
+                    setattr(inp, field, value)
             if m.mtmd_helper_gen_audio_set_input(helper, ctypes.byref(inp)) != 0:
                 raise SpeechStageFailed("the speech prompt could not be prepared")
             if bitmap is not None:
