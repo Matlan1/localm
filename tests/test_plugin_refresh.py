@@ -224,13 +224,24 @@ def test_unload_purges_submodules_from_sys_modules(env):
 
 def test_refresh_endpoint_over_real_builtins(env, monkeypatch):
     """The /api/plugins/{name}/refresh management route: a just-installed plugin
-    reports up-to-date; an unknown name 404s."""
+    reports up-to-date; an unknown name 404s.
+
+    Installing voice starts its on_install prefetch on a thread: stubbed (no
+    network in a unit test) and joined before the monkeypatch scope ends."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    import threading
+
+    import localm.voice as voice
+    monkeypatch.setattr(voice, "prefetch_stt_model",
+                        lambda allow_download=None, name=None: (False, "stubbed in tests"))
     from localm.plugins.engine import attach_engine
     app = FastAPI()
     attach_engine(app)                          # default roots = the real builtins
     with TestClient(app) as c:
         assert c.post("/api/plugins/voice/install").status_code == 200
+        for t in threading.enumerate():
+            if t.name == voice.PREFETCH_THREAD_NAME:
+                t.join(timeout=10)
         r = c.post("/api/plugins/voice/refresh")
         assert r.status_code == 200
         assert r.json()["status"] == "up-to-date"

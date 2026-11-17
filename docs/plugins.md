@@ -139,7 +139,7 @@ def unregister() -> None:
     """Optional: clean up when the plugin is disabled/unloaded."""
 
 # Optional lifecycle hooks, called if present:
-def on_install() -> None: ...                # called on an HTTP/GUI-driven install
+def on_install() -> str | None: ...         # called once at every install; may return a note for the user
 def on_uninstall(delete_data: bool = False) -> None: ...  # called at uninstall
 def on_first_use() -> None: ...              # called once the first time the plugin is loaded/activated; persisted so it never re-fires on a later server start
 ```
@@ -155,15 +155,25 @@ not just a debug file). An `on_uninstall` failure is logged at WARNING too and
 uninstall proceeds; when the user asked for the plugin's data to be deleted, the
 uninstall then reports that the data may not be fully gone.
 
-`on_install` fires only from the HTTP/GUI first-party install route
-(`POST /api/plugins/{name}/install`, i.e. `PluginManager.install`). The CLI's
-`localm plugin install <name>` (and `install /path/to/plugin`), the GUI's
-install-from-directory route and the MCP plugin-admin tool install headless,
-without loading the plugin, and never call it - nor does it fire retroactively
-the first time the server loads the plugin.
-A plugin whose `on_install` does real work (the bundled `voice` plugin prefetches
-its Whisper model there) must not assume it ran; use `on_first_use` for anything
-that has to happen regardless of install path.
+`on_install` runs at every install of the plugin: the Plugins page
+(`POST /api/plugins/{name}/install` and the install-from-directory route),
+`localm plugin install <name>` (and `install /path/to/plugin`), `localm plugin
+setup` (the plugin step of setup and the graphical installer), and the MCP
+`install_plugin` tool. It is skipped when a plugin the manifest requires is not
+installed. During a live install it runs on the server's event loop, so do slow
+work on a thread there; an install from the command line or the MCP tool loads
+no routes (register() is not called) and runs the hook inline, in a process that
+may exit as soon as it returns, so finish the work before returning. There the
+plugin's module is imported only when its source defines `on_install` at module
+level, so a plugin without the hook runs none of its code at install. The bundled
+`voice` plugin checks `asyncio.get_running_loop()` to tell the two apart: it
+prefetches its Whisper model on a thread on the server and inline otherwise, and
+downloads nothing while network access is off (unless model downloads are
+allowed while it is off). A string the hook returns is shown to the person
+installing (the CLI prints it, the Plugins page adds it to its
+message, and the MCP tool adds it to its reply). It does not fire retroactively
+the first time the server loads a plugin installed before; use `on_first_use`
+for anything that has to happen once regardless of how the plugin got there.
 
 `on_uninstall` has the mirror-image limit: it runs only when the plugin is loaded
 at that moment, that is for an active plugin uninstalled through the GUI or
