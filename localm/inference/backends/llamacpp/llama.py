@@ -2349,7 +2349,7 @@ class LlamaCpp:
 
         Raises RuntimeError when this build does not export the encoder API and
         the model's architecture is an encoder-decoder one, since such a model
-        cannot generate without ``llama_encode``."""
+        cannot generate without an encoder pass."""
         model = self._model_ptr
         if model is None:
             return False
@@ -2361,8 +2361,8 @@ class LlamaCpp:
         if arch in _GGUF_ENCODER_DECODER_ARCHITECTURES:
             raise RuntimeError(
                 f"This model's architecture ('{arch}') is an encoder-decoder "
-                "model, and the loaded llama runtime does not export "
-                "llama_encode, so it cannot run it. Update the runtime with  "
+                "model, and the loaded llama runtime cannot run an encoder "
+                "pass, so it cannot run it. Update the runtime with  "
                 "localm setup-llama")
         return False
 

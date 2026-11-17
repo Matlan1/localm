@@ -40,8 +40,9 @@ IT ALSO CHECKS THAT EVERY FUNCTION LOCALM BINDS IS STILL DECLARED, read from
 localm's own source (``bound_functions``) and from ``llama.h``, the mtmd headers
 and the ggml headers at the pinned release and at ``--ref``: a function localm
 calls unconditionally that a header no longer declares fails, as does one the
-pinned headers declare that ``--ref`` dropped; a function upstream marks
-DEPRECATED is reported, since upstream removes those in bulk.
+pinned headers declare that ``--ref`` dropped. A function upstream marks
+DEPRECATED fails too when localm calls it unconditionally, since upstream
+removes those in bulk, and is reported when localm probes for it first.
 
 It complements the runtime guard ``_abi.verify_abi`` (which validates whatever DLL
 is actually loaded on a user's machine) and the CI load test: this one catches
@@ -165,9 +166,10 @@ def _resolve_ref(ref: str) -> str:
     tags, err = check_llama_pin.upstream_tags()
     if tags:
         return tags[0]
+    pin = check_llama_pin.pinned_tag()
     print(f"  (could not resolve latest tag ({err or 'none found'}), using "
-          f"{LLAMA_ABI_REF})", file=sys.stderr)
-    return LLAMA_ABI_REF
+          f"the pin {pin})", file=sys.stderr)
+    return pin
 
 
 def _fetch_header(ref: str) -> str:
@@ -801,7 +803,8 @@ _API_MACRO = re.compile(r"\b(LLAMA_API|MTMD_API|GGML_API|GGML_BACKEND_API)\b")
 _BIND_CALLS = frozenset({"_bind", "_read_raw", "getattr"})
 _PROBE_CALLS = frozenset({"hasattr", "_has_symbol", "_ggml_sym", "_sym",
                           "_resolve_staging"})
-# Python modules whose attributes share the C names; their attributes are not bindings.
+# Python modules whose attributes share the C names; their attributes (also when
+# held as an attribute, such as self._api) are not bindings.
 _PYTHON_ALIASES = frozenset({"api", "_api"})
 # Packages whose tuples of native names are probe lists.
 _PROBE_LIST_DIRS = (("localm", "inference", "backends", "llamacpp"),)
@@ -858,7 +861,8 @@ def _native_references(tree, probe_lists: bool):
                     yield arg.value, node, is_bind
         elif isinstance(node, ast.Attribute) and _NATIVE_NAME.match(node.attr):
             base = node.value
-            if not (isinstance(base, ast.Name) and base.id in _PYTHON_ALIASES):
+            if not ((isinstance(base, ast.Name) and base.id in _PYTHON_ALIASES)
+                    or (isinstance(base, ast.Attribute) and base.attr in _PYTHON_ALIASES)):
                 yield node.attr, node, True
         elif probe_lists and isinstance(node, (ast.Tuple, ast.List, ast.Set)):
             for elt in node.elts:
@@ -933,10 +937,12 @@ def check_functions(bound: dict, headers: dict, label: str,
                     pinned: dict | None = None, deprecated: list | None = None) -> int:
     """Check every function in *bound* against *headers* (prefix -> header text;
     a prefix with no text is not checked). A FAIL for a required function the
-    headers do not declare and for any function the *pinned* headers declare
-    that these no longer do. A NOTE for a probed function the headers do not
-    declare, and for one declared DEPRECATED (upstream's notice that it will
-    be removed), which is also appended to *deprecated* as "name (label)"."""
+    headers do not declare, for one they declare DEPRECATED (upstream's notice
+    that it will be removed, after which every call to it fails), and for any
+    function the *pinned* headers declare that these no longer do. A NOTE for a
+    probed function the headers do not declare, and for a probed one declared
+    DEPRECATED. Every deprecated one is also appended to *deprecated* as
+    "name (label)"."""
     print(f"\n############ Checking the functions localm binds against {label} "
           "############")
     declared = {p: declared_functions(t) for p, t in headers.items() if t}
@@ -953,9 +959,15 @@ def check_functions(bound: dict, headers: dict, label: str,
         where = ", ".join(fn.sites[:3]) + (" ..." if len(fn.sites) > 3 else "")
         if name in declared[prefix]:
             if declared[prefix][name]:
-                print(f"  NOTE  {name} is DEPRECATED upstream and will be removed ({where})")
                 if deprecated is not None:
                     deprecated.append(f"{name} ({label})")
+                if fn.required:
+                    print(f"  FAIL  {name} is DEPRECATED upstream and localm calls it "
+                          f"with no fallback; once it is removed every call fails ({where})")
+                    problems += 1
+                else:
+                    print(f"  NOTE  {name} is DEPRECATED upstream and will be removed; "
+                          f"localm probes for it first ({where})")
             continue
         if fn.required:
             print(f"  FAIL  {name} is not declared; every load that reaches it raises "
@@ -1109,9 +1121,9 @@ def main() -> int:
         print(f"\nDEPRECATED UPSTREAM function(s) localm binds ({len(deprecated)}):")
         for item in deprecated:
             print(f"  - {item}")
-        print("  Still declared, so this does NOT fail the check. Once upstream "
-              "removes one, every call to it fails: move each to its replacement "
-              "before that release.")
+        print("  A function localm calls with no fallback fails the check above; "
+              "one it probes for first is noted. Move each to its replacement "
+              "before upstream removes it.")
 
     print()
     if total:

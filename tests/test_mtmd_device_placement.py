@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The vision projector must not sit on a device the user's configuration excluded.
 
-``mtmd_context_params`` has no device field; clip reads the process environment
-variable ``MTMD_BACKEND_DEVICE`` instead (upstream ``tools/mtmd/clip.cpp``).
+Where ``mtmd_context_params`` has a ``device`` field, the device goes there
+(TestOpenSetsTheDeviceField). In an older layout without it, clip reads the
+process environment variable ``MTMD_BACKEND_DEVICE`` instead (upstream
+``tools/mtmd/clip.cpp``), which the other tests here pin.
 Without it the projector can hold its weights and compute buffer on a card the
 configured GPU split left out.
 
@@ -18,6 +20,8 @@ A wrong name is non-fatal upstream (clip warns and falls back), so dropping the
 guard does not crash anything: it moves a gigabyte onto an arbitrary card.
 """
 
+import ctypes
+import logging
 import os
 
 import pytest
@@ -255,6 +259,94 @@ class TestOpenSetsTheEnvironment:
         assert _ctx(lib, 1)._open(use_gpu=True) is None
         assert lib.calls == 0
         assert mtmd_mod._MTMD_DEVICE_ENV not in os.environ
+
+
+class _FieldLib(_FakeLib):
+    """A runtime whose mtmd_context_params has the ``device`` field: records the
+    pointer the native call was given there."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.seen_device = "<never called>"
+
+    def mtmd_init_from_file(self, path, model_ptr, params):
+        self.seen_device = ctypes.cast(ctypes.byref(params, 8),
+                                       ctypes.POINTER(ctypes.c_void_p))[0]
+        return super().mtmd_init_from_file(path, model_ptr, params)
+
+
+_HANDLES = {"CPU": 0x100, "Vulkan0": 0x200, "Vulkan1": 0x300}
+
+
+@pytest.fixture
+def device_field(monkeypatch):
+    """The params layout with the device field, and a registry whose devices
+    have the handles in _HANDLES."""
+    from localm.inference.backends.llamacpp import _loader
+    monkeypatch.setattr(mtmd_mod, "_params_layout",
+                        lambda m, params: mtmd_mod._PARAM_LAYOUTS[1][1])
+    monkeypatch.setattr(_loader, "compute_device_handle", _HANDLES.get)
+
+
+class TestOpenSetsTheDeviceField:
+    """Where mtmd_context_params has a ``device`` field, libmtmd places the
+    projector by it and never reads MTMD_BACKEND_DEVICE."""
+
+    def test_the_layout_with_the_field_names_its_offset(self):
+        assert mtmd_mod._PARAM_LAYOUTS[1][1].device == 8
+        assert mtmd_mod._PARAM_LAYOUTS[0][1].device is None
+
+    def test_the_configured_device_goes_into_the_field(self, monkeypatch, device_field):
+        _devices(monkeypatch, [("CPU", CPU), ("Vulkan0", GPU), ("Vulkan1", GPU)])
+        lib = _FieldLib()
+        assert _ctx(lib, 1)._open(use_gpu=True) == 0x1234
+        assert lib.seen_device == _HANDLES["Vulkan1"]
+        assert lib.seen_env is None
+        assert mtmd_mod._MTMD_DEVICE_ENV not in os.environ
+
+    def test_device_zero_leaves_the_field_empty(self, monkeypatch, device_field):
+        _devices(monkeypatch, [("CPU", CPU), ("Vulkan0", GPU), ("Vulkan1", GPU)])
+        lib = _FieldLib()
+        _ctx(lib, 0)._open(use_gpu=True)
+        assert lib.seen_device is None
+
+    def test_an_ambiguous_registry_leaves_the_field_empty(self, monkeypatch, device_field):
+        _devices(monkeypatch, [("CPU", CPU), ("Vulkan0", GPU), ("Vulkan1", IGPU)])
+        lib = _FieldLib()
+        _ctx(lib, 1)._open(use_gpu=True)
+        assert lib.seen_device is None
+
+    def test_the_cpu_attempt_leaves_the_field_empty(self, monkeypatch, device_field):
+        _devices(monkeypatch, [("CPU", CPU), ("Vulkan0", GPU), ("Vulkan1", GPU)])
+        lib = _FieldLib()
+        _ctx(lib, 1)._open(use_gpu=False)
+        assert lib.seen_device is None
+
+    def test_a_user_export_names_the_device_and_is_kept(self, monkeypatch, device_field):
+        _devices(monkeypatch, [("CPU", CPU), ("Vulkan0", GPU), ("Vulkan1", GPU)])
+        monkeypatch.setenv(mtmd_mod._MTMD_DEVICE_ENV, "Vulkan0")
+        lib = _FieldLib()
+        _ctx(lib, 1)._open(use_gpu=True)
+        assert lib.seen_device == _HANDLES["Vulkan0"]
+        assert os.environ[mtmd_mod._MTMD_DEVICE_ENV] == "Vulkan0"
+
+    def test_an_empty_user_export_pins_nothing(self, monkeypatch, device_field):
+        _devices(monkeypatch, [("CPU", CPU), ("Vulkan0", GPU), ("Vulkan1", GPU)])
+        monkeypatch.setenv(mtmd_mod._MTMD_DEVICE_ENV, "")
+        lib = _FieldLib()
+        _ctx(lib, 1)._open(use_gpu=True)
+        assert lib.seen_device is None
+        assert os.environ[mtmd_mod._MTMD_DEVICE_ENV] == ""
+
+    def test_an_unknown_device_name_is_logged_and_left_to_the_default(
+            self, monkeypatch, device_field, caplog):
+        _devices(monkeypatch, [("CPU", CPU), ("Vulkan0", GPU), ("Vulkan1", GPU)])
+        monkeypatch.setenv(mtmd_mod._MTMD_DEVICE_ENV, "CUDA7")
+        caplog.set_level(logging.WARNING, logger="localm")
+        lib = _FieldLib()
+        assert _ctx(lib, 1)._open(use_gpu=True) == 0x1234
+        assert lib.seen_device is None
+        assert "no compute device is named 'CUDA7'" in caplog.text
 
 
 class TestConstructorAppliesItInTime:

@@ -341,8 +341,8 @@ Covered functions (grouped):
 **Accessors**: `llama_get_model`, `llama_n_ctx`, `llama_n_ctx_seq`, `llama_model_n_ctx_train`, `llama_model_n_embd`, `llama_model_n_layer`  
 **Vocabulary**: `llama_model_get_vocab`, `llama_vocab_n_tokens`, `llama_tokenize`, `llama_token_to_piece`, `llama_detokenize`, `llama_vocab_bos`, `llama_vocab_eos`, `llama_vocab_is_eog`  
 **Chat template**: `llama_model_chat_template`, `llama_chat_apply_template`  
-**Batch**: `llama_batch_get_one`, `llama_batch_init`, `llama_batch_free`  
-**Inference**: `llama_decode`, `llama_get_logits_ith`, `llama_get_logits`  
+**Batch**: `llama_batch_get_one`, `llama_batch_init`, `llama_batch_free` (localm-side: they build a `llama_batch`-shaped container in Python and call nothing native)  
+**Inference**: `llama_decode`, `llama_encode` (run the batch through `llama_batch_ext_*` and `llama_process` where the runtime exports them, every upstream build from b11200 on, with the same meaning the runtime's own `llama_decode` gives a `llama_batch`; on an older runtime, through its `llama_decode` / `llama_encode`; `has_batch_ext_api()` says which), `llama_get_logits_ith`, `llama_get_logits`  
 **Embeddings** (export-probed via `has_embeddings_api()`): `llama_get_embeddings_seq`, `llama_get_embeddings_ith` - bound here but unused by `LlamaCpp`/`GgufBackend`; `llama_get_embeddings_seq` is called by the separate dedicated embedding-model loader (`localm.inference.embedder`, see Known Limitations), `llama_get_embeddings_ith` is called by the Qwen3-TTS speech path (`mtmd_gen.py`) to read each step's hidden state  
 **Model metadata**: `has_model_meta_api()` / `llama_model_meta_val_str`  
 **Model introspection**: `has_kv_head_api()` / `llama_model_n_head` / `llama_model_n_head_kv`, `has_hybrid_api()` / `llama_model_is_recurrent` / `llama_model_is_hybrid`, `has_max_devices()` / `llama_max_devices`  
@@ -351,8 +351,8 @@ Covered functions (grouped):
 **Multi-Token Prediction (MTP)**: `llama_model_mtp_support` / `llama_model_has_mtp` (plain export; whether an MTP draft context on this model would run a real draft head), `llama_set_embeddings_nextn`, `llama_get_embeddings_nextn` (declared without `extern "C"` in an internal header, resolved via `_symbols.py` rather than a plain `getattr`, and probed as a group via `mtp_hidden_state_available()`), `llama_get_embeddings_nextn_ith` (surfaced as `llama_get_embeddings_nextn_rows` for a run of rows), `llama_set_nextn_layer_offset` (same C++-linkage resolution, but each probed individually rather than as part of the group check) - see below  
 **Diagnostics**: `llama_print_system_info`  
 **LoRA adapters** (`has_lora_api()`): `llama_adapter_lora_init`, `llama_adapter_lora_free`, `llama_set_adapters_lora`  
-**Encoder-decoder** (`has_encoder_api()`): `llama_encode`, `llama_model_has_encoder`, `llama_model_has_decoder`, `llama_model_decoder_start_token`  
-**Diffusion** (`has_diffusion_api()`): `llama_model_is_diffusion`, `llama_vocab_mask`, `llama_set_causal_attn`, `llama_sampler_apply`, `llama_n_ubatch`, `llama_encode`  
+**Encoder-decoder** (`has_encoder_api()`): an encoder pass (`has_encode()`), `llama_model_has_encoder`, `llama_model_has_decoder`, `llama_model_decoder_start_token`  
+**Diffusion** (`has_diffusion_api()`): `llama_model_is_diffusion`, `llama_vocab_mask`, `llama_set_causal_attn`, `llama_sampler_apply`, `llama_n_ubatch`, an encoder pass (`has_encode()`)  
 **Reranking** (`has_rerank_api()`): `llama_vocab_bos`, `llama_vocab_eos`, `llama_vocab_sep`, `llama_vocab_get_add_bos`, `llama_vocab_get_add_eos`, `llama_vocab_get_add_sep`, `llama_model_n_cls_out`, `llama_model_cls_label`  
 **Backend sampling** (`has_backend_sampling()`): `llama_set_sampler`, `llama_get_sampled_token_ith`  
 **Other accessors**: `llama_vocab_type`, `llama_vocab_get_text`, `llama_model_n_embd_inp`, `llama_max_devices`; `penalties_needs_n_vocab()` reports whether the runtime's `llama_sampler_init_penalties` takes an `n_vocab` argument
