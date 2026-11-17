@@ -196,6 +196,8 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
     "tests/test_config_write.py": (("localm/plugins/*.py",), "scans every plugin module for direct config writes"),
     "tests/test_rag_store_live_lookups.py": (("localm/rag/_store/*.py",), "reads every module of the RAG store"),
     "tests/test_setup_llama_live_lookups.py": (("localm/setup_llama/*.py",), "reads every module of setup_llama"),
+    "tests/test_vc_runtime.py": (("localm/setup_llama/*.py",),
+                                 "reads every module of setup_llama for native-dependency bundler calls"),
     "tests/test_docs_reaudit_enumerations.py": (
         ("docs/*", "localm/inference/routes/*.py", "localm/inference/backends/llamacpp/*.py"),
         "compares the documented route and backend modules with the folders"),
