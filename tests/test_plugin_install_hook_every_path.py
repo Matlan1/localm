@@ -139,7 +139,8 @@ def test_app_free_directory_install_runs_on_install(env):
 def test_a_plugin_that_cannot_be_imported_still_installs_and_warns(env, caplog):
     from localm.plugins.engine import PluginManager
     store, inst = env / "store", env / "installed"
-    _make_plugin(store, "broken", "raise RuntimeError('import exploded')\n")
+    _make_plugin(store, "broken", "def on_install():\n    return 'x'\n"
+                                  "raise RuntimeError('import exploded')\n")
     mgr = PluginManager(None, store_root=store, installed_root=inst)
     with caplog.at_level(logging.WARNING, logger="localm.plugins"):
         mgr.set_installed_state("broken", True)
@@ -147,6 +148,58 @@ def test_a_plugin_that_cannot_be_imported_still_installs_and_warns(env, caplog):
     warned = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert any("broken" in m and "on_install" in m and "import exploded" in m
                for m in warned), warned
+
+
+def test_a_plugin_without_on_install_is_not_imported_at_install(env, caplog):
+    """Its source binds no on_install, so the app-free install runs none of its
+    code: an import that would fail is never attempted and nothing warns."""
+    from localm.plugins.engine import PluginManager
+    src = _make_plugin(env / "src", "quiet", """
+        from pathlib import Path
+        (Path(__file__).parent / "imported").write_text("yes")
+        import a_package_that_is_not_installed  # noqa: F401
+
+        def register(host):
+            pass
+    """)
+    inst = env / "installed"
+    mgr = PluginManager(None, external_root=env / "noext", installed_root=inst,
+                        builtin_root=None)
+    with caplog.at_level(logging.WARNING, logger="localm.plugins"):
+        mgr.set_installed_from_dir(src)
+    assert mgr.is_installed("quiet") and mgr.is_enabled("quiet")
+    assert not (inst / "quiet" / "imported").exists()
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_on_install_bound_inside_a_block_still_runs(env):
+    from localm.plugins.engine import PluginManager
+    store, inst = env / "store", env / "installed"
+    _make_plugin(store, "blocky", """
+        from pathlib import Path
+
+        def register(host):
+            pass
+
+        if True:
+            def on_install():
+                (Path(__file__).parent / "on_install_called").write_text("yes")
+    """)
+    mgr = PluginManager(None, store_root=store, installed_root=inst)
+    mgr.set_installed_state("blocky", True)
+    assert (inst / "blocky" / "on_install_called").exists()
+
+
+def test_a_note_does_not_outlive_its_install(env):
+    """An install that skips the hook (a required plugin is missing) never
+    returns an earlier install's note."""
+    from localm.plugins.engine import PluginManager
+    store, inst = env / "store", env / "installed"
+    _make_plugin(store, "hooked", _HOOKED, toml_extra='requires = ["basedep"]\n')
+    mgr = PluginManager(None, store_root=store, installed_root=inst)
+    mgr._install_notes["hooked"] = "from an earlier install"
+    mgr.set_installed_state("hooked", True)
+    assert mgr.pop_install_note("hooked") is None
 
 
 def test_a_failing_hook_on_an_app_free_install_warns_and_the_install_stands(env, caplog):

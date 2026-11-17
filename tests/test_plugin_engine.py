@@ -1013,16 +1013,26 @@ def test_uninstall_http_reports_failure_when_removal_incomplete(env, monkeypatch
     """The route must not report {"status": "uninstalled"} when uninstall()
     itself reports a degraded (False) result - a locked file, an AV hold or a
     permission denial that leaves the plugin's files on disk must not reply 200
-    "uninstalled"."""
+    "uninstalled".
+
+    Installing voice starts its on_install prefetch on a thread: stubbed (no
+    network in a unit test) and joined before the monkeypatch scope ends."""
     import shutil
+    import threading
     from pathlib import Path
 
+    import localm.voice as voice
     from localm.plugins.engine import attach_engine
+    monkeypatch.setattr(voice, "prefetch_stt_model",
+                        lambda allow_download=None, name=None: (False, "stubbed in tests"))
 
     app = FastAPI()
     manager = attach_engine(app)              # default roots = the real builtins
     with TestClient(app) as c:
         assert c.post("/api/plugins/voice/install").status_code == 200
+        for t in threading.enumerate():
+            if t.name == voice.PREFETCH_THREAD_NAME:
+                t.join(timeout=10)
 
     installed_dir = Path(manager._installed_root) / "voice"
     assert installed_dir.is_dir()

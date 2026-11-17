@@ -163,7 +163,9 @@ setup` (the plugin step of setup and the graphical installer), and the MCP
 installed. During a live install it runs on the server's event loop, so do slow
 work on a thread there; an install from the command line or the MCP tool loads
 no routes (register() is not called) and runs the hook inline, in a process that
-may exit as soon as it returns, so finish the work before returning. The bundled
+may exit as soon as it returns, so finish the work before returning. There the
+plugin's module is imported only when its source defines `on_install` at module
+level, so a plugin without the hook runs none of its code at install. The bundled
 `voice` plugin checks `asyncio.get_running_loop()` to tell the two apart: it
 prefetches its Whisper model on a thread on the server and inline otherwise, and
 downloads nothing while network access is off (unless model downloads are

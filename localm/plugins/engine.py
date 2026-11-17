@@ -446,6 +446,41 @@ def _entry_module_file(base: Path, mod_name: str) -> Optional[Path]:
     return next((c for c in candidates if c.is_file()), None)
 
 
+def _entry_may_define(spec: PluginSpec, attr: str) -> bool:
+    """False only when *spec*'s entry module's source shows no binding of a
+    top-level *attr*: it parses and no def, class, assignment or import at
+    module level (inside an if or try block included) binds that name; a
+    binding made by setattr or globals() is not seen. True when one does, or
+    when that cannot be told
+    (no file, unreadable, a syntax error), so the caller imports it and meets
+    the real outcome. Reads the source; runs none of it."""
+    import ast
+    mod_name = (spec.register_entry or "plugin").partition(":")[0]
+    mod_file = _entry_module_file(Path(spec.path), mod_name) if spec.path else None
+    if mod_file is None:
+        return True
+    try:
+        tree = ast.parse(mod_file.read_bytes(), filename=str(mod_file))
+    except (OSError, SyntaxError, ValueError):
+        return True
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    for node in tree.body:
+        # A top-level def binds its own name only; any other statement (an
+        # if/try block included) is searched whole, which can over-report but
+        # never misses a binding.
+        subs = [node] if isinstance(node, defs) else ast.walk(node)
+        for sub in subs:
+            if isinstance(sub, defs) and sub.name == attr:
+                return True
+            if isinstance(sub, ast.Name) and sub.id == attr and isinstance(sub.ctx, ast.Store):
+                return True
+            if isinstance(sub, (ast.Import, ast.ImportFrom)):
+                for alias in sub.names:
+                    if alias.name == "*" or (alias.asname or alias.name.split(".")[0]) == attr:
+                        return True
+    return False
+
+
 def _package_module_name(spec: PluginSpec, mod_name: str) -> Optional[str]:
     """The real module name of *mod_name* when *spec* is a first-party plugin
     whose folder is in the localm package, else None."""
@@ -1854,23 +1889,28 @@ class PluginManager:
 
     def _run_install_hook(self, name: str) -> None:
         """Run *name*'s optional ``on_install`` hook for the install that just
-        happened. Every install path calls this: the live install routes and
-        the app-free installs (``localm plugin install`` and ``plugin setup``,
-        the MCP install_plugin tool, the install-from-directory route).
+        happened. Every install path calls this: the live install routes
+        (``install``, ``install_external``), the install-from-directory route,
+        and the app-free installs (``localm plugin install`` and ``plugin
+        setup``, the MCP install_plugin tool).
 
         A loaded plugin's own module is used. Otherwise the module is imported
-        for the hook alone, without calling register(), and a third-party
-        module is dropped from sys.modules again afterwards. The hook runs
-        through ``_on_loop``: on the server's event loop during a live install,
-        and inline on the calling thread for an app-free one. A non-empty str
-        the hook returns is kept for ``pop_install_note``. Never raises: an
-        import or hook error is logged at WARNING and the install stands."""
+        for the hook alone, without calling register(), and only when its
+        source may define ``on_install`` (``_entry_may_define``), so a plugin
+        without the hook runs no code at install; a third-party module is
+        dropped from sys.modules again afterwards. The hook runs through
+        ``_on_loop``: on the server's event loop when called inside
+        ``run_lifecycle`` (the HTTP install routes), and inline on the calling
+        thread otherwise (the CLI, setup, the MCP tool). A non-empty str the
+        hook returns is kept for ``pop_install_note``. Never raises: an import
+        or hook error is logged at WARNING and the install stands."""
         self._install_notes.pop(name, None)
         if name in self._loaded:
             note = self._invoke_hook(name, "on_install")
         else:
             spec = self._specs.get(name)
-            if spec is None or spec.tools_only:
+            if (spec is None or spec.tools_only
+                    or not _entry_may_define(spec, "on_install")):
                 return
             try:
                 module, _attr, uniq = _import_module(spec)
@@ -2306,6 +2346,7 @@ class PluginManager:
         saved. A plugin whose required plugins are not installed is installed
         but neither loaded nor enabled. Returns whether it was enabled. KeyError
         if no such plugin exists."""
+        self._install_notes.pop(name, None)          # a note is this install's only
         copied = self._provision_from_store(name)    # may raise KeyError
         # Roll back only the copy this call created; see _provision_from_store.
         self._provision_and_verify(name, rollback_on_fail=copied)
@@ -2359,6 +2400,7 @@ class PluginManager:
         Returns the parsed PluginSpec."""
         spec0, dest = self._copy_third_party_source(source, force=force)
         name = spec0.name
+        self._install_notes.pop(name, None)          # a note is this install's only
         self._provision_and_verify(name, fail_verb="is not loadable")
         if self._left_disabled_for_requires(name):
             self._record_event("plugin_installed", name)
@@ -2387,6 +2429,7 @@ class PluginManager:
         Returns the parsed PluginSpec."""
         spec0, dest = self._copy_third_party_source(source, force=force)
         name = spec0.name
+        self._install_notes.pop(name, None)          # a note is this install's only
         self._provision_and_verify(name)
         self._record_event("plugin_installed", name)
         self._enable_and_run_install_hook(name, enable)
@@ -2397,6 +2440,7 @@ class PluginManager:
         False or a plugin it requires is not installed, then run its
         ``on_install`` hook, which (as on a live install) is skipped while a
         required plugin is missing."""
+        self._install_notes.pop(name, None)          # a note is this install's only
         if enable:
             if self._left_disabled_for_requires(name):
                 return

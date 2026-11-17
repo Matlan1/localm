@@ -220,7 +220,7 @@ export async function installRequirements(name, missing, btn = null) {
         if (!r.ok) {
           toast(`install ${dep}: ${d.detail || "failed"}`, true);
         } else {
-          toast(`${dep}: ${d.status || "installed"}`);
+          toast(`${dep}: ${d.status || "installed"}` + (d.note ? `. ${d.note}` : ""));
         }
       } catch (e) {
         toast(`install ${dep} failed: ${e.message}`, true);
