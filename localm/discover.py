@@ -5138,7 +5138,12 @@ def vram_capacity_joined() -> tuple:
 
 def _takes_kwarg(fn, name: str) -> bool:
     """Whether callable *fn* accepts keyword argument *name* (by name or
-    through ``**kwargs``); False when its signature cannot be read."""
+    through ``**kwargs``); False when its signature cannot be read. A mock
+    patched in with a callable ``side_effect`` is judged by that callable,
+    which is what receives the arguments."""
+    side_effect = getattr(fn, "side_effect", None)
+    if callable(side_effect) and not inspect.isclass(side_effect):
+        fn = side_effect
     try:
         params = inspect.signature(fn).parameters
     except (TypeError, ValueError):
