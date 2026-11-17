@@ -288,18 +288,8 @@ def missing_dll_clause(binary_dir: Optional[Path], images: list) -> Optional[str
     by llama.dll)"). None elsewhere, or when every import is found."""
     if sys.platform != "win32" or binary_dir is None:
         return None
-    from localm import pe_deps, vc_runtime
-    dirs = [Path(binary_dir), *rocm_runtime_dirs(),
-            Path(sys.base_prefix), Path(sys.executable).parent]
-    system = vc_runtime._system_dir()
-    if system is not None:
-        dirs.append(system)
-    try:
-        missing = pe_deps.unresolved_imports([Path(p) for p in images], dirs)
-    except Exception:
-        logger.warning("could not work out which DLL is missing", exc_info=True)
-        return None
-    return vc_runtime.describe_missing(missing)
+    from localm import vc_runtime
+    return vc_runtime.missing_clause(images, [Path(binary_dir), *rocm_runtime_dirs()])
 
 
 def _provisioned_backend_name(binary_dir: Path) -> str:

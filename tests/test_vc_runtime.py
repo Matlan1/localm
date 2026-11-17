@@ -28,7 +28,7 @@ VERSION = vc_runtime.REDIST_VERSION
 #  Builders                                                                   #
 # --------------------------------------------------------------------------- #
 
-def _pe(imports: list[str], version: tuple | None = None) -> bytes:
+def _pe(imports: list[str], version: tuple | None = None, machine: int = 0x8664) -> bytes:
     """A minimal PE32+ image importing *imports*, with a VS_FIXEDFILEINFO of
     *version* after its import section when given."""
     opt_size, dirs_at, va, raw = 240, 112, 0x1000, 0x400
@@ -47,7 +47,7 @@ def _pe(imports: list[str], version: tuple | None = None) -> bytes:
     head = bytearray(0x40)
     head[:2] = b"MZ"
     struct.pack_into("<I", head, 0x3C, 0x40)
-    image = bytes(head) + b"PE\0\0" + struct.pack("<HHIIIHH", 0x8664, 1, 0, 0, 0, opt_size, 0)
+    image = bytes(head) + b"PE\0\0" + struct.pack("<HHIIIHH", machine, 1, 0, 0, 0, opt_size, 0)
     image += bytes(opt) + section
     image = image + b"\0" * (raw - len(image)) + body
     if version is not None:
@@ -163,6 +163,19 @@ def test_runtime_files_finds_the_runtime_cabinet_for_the_suffix():
     assert vc_runtime.runtime_files(exe, "amd64") == dlls
     with pytest.raises(vc_runtime.RedistError, match="arm64"):
         vc_runtime.runtime_files(exe, "arm64")
+
+
+def test_arm64_takes_system_named_files_and_skips_other_machines():
+    arm = 0xAA64
+    files = {
+        "msvcp140.dll_arm64": _pe(["VCRUNTIME140.dll"], VERSION, arm),
+        "vcomp140.dll_system_arm64": _pe(["KERNEL32.dll"], VERSION, arm),
+        "vcruntime140_1.dll_arm64": _pe(["KERNEL32.dll"], VERSION, 0x8664),
+    }
+    exe = _bundle([_cab({"0": b"m"}), _cab({"a0": _cab(files)}, mszip=False)])
+    found = vc_runtime.runtime_files(exe, "arm64")
+    assert sorted(found) == ["msvcp140.dll", "vcomp140.dll"]
+    assert found["vcomp140.dll"] == files["vcomp140.dll_system_arm64"]
 
 
 def test_a_file_that_is_not_a_bundle_is_refused():
@@ -361,15 +374,40 @@ def test_loader_names_the_missing_runtime_dll(tmp_path, monkeypatch):
     monkeypatch.setattr(_loader.sys, "platform", "win32")
     monkeypatch.setattr(_loader, "rocm_runtime_dirs", lambda: [])
     monkeypatch.setattr(vc_runtime, "_system_dir", lambda: None)
-    monkeypatch.setattr(pe_deps, "_is_loaded", lambda name: False)
+    monkeypatch.setattr(pe_deps, "_is_loaded", lambda name: name.lower() == "kernel32.dll")
     monkeypatch.setattr(_loader.sys, "base_prefix", str(tmp_path / "py"))
     monkeypatch.setattr(_loader.sys, "executable", str(tmp_path / "py" / "python.exe"))
     clause = _loader.missing_dll_clause(lib, [lib / "llama.dll"])
     assert clause == ("msvcp140.dll is missing (the Microsoft Visual C++ runtime; needed by "
                       "ggml-base.dll, llama.dll)")
-    (lib / "msvcp140.dll").write_bytes(_pe(["KERNEL32.dll"]))
+    (lib / "msvcp140.dll").write_bytes(_pe(["VCRUNTIME140.dll", "KERNEL32.dll"]))
     assert _loader.missing_dll_clause(lib, [lib / "llama.dll"]) == (
-        "kernel32.dll is missing (needed by ggml-base.dll, msvcp140.dll)")
+        "vcruntime140.dll is missing (the Microsoft Visual C++ runtime; needed by "
+        "msvcp140.dll)")
+    (lib / "vcruntime140.dll").write_bytes(_pe(["KERNEL32.dll"]))
+    assert _loader.missing_dll_clause(lib, [lib / "llama.dll"]) is None
+
+
+def test_sdcpp_load_error_names_the_missing_runtime_dll(tmp_path, monkeypatch):
+    from localm.media.sdcpp import _binding, _child
+    rt = tmp_path / "sd"
+    rt.mkdir()
+    (rt / _binding.lib_filename()).write_bytes(_pe(["MSVCP140.dll", "KERNEL32.dll"]))
+    monkeypatch.setattr(vc_runtime.sys, "platform", "win32")
+    monkeypatch.setattr(vc_runtime, "_system_dir", lambda: None)
+    monkeypatch.setattr(pe_deps, "_is_loaded", lambda name: name.lower() == "kernel32.dll")
+    monkeypatch.setattr(vc_runtime.sys, "base_prefix", str(tmp_path / "py"))
+    monkeypatch.setattr(vc_runtime.sys, "executable", str(tmp_path / "py" / "python.exe"))
+    monkeypatch.setattr(_child, "_prepare_environment", lambda d: None)
+
+    def refuse(runtime_dir, extra):
+        raise OSError("[WinError 126] The specified module could not be found")
+    monkeypatch.setattr(_binding, "load_library", refuse)
+    with pytest.raises(RuntimeError) as e:
+        _child._load_lib({"runtime_dir": str(rt), "extra_dirs": []})
+    message = str(e.value)
+    assert "msvcp140.dll is missing (the Microsoft Visual C++ runtime" in message
+    assert vc_runtime.redist_url() in message and "setup-sdcpp --force" in message
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="reads this Windows' own system DLLs")

@@ -86,7 +86,7 @@ def _name_missing_shared_lib(detail: str) -> Optional[str]:
     libllama.so from ...: libgomp.so.1: cannot open shared object file: No
     such file or directory``); this pulls the soname back out of it rather
     than re-running the load probe. On Windows the loader's error names the
-    missing DLL itself (see ``_loader._missing_dll_clause``)."""
+    missing DLL itself (see ``_loader.missing_dll_clause``)."""
     named = _name_missing_dll(detail)
     if named:
         return named

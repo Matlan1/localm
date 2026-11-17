@@ -248,21 +248,31 @@ def _folder_bytes(cab: bytes, at: int, n_blocks: int, kind: int, reserve: int) -
     return bytes(out)
 
 
+_MACHINE_TYPES = {"amd64": 0x8664, "arm64": 0xAA64}
+
+
 def runtime_files(exe: bytes, suffix: str) -> dict[str, bytes]:
     """``{dll name (lower case): content}`` of the runtime cabinet in the
     redistributable package *exe*: the cabinet whose files carry *suffix*
-    (``msvcp140.dll_amd64``)."""
+    (``msvcp140.dll_amd64``, or ``vcomp140.dll_system_arm64``). Only DLLs built
+    for *suffix*'s machine are returned: the arm64 package also carries x64
+    files for emulated programs."""
     containers = _burn_containers(exe)
     if len(containers) < 2:
         raise RedistError("the package has no attached container")
+    want = _MACHINE_TYPES.get(suffix)
     for payload in cabinet_files(containers[1]).values():
         if payload[:4] != b"MSCF":
             continue
         found: dict[str, bytes] = {}
-        for name, data in cabinet_files(payload).items():
+        for name, data in sorted(cabinet_files(payload).items()):
             low = name.lower()
-            if low.endswith("_" + suffix) and low[:-len(suffix) - 1] in RUNTIME_DLLS:
-                found[low[:-len(suffix) - 1]] = data
+            for tail in ("_system_" + suffix, "_" + suffix):
+                base = low[:-len(tail)]
+                if (low.endswith(tail) and base in RUNTIME_DLLS
+                        and (want is None or pe_deps.machine(data) == want)):
+                    found.setdefault(base, data)
+                    break
         if "msvcp140.dll" in found:
             return found
     raise RedistError(f"the package holds no runtime cabinet for {suffix}")
@@ -365,6 +375,28 @@ def place_app_local(folder: Path, download: Callable[[str, Path], object],
 # --------------------------------------------------------------------------- #
 #  Naming what is missing after a failed load                                  #
 # --------------------------------------------------------------------------- #
+
+def missing_clause(images: Iterable[Path], dirs: Iterable[Path]) -> Optional[str]:
+    """Windows, after a library in *images* failed to load: the
+    :func:`describe_missing` clause for the DLLs that neither *dirs*, Python's
+    own folder, nor the system folder holds and that this process has not
+    loaded. None off Windows, when every import is found, or when the scan
+    itself fails (logged)."""
+    if sys.platform != "win32":
+        return None
+    own = [Path(d) for d in dirs]
+    search = own + [Path(sys.base_prefix), Path(sys.executable).parent]
+    system = _system_dir()
+    if system is not None:
+        search.append(system)
+    try:
+        missing = pe_deps.unresolved_imports([Path(p) for p in images], search, follow=own)
+    except Exception:
+        from localm.debuglog import logger
+        logger.warning("could not work out which DLL is missing", exc_info=True)
+        return None
+    return describe_missing(missing)
+
 
 def describe_missing(missing: dict[str, list[str]]) -> Optional[str]:
     """One clause naming the DLLs in *missing* (as

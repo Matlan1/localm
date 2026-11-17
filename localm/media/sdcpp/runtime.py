@@ -307,8 +307,8 @@ def _flatten(staging: Path) -> None:
 def _place_vc_runtime(staging: Path, say: Progress) -> None:
     """Windows: put the Microsoft Visual C++ runtime DLLs the build needs and
     this machine lacks next to it (:func:`localm.vc_runtime.place_app_local`).
-    A failure is reported through *say* and the debug log; the load test that
-    follows then names the missing DLL."""
+    A failure is reported through *say* and the debug log; if the runtime then
+    does not load, its load error names the missing DLL (``_child._load_lib``)."""
     from localm import vc_runtime
     from localm.debuglog import logger
     try:
