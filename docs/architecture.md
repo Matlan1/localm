@@ -102,22 +102,29 @@ anyway); when the script itself fails it prints
 exists, so pytest stops with "file or directory not found".
 
 CI runs that selection on every pull request without the `full-ci` label.
-The `python-pr-gate` job in `.github/workflows/ci.yml`
-(`scripts/run_affected_tests.py`) runs the `--depth 1` selection on ubuntu
-after the lockfile check, the hygiene gate and ruff. It never runs the
-whole suite: when the depth-1 selection is wider than a quarter of the
-suite it runs the depth-0 selection instead, and a depth-0 selection that is
-still wider (a change to a module most tests import) runs in full, with the
-job summary saying so. It fails when the selection is every test file (a
-`tests/conftest.py` or dependency-lock change), when a depth-0 retry selects
-nothing or fails, when the selector fails, prints nothing, names a path that
-is not an existing test file, or cannot resolve the base ref it diffs from. A
-change that fails the gate that way needs the two-platform matrix with
-coverage, which runs on a PR carrying the `full-ci` label in place of the
-gate. `python-pr-gate-windows` runs the same selection, with the same install
-and test command, on windows-latest, so a test that skips on Linux (`skipif`
-not win32) runs on every pull request that selects it; the lockfile check, the
-hygiene gate and ruff run on the Linux job only.
+The `python-pr-gate-plan` job in `.github/workflows/ci.yml`
+(`scripts/run_affected_tests.py --plan-out`) computes the `--depth 1`
+selection once, on ubuntu, after the lockfile check, the hygiene gate and
+ruff. It never runs the whole suite: when the depth-1 selection is wider than
+a quarter of the suite it runs the depth-0 selection instead, and a depth-0
+selection that is still wider (a change to a module most tests import) runs
+in full, with the job summary saying so. It fails when the selection is every
+test file (a `tests/conftest.py` or dependency-lock change), when a depth-0
+retry selects nothing or fails, when the selector fails, prints nothing, names
+a path that is not an existing test file, or cannot resolve the base ref it
+diffs from. A change that fails the gate that way needs the two-platform
+matrix with coverage, which runs on a PR carrying the `full-ci` label in place
+of the gate.
+
+The plan splits the selection into shards: one per 75 selected test files,
+at most 5. `python-pr-gate-shard` runs each shard on ubuntu-latest and on
+windows-latest (`tests/_shard.py`, the split the full matrix uses), so a wide
+selection runs in parallel and a test that skips on Linux (`skipif` not win32)
+runs on every pull request that selects it. A docs-only change runs no shard.
+`python-pr-gate` (the Linux shards) and `python-pr-gate-windows` (the Windows
+shards) are the verdicts: each fails unless the plan job succeeded and either
+nothing was selected and no shard ran, or every shard of its platform
+reported success and every selected test ran in exactly one shard.
 
 `merge-policy` (`scripts/merge_policy.py`) is the one check that sums the
 others up. It runs on every pull request once `python-pr-gate`,
