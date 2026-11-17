@@ -3659,7 +3659,7 @@ def apply_gpu_split(mp, *, config: Optional[dict] = None,
 
     Returns the ctypes float array backing ``mp.tensor_split`` (or ``None``
     when no ``tensor_split`` was written) - the CALLER MUST keep this
-    referenced until after the ``llama_load_model_from_file()`` call that
+    referenced until after the ``llama_model_load_from_file()`` call that
     consumes *mp*: llama.cpp copies ``tensor_split``'s contents at load time
     (it is not held as a live pointer afterward), so the buffer only needs to
     survive that one call, not the loaded model's lifetime."""

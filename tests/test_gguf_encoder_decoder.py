@@ -121,8 +121,8 @@ class FakeT5:
         mock_api.llama_decode.side_effect = self.decode
         mock_api.llama_sampler_sample.side_effect = self.sample
         mock_api.llama_model_decoder_start_token.return_value = self.start
-        mock_api.llama_token_bos.return_value = self.bos
-        mock_api.llama_token_eos.return_value = EOS
+        mock_api.llama_vocab_bos.return_value = self.bos
+        mock_api.llama_vocab_eos.return_value = EOS
         mock_api.llama_vocab_get_add_bos.return_value = False
         mock_api.llama_vocab_get_add_eos.return_value = True
 
@@ -451,7 +451,7 @@ class TestLoad:
         mock_api.llama_context_default_params.return_value = SimpleNamespace(
             n_ctx=0, n_batch=0, n_ubatch=0, offload_kqv=True, flash_attn_type=0,
             n_rs_seq=0)
-        mock_api.llama_load_model_from_file.return_value = 0xB00
+        mock_api.llama_model_load_from_file.return_value = 0xB00
         mock_api.llama_init_from_model.return_value = 0xC00
         mock_api.has_encoder_api.return_value = encoder_api
         mock_api.llama_model_has_encoder.return_value = has_encoder
@@ -547,7 +547,7 @@ class TestLoad:
             message = str(ei.value)
             del ei
         assert "'t5'" in message and "llama_encode" in message and "setup-llama" in message
-        mock_api.llama_free_model.assert_called_once_with(0xB00)
+        mock_api.llama_model_free.assert_called_once_with(0xB00)
         mock_api.llama_init_from_model.assert_not_called()
         mock_api.llama_model_has_encoder.assert_not_called()
 

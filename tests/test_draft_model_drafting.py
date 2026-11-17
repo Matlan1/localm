@@ -361,7 +361,7 @@ def test_close_frees_the_context_the_sampler_and_the_model_once():
         order = []
         api.llama_free.side_effect = lambda c: order.append("ctx")
         api.llama_sampler_free.side_effect = lambda s: order.append("sampler")
-        api.llama_free_model.side_effect = lambda m: order.append("model")
+        api.llama_model_free.side_effect = lambda m: order.append("model")
         src.close()
         src.close()
     assert order == ["ctx", "sampler", "model"]
@@ -374,7 +374,7 @@ def test_the_draft_model_is_freed_before_the_target_model():
     with patch.object(llama_mod, "api") as api:
         order = []
         api.llama_free.side_effect = lambda c: order.append(("ctx", c.value))
-        api.llama_free_model.side_effect = lambda m: order.append(("model", m.value))
+        api.llama_model_free.side_effect = lambda m: order.append(("model", m.value))
         api.llama_sampler_free.side_effect = lambda s: None
         llm._free_native()
     assert order == [("ctx", 6), ("model", 5), ("ctx", 2), ("model", 1)]
@@ -990,7 +990,7 @@ def test_each_draft_load_outcome_is_reported_and_frees_what_it_loaded(tmp_path, 
     with patch.object(llama_mod, "api") as api, \
          patch.object(llama_mod, "set_use_mmap"):
         _view_api(api, draft_type=3 if case == "vocab" else 2)
-        api.llama_load_model_from_file.return_value = (
+        api.llama_model_load_from_file.return_value = (
             None if case == "load-failed" else ctypes.c_void_p(5))
         api.has_hybrid_api.return_value = True
         api.llama_model_is_recurrent.return_value = case == "recurrent"
@@ -1000,7 +1000,7 @@ def test_each_draft_load_outcome_is_reported_and_frees_what_it_loaded(tmp_path, 
             None if case == "context" else ctypes.c_void_p(6))
         llm._load_draft_model(path + (".nope" if case == "missing" else ""), None, True)
         src = llm._source
-        freed = [c.args[0].value for c in api.llama_free_model.call_args_list]
+        freed = [c.args[0].value for c in api.llama_model_free.call_args_list]
     assert src.status == status
     assert src.usable is (case == "ok")
     if case in ("vocab", "recurrent", "context"):
@@ -1067,13 +1067,13 @@ def test_native_draft_context_and_free_calls_run_with_stderr_quieted(tmp_path, c
          patch.object(llama_mod, "_quiet_stderr", quiet), \
          patch("localm.discover.apply_gpu_split", return_value=None):
         _view_api(api, draft_type=3 if case == "vocab" else 2)
-        api.llama_load_model_from_file.return_value = (
+        api.llama_model_load_from_file.return_value = (
             None if case == "cancel" else ctypes.c_void_p(5))
         api.has_hybrid_api.return_value = False
         api.llama_context_default_params.side_effect = lambda: SimpleNamespace()
         api.llama_init_from_model.side_effect = record(
             "init", None if case == "context" else ctypes.c_void_p(6))
-        api.llama_free_model.side_effect = record("free_model")
+        api.llama_model_free.side_effect = record("free_model")
         api.llama_free.side_effect = record("free_ctx")
         if case == "cancel":
             with pytest.raises(ModelLoadCancelled):
@@ -1095,10 +1095,10 @@ def test_a_cancelled_draft_load_frees_the_target_and_raises(tmp_path):
     llm._cancel_event.set()
     with patch.object(llama_mod, "api") as api, \
          patch.object(llama_mod, "set_use_mmap"):
-        api.llama_load_model_from_file.return_value = None
+        api.llama_model_load_from_file.return_value = None
         with pytest.raises(ModelLoadCancelled) as caught:
             llm._load_draft_model(path, None, True)
-        freed_models = [c.args[0].value for c in api.llama_free_model.call_args_list]
+        freed_models = [c.args[0].value for c in api.llama_model_free.call_args_list]
     assert isinstance(caught.value, ModelLoadCancelled)
     assert freed_models == [1]
     assert (llm._model_ptr, llm._ctx_ptr) == (None, None)
@@ -1110,7 +1110,7 @@ def test_a_draft_file_that_is_not_a_chat_model_is_never_loaded(tmp_path):
     with patch.object(llama_mod, "api") as api:
         llm._load_draft_model(str(head), None, True)
     assert (llm._source.status, llm._source.usable) == ("draft-unsupported-role", False)
-    api.llama_load_model_from_file.assert_not_called()
+    api.llama_model_load_from_file.assert_not_called()
 
 
 @pytest.mark.parametrize("main_gpu,ratios", [(None, None), (1, [(0, 0.6), (1, 0.4)])])
@@ -1124,7 +1124,7 @@ def test_the_draft_model_is_split_over_the_targets_devices(tmp_path, main_gpu, r
          patch("localm.discover.apply_main_gpu") as main, \
          patch("localm.discover.apply_gpu_split", return_value=None) as split:
         api.llama_model_default_params.return_value = params
-        api.llama_load_model_from_file.return_value = None
+        api.llama_model_load_from_file.return_value = None
         llm._load_draft_model(path, None, True)
     assert params.n_gpu_layers == 99
     assert not hasattr(params, "devices")
@@ -1151,7 +1151,7 @@ def test_a_cpu_draft_model_is_not_split_and_gets_no_gpu_device(tmp_path):
          patch("localm.discover.apply_main_gpu") as main, \
          patch("localm.discover.apply_gpu_split") as split:
         api.llama_model_default_params.return_value = params
-        api.llama_load_model_from_file.side_effect = load
+        api.llama_model_load_from_file.side_effect = load
         llm._load_draft_model(path, None, True, on_gpu=False)
     assert params.n_gpu_layers == 0
     assert params.devices and seen == {"first": None}
@@ -1345,7 +1345,7 @@ def test_a_cpu_placed_draft_model_loads_without_gpu_layers_and_says_so(tmp_path)
         params = SimpleNamespace(n_gpu_layers=-1, split_mode=1, main_gpu=0)
         api.llama_model_default_params.return_value = params
         _view_api(api)
-        api.llama_load_model_from_file.return_value = ctypes.c_void_p(5)
+        api.llama_model_load_from_file.return_value = ctypes.c_void_p(5)
         api.has_hybrid_api.return_value = True
         api.llama_model_is_recurrent.return_value = False
         api.llama_model_is_hybrid.return_value = False
@@ -1424,7 +1424,7 @@ def test_a_disabled_draft_source_frees_its_native_state():
     src._sampler = object()
     with patch.object(llama_mod, "api") as api:
         src.disable("draft-rewind-unsupported")
-        freed_models = [c.args[0].value for c in api.llama_free_model.call_args_list]
+        freed_models = [c.args[0].value for c in api.llama_model_free.call_args_list]
         freed_ctx = [c.args[0].value for c in api.llama_free.call_args_list]
     assert (src.usable, src.status, src.loaded) == (False, "draft-rewind-unsupported", False)
     assert (freed_models, freed_ctx) == ([5], [6])
@@ -1746,7 +1746,7 @@ def test_a_draft_the_metadata_rejects_is_never_loaded(tmp_path):
          patch("localm.model_manager.gguf.gguf_recurrent_state_bytes", return_value=0):
         llm._load_draft_model(str(draft), None, True)
     assert (llm._source.status, llm._source.usable) == ("draft-vocab-mismatch", False)
-    api.llama_load_model_from_file.assert_not_called()
+    api.llama_model_load_from_file.assert_not_called()
 
 
 def test_a_recurrent_draft_the_metadata_shows_is_never_loaded(tmp_path):
@@ -1756,7 +1756,7 @@ def test_a_recurrent_draft_the_metadata_shows_is_never_loaded(tmp_path):
          patch("localm.model_manager.gguf.gguf_recurrent_state_bytes", return_value=1000):
         llm._load_draft_model(str(draft), None, True)
     assert llm._source.status == "draft-rewind-unsupported"
-    api.llama_load_model_from_file.assert_not_called()
+    api.llama_model_load_from_file.assert_not_called()
 
 
 @pytest.mark.parametrize("on_gpu,offload", [(True, True), (False, False)])
@@ -1803,9 +1803,9 @@ def test_an_unexpected_error_after_the_draft_load_leaves_the_target_loaded(tmp_p
          patch.object(llama_mod, "set_use_mmap"), \
          patch("localm.inference.backends.llamacpp._draftmodel.native_vocab_view",
                side_effect=_raise_for_the_draft_view):
-        api.llama_load_model_from_file.return_value = ctypes.c_void_p(5)
+        api.llama_model_load_from_file.return_value = ctypes.c_void_p(5)
         llm._load_draft_model(path, None, True)
-        freed = [c.args[0].value for c in api.llama_free_model.call_args_list]
+        freed = [c.args[0].value for c in api.llama_model_free.call_args_list]
     assert llm._source.status == "draft-error:AttributeError"
     assert llm._source.usable is False
     assert freed == [5] and llm._source._model is None
@@ -1822,7 +1822,7 @@ def test_a_draft_path_that_is_not_a_gguf_file_says_so(tmp_path):
         llm2._load_draft_model(str(tmp_path / "absent.gguf"), None, True)
     assert llm._source.status == "draft-not-gguf"
     assert llm2._source.status == "draft-model-missing"
-    api.llama_load_model_from_file.assert_not_called()
+    api.llama_model_load_from_file.assert_not_called()
 
 
 @pytest.mark.parametrize("status,on_gpu,printed", [
@@ -1928,7 +1928,7 @@ def test_a_cancelled_draft_load_is_freed_outside_the_draft_frame(tmp_path):
     llm._free_native = lambda: seen.append("free")
     with patch.object(llama_mod, "api") as api, \
          patch.object(llama_mod, "set_use_mmap"):
-        api.llama_load_model_from_file.return_value = None
+        api.llama_model_load_from_file.return_value = None
         with pytest.raises(ModelLoadCancelled):
             llm._load_draft_model(path, None, True)
     assert seen == ["free"]
@@ -1948,7 +1948,7 @@ def test_a_failed_target_free_after_a_cancel_is_not_reported_as_a_draft_error(tm
     llm._free_native = fail
     with patch.object(llama_mod, "api") as api, \
          patch.object(llama_mod, "set_use_mmap"):
-        api.llama_load_model_from_file.return_value = None
+        api.llama_model_load_from_file.return_value = None
         with pytest.raises(RuntimeError, match="free failed"):
             llm._load_draft_model(path, None, True)
 

@@ -40,7 +40,7 @@ Extension modules: regex._regex (total: 1)
 
 _WEIGHTS_TRACE = _CONTEXT_TRACE.replace(
     '_api.py", line 169 in llama_init_from_model',
-    '_api.py", line 130 in llama_load_model_from_file')
+    '_api.py", line 130 in llama_model_load_from_file')
 
 
 class TestCrashPhaseFromTrace:
@@ -52,7 +52,7 @@ class TestCrashPhaseFromTrace:
 
     def test_known_frame_on_another_thread_does_not_count(self):
         trace = _CONTEXT_TRACE.replace(
-            'queues.py", line 103 in get', 'x.py", line 1 in llama_load_model_from_file')
+            'queues.py", line 103 in get', 'x.py", line 1 in llama_model_load_from_file')
         assert crash_phase_from_trace(trace) == "context"
         only_other = trace.replace(
             '_api.py", line 169 in llama_init_from_model', '_api.py", line 1 in helper')

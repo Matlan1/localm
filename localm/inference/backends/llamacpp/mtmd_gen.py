@@ -898,7 +898,7 @@ class SpeechSynthesizer:
             apply_main_gpu(mp)
         try:
             with _quiet_stderr():
-                self._model = api.llama_load_model_from_file(model_path, mp)
+                self._model = api.llama_model_load_from_file(model_path, mp)
                 if not self._model:
                     raise SpeechUnavailable(
                         f"could not load the speech model {Path(model_path).name}")
@@ -913,7 +913,8 @@ class SpeechSynthesizer:
                 if not self._ctx:
                     raise SpeechUnavailable("could not create the speech model's context")
                 self._mtmd = MtmdContext(mmproj_path, self._model,
-                                         gpu_index=int(mp.main_gpu))
+                                         gpu_index=int(mp.main_gpu),
+                                         use_gpu=int(n_gpu_layers) > 0)
             self._vocab = api.llama_model_get_vocab(self._model)
             self._mem = api.llama_get_memory(self._ctx)
             info = self._m.mtmd_gen_audio_get_info(self._mtmd._ctx)
@@ -1221,6 +1222,6 @@ class SpeechSynthesizer:
                 self._ctx = None
         if self._model is not None:
             try:
-                api.llama_free_model(self._model)
+                api.llama_model_free(self._model)
             finally:
                 self._model = None

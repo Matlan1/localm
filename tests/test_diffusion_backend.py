@@ -566,14 +566,14 @@ class TestLoadSetup:
         api = self._api(mask=-1)
         with pytest.raises(RuntimeError, match="no mask token"):
             self._build(api, monkeypatch)
-        api.llama_free_model.assert_called_once()
+        api.llama_model_free.assert_called_once()
 
     def test_runtime_without_the_diffusion_calls_is_refused(self, monkeypatch):
         api = self._api()
         api.has_diffusion_api.return_value = False
         with pytest.raises(RuntimeError, match="setup-llama"):
             self._build(api, monkeypatch)
-        api.llama_free_model.assert_called_once()
+        api.llama_model_free.assert_called_once()
 
     def test_a_mocked_non_bool_answer_is_not_diffusion(self, monkeypatch):
         from unittest.mock import MagicMock

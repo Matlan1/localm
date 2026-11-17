@@ -44,7 +44,7 @@ def _mock_api(seen):
                     break
             seen["devices"] = entries
         return ctypes.c_void_p(1)
-    api.llama_load_model_from_file.side_effect = load
+    api.llama_model_load_from_file.side_effect = load
     return api
 
 
@@ -136,6 +136,16 @@ def test_a_gpu_projector_still_opens_on_the_gpu(monkeypatch):
     ctx = mtmd_mod.MtmdContext("/fake/mmproj.gguf", 0xBEEF)
     assert lib.use_gpu == [1]
     assert ctx.on_gpu is True
+
+
+def test_a_gpu_projector_on_a_runtime_without_a_gpu_reports_the_cpu(monkeypatch):
+    _devices(monkeypatch, [("CPU", CPU)])
+    lib = _RecordingLib()
+    monkeypatch.setattr(mtmd_mod, "_load_lib", lambda: lib)
+    monkeypatch.setattr(mtmd_mod, "_input_text_class", mtmd_mod._MtmdInputTextV2)
+    ctx = mtmd_mod.MtmdContext("/fake/mmproj.gguf", 0xBEEF)
+    assert lib.use_gpu == [1]
+    assert ctx.on_gpu is False
 
 
 @pytest.mark.parametrize("cpu_only,draft_gpu,on_gpu", [

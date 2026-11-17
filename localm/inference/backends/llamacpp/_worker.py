@@ -3,7 +3,7 @@
 child process spawned by ``_runner.py``; never imported or constructed in the
 main server process.
 
-``llama_load_model_from_file`` and every subsequent
+``llama_model_load_from_file`` and every subsequent
 ``llama_init_from_model``/``llama_decode`` call (context growth,
 token-by-token generation) can hard-abort the whole process on a native
 CUDA/HIP driver failure - no Python ``try/except`` can catch it. Isolating

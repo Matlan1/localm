@@ -240,7 +240,7 @@ class TestLlamaCppBackstop:
         mock_api = MagicMock()
         mock_api.llama_model_default_params.return_value = SimpleNamespace(
             main_gpu=0, n_gpu_layers=0, use_mmap=True)
-        mock_api.llama_load_model_from_file.return_value = 0xB00
+        mock_api.llama_model_load_from_file.return_value = 0xB00
         mock_api.llama_model_meta_val_str.return_value = pre_type
         return mock_api
 
@@ -266,7 +266,7 @@ class TestLlamaCppBackstop:
             del ei
             gc.collect()
         assert message == REFUSAL
-        mock_api.llama_free_model.assert_called_once_with(0xB00)
+        mock_api.llama_model_free.assert_called_once_with(0xB00)
         mock_api.llama_init_from_model.assert_not_called()
 
     def test_an_unaffected_model_is_loaded(self, monkeypatch):
@@ -410,7 +410,7 @@ class TestEmbedderChildBackstop:
         monkeypatch.setattr(api_module, "llama_backend_init", lambda: None)
         monkeypatch.setattr(api_module, "llama_model_default_params",
                             lambda: SimpleNamespace())
-        monkeypatch.setattr(api_module, "llama_load_model_from_file",
+        monkeypatch.setattr(api_module, "llama_model_load_from_file",
                             lambda path, mp: "model_ptr")
         monkeypatch.setattr(api_module, "llama_model_get_vocab", lambda model: "vocab")
         monkeypatch.setattr(api_module, "llama_model_n_embd", lambda model: 384)
@@ -427,7 +427,7 @@ class TestEmbedderChildBackstop:
         monkeypatch.setattr(api_module, "llama_init_from_model", _init)
         monkeypatch.setattr(api_module, "has_memory_api", lambda: False)
         monkeypatch.setattr(api_module, "llama_free", lambda ctx: None)
-        monkeypatch.setattr(api_module, "llama_free_model",
+        monkeypatch.setattr(api_module, "llama_model_free",
                             lambda model: calls["free"].append(model))
         monkeypatch.setattr("localm.discover.apply_main_gpu", lambda *a, **k: None)
         monkeypatch.setattr("localm.discover.apply_gpu_split", lambda *a, **k: None)
