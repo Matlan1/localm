@@ -810,8 +810,9 @@ _SKIP_DIRS = (("localm", "media"),)
 
 
 class BoundFunction(NamedTuple):
-    """A native function localm references, where, and whether a missing one is
-    tolerated (some reference to it is a presence probe)."""
+    """A native function localm references, where, and whether a missing one
+    fails a call (some binding of it sits in a function that does not probe for
+    it first)."""
     name: str
     required: bool
     sites: tuple
@@ -821,53 +822,77 @@ def _under(parts: tuple, prefix: tuple) -> bool:
     return parts[:len(prefix)] == prefix
 
 
+def _scopes(tree) -> dict:
+    """node -> the innermost function definition containing it, or *tree*."""
+    import ast
+
+    scope_of: dict = {}
+    stack = [(tree, tree)]
+    while stack:
+        node, scope = stack.pop()
+        for child in ast.iter_child_nodes(node):
+            inner = (child if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                     else scope)
+            scope_of[child] = inner
+            stack.append((child, inner))
+    return scope_of
+
+
+def _native_references(tree, probe_lists: bool):
+    """(name, node, is_bind) for every native function name *tree* binds or
+    probes; tuples of names count as probes when *probe_lists*."""
+    import ast
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            fname = (func.id if isinstance(func, ast.Name)
+                     else func.attr if isinstance(func, ast.Attribute) else None)
+            if fname not in _BIND_CALLS and fname not in _PROBE_CALLS:
+                continue
+            is_bind = fname in _BIND_CALLS and not (
+                fname == "getattr" and len(node.args) > 2)
+            for arg in node.args:
+                if (isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                        and _NATIVE_NAME.match(arg.value)):
+                    yield arg.value, node, is_bind
+        elif isinstance(node, ast.Attribute) and _NATIVE_NAME.match(node.attr):
+            base = node.value
+            if not (isinstance(base, ast.Name) and base.id in _PYTHON_ALIASES):
+                yield node.attr, node, True
+        elif probe_lists and isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+            for elt in node.elts:
+                if (isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+                        and _NATIVE_NAME.match(elt.value)):
+                    yield elt.value, elt, False
+
+
 def bound_functions(root: Path) -> dict:
     """name -> BoundFunction for every llama/mtmd/ggml function the localm
     package under *root* binds or probes, read from its source: string
     arguments of the binding helpers and of hasattr/getattr, attributes read
     off a loaded library, and (inside the llama.cpp backend) tuples of names
-    used as probe lists."""
+    used as probe lists. A binding is guarded when the function containing it
+    (or the module, at top level) also probes that name."""
     import ast
 
     sites: dict = {}
-    probed: set = set()
-
-    def add(name, where, is_required):
-        sites.setdefault(name, []).append(where)
-        if not is_required:
-            probed.add(name)
-
+    binds: dict = {}     # name -> scopes holding a binding
+    probes: dict = {}    # name -> scopes holding a probe
     for path in sorted((root / "localm").rglob("*.py")):
         parts = path.relative_to(root).parts
         if any(_under(parts, d) for d in _SKIP_DIRS):
             continue
-        probe_lists = any(_under(parts, d) for d in _PROBE_LIST_DIRS)
         rel = "/".join(parts)
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                func = node.func
-                fname = (func.id if isinstance(func, ast.Name)
-                         else func.attr if isinstance(func, ast.Attribute) else None)
-                if fname not in _BIND_CALLS and fname not in _PROBE_CALLS:
-                    continue
-                is_required = fname in _BIND_CALLS and not (
-                    fname == "getattr" and len(node.args) > 2)
-                for arg in node.args:
-                    if (isinstance(arg, ast.Constant) and isinstance(arg.value, str)
-                            and _NATIVE_NAME.match(arg.value)):
-                        add(arg.value, f"{rel}:{node.lineno}", is_required)
-            elif isinstance(node, ast.Attribute) and _NATIVE_NAME.match(node.attr):
-                base = node.value
-                if isinstance(base, ast.Name) and base.id in _PYTHON_ALIASES:
-                    continue
-                add(node.attr, f"{rel}:{node.lineno}", True)
-            elif probe_lists and isinstance(node, (ast.Tuple, ast.List, ast.Set)):
-                for elt in node.elts:
-                    if (isinstance(elt, ast.Constant) and isinstance(elt.value, str)
-                            and _NATIVE_NAME.match(elt.value)):
-                        add(elt.value, f"{rel}:{elt.lineno}", False)
-    return {name: BoundFunction(name, name not in probed, tuple(where))
+        scope_of = _scopes(tree)
+        probe_lists = any(_under(parts, d) for d in _PROBE_LIST_DIRS)
+        for name, node, is_bind in _native_references(tree, probe_lists):
+            sites.setdefault(name, []).append(f"{rel}:{node.lineno}")
+            key = (rel, getattr(scope_of[node], "lineno", 0))
+            (binds if is_bind else probes).setdefault(name, set()).add(key)
+    return {name: BoundFunction(name, bool(binds.get(name, set()) - probes.get(name, set())),
+                                tuple(where))
             for name, where in sites.items()}
 
 
@@ -875,6 +900,7 @@ def declared_functions(text: str) -> dict:
     """name -> True when deprecated, for every function a header *text*
     declares with an API export macro."""
     text = re.sub(r"^[ \t]*#(?:[^\n]*\\\n)*[^\n]*", "", _strip_comments(text), flags=re.M)
+    text = re.sub(r'"(?:\\.|[^"\\\n])*"', '""', text)
     out: dict = {}
     for m in re.finditer(r"\b((?:llama|mtmd|ggml)_[A-Za-z0-9_]*)\s*\(", text):
         start = max(text.rfind(c, 0, m.start()) for c in ";{}") + 1

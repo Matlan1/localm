@@ -1259,7 +1259,6 @@ _REMOVED_AT_B12347 = frozenset({
 _LLAMA_H_FUNCTIONS = """
 #define LLAMA_API __declspec(dllimport)
 #define DEPRECATED(func, hint) func __attribute__((deprecated(hint)))
-#define LLAMA_HELPER(x) llama_from_a_macro(x)
 extern "C" {
     typedef bool (*llama_progress_callback)(float progress, void * user_data);
     struct llama_model_params {
@@ -1270,10 +1269,14 @@ extern "C" {
                              const char * path_model,
               struct llama_model_params   params);
     LLAMA_API void llama_model_free(struct llama_model * model);
+    #if defined(LLAMA_SHARED)
+    #    define LLAMA_EXPORT LLAMA_API
+    #endif
+    #define LLAMA_HELPER(x) llama_from_a_macro(x)
     DEPRECATED(LLAMA_API int32_t llama_decode(
             struct llama_context * ctx,
               struct llama_batch   batch),
-            "use llama_process instead");
+            "use llama_vocab_n_tokens() instead");
     LLAMA_API DEPRECATED(size_t llama_get_state_size(struct llama_context * ctx),
         "use llama_state_get_size instead");
     LLAMA_API int32_t llama_vocab_n_tokens(const struct llama_vocab * vocab);
@@ -1358,14 +1361,41 @@ def test_the_scan_finds_the_bindings_localm_makes():
     bound = abichk.bound_functions(_REPO_ROOT)
     for name in ("llama_model_load_from_file", "llama_model_free",
                  "llama_init_from_model", "llama_decode", "llama_vocab_n_tokens",
-                 "mtmd_init_from_file", "mtmd_helper_gen_audio_init",
+                 "llama_vocab_bos", "llama_vocab_eos", "mtmd_init_from_file",
+                 "mtmd_helper_gen_audio_init", "mtmd_support_audio",
                  "llama_model_default_params"):
         assert bound[name].required, name
     for name in ("llama_model_has_mtp", "llama_kv_cache_seq_rm", "ggml_backend_dev_count",
-                 "llama_set_embeddings_nextn", "mtmd_support_audio"):
+                 "llama_set_embeddings_nextn"):
         assert not bound[name].required, name
     assert not any(site.startswith("localm/media/")
                    for f in bound.values() for site in f.sites)
+
+
+def test_a_binding_is_guarded_only_by_a_probe_in_its_own_function(tmp_path):
+    pkg = tmp_path / "localm"
+    pkg.mkdir()
+    (pkg / "binding.py").write_text(
+        "def available(lib):\n"
+        "    return hasattr(lib, 'llama_a') and hasattr(lib, 'llama_b')\n"
+        "\n"
+        "def a(lib):\n"
+        "    return _bind('llama_a')\n"
+        "\n"
+        "def b(lib):\n"
+        "    if hasattr(lib, 'llama_b'):\n"
+        "        return _bind('llama_b')\n"
+        "    return None\n", encoding="utf-8")
+    bound = abichk.bound_functions(tmp_path)
+    assert bound["llama_a"].required
+    assert not bound["llama_b"].required
+
+
+def test_a_name_in_a_deprecation_hint_is_not_a_declaration():
+    declared = abichk.declared_functions(
+        'DEPRECATED(MTMD_API int32_t mtmd_encode(void * ctx), "use mtmd_encode_chunk() instead");\n'
+        "MTMD_API int32_t mtmd_encode_chunk(void * ctx);\n")
+    assert declared == {"mtmd_encode": True, "mtmd_encode_chunk": False}
 
 
 def test_localm_binds_none_of_the_functions_upstream_pruned():

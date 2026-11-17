@@ -256,6 +256,8 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
                                                "environment switches"),
     "tests/test_store_lock_create_refused.py": (_LOCALM_PY,
                                                 "walks the AST of every localm .py for O_EXCL lock-file creates"),
+    "tests/test_check_llama_abi.py": (_LOCALM_PY,
+                                      "walks the AST of every localm .py for the native functions it binds"),
 }
 # Test files that walk a folder of the checkout, or load a module that does,
 # while their result does not depend on what that folder holds, with how.
@@ -285,6 +287,7 @@ _NOT_TREE_SCANNERS: dict[str, str] = {
     "tests/test_updater.py": "asks whether the checkout is a site-packages install",
     "tests/test_uv_tool.py": "reads the uv pin file",
     "tests/test_shell_entrypoints_executable.py": "reads the index mode of a fixed list of files",
+    "tests/test_llama_pin_constant_and_currency.py": "names check_llama_abi.py as a workflow step without running it",
 }
 _ROOT_DECLARATIONS = ("dependencies", "optional-dependencies", "dev-dependencies")
 _ROOT_METADATA_DECLARATIONS = ("requires-dist", "requires-dev", "provides-extras")
