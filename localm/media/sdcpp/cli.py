@@ -39,9 +39,18 @@ def main(backend: str, force: bool, status: bool) -> None:
             else:
                 console.print(f"  {b}: not installed")
         return
+    ask = None
+    if sys.stdin is not None and sys.stdin.isatty():
+        def ask(text: str) -> bool:
+            return click.confirm(text, default=True)
     try:
-        rt = runtime.provision(backend, force=force,
+        rt = runtime.provision(backend, force=force, ask=ask,
                                on_progress=lambda m: console.print(f"[dim]{escape(m)}[/dim]"))
+    except runtime.VcRuntimeMissingError as e:
+        from localm.setup_spec import VC_RUNTIME_ABSENT_EXIT
+        console.print(f"[yellow]The stable-diffusion.cpp runtime was not installed: "
+                      f"{escape(str(e))}[/yellow]")
+        sys.exit(VC_RUNTIME_ABSENT_EXIT)
     except runtime.ProvisionError as e:
         console.print(f"[red]Could not install the stable-diffusion.cpp runtime: {escape(str(e))}[/red]")
         sys.exit(1)

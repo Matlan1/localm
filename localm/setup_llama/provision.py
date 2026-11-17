@@ -404,6 +404,14 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
             _note_vulkan_without_gpu()
         return chosen, used_tag[0]
 
+    # Returns the chosen backend untried by any fallback when the Visual C++
+    # runtime is missing. See test_vc_runtime_missing_skips_the_backend_fallback.
+    if provisioned and _sl.vc_runtime_missing(target):
+        console.print(f"[yellow]The {chosen} runtime is installed but cannot load until the "
+                      "Microsoft Visual C++ Redistributable is installed. No other "
+                      "backend was tried: none loads without it.[/yellow]")
+        return chosen, used_tag[0]
+
     # ---- The installer must never hand the user a runtime our OWN gate rejects.
     #
     # This runs BEFORE the backend fallback below, and the order is the whole

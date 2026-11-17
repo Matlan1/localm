@@ -343,9 +343,7 @@ def _load_lib(payload):
         if clause and "Visual C++" in clause:
             raise RuntimeError(
                 f"could not load the stable-diffusion.cpp runtime from {runtime_dir}: "
-                f"{clause} ({e}). Reinstall it with 'localm setup-sdcpp --force', which "
-                "places the Visual C++ runtime next to it, or install the Visual C++ "
-                f"Redistributable: {vc_runtime.redist_url()}") from e
+                f"{clause} ({e}). {vc_runtime.install_hint()}") from e
         raise RuntimeError(
             f"could not load the stable-diffusion.cpp runtime from {runtime_dir} "
             f"({clause + '; ' if clause else ''}{e}). "

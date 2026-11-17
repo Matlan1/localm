@@ -288,6 +288,16 @@ coding agent's shell access, so you can grant one without the other.
   PyTorch has a build label, `download.pytorch.org`, so `off` and the domain
   lists refuse it; the transfer itself is made by uv, which follows redirects
   on its own, without the per-hop check or the DNS-rebinding pin.
+- **The Microsoft Visual C++ Redistributable** (Windows only). When the
+  llama.cpp or image/video runtime needs the Visual C++ runtime and Windows
+  does not have it (or has an older version), `localm setup-llama`,
+  `localm setup-sdcpp` and setup ask first, then download Microsoft's
+  installer from `download.visualstudio.microsoft.com` (one fixed, pinned URL;
+  its size, sha256 and Microsoft signature are checked before it runs) and run
+  it, which shows one Windows administrator prompt. A run nobody can answer
+  (`--yes`, an update, the GUI's runtime switch, a generation that installs its
+  runtime) never offers it. Under `off` the download is refused, with the
+  remedy, unless `net_allow_model_downloads` is on.
 - **Bug-report upload.** A deliberate, one-off action you trigger yourself
   (see [privacy.md](privacy.md)); it does not call `check_url` and is not
   subject to the domain lists. With `net_mode` set to `off` it is refused before

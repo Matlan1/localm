@@ -70,9 +70,7 @@ def _name_missing_dll(detail: str) -> Optional[str]:
     names, vc, users = m.group(1), m.group(2), m.group(3)
     if vc:
         from localm import vc_runtime
-        return (f"{names} (the Microsoft Visual C++ runtime) - retry with --force, which "
-                "places it next to the runtime, or install the Visual C++ "
-                f"Redistributable: {vc_runtime.redist_url()}")
+        return f"{names} (the Microsoft Visual C++ runtime) - {vc_runtime.install_hint()}"
     return (f"{names} (needed by {users}) - install the driver or program that "
             "provides it, then retry")
 

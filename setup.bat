@@ -21,6 +21,7 @@ set LOCALM_SETUP=1
 title LocaLM setup
 set "HBSEQ=0"
 set "RUNTIME_OK=1"
+set "VCMISSING="
 
 rem ---- command-line options ---------------------------------------------------
 rem    uninstall  (or --uninstall / --rollback)  remove LocaLM from this folder
@@ -788,6 +789,10 @@ if exist "%STMP%\localm_hint.txt" for /f "usebackq delims=" %%a in ("%STMP%\loca
 del "%STMP%\localm_hint.txt" 2>nul
 if not defined SLB set "SLB=backend"
 echo.
+rem  setup-llama exit 3 is localm.setup_spec.VC_RUNTIME_ABSENT_EXIT: the runtime is
+rem  in place but Windows lacks the Visual C++ Redistributable, and setup-llama
+rem  printed the remedy. Setup goes on with RUNTIME_OK=0 and VCMISSING=1 and no
+rem  report offer.
 if /i "%BACKEND%"=="own" (
     set "LLAMABUILD="
     call :flush
@@ -795,7 +800,11 @@ if /i "%BACKEND%"=="own" (
     set /p "LLAMABUILD=  Path to your llama.cpp build dir with llama.dll (blank = skip): "
     if not "!LLAMABUILD!"=="" (
         .venv\Scripts\localm setup-llama --from "!LLAMABUILD!" --force
-        if errorlevel 1 (
+        if "!errorlevel!"=="3" (
+            set "RUNTIME_OK=0"
+            set "VCMISSING=1"
+            set "PFHINT=.venv\Scripts\localm setup-llama"
+        ) else if errorlevel 1 (
             set "PFHINT=.venv\Scripts\localm setup-llama --from "!LLAMABUILD!" --force"
             set "PFDETAIL=Provisioning the native llama.cpp runtime with --from failed during setup."
             call :provision_failed || exit /b 1
@@ -807,7 +816,11 @@ if /i "%BACKEND%"=="own" (
     )
 ) else (
     .venv\Scripts\localm setup-llama --backend %BACKEND% %SLFORCE%
-    if errorlevel 1 (
+    if "!errorlevel!"=="3" (
+        set "RUNTIME_OK=0"
+        set "VCMISSING=1"
+        set "PFHINT=.venv\Scripts\localm setup-llama"
+    ) else if errorlevel 1 (
         set "PFHINT=.venv\Scripts\localm setup-llama --backend %BACKEND% --force"
         set "PFDETAIL=Provisioning the native llama.cpp runtime (--backend %BACKEND%) failed during setup."
         call :provision_failed || exit /b 1
@@ -955,8 +968,11 @@ rem ---- done ------------------------------------------------------------------
 echo.
 echo  Done. Setup complete.
 if "%RUNTIME_OK%"=="0" echo.
-if "%RUNTIME_OK%"=="0" echo  [^^!] No model can load yet - the native llama.cpp runtime did not finish
-if "%RUNTIME_OK%"=="0" echo      provisioning. Finish it any time with:
+if "%RUNTIME_OK%"=="0" if defined VCMISSING echo  [^^!] No model can load yet - Windows lacks the Microsoft Visual C++ Redistributable.
+if "%RUNTIME_OK%"=="0" if defined VCMISSING echo      Install it from https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist
+if "%RUNTIME_OK%"=="0" if defined VCMISSING echo      or run this, which offers to install it:
+if "%RUNTIME_OK%"=="0" if not defined VCMISSING echo  [^^!] No model can load yet - the native llama.cpp runtime did not finish
+if "%RUNTIME_OK%"=="0" if not defined VCMISSING echo      provisioning. Finish it any time with:
 if "%RUNTIME_OK%"=="0" echo        !PFHINT!
 rem  The backend setup-llama recorded as installed, when it differs from the pick.
 set "INSTALLEDBK="

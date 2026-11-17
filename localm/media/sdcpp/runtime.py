@@ -29,6 +29,7 @@ BACKENDS = ("cpu", "vulkan", "cuda", "rocm", "metal")
 _DOWNLOAD_STALL_TIMEOUT = 60
 
 Progress = Callable[[str], None]
+Ask = Callable[[str], bool]
 
 
 class ProvisionError(RuntimeError):
@@ -37,6 +38,11 @@ class ProvisionError(RuntimeError):
 
 class DownloadError(ProvisionError):
     """A download was refused, failed, or did not verify."""
+
+
+class VcRuntimeMissingError(ProvisionError):
+    """Windows lacks the Microsoft Visual C++ Redistributable the runtime needs,
+    so no backend of it loads; nothing was installed."""
 
 
 @dataclass
@@ -304,21 +310,21 @@ def _flatten(staging: Path) -> None:
         shutil.move(str(item), str(staging / item.name))
 
 
-def _place_vc_runtime(staging: Path, say: Progress) -> None:
-    """Windows: put the Microsoft Visual C++ runtime DLLs the build needs and
-    this machine lacks next to it (:func:`localm.vc_runtime.place_app_local`).
-    A failure is reported through *say* and the debug log; if the runtime then
-    does not load, its load error names the missing DLL (``_child._load_lib``)."""
-    from localm import vc_runtime
-    from localm.debuglog import logger
-    try:
-        vc_runtime.place_app_local(
-            staging, lambda url, dest: _download(url, dest, say, "Visual C++ runtime"), say)
-    except Exception as e:  # noqa: BLE001 - reported, the load test decides
-        logger.warning("sdcpp runtime: could not place the Visual C++ runtime: %s", e)
-        say(f"Could not place the Microsoft Visual C++ runtime next to the {RUNTIME_LABEL} "
-            f"({e}). If it does not load, install the Visual C++ Redistributable: "
-            f"{vc_runtime.redist_url()}")
+def _require_vc_runtime(staging: Path, say: Progress, ask: Optional[Ask]) -> None:
+    """Windows: make sure the Microsoft Visual C++ runtime the build in
+    *staging* imports is present, offering to install it through *ask* (None:
+    not offered) with :func:`localm.vc_runtime.ensure`. Raises
+    :class:`VcRuntimeMissingError` when it stays missing; *say* has then had
+    the message that names it and the remedy."""
+    from localm import netpolicy, vc_runtime
+    if vc_runtime.ensure(
+            staging, ask=ask, say=say, refusal=netpolicy.download_refusal,
+            download=lambda url, dest: _download(url, dest, say,
+                                                 "the Visual C++ Redistributable")):
+        return
+    raise VcRuntimeMissingError(
+        f"the {RUNTIME_LABEL} needs the Microsoft Visual C++ Redistributable, which this "
+        f"Windows lacks. {vc_runtime.install_hint()}")
 
 
 RUNTIME_LABEL = "native image and video runtime"
@@ -326,27 +332,32 @@ RUNTIME_LABEL = "native image and video runtime"
 
 def install(backend: str, *, force: bool = False,
             on_progress: Optional[Progress] = None,
-            probe: Optional[Callable[[Runtime], dict]] = None) -> Runtime:
+            probe: Optional[Callable[[Runtime], dict]] = None,
+            ask: Optional[Ask] = None) -> Runtime:
     """Download, verify, extract and load-test the runtime for *backend*.
 
     Network access goes through ``netpolicy`` as an explicit download. An
     installed runtime of the same build stays in place until the new one is
     fully downloaded and can be moved in. On a failed load-test the directory
-    is kept with ``FAILED_MARKER`` and :class:`ProvisionError` is raised. Every
-    progress message, and the failure, is also written to the debug log.
+    is kept with ``FAILED_MARKER`` and :class:`ProvisionError` is raised. On
+    Windows without the Microsoft Visual C++ Redistributable it is offered
+    through *ask* (None: not offered), and :class:`VcRuntimeMissingError` is
+    raised, with nothing installed, when it stays missing. Every progress
+    message, and the failure, is also written to the debug log.
     *probe* replaces the real worker load-test (tests only)."""
     from localm.debuglog import logger
     from localm.media.runtime_files import logged
     say = logged(on_progress, "sdcpp runtime")
     try:
-        return _install(backend, force=force, say=say, probe=probe)
+        return _install(backend, force=force, say=say, probe=probe, ask=ask)
     except ProvisionError as e:
         logger.warning("sdcpp runtime: installing the %s runtime failed: %s", backend, e)
         raise
 
 
 def _install(backend: str, *, force: bool, say: Progress,
-             probe: Optional[Callable[[Runtime], dict]]) -> Runtime:
+             probe: Optional[Callable[[Runtime], dict]],
+             ask: Optional[Ask] = None) -> Runtime:
     plat = platform_key()
     if plat is None or (plat, backend) not in pins.ASSETS:
         raise ProvisionError(
@@ -375,7 +386,7 @@ def _install(backend: str, *, force: bool, say: Progress,
         except netpolicy.NetworkPolicyError as e:
             raise DownloadError(refused_download_message(e)) from e
         _flatten(staging)
-        _place_vc_runtime(staging, say)
+        _require_vc_runtime(staging, say, ask)
         if any(name.startswith("cudart-")
                for name, _sha in pins.EXTRA_ASSETS.get((plat, backend), [])):
             (staging / NVIDIA_CUDA_LICENSE).write_text(NVIDIA_CUDA_LICENSE_NOTICE,
@@ -425,20 +436,23 @@ def _probe(rt: Runtime) -> dict:
 
 def provision(choice: str = "auto", *, force: bool = False,
               on_progress: Optional[Progress] = None,
-              probe: Optional[Callable[[Runtime], dict]] = None) -> Runtime:
+              probe: Optional[Callable[[Runtime], dict]] = None,
+              ask: Optional[Ask] = None) -> Runtime:
     """Install (if needed) and return the runtime for *choice*.
 
     An explicit backend is installed or the call fails with the reason.
     ``auto`` tries the recommended backend, then vulkan, then cpu, skipping a
     backend whose load-test already failed at this tag, and reports each
-    fallback through *on_progress*. A network failure stops the attempt."""
+    fallback through *on_progress*. A network failure, and a missing Microsoft
+    Visual C++ Redistributable (offered through *ask*, see :func:`install`),
+    stop the attempt."""
     say = on_progress or (lambda _m: None)
     choice = (choice or "auto").strip().lower()
     if choice != "auto":
         if choice not in BACKENDS:
             raise ProvisionError(f"unknown runtime backend {choice!r} "
                                  f"(choose from: auto, {', '.join(BACKENDS)})")
-        return install(choice, force=force, on_progress=say, probe=probe)
+        return install(choice, force=force, on_progress=say, probe=probe, ask=ask)
     if not force:
         rt = resolve("auto")
         if rt is not None and rt.backend == recommended_backend():
@@ -457,8 +471,8 @@ def provision(choice: str = "auto", *, force: bool = False,
             errors.append(f"{b}: {failed}")
             continue
         try:
-            return install(b, force=force, on_progress=say, probe=probe)
-        except DownloadError:
+            return install(b, force=force, on_progress=say, probe=probe, ask=ask)
+        except (DownloadError, VcRuntimeMissingError):
             raise
         except ProvisionError as e:
             errors.append(f"{b}: {e}")

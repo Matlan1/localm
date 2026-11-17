@@ -292,20 +292,24 @@ def missing_dll_clause(binary_dir: Optional[Path], images: list) -> Optional[str
     return vc_runtime.missing_clause(images, [Path(binary_dir), *rocm_runtime_dirs()])
 
 
-def _provisioned_backend_name(binary_dir: Path) -> str:
-    """The backend recorded in *binary_dir*'s marker, or ``auto`` without one."""
-    try:
-        from localm.setup_llama.runtime_dir import _provisioned_backend
-        return _provisioned_backend(Path(binary_dir)) or "auto"
-    except Exception:
-        logger.warning("could not read the provisioned backend of %s", binary_dir,
-                       exc_info=True)
-        return "auto"
-
-
-def _vc_redist_url() -> str:
+def _vc_runtime_short(binary_dir: Optional[Path]) -> bool:
+    """Windows: whether the libraries in *binary_dir* import a Microsoft Visual
+    C++ runtime DLL that the system folder lacks at the version localm checks
+    for (missing or older). False elsewhere, or when the check fails (logged)."""
+    if sys.platform != "win32" or binary_dir is None:
+        return False
     from localm import vc_runtime
-    return vc_runtime.redist_url()
+    try:
+        return bool(vc_runtime.missing_from_system(Path(binary_dir)))
+    except Exception:
+        logger.warning("could not check the Visual C++ runtime for %s", binary_dir,
+                       exc_info=True)
+        return False
+
+
+def _vc_install_hint() -> str:
+    from localm import vc_runtime
+    return vc_runtime.install_hint()
 
 
 # ggml shared libraries that are NOT compute backends (do not register them).
@@ -627,14 +631,12 @@ def load_lib() -> ctypes.CDLL:
             _loaded_lib = ctypes.CDLL(str(lib_path), mode=ctypes.RTLD_GLOBAL)
     except OSError as e:
         clause = missing_dll_clause(binary_dir, [*ggml, lib_path])
-        if clause and "Visual C++" in clause:
+        if (clause and "Visual C++" in clause) or _vc_runtime_short(binary_dir):
             raise RuntimeError(
-                f"Failed to load {name} from {lib_path}: {clause}. {e}\n"
+                f"Failed to load {name} from {lib_path}: "
+                f"{clause + '. ' if clause else ''}{e}\n"
                 "Windows does not have the Microsoft Visual C++ runtime this build "
-                "needs. Re-provision, which places it next to the runtime:\n"
-                f"  localm setup-llama --backend {_provisioned_backend_name(binary_dir)} --force\n"
-                "or install the Visual C++ Redistributable from "
-                f"{_vc_redist_url()}"
+                f"needs, or has an older version. {_vc_install_hint()}"
             ) from e
         raise RuntimeError(
             f"Failed to load {name} from {lib_path}: "

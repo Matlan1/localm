@@ -706,6 +706,18 @@ def runtime_failed(emit: Callable[[str], None], retry: str, detail: str) -> None
     raise StopSetup(f"stopped after the runtime failed. Retry with: {retry}")
 
 
+def vc_runtime_absent(localm_exe: str) -> None:
+    """After setup-llama exited with :data:`localm.setup_spec.VC_RUNTIME_ABSENT_EXIT`
+    (the runtime is in place, Windows lacks the Microsoft Visual C++
+    Redistributable, and setup-llama printed the remedy): raises StepFailed, so
+    the install goes on and the summary names it, with no problem report
+    offered."""
+    raise StepFailed("no model can load until the Microsoft Visual C++ Redistributable is "
+                     "installed: get it from https://learn.microsoft.com/cpp/windows/"
+                     f"latest-supported-vc-redist or run \"{localm_exe}\" setup-llama, "
+                     "which offers to install it")
+
+
 #: The line scripts/report_issue.py --save-only ends with: this, then the saved path.
 _SAVED_REPORT_PREFIX = "SAVED_REPORT="
 
@@ -910,6 +922,8 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
             force = ["--force"] if "native-runtime" in cut_short else []
             code = _run([localm_exe, "setup-llama", "--backend", plan.backend, *force],
                         emit, plan, allow_fail=True, answers=True)
+            if code == spec.VC_RUNTIME_ABSENT_EXIT:
+                vc_runtime_absent(localm_exe)
             if code != 0:
                 runtime_failed(
                     emit, f'"{localm_exe}" setup-llama --backend {plan.backend} --force',
@@ -927,6 +941,8 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
         def provision_own(emit):
             code = _run([localm_exe, "setup-llama", "--from", plan.own_build_dir,
                          "--force"], emit, plan, allow_fail=True, answers=True)
+            if code == spec.VC_RUNTIME_ABSENT_EXIT:
+                vc_runtime_absent(localm_exe)
             if code != 0:
                 runtime_failed(
                     emit, f'"{localm_exe}" setup-llama --from "{plan.own_build_dir}" --force',

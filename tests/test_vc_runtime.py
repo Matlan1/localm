@@ -1,26 +1,29 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The Microsoft Visual C++ runtime placed beside a native runtime on Windows
-(localm.vc_runtime): unpacking the redistributable's WiX bundle and its
-cabinets, choosing which DLLs a runtime folder needs, the pinned checksum, the
-system copy that is new enough, and the load error that names a missing DLL.
+"""The Microsoft Visual C++ runtime on Windows (localm.vc_runtime): the check of
+the system folder, the offer to run Microsoft's installer and every path on
+which it does not run, the pinned and signed download, setup-llama's one
+placement path, the exit code setup reads, and the load error that names a
+missing DLL.
 
-The bundle, cabinets and DLLs are real files in their real formats, built here."""
+The DLLs are real PE images in their real format, built here."""
 
 from __future__ import annotations
 
 import ast
 import hashlib
+import re
 import struct
-import zlib
+import sys
 from pathlib import Path
 
 import pytest
 
-from localm import pe_deps, vc_runtime
+from localm import pe_deps, setup_spec, vc_runtime
 from localm import setup_llama as sl
 from localm.setup_llama import load_probe
 
 VERSION = vc_runtime.REDIST_VERSION
+_REPO = Path(__file__).resolve().parents[1]
 
 
 # --------------------------------------------------------------------------- #
@@ -56,82 +59,6 @@ def _pe(imports: list[str], version: tuple | None = None, machine: int = 0x8664)
     return image
 
 
-def _cab(files: dict[str, bytes], *, mszip: bool = True, block: int = 700) -> bytes:
-    """A single-folder cabinet holding *files*, MSZIP blocks of *block* bytes
-    (each block's deflate stream primed with the output before it) or stored."""
-    blob = b"".join(files.values())
-    data, out = b"", b""
-    for i in range(0, len(blob), block):
-        chunk = blob[i:i + block]
-        if mszip:
-            c = zlib.compressobj(9, zlib.DEFLATED, -15, zdict=out[-32768:] or None) \
-                if out else zlib.compressobj(9, zlib.DEFLATED, -15)
-            payload = b"CK" + c.compress(chunk) + c.flush()
-        else:
-            payload = chunk
-        data += struct.pack("<IHH", 0, len(payload), len(chunk)) + payload
-        out += chunk
-    table, offset = b"", 0
-    for name, content in files.items():
-        table += struct.pack("<IIHHHH", len(content), offset, 0, 0, 0, 0x20) + name.encode() + b"\0"
-        offset += len(content)
-    n_blocks = -(-len(blob) // block)
-    start = 44 + len(table)
-    total = start + len(data)
-    head = (b"MSCF" + struct.pack("<IIIII", 0, total, 0, 44, 0)
-            + struct.pack("<BBHHHHH", 3, 1, 1, len(files), 0, 0, 0))
-    folder = struct.pack("<IHH", start, n_blocks, 1 if mszip else 0)
-    return head + folder + table + data
-
-
-def _bundle(containers: list[bytes], signature: bytes = b"S" * 40) -> bytes:
-    """A WiX Burn bundle: a stub with a .wixburn section, the UX container, the
-    signature, then the attached containers."""
-    stub_size = 0x400
-    head = bytearray(0x40)
-    head[:2] = b"MZ"
-    struct.pack_into("<I", head, 0x3C, 0x40)
-    image = bytes(head) + b"PE\0\0" + struct.pack("<HHIIIHH", 0x8664, 1, 0, 0, 0, 0, 0)
-    image += b".wixburn" + struct.pack("<IIII", 64, 0x1000, 0x200, 0x200) + b"\0" * 16
-    image += b"\0" * (0x200 - len(image))
-    sig_offset = stub_size + len(containers[0])
-    header = struct.pack("<II", 0x00F14300, 2) + b"\0" * 16 + struct.pack(
-        "<IIIIII", stub_size, 0, sig_offset, len(signature), 1, len(containers))
-    header += struct.pack("<" + "I" * len(containers), *(len(c) for c in containers))
-    image += header + b"\0" * (stub_size - len(image) - len(header))
-    return image + containers[0] + signature + b"".join(containers[1:])
-
-
-def _redist(suffix: str = "amd64", version: tuple = VERSION) -> tuple[bytes, dict]:
-    dlls = {
-        "msvcp140.dll": _pe(["VCRUNTIME140.dll", "KERNEL32.dll"], version),
-        "vcruntime140.dll": _pe(["KERNEL32.dll"], version),
-        "vcruntime140_1.dll": _pe(["VCRUNTIME140.dll"], version),
-        "vcomp140.dll": _pe(["KERNEL32.dll"], version),
-    }
-    runtime_cab = _cab({f"{n}_{suffix}": b for n, b in dlls.items()})
-    other_cab = _cab({"readme_amd64": b"not a dll"}, mszip=False)
-    attached = _cab({"a0": b"\xd0\xcf\x11\xe0 an msi", "a1": other_cab, "a2": runtime_cab},
-                    mszip=False)
-    ux = _cab({"0": b"<BurnManifest/>"})
-    return _bundle([ux, attached]), dlls
-
-
-@pytest.fixture
-def pinned(monkeypatch):
-    """Pin the amd64 package to a bundle built here and serve it by copy."""
-    exe, dlls = _redist()
-    monkeypatch.setitem(vc_runtime._REDIST, "amd64", (
-        "https://example.invalid/VC_redist.x64.exe", hashlib.sha256(exe).hexdigest(),
-        len(exe), "amd64"))
-    calls: list[str] = []
-
-    def download(url, dest):
-        calls.append(url)
-        Path(dest).write_bytes(exe)
-    return download, calls, dlls
-
-
 def _runtime_folder(tmp_path: Path, imports: list[str]) -> Path:
     folder = tmp_path / "lib"
     folder.mkdir()
@@ -140,129 +67,92 @@ def _runtime_folder(tmp_path: Path, imports: list[str]) -> Path:
     return folder
 
 
+_PACKAGE = b"MZ the installer stand-in" * 100
+
+
+class _Rig:
+    """A runtime folder, a stand-in system folder, and recorders for every step
+    :func:`vc_runtime.ensure` can take."""
+
+    def __init__(self, tmp_path: Path, monkeypatch):
+        self.lib = _runtime_folder(tmp_path, ["MSVCP140.dll", "VCRUNTIME140_1.dll"])
+        self.system = tmp_path / "system32"
+        self.system.mkdir()
+        self.downloads: list[str] = []
+        self.runs: list[tuple] = []
+        self.questions: list[str] = []
+        self.said: list[str] = []
+        self.answer = True
+        self.exit_code = 0
+        self.installs = True
+        self.package = _PACKAGE
+        self.refused = None
+        url, _sha, _size = vc_runtime._REDIST["amd64"]
+        monkeypatch.setitem(vc_runtime._REDIST, "amd64", (
+            url, hashlib.sha256(_PACKAGE).hexdigest(), len(_PACKAGE)))
+        monkeypatch.setattr(vc_runtime, "authenticode_signer", lambda p: vc_runtime.SIGNER)
+        monkeypatch.setattr(vc_runtime, "run_installer", self._run)
+        monkeypatch.setattr(vc_runtime, "_hold_open", lambda p: None)
+        monkeypatch.setitem(vc_runtime._STATE, "declined", False)
+
+    def download(self, url: str, dest: Path) -> None:
+        self.downloads.append(url)
+        Path(dest).write_bytes(self.package)
+
+    def ask(self, text: str) -> bool:
+        self.questions.append(text)
+        return self.answer
+
+    def _run(self, path, args=vc_runtime.INSTALL_ARGS):
+        self.runs.append((Path(path).name, tuple(args), Path(path).read_bytes() == _PACKAGE))
+        if self.installs:
+            for name in ("msvcp140.dll", "vcruntime140_1.dll"):
+                (self.system / name).write_bytes(_pe(["KERNEL32.dll"], VERSION))
+        return self.exit_code
+
+    def ensure(self, *, ask="default") -> bool:
+        return vc_runtime.ensure(self.lib, download=self.download,
+                                 refusal=lambda url: self.refused,
+                                 ask=self.ask if ask == "default" else ask,
+                                 say=self.said.append, system_dir=self.system,
+                                 machine="AMD64")
+
+
+@pytest.fixture()
+def rig(tmp_path, monkeypatch):
+    return _Rig(tmp_path, monkeypatch)
+
+
 # --------------------------------------------------------------------------- #
-#  Unpacking                                                                  #
+#  Detection                                                                  #
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.parametrize("mszip", [True, False])
-def test_cabinet_files_round_trip_across_blocks(mszip):
-    files = {"a.dll_amd64": bytes(range(256)) * 9, "b.txt": b"hello" * 300}
-    assert vc_runtime.cabinet_files(_cab(files, mszip=mszip, block=500)) == files
+def test_missing_from_system_counts_absent_and_older_copies(tmp_path):
+    folder = _runtime_folder(tmp_path, ["MSVCP140.dll", "VCRUNTIME140.dll", "KERNEL32.dll"])
+    system = tmp_path / "system"
+    system.mkdir()
+    assert vc_runtime.missing_from_system(folder, system) == ["msvcp140.dll",
+                                                              "vcruntime140.dll"]
+    (system / "msvcp140.dll").write_bytes(_pe(["KERNEL32.dll"], (14, 29, 30133, 0)))
+    (system / "vcruntime140.dll").write_bytes(_pe(["KERNEL32.dll"], VERSION))
+    assert vc_runtime.missing_from_system(folder, system) == ["msvcp140.dll"]
+    (system / "msvcp140.dll").write_bytes(_pe(["KERNEL32.dll"], (14, 60, 1, 0)))
+    assert vc_runtime.missing_from_system(folder, system) == []
 
 
-def test_cabinet_with_another_compression_is_refused():
-    cab = bytearray(_cab({"x": b"y" * 10}))
-    struct.pack_into("<H", cab, 36 + 6, 3)
-    with pytest.raises(vc_runtime.RedistError, match="compression type 3"):
-        vc_runtime.cabinet_files(bytes(cab))
-
-
-def test_runtime_files_finds_the_runtime_cabinet_for_the_suffix():
-    exe, dlls = _redist()
-    assert vc_runtime.runtime_files(exe, "amd64") == dlls
-    with pytest.raises(vc_runtime.RedistError, match="arm64"):
-        vc_runtime.runtime_files(exe, "arm64")
-
-
-def test_arm64_takes_system_named_files_and_skips_other_machines():
-    arm = 0xAA64
-    files = {
-        "msvcp140.dll_arm64": _pe(["VCRUNTIME140.dll"], VERSION, arm),
-        "vcomp140.dll_system_arm64": _pe(["KERNEL32.dll"], VERSION, arm),
-        "vcruntime140_1.dll_arm64": _pe(["KERNEL32.dll"], VERSION, 0x8664),
-    }
-    exe = _bundle([_cab({"0": b"m"}), _cab({"a0": _cab(files)}, mszip=False)])
-    found = vc_runtime.runtime_files(exe, "arm64")
-    assert sorted(found) == ["msvcp140.dll", "vcomp140.dll"]
-    assert found["vcomp140.dll"] == files["vcomp140.dll_system_arm64"]
-
-
-def test_a_file_that_is_not_a_bundle_is_refused():
-    with pytest.raises(vc_runtime.RedistError):
-        vc_runtime.runtime_files(_pe(["KERNEL32.dll"]), "amd64")
-
-
-# --------------------------------------------------------------------------- #
-#  Placing                                                                    #
-# --------------------------------------------------------------------------- #
-
-def test_places_what_the_folder_imports_and_its_runtime_dependencies(tmp_path, pinned):
-    download, calls, dlls = pinned
-    folder = _runtime_folder(tmp_path, ["MSVCP140.dll", "VCRUNTIME140_1.dll", "KERNEL32.dll"])
-    placed = vc_runtime.place_app_local(folder, download, system_dir=None, on_windows=True)
-    # vcruntime140.dll is not imported by the folder; msvcp140.dll needs it.
-    assert placed == ["msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll"]
-    assert calls == ["https://example.invalid/VC_redist.x64.exe"]
-    for name in placed:
-        assert (folder / name).read_bytes() == dlls[name]
-    assert not (folder / "vcomp140.dll").exists()
-    notice = (folder / vc_runtime.LICENSE_NAME).read_text(encoding="utf-8")
-    assert "msvcp140.dll" in notice and "aka.ms/VCRedistLicense" in notice
-    assert vc_runtime.needed(folder) == set()
-    assert sorted(p.name for p in folder.iterdir() if p.name.startswith(".vcredist")) == []
-    assert vc_runtime.place_app_local(folder, download, system_dir=None, on_windows=True) == []
-    assert len(calls) == 1
-
-
-def test_nothing_is_fetched_when_nothing_imports_the_runtime(tmp_path, pinned):
-    download, calls, _ = pinned
+def test_nothing_is_missing_when_nothing_imports_the_runtime(tmp_path):
     folder = tmp_path / "lib"
     folder.mkdir()
     (folder / "llama.dll").write_bytes(_pe(["KERNEL32.dll", "vulkan-1.dll"]))
-    (folder / "notes.txt").write_text("x")
-    assert vc_runtime.place_app_local(folder, download, system_dir=None, on_windows=True) == []
-    assert calls == []
+    assert vc_runtime.missing_from_system(folder, None) == []
 
 
-def test_a_system_copy_at_the_pinned_version_is_used_instead(tmp_path, pinned):
-    download, calls, _ = pinned
-    system = tmp_path / "system"
-    system.mkdir()
-    for name in ("msvcp140.dll", "vcruntime140.dll"):
-        (system / name).write_bytes(_pe(["KERNEL32.dll"], VERSION))
-    folder = _runtime_folder(tmp_path, ["MSVCP140.dll", "VCRUNTIME140.dll"])
-    assert vc_runtime.place_app_local(folder, download, system_dir=system, on_windows=True) == []
-    assert calls == []
-
-
-def test_an_older_system_copy_gets_an_app_local_one(tmp_path, pinned):
-    download, calls, _ = pinned
-    system = tmp_path / "system"
-    system.mkdir()
-    (system / "msvcp140.dll").write_bytes(_pe(["KERNEL32.dll"], (14, 29, 30133, 0)))
-    (system / "vcruntime140.dll").write_bytes(_pe(["KERNEL32.dll"], VERSION))
-    folder = _runtime_folder(tmp_path, ["MSVCP140.dll", "VCRUNTIME140.dll"])
-    placed = vc_runtime.place_app_local(folder, download, system_dir=system, on_windows=True)
-    assert placed == ["msvcp140.dll"]
-
-
-def test_a_package_that_does_not_match_its_pin_changes_nothing(tmp_path, pinned, monkeypatch):
-    download, _, _ = pinned
-    url, sha, size, suffix = vc_runtime._REDIST["amd64"]
-    monkeypatch.setitem(vc_runtime._REDIST, "amd64", (url, "0" * 64, size, suffix))
-    folder = _runtime_folder(tmp_path, ["MSVCP140.dll"])
-    before = sorted(p.name for p in folder.iterdir())
-    with pytest.raises(vc_runtime.RedistError, match="sha256"):
-        vc_runtime.place_app_local(folder, download, system_dir=None, on_windows=True)
-    assert sorted(p.name for p in folder.iterdir()) == before
-
-
-def test_a_dll_of_another_version_is_refused(tmp_path, monkeypatch):
-    exe, _ = _redist(version=(14, 40, 1, 0))
-    monkeypatch.setitem(vc_runtime._REDIST, "amd64", (
-        "https://example.invalid/x.exe", hashlib.sha256(exe).hexdigest(), len(exe), "amd64"))
-    folder = _runtime_folder(tmp_path, ["MSVCP140.dll"])
-    with pytest.raises(vc_runtime.RedistError, match="version"):
-        vc_runtime.place_app_local(folder, lambda u, d: Path(d).write_bytes(exe),
-                                   system_dir=None, on_windows=True)
-    assert not (folder / "msvcp140.dll").exists()
-
-
-def test_off_windows_it_does_nothing(tmp_path, pinned):
-    download, calls, _ = pinned
-    folder = _runtime_folder(tmp_path, ["MSVCP140.dll"])
-    assert vc_runtime.place_app_local(folder, download, on_windows=False) == []
-    assert calls == []
+def test_off_windows_nothing_is_missing_and_nothing_is_offered(tmp_path, monkeypatch, rig):
+    monkeypatch.setattr(vc_runtime.sys, "platform", "linux")
+    assert vc_runtime.missing_from_system(rig.lib) == []
+    assert vc_runtime.ensure(rig.lib, download=rig.download, ask=rig.ask,
+                             refusal=lambda url: None, say=rig.said.append) is True
+    assert rig.questions == rig.downloads == rig.runs == rig.said == []
 
 
 @pytest.mark.parametrize("machine,key", [("AMD64", "amd64"), ("x86_64", "amd64"),
@@ -272,37 +162,226 @@ def test_redist_machine(machine, key):
 
 
 def test_every_pin_is_microsofts_versioned_download():
-    for url, sha, size, _suffix in vc_runtime._REDIST.values():
-        assert url.startswith("https://download.visualstudio.microsoft.com/download/pr/")
+    for url, sha, size in vc_runtime._REDIST.values():
+        assert url.startswith(f"https://{vc_runtime.REDIST_HOST}/download/pr/")
         assert sha.upper() in url and len(sha) == 64 and size > 1_000_000
 
 
+def test_the_installer_runs_quietly_without_restarting_windows():
+    assert vc_runtime.INSTALL_ARGS == ("/install", "/quiet", "/norestart")
+
+
 # --------------------------------------------------------------------------- #
-#  setup-llama: one placement path                                            #
+#  The offer                                                                  #
 # --------------------------------------------------------------------------- #
 
-def test_bundling_on_windows_places_the_runtime_through_setup_llamas_download(
-        tmp_path, pinned, monkeypatch):
-    download, calls, _ = pinned
-    monkeypatch.setattr(sl.sys, "platform", "win32")
-    monkeypatch.setattr(vc_runtime, "_system_dir", lambda: None)
-    monkeypatch.setattr(sl, "_download", download)
-    folder = _runtime_folder(tmp_path, ["MSVCP140.dll"])
-    sl._bundle_missing_native_deps(folder)
-    assert (folder / "msvcp140.dll").is_file() and calls
+def test_a_present_runtime_asks_and_downloads_nothing(rig):
+    for name in ("msvcp140.dll", "vcruntime140_1.dll"):
+        (rig.system / name).write_bytes(_pe(["KERNEL32.dll"], VERSION))
+    assert rig.ensure() is True
+    assert rig.questions == rig.downloads == rig.runs == rig.said == []
 
 
-def test_bundling_on_windows_never_raises(tmp_path, monkeypatch, caplog):
-    monkeypatch.setattr(sl.sys, "platform", "win32")
-    monkeypatch.setattr(vc_runtime, "_system_dir", lambda: None)
+def test_yes_downloads_checks_runs_and_checks_again(rig):
+    assert rig.ensure() is True
+    assert len(rig.questions) == 1
+    q = rig.questions[0]
+    assert "no model can load without it" in q and "one administrator prompt" in q
+    assert "msvcp140.dll, vcruntime140_1.dll" in q and vc_runtime.REDIST_HOST in q
+    assert rig.downloads == [vc_runtime._REDIST["amd64"][0]]
+    assert rig.runs == [("VC_redist.x64.exe", vc_runtime.INSTALL_ARGS, True)]
+    assert rig.said[-1] == "The Microsoft Visual C++ Redistributable is installed."
+    assert sorted(p.name for p in rig.lib.iterdir()) == ["ggml-base.dll", "llama.dll"]
 
+
+def test_an_older_runtime_is_named_as_older(rig):
+    (rig.system / "msvcp140.dll").write_bytes(_pe(["KERNEL32.dll"], (14, 29, 30133, 0)))
+    rig.answer = False
+    assert rig.ensure() is False
+    assert "has an older version of" in rig.questions[0]
+    assert "has an older version of" in rig.said[-1]
+
+
+def _assert_fallback(text: str, reason: str) -> None:
+    assert text.startswith("No model can load yet:")
+    assert f"({reason}" in text
+    assert vc_runtime.REDIST_PAGE in text and vc_runtime.redist_url() in text
+    assert f"'{vc_runtime.RERUN_HINT}'" in text
+
+
+def test_declined_downloads_nothing_and_is_not_asked_again(rig):
+    rig.answer = False
+    assert rig.ensure() is False
+    assert rig.downloads == rig.runs == []
+    _assert_fallback(rig.said[-1], "you declined it")
+    assert rig.ensure() is False
+    assert len(rig.questions) == 1
+    _assert_fallback(rig.said[-1], "you declined it earlier in this run")
+
+
+def test_an_unattended_run_never_downloads_or_runs_the_installer(rig):
+    assert rig.ensure(ask=None) is False
+    assert rig.questions == rig.downloads == rig.runs == []
+    _assert_fallback(rig.said[-1], "this run is unattended")
+
+
+def test_network_off_refuses_before_asking(rig):
+    rig.refused = "Network access is off."
+    assert rig.ensure() is False
+    assert rig.questions == rig.downloads == rig.runs == []
+    _assert_fallback(rig.said[-1], "Network access is off")
+    assert "off.)" not in rig.said[-1]
+
+
+def test_setup_llama_refuses_the_download_with_network_access_off(monkeypatch):
+    nd = sl.native_deps
+    monkeypatch.setattr(nd, "_net_allowed", lambda: False)
+    refusal = nd._vc_refusal(vc_runtime._REDIST["amd64"][0]) or ""
+    assert "Visual C++ Redistributable was not downloaded" in refusal
+    assert "net_allow_model_downloads" in refusal
+    monkeypatch.setattr(nd, "_net_allowed", lambda: True)
+    assert nd._vc_refusal(vc_runtime._REDIST["amd64"][0]) is None
+
+def test_a_corrupted_download_is_refused_and_never_runs(rig):
+    rig.package = _PACKAGE[:-1] + b"!"
+    assert rig.ensure() is False
+    assert rig.runs == []
+    _assert_fallback(rig.said[-1], "the download's sha256 is")
+
+
+def test_a_download_of_the_wrong_size_is_refused(rig):
+    rig.package = _PACKAGE + b"x"
+    assert rig.ensure() is False
+    assert rig.runs == []
+    assert "bytes, expected" in rig.said[-1]
+
+
+def test_a_package_not_signed_by_microsoft_never_runs(rig, monkeypatch):
+    monkeypatch.setattr(vc_runtime, "authenticode_signer", lambda p: "Someone Else")
+    assert rig.ensure() is False
+    assert rig.runs == []
+    assert "signed by 'Someone Else'" in rig.said[-1]
+
+
+def test_an_invalid_signature_never_runs(rig, monkeypatch):
+    def invalid(path):
+        raise vc_runtime.RedistError("the installer's signature is not valid "
+                                     "(WinVerifyTrust 0x80096010)")
+    monkeypatch.setattr(vc_runtime, "authenticode_signer", invalid)
+    assert rig.ensure() is False
+    assert rig.runs == []
+    assert "0x80096010" in rig.said[-1]
+
+
+def test_a_failed_download_ends_in_the_message(rig):
     def broken(url, dest):
-        raise OSError("network down")
-    monkeypatch.setattr(sl, "_download", broken)
-    folder = _runtime_folder(tmp_path, ["MSVCP140.dll"])
-    sl._bundle_missing_native_deps(folder)
-    assert not (folder / "msvcp140.dll").exists()
-    assert any("Visual C++ runtime" in r.message for r in caplog.records)
+        raise OSError("connection reset")
+    rig.download = broken
+    assert rig.ensure() is False
+    assert rig.runs == []
+    _assert_fallback(rig.said[-1], "connection reset")
+
+
+@pytest.mark.parametrize("code,reason", [
+    (vc_runtime.ERROR_CANCELLED, "the administrator prompt was declined"),
+    (vc_runtime.ERROR_INSTALL_USEREXIT, "the installation was cancelled"),
+    (vc_runtime.ERROR_INSTALL_FAILURE, "the installer failed (code 1603"),
+    (vc_runtime.ERROR_INSTALL_ALREADY_RUNNING, "another installation is in progress"),
+    (vc_runtime.WAIT_TIMEOUT, "still running after 20 minutes"),
+    (1714, "the installer exited with code 1714"),
+    (vc_runtime.ERROR_SUCCESS_REBOOT_REQUIRED, "Windows needs a restart"),
+    (vc_runtime.ERROR_SUCCESS, "the installer finished but the system folder still lacks it"),
+])
+def test_every_install_that_leaves_the_runtime_missing_says_why(rig, code, reason):
+    rig.exit_code, rig.installs = code, False
+    assert rig.ensure() is False
+    assert len(rig.runs) == 1
+    _assert_fallback(rig.said[-1], reason)
+
+
+def test_a_restart_request_with_the_runtime_in_place_counts_as_installed(rig):
+    rig.exit_code = vc_runtime.ERROR_SUCCESS_REBOOT_REQUIRED
+    assert rig.ensure() is True
+    assert "restart" in rig.said[-1] and "models can load now" in rig.said[-1]
+
+
+def test_a_newer_version_already_installed_counts_when_the_system_has_it(rig):
+    rig.exit_code = vc_runtime.ERROR_PRODUCT_VERSION
+    assert rig.ensure() is True
+
+
+def test_no_pinned_installer_for_the_machine_downloads_nothing(rig):
+    assert vc_runtime.ensure(rig.lib, download=rig.download, ask=rig.ask,
+                             refusal=lambda url: None, say=rig.said.append,
+                             system_dir=rig.system, machine="x86") is False
+    assert rig.questions == rig.downloads == []
+    assert "no installer is pinned for x86" in rig.said[-1]
+
+
+def test_installer_helpers_refuse_off_windows(tmp_path, monkeypatch):
+    monkeypatch.setattr(vc_runtime.sys, "platform", "linux")
+    with pytest.raises(vc_runtime.RedistError):
+        vc_runtime.authenticode_signer(tmp_path / "x.exe")
+    with pytest.raises(vc_runtime.RedistError):
+        vc_runtime.run_installer(tmp_path / "x.exe")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="WinVerifyTrust is Windows-only")
+def test_an_unsigned_file_has_no_valid_signature(tmp_path):
+    exe = tmp_path / "unsigned.exe"
+    exe.write_bytes(_pe(["KERNEL32.dll"]))
+    with pytest.raises(vc_runtime.RedistError, match="signature is not valid"):
+        vc_runtime.authenticode_signer(exe)
+
+
+# --------------------------------------------------------------------------- #
+#  setup-llama: one placement path, the keep path and the exit code           #
+# --------------------------------------------------------------------------- #
+
+def _setup_llama_rig(rig, monkeypatch, *, interactive=True, answer=True):
+    monkeypatch.setattr(sl.sys, "platform", "win32")
+    monkeypatch.setattr(vc_runtime.sys, "platform", "win32")
+    monkeypatch.setattr(vc_runtime, "_system_dir", lambda: rig.system)
+    monkeypatch.setattr(vc_runtime, "redist_machine", lambda machine=None: "amd64")
+    monkeypatch.setattr(sl, "_download", rig.download)
+    monkeypatch.setattr(sl, "_interactive", lambda: interactive)
+    monkeypatch.setattr(sl, "_flush_stdin", lambda: None)
+    asked: list[str] = []
+    monkeypatch.setattr(sl, "_confirm", lambda text, default: asked.append(text) or answer)
+    monkeypatch.setattr(sl.native_deps, "_VC_UNATTENDED", {"on": False})
+    return asked
+
+
+def test_bundling_on_windows_offers_through_setup_llamas_download(rig, monkeypatch):
+    asked = _setup_llama_rig(rig, monkeypatch)
+    sl._bundle_missing_native_deps(rig.lib)
+    assert len(asked) == 1 and rig.downloads and len(rig.runs) == 1
+    assert sl.vc_runtime_missing(rig.lib) is False
+
+
+def test_yes_flag_never_offers(rig, monkeypatch):
+    asked = _setup_llama_rig(rig, monkeypatch)
+    sl.set_vc_unattended(True)
+    assert sl.offer_vc_runtime(rig.lib) is False
+    assert asked == [] and rig.downloads == [] and rig.runs == []
+    assert sl.vc_runtime_missing(rig.lib) is True
+
+
+def test_no_terminal_never_offers(rig, monkeypatch):
+    asked = _setup_llama_rig(rig, monkeypatch, interactive=False)
+    assert sl.offer_vc_runtime(rig.lib) is False
+    assert asked == [] and rig.runs == []
+
+
+def test_bundling_on_windows_never_raises(rig, monkeypatch, caplog):
+    _setup_llama_rig(rig, monkeypatch)
+
+    def boom(*a, **k):
+        raise ValueError("unexpected")
+    monkeypatch.setattr(vc_runtime, "ensure", boom)
+    sl._bundle_missing_native_deps(rig.lib)
+    assert any("Visual C++ Redistributable check failed" in r.message
+               for r in caplog.records)
 
 
 def test_replace_target_bundles_into_staging_before_the_swap(tmp_path, monkeypatch):
@@ -332,6 +411,199 @@ def test_only_replace_target_calls_the_bundler():
     assert callers == ["runtime_dir.py"]
 
 
+def test_vc_runtime_missing_skips_the_backend_fallback(tmp_path, monkeypatch):
+    from localm.setup_llama import provision
+    target = tmp_path / "lib"
+    target.mkdir()
+    fell_back: list[str] = []
+    monkeypatch.setattr(sl, "_replace_target", lambda t, fill: "b9999")
+    monkeypatch.setattr(sl, "_install_runtime_wheel", lambda d: True)
+    monkeypatch.setattr(sl, "_runtime_pkg_dir", lambda: tmp_path / "pkg")
+    monkeypatch.setattr(provision, "_chosen_backend_loads", lambda c: (False, "no load"))
+    monkeypatch.setattr(sl, "vc_runtime_missing", lambda t: True)
+    monkeypatch.setattr(provision, "_fall_back_to_universal",
+                        lambda *a, **k: fell_back.append("universal") or ("vulkan", None))
+    monkeypatch.setattr(provision, "_universal_backend_failed",
+                        lambda *a, **k: fell_back.append("terminal") or ("cpu", None))
+    assert provision._provision_with_fallback("cuda", target, None, False) == ("cuda", "b9999")
+    assert provision._provision_with_fallback("cpu", target, None, False) == ("cpu", "b9999")
+    assert fell_back == []
+    monkeypatch.setattr(sl, "vc_runtime_missing", lambda t: False)
+    provision._provision_with_fallback("cuda", target, None, False)
+    assert fell_back == ["universal"]
+
+
+def _run_main(tmp_path, monkeypatch, *, vc_missing: bool, args=("--backend", "cpu")):
+    from click.testing import CliRunner
+    from localm.setup_llama import cli
+    target = tmp_path / "runtime" / "lib"
+    verified: list[bool] = []
+    unattended: list[bool] = []
+    monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: target)
+    monkeypatch.setattr(sl, "set_vc_unattended", unattended.append)
+    monkeypatch.setattr(cli, "_require_backend_here", lambda b: None)
+    monkeypatch.setattr(cli, "_refuse_when_net_off", lambda: None)
+    monkeypatch.setattr(cli, "_apply_version_request", lambda *a: None)
+    monkeypatch.setattr(cli, "_stored_pin", lambda: None)
+    monkeypatch.setattr(cli, "_keeps_existing_install", lambda *a, **k: False)
+    monkeypatch.setattr(cli, "_provision_release", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_refresh_install_record", lambda t: None)
+    monkeypatch.setattr(sl, "vc_runtime_missing", lambda t: vc_missing)
+    monkeypatch.setattr(sl, "_verify", lambda: verified.append(True))
+    result = CliRunner().invoke(sl.main, list(args))
+    return result, verified, unattended
+
+
+def test_setup_llama_exits_3_without_success_when_the_runtime_stays_missing(
+        tmp_path, monkeypatch):
+    result, verified, unattended = _run_main(tmp_path, monkeypatch, vc_missing=True,
+                                             args=("--backend", "cpu", "--yes"))
+    assert result.exit_code == setup_spec.VC_RUNTIME_ABSENT_EXIT == 3
+    assert verified == []
+    assert unattended == [True]
+    assert "Native runtime ready" not in result.output
+
+
+def test_setup_llama_verifies_when_the_runtime_is_present(tmp_path, monkeypatch):
+    result, verified, unattended = _run_main(tmp_path, monkeypatch, vc_missing=False)
+    assert result.exit_code == 0, result.output
+    assert verified == [True]
+    assert unattended == [False]
+
+
+def test_a_kept_install_offers_again_and_load_tests(tmp_path, monkeypatch):
+    from localm.setup_llama import cli
+    offered: list[Path] = []
+    state = {"missing": True}
+    monkeypatch.setattr(sl, "vc_runtime_missing", lambda t: state["missing"])
+
+    def offer(t):
+        offered.append(t)
+        state["missing"] = False
+        return True
+    monkeypatch.setattr(sl, "offer_vc_runtime", offer)
+    monkeypatch.setattr(sl, "_native_loads_ok", lambda: (True, ""))
+    cli._vc_runtime_for_kept_install(tmp_path, "cpu")
+    assert offered == [tmp_path]
+
+
+def test_a_kept_install_without_the_runtime_exits_3(tmp_path, monkeypatch):
+    from localm.setup_llama import cli
+    monkeypatch.setattr(sl, "vc_runtime_missing", lambda t: True)
+    monkeypatch.setattr(sl, "offer_vc_runtime", lambda t: False)
+    loads: list[bool] = []
+    monkeypatch.setattr(sl, "_native_loads_ok", lambda: loads.append(True) or (True, ""))
+    with pytest.raises(SystemExit) as e:
+        cli._vc_runtime_for_kept_install(tmp_path, "cpu")
+    assert e.value.code == setup_spec.VC_RUNTIME_ABSENT_EXIT
+    assert loads == []
+
+
+def test_a_kept_install_with_the_runtime_present_offers_nothing(tmp_path, monkeypatch):
+    from localm.setup_llama import cli
+    monkeypatch.setattr(sl, "vc_runtime_missing", lambda t: False)
+    monkeypatch.setattr(sl, "offer_vc_runtime",
+                        lambda t: pytest.fail("offered with the runtime present"))
+    cli._vc_runtime_for_kept_install(tmp_path, "cpu")
+
+
+def test_the_keep_path_calls_the_offer():
+    from localm.setup_llama import cli
+    src = Path(cli.__file__).read_text(encoding="utf-8")
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "_keeps_existing_install")
+    calls = [n.func.id for n in ast.walk(fn)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+    assert "_vc_runtime_for_kept_install" in calls
+
+
+# --------------------------------------------------------------------------- #
+#  Every setup variant reads exit 3 as "runtime absent", not as a failure      #
+# --------------------------------------------------------------------------- #
+
+def test_setup_bat_reads_exit_3_after_every_setup_llama_run():
+    lines = (_REPO / "setup.bat").read_text(encoding="utf-8").splitlines()
+    runs = [i for i, line in enumerate(lines)
+            if re.match(r"\s*\.venv\\Scripts\\localm setup-llama ", line)]
+    assert len(runs) == 2
+    for i in runs:
+        assert lines[i + 1].strip() == 'if "!errorlevel!"=="3" ('
+        block = "\n".join(lines[i + 2:i + 6])
+        assert 'set "VCMISSING=1"' in block and 'set "RUNTIME_OK=0"' in block
+        assert "provision_failed" not in block
+
+
+def test_the_gui_installer_reads_exit_3_after_every_setup_llama_run():
+    src = (_REPO / "installer" / "gui.py").read_text(encoding="utf-8")
+    runs = [m.start() for m in re.finditer(r'_run\(\[localm_exe, "setup-llama"', src)]
+    assert len(runs) == 2
+    for at in runs:
+        after = src[at:at + 400]
+        assert "if code == spec.VC_RUNTIME_ABSENT_EXIT:" in after
+        assert after.index("VC_RUNTIME_ABSENT_EXIT") < after.index("runtime_failed(")
+
+
+def test_the_gui_installer_step_names_the_remedy_without_a_report():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "localm_installer_gui_vc", _REPO / "installer" / "gui.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    try:
+        spec.loader.exec_module(mod)
+        with pytest.raises(mod.StepFailed) as e:
+            mod.vc_runtime_absent("localm")
+    finally:
+        sys.modules.pop(spec.name, None)
+    text = str(e.value)
+    assert "Visual C++ Redistributable" in text and '"localm" setup-llama' in text
+    assert vc_runtime.REDIST_PAGE.replace("https://", "") in text
+
+
+# --------------------------------------------------------------------------- #
+#  stable-diffusion.cpp                                                       #
+# --------------------------------------------------------------------------- #
+
+def test_sdcpp_install_without_the_runtime_raises_and_tries_no_other_backend(monkeypatch):
+    from localm.media.sdcpp import runtime as sd
+    tried: list[str] = []
+
+    def install(b, **kw):
+        tried.append(b)
+        raise sd.VcRuntimeMissingError("needs the Microsoft Visual C++ Redistributable")
+    monkeypatch.setattr(sd, "install", install)
+    monkeypatch.setattr(sd, "platform_key", lambda: "windows")
+    monkeypatch.setattr(sd, "recommended_backend", lambda: "vulkan")
+    monkeypatch.setattr(sd, "installed", lambda b: None)
+    monkeypatch.setattr(sd, "load_test_failed", lambda b: None)
+    with pytest.raises(sd.VcRuntimeMissingError):
+        sd.provision("auto", force=True)
+    assert tried == ["vulkan"]
+
+
+def test_sdcpp_requires_the_runtime_and_passes_its_question(tmp_path, monkeypatch):
+    from localm.media.sdcpp import runtime as sd
+    seen = {}
+
+    def ensure(folder, *, download, refusal, ask, say):
+        seen["ask"], seen["refusal"] = ask, refusal
+        say("No model can load yet: ...")
+        return False
+    monkeypatch.setattr(vc_runtime, "ensure", ensure)
+    said: list[str] = []
+
+    def ask(text):
+        return False
+    with pytest.raises(sd.VcRuntimeMissingError) as e:
+        sd._require_vc_runtime(tmp_path, said.append, ask)
+    from localm import netpolicy
+    assert seen["ask"] is ask and said
+    assert seen["refusal"] is netpolicy.download_refusal
+    assert vc_runtime.RERUN_HINT in str(e.value)
+    monkeypatch.setattr(vc_runtime, "ensure", lambda folder, **k: True)
+    sd._require_vc_runtime(tmp_path, said.append, None)
+
+
 # --------------------------------------------------------------------------- #
 #  Naming a missing DLL                                                       #
 # --------------------------------------------------------------------------- #
@@ -359,7 +631,7 @@ def test_the_clause_names_the_runtime_and_setup_reads_it_back():
     line = f"RuntimeError: Failed to load llama.dll from X: {clause}. [WinError 126] ..."
     named = load_probe._name_missing_shared_lib(line) or ""
     assert named.startswith("msvcp140.dll (the Microsoft Visual C++ runtime)")
-    assert vc_runtime.redist_url() in named
+    assert vc_runtime.REDIST_PAGE in named and vc_runtime.RERUN_HINT in named
     other = load_probe._name_missing_shared_lib(
         "RuntimeError: Failed to load llama.dll from X: vulkan-1.dll is missing "
         "(needed by ggml-vulkan.dll). [WinError 126]") or ""
@@ -387,6 +659,20 @@ def test_loader_names_the_missing_runtime_dll(tmp_path, monkeypatch):
     assert _loader.missing_dll_clause(lib, [lib / "llama.dll"]) is None
 
 
+def test_loader_names_an_older_system_runtime(tmp_path, monkeypatch):
+    from localm.inference.backends.llamacpp import _loader
+    lib = _runtime_folder(tmp_path, ["MSVCP140.dll"])
+    system = tmp_path / "system32"
+    system.mkdir()
+    (system / "msvcp140.dll").write_bytes(_pe(["KERNEL32.dll"], (14, 29, 30133, 0)))
+    monkeypatch.setattr(_loader.sys, "platform", "win32")
+    monkeypatch.setattr(vc_runtime.sys, "platform", "win32")
+    monkeypatch.setattr(vc_runtime, "_system_dir", lambda: system)
+    assert _loader._vc_runtime_short(lib) is True
+    (system / "msvcp140.dll").write_bytes(_pe(["KERNEL32.dll"], VERSION))
+    assert _loader._vc_runtime_short(lib) is False
+
+
 def test_sdcpp_load_error_names_the_missing_runtime_dll(tmp_path, monkeypatch):
     from localm.media.sdcpp import _binding, _child
     rt = tmp_path / "sd"
@@ -406,47 +692,14 @@ def test_sdcpp_load_error_names_the_missing_runtime_dll(tmp_path, monkeypatch):
         _child._load_lib({"runtime_dir": str(rt), "extra_dirs": []})
     message = str(e.value)
     assert "msvcp140.dll is missing (the Microsoft Visual C++ runtime" in message
-    assert vc_runtime.redist_url() in message and "setup-sdcpp --force" in message
+    assert vc_runtime.install_hint() in message
 
 
-# --------------------------------------------------------------------------- #
-#  The amd-rocm SIMD CPU overlay scores its variants with the runtime present #
-# --------------------------------------------------------------------------- #
-
-def test_copy_placed_copies_only_the_runtime_and_keeps_what_is_there(tmp_path):
-    src, dest = tmp_path / "src", tmp_path / "dest"
-    src.mkdir()
-    dest.mkdir()
-    for name in ("msvcp140.dll", "vcruntime140.dll", "llama.dll", vc_runtime.LICENSE_NAME):
-        (src / name).write_bytes(name.encode())
-    (dest / "vcruntime140.dll").write_bytes(b"own")
-    assert vc_runtime.copy_placed(src, dest) == [vc_runtime.LICENSE_NAME, "msvcp140.dll"]
-    assert (dest / "vcruntime140.dll").read_bytes() == b"own"
-    assert not (dest / "llama.dll").exists()
-
-
-def test_rocm_overlay_variants_are_scored_beside_the_placed_runtime(tmp_path, monkeypatch):
-    import zipfile
-    from localm.setup_llama import rocm_cpu
-    target = tmp_path / "lib"
-    target.mkdir()
-    (target / "ggml-cpu.dll").write_bytes(b"rocm's own")
-    (target / "msvcp140.dll").write_bytes(b"placed")
-    archive = tmp_path / "overlay.zip"
-    with zipfile.ZipFile(archive, "w") as zf:
-        zf.writestr("ggml-cpu-x64.dll", _pe(["MSVCP140.dll"]))
-
-    def download(url, dest):
-        Path(dest).write_bytes(archive.read_bytes())
-    monkeypatch.setattr(sl, "_download", download)
-    monkeypatch.setattr(rocm_cpu, "_validate_archive", lambda *a, **k: None)
-    seen: list[str] = []
-
-    def best(variants):
-        seen.extend(sorted(p.name for p in variants[0].parent.iterdir()))
-        return None, {}
-    monkeypatch.setattr(rocm_cpu, "_best_variant", best)
-    assert rocm_cpu._install_overlay(target) is None
-    assert "msvcp140.dll" in seen and "ggml-cpu-x64.dll" in seen
-    assert (target / "ggml-cpu.dll").read_bytes() == b"rocm's own"
-
+def test_nothing_places_microsoft_files_any_more():
+    for name in ("place_app_local", "copy_placed", "cabinet_files", "runtime_files",
+                 "LICENSE_NAME"):
+        assert not hasattr(vc_runtime, name), name
+    tree = [*(_REPO / "localm" / "setup_llama").glob("*.py"),
+            *(_REPO / "localm" / "media" / "sdcpp").glob("*.py"),
+            _REPO / "localm" / "vc_runtime.py"]
+    assert not [p for p in tree if "msvc-runtime" in p.read_text(encoding="utf-8")]
