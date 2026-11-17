@@ -788,11 +788,11 @@ set "SLB="
 if exist "%STMP%\localm_hint.txt" for /f "usebackq delims=" %%a in ("%STMP%\localm_hint.txt") do set "SLB=%%a"
 del "%STMP%\localm_hint.txt" 2>nul
 if not defined SLB set "SLB=backend"
-echo.
 rem  setup-llama exit 3 is localm.setup_spec.VC_RUNTIME_ABSENT_EXIT: the runtime is
 rem  in place but Windows lacks the Visual C++ Redistributable, and setup-llama
 rem  printed the remedy. Setup goes on with RUNTIME_OK=0 and VCMISSING=1 and no
 rem  report offer.
+echo.
 if /i "%BACKEND%"=="own" (
     set "LLAMABUILD="
     call :flush
