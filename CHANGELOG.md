@@ -137,6 +137,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - Updates now finish the native runtime and media components with the newly installed version at its first start, also from the terminal. If an update's new llama.cpp build does not work on your machine, localm keeps the build you had and finishes the update; `localm doctor` says which build was kept, why, and how to try the new one again.
 - The bundled AMD ROCm runtime for Radeon GPUs moves to lemonade-sdk b1372; an update re-provisions it on its own.
 - Network: with private addresses allowed, link-local and cloud-metadata addresses such as 169.254.169.254 stay refused.
+- **The automated browser accepts Playwright 1.65.** A new install gets it; an install that moves to it downloads the matching Chromium build again with `localm setup-browser`.
+- **The Hugging Face backend now runs on transformers 5.23** as well as 5.22; running setup again installs it.
 
 ### Security
 - **The GUI no longer resends a refused request to another site.** When a call to a different origin was refused, the page could refresh its session token and retry it there; it now retries only calls to its own server.
