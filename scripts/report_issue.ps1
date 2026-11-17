@@ -6,9 +6,12 @@
 # after you confirm. A failed or declined send is NEVER reported as success:
 # it saves the report and points at the maintainer email. With localm's Network
 # access off (LOCALM_NET_MODE, or net_mode in the data dir's config.json) nothing
-# is sent; when that setting cannot be read you are asked before anything is sent.
+# is sent unless you send that one report anyway (asked at a terminal, default no,
+# or --send-anyway); when that setting cannot be read you are asked before
+# anything is sent.
 #
 # Args (passed through by report-issue.bat): --summary --detail --log --yes
+# --send-anyway
 # No param()/[CmdletBinding()] on purpose: the --foo pass-through args must land in
 # $args, which advanced-function binding would instead reject as unknown parameters.
 
@@ -19,13 +22,14 @@ $email = 'theilige@gmail.com'
 $fence = '```'
 
 # ---- parse the pass-through args ($args, not PowerShell -params) -----------
-$summary = ''; $detail = ''; $logPath = ''; $yes = $false
+$summary = ''; $detail = ''; $logPath = ''; $yes = $false; $anyway = $false
 for ($i = 0; $i -lt $args.Count; $i++) {
   switch ($args[$i]) {
     '--summary' { $i++; $summary = [string]$args[$i] }
     '--detail'  { $i++; $detail  = [string]$args[$i] }
     '--log'     { $i++; $logPath = [string]$args[$i] }
     '--yes'     { $yes = $true }
+    '--send-anyway' { $anyway = $true }
   }
 }
 
@@ -269,14 +273,28 @@ function Save-Local {
 $pair = Read-Proxy; $url = $pair[0]; $tok = $pair[1]
 $netMode = 'ask'; $netWhy = ''
 if ($url) { $r = Get-NetMode; $netMode = $r[0]; $netWhy = $r[1] }
-if ($netMode -eq 'off') {
+$sendAnywayEffect = 'Sending anyway makes one connection to the bug-report server to send this report only. Network access stays off.'
+if ($netMode -eq 'off' -and $anyway) {
+  Write-Host "  Network access is off; sending this report anyway (--send-anyway). $sendAnywayEffect"
+} elseif ($netMode -eq 'off' -and $interactive -and -not $yes) {
+  Write-Host "  Network access is off (net_mode=off), so the report was not sent. $netOffRemedy."
+  Write-Host "  $sendAnywayEffect"
+  try { $ans = Read-Host '  Send this one report anyway? [y/N]' } catch { $ans = '' }
+  if ($ans -notmatch '^\s*(y|yes)\s*$') {
+    $p = Save-Local
+    Write-Host "  Not sent. Saved at $p - email it to $email if you change your mind."
+    exit 0
+  }
+  $anyway = $true
+} elseif ($netMode -eq 'off') {
   $p = Save-Local
   Write-Host "  Network access is off (net_mode=off), so the report was not sent. $netOffRemedy."
+  Write-Host "  To send this one report anyway, run report-issue again with --send-anyway. $sendAnywayEffect"
   Write-Host "  The report is saved at $p; email it to $email if you prefer."
   exit 1
 }
-$send = $yes
-if ($netMode -eq 'unknown') {
+$send = $yes -or $anyway
+if ($netMode -eq 'unknown' -and -not $anyway) {
   Write-Host "  localm's Network access setting could not be read: $netWhy. Sending connects to the bug-report server."
   if (-not $interactive) {
     $p = Save-Local

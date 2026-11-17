@@ -11,6 +11,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Added
+- **Send a bug report anyway while Network access is off.** When a bug report is not sent because Network access is off, you can now send that one report anyway without changing the setting: Settings > Report a bug shows a "Send anyway" button next to the refusal, `localm bug-report` asks at its prompt or takes `--send-anyway`, and the standalone `report-issue` reporter asks at its prompt or takes `--send-anyway`. This makes one connection to the bug-report server for that report only, and Network access stays off. Only the owner can use it in the GUI.
+
+### Fixed
+- Saving a different speech model while the speech model was downloading no longer makes the finished download fail with "no model.bin snapshot is present".
+
+## [0.3.4b3] - 2026-11-17
+
 ### Fixed
 - **`localm comfy stop` stops the ComfyUI that `localm image` started, without a running server.** `localm image`, `localm music` and `localm video` keep ComfyUI running for the next generation and now say so. `localm comfy stop` ends that ComfyUI and frees its VRAM even when no `localm gui` or `localm serve` is running, after checking the process is still the one localm started; it never stops a ComfyUI you started yourself.
 - **A crash record that cannot be read no longer files a bug report on the next start.** When the record a run leaves to detect a crash was damaged (for example, the run died while writing it), the next start saved a bug report with that run's log tail even if the run was in privacy mode. Such a record is now cleared without a report, and the debug log says it could not be read.
@@ -117,6 +125,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - On Windows, two localm processes saving the same settings or key store at the same moment no longer crash one of them with "Permission denied" on a `.lock` file; the second one waits its turn.
 - A reply cap (`max_tokens`, `max_completion_tokens`) of `0.0` now means no request cap, like `0`; the chat drawer's Max tokens field explains that blank or 0 uses the Settings value; "Save and reload model" with nothing changed no longer says "Saved"; a failed background job now leaves a warning in the log (with its cause, except in privacy mode).
 - **An open page survives a server restart on the same port.** It picks up the new session token by itself instead of failing every call and reloading, and when a reload is needed while Settings has unsaved changes it asks in the page. Reset and re-enter key signs the browser out on the server first and says when that failed. The sidebar also lists the image, video and music runtimes a job left loaded, with a button to unload them.
+- **Models load again with the "latest" llama.cpp runtime choice and with llama.cpp builds from b12347 on.** Those builds removed functions localm still called, so no model could load on them.
+- **A speech model set to run without GPU layers keeps its voice projector on the CPU too.** Image and speech encoding also report the CPU on a runtime without a GPU, instead of claiming the GPU.
 
 ### Added
 - **A supported-models page.** `docs/models.md` lists every model kind localm runs: formats, the GGUF language model architectures of the bundled llama.cpp, Transformers, EXL2 and EXL3, embeddings and rerankers, speech, image, video and music, and the kinds localm recognises but does not run yet.
@@ -135,6 +145,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - Updates now finish the native runtime and media components with the newly installed version at its first start, also from the terminal. If an update's new llama.cpp build does not work on your machine, localm keeps the build you had and finishes the update; `localm doctor` says which build was kept, why, and how to try the new one again.
 - The bundled AMD ROCm runtime for Radeon GPUs moves to lemonade-sdk b1372; an update re-provisions it on its own.
 - Network: with private addresses allowed, link-local and cloud-metadata addresses such as 169.254.169.254 stay refused.
+- **The automated browser accepts Playwright 1.65.** A new install gets it; an install that moves to it downloads the matching Chromium build again with `localm setup-browser`.
+- **The Hugging Face backend now runs on transformers 5.23** as well as 5.22; running setup again installs it.
 
 ### Security
 - **The GUI no longer resends a refused request to another site.** When a call to a different origin was refused, the page could refresh its session token and retry it there; it now retries only calls to its own server.

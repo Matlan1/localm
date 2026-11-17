@@ -1462,7 +1462,7 @@ def _stub_embedder(n_ctx=8, n_seq_max=emb._EMBED_BATCH_TARGET,
 
 
 class TestGGUFEmbedderLoadStderrWrapping:
-    """The isolated child's native model-load calls (llama_load_model_from_file /
+    """The isolated child's native model-load calls (llama_model_load_from_file /
     llama_init_from_model) run inside debuglog.dedup_native_stderr(), not with
     the child's raw inherited fd 2 left unmanaged.
 
@@ -1484,7 +1484,7 @@ class TestGGUFEmbedderLoadStderrWrapping:
         monkeypatch.setattr(api_module, "llama_backend_init", lambda: None)
         monkeypatch.setattr(api_module, "llama_model_default_params",
                             lambda: types.SimpleNamespace())
-        monkeypatch.setattr(api_module, "llama_load_model_from_file", _load)
+        monkeypatch.setattr(api_module, "llama_model_load_from_file", _load)
         monkeypatch.setattr(api_module, "llama_model_get_vocab", lambda model: "vocab")
         monkeypatch.setattr(api_module, "llama_model_n_embd", lambda model: 384)
         monkeypatch.setattr(api_module, "llama_model_n_ctx_train", lambda model: 512)
@@ -1496,7 +1496,7 @@ class TestGGUFEmbedderLoadStderrWrapping:
         # The fake pointers above are plain strings, not real ctypes handles, so
         # the REAL native free functions must never see them.
         monkeypatch.setattr(api_module, "llama_free", lambda ctx: None)
-        monkeypatch.setattr(api_module, "llama_free_model", lambda model: None)
+        monkeypatch.setattr(api_module, "llama_model_free", lambda model: None)
         monkeypatch.setattr("localm.discover.apply_main_gpu", lambda *a, **k: None)
         monkeypatch.setattr("localm.discover.apply_gpu_split", lambda *a, **k: None)
 
@@ -1519,7 +1519,7 @@ class TestGGUFEmbedderLoadStderrWrapping:
             # ONE contiguous scope covering BOTH native calls.
             assert events == ["enter", "load", "init", "exit"], events
         finally:
-            # Clear the fake pointers while llama_free/llama_free_model are
+            # Clear the fake pointers while llama_free/llama_model_free are
             # still mocked, so a later __del__ finds nothing left to free.
             embedder.close()
 

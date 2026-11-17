@@ -185,9 +185,17 @@ def _not_filed_error(status) -> LocalmError:
               f"Send the saved report by email to {MAINTAINER_EMAIL} instead."))
 
 
+#: What a "Send anyway" choice does, said wherever it is offered.
+SEND_ANYWAY_EFFECT = ("Send anyway makes one connection to the bug-report server to "
+                      "send this report only. Network access stays off.")
+
+#: The ``localm bug-report`` flag that sends one report while Network access is off.
+SEND_ANYWAY_FLAG = "--send-anyway"
+
+
 def upload_report(title: str, body: str, *, url: Optional[str] = None,
                   token: Optional[str] = None, timeout: float = 15.0,
-                  opener=None) -> dict:
+                  opener=None, send_anyway: bool = False) -> dict:
     """POST a user-reviewed report to the upload endpoint and return its JSON
     response (e.g. ``{"url": "<issue url>"}``).
 
@@ -197,7 +205,9 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
     is called), a network error, a non-2xx response, or a reply that says the
     report was not filed (``"filed": false``, stage ``not_filed``) - so a failed
     send is NEVER
-    reported as success (we do not hide problems). *opener* is injectable for
+    reported as success (we do not hide problems). *send_anyway* True is the
+    person's consent, given for this one report, to send it while ``net_mode``
+    is off; nothing is written to the config. *opener* is injectable for
     tests (defaults to urllib)."""
     import json as _json
 
@@ -231,7 +241,15 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
                           stage="no_endpoint",
                           hint="No bug-report server is configured in this build, so "
                                "the report cannot be filed automatically.")
-    refuse_when_network_off("the report was not sent", exempt=False)
+    refuse_when_network_off("the report was not sent", exempt=send_anyway is True)
+    if send_anyway is True:
+        import logging
+
+        from localm import config
+        if config.network_mode() == "off":
+            logging.getLogger("localm").info(
+                "bugreport: sending one report on the person's Send anyway choice; "
+                "the Network access setting is unchanged")
     payload = _json.dumps(
         {"title": (title or "localm bug report")[:200], "body": body or ""}
     ).encode("utf-8")

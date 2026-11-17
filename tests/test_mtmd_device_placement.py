@@ -47,6 +47,8 @@ def _devices(monkeypatch, devices):
     leave the real (library-loading) function running."""
     from localm.inference.backends.llamacpp import _loader
     monkeypatch.setattr(_loader, "compute_devices", lambda: list(devices))
+    monkeypatch.setattr(_loader, "has_gpu_device",
+                        lambda: any(t == GPU for _n, t in devices))
 
 
 class TestResolveBackendDeviceName:

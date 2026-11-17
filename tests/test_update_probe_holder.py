@@ -248,7 +248,8 @@ def test_stop_ends_a_daemon_windows_does_not_name_and_refuses_a_foreign_holder(t
     monkeypatch.setattr(install_manifest, "list_processes", lambda: _procs((10, 1, launcher), (40, 1, launcher)))
     monkeypatch.setattr(install_manifest, "command_line", {10: probe, 40: "x -m other"}.get)
     stopped = []
-    monkeypatch.setattr(install_manifest, "_stop", lambda pid, timeout=0: stopped.append(pid) or True)
+    monkeypatch.setattr(install_manifest, "_stop",
+                        lambda pid, timeout=0, start=None: stopped.append(pid) or True)
     monkeypatch.setattr(updater_runtime, "holders", lambda lib: [{"pid": None, "name": "an unidentified process"}])
     assert updater_runtime.stop_own_probe_daemons(tmp_path, root) == 1
     assert stopped == [10]

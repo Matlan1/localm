@@ -211,11 +211,11 @@ def test_the_push_trigger_runs_the_same_jobs_as_before_the_split():
 
 
 @pytest.mark.parametrize("labels,expected_present,expected_absent", [
-    ((), {"lint", "python-pr-gate", "python-pr-gate-windows", "voice-stack", "proxy-tests", "gui-tests",
-          "merge-policy"},
-     {"test", "optional-stacks", "comfyui-pin-check", "llama-rocm-pin-check"}),
+    ((), {"lint", "python-pr-gate-plan", "python-pr-gate", "python-pr-gate-windows", "voice-stack",
+          "proxy-tests", "gui-tests", "optional-stacks", "merge-policy"},
+     {"test", "comfyui-pin-check", "llama-rocm-pin-check"}),
     (("full-ci",), {"lint", "test", "gui-tests", "optional-stacks", "merge-policy"},
-     {"python-pr-gate", "python-pr-gate-windows"}),
+     {"python-pr-gate-plan", "python-pr-gate", "python-pr-gate-windows"}),
 ])
 def test_pull_request_behaviour_is_unchanged_by_the_schedule_split(labels, expected_present, expected_absent):
     ran = _jobs_that_run(_scenario("pull_request", labels=labels))
@@ -246,6 +246,19 @@ def test_the_voice_stack_runs_its_steps_on_a_pull_request_only_for_voice_changes
     after = steps[steps.index(scope) + 1:]
     gated = [s for s in after if s.get("if") == "steps.scope.outputs.run == 'true'"]
     assert len(gated) == len(after) - 1, "every step after the scope check is gated, except the whisper smoke"
+
+
+def test_the_optional_stacks_run_their_steps_on_a_pull_request_for_dependency_changes():
+    steps = _load()["jobs"]["optional-stacks"]["steps"]
+    scope = next(s for s in steps if s.get("id") == "scope")
+    assert steps[0]["with"]["fetch-depth"] == 2
+    assert "git diff --name-only HEAD^1 HEAD" in scope["run"]
+    assert scope["env"]["FULL_CI"] == "${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}"
+    assert '[ "$FULL_CI" = "true" ]' in scope["run"]
+    for path in (r"pyproject\.toml", r"uv\.lock", ".github/requirements/", r"\.github/workflows/ci\.yml"):
+        assert path in scope["run"], path
+    after = steps[steps.index(scope) + 1:]
+    assert after and all(s.get("if") == "steps.scope.outputs.run == 'true'" for s in after)
 
 
 def test_the_proxy_tests_run_on_a_pull_request_only_for_proxy_changes():

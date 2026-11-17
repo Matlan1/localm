@@ -9,7 +9,7 @@ rem  missing: it runs the self-contained reporter on any Python it can find, and
 rem  falls back to a pure-PowerShell reporter when there is no Python at all.
 rem
 rem  Optional args (used by setup.bat's failure paths) pass straight through:
-rem    --summary "..."  --detail "..."  --log <path>  --yes
+rem    --summary "..."  --detail "..."  --log <path>  --yes  --send-anyway
 rem ===========================================================================
 setlocal EnableExtensions
 cd /d "%~dp0"

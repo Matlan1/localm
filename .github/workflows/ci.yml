@@ -11,10 +11,11 @@ on:
   #                  [tool.mutmut] only_mutate modules the diff touches; the
   #                  mutation-run shards of those modules run only with the
   #                  `mutation-test` label - see those jobs below.
-  #                  python-pr-gate runs on every pull_request WITHOUT that
-  #                  label: lockfile check, hygiene, ruff, and the tests
-  #                  scripts/affected_tests.py selects for the diff. A
-  #                  labelled PR gets the matrix instead. merge-policy runs
+  #                  the python-pr-gate jobs run on every pull_request
+  #                  WITHOUT that label: lockfile check, hygiene, ruff, and
+  #                  the tests scripts/affected_tests.py selects for the
+  #                  diff, in shards on Linux and Windows. A labelled PR
+  #                  gets the matrix instead. merge-policy runs
   #                  on every pull_request after those jobs and sums them up
   #                  into one check - see that job below.
   #   push           paths-scoped to the two native-binding files below. It
@@ -481,11 +482,29 @@ jobs:
       - name: Lint workflows (zizmor)
         run: zizmor --offline .github/workflows/
 
-  # The per-PR Python gate: the only job that runs Python tests on a PR
-  # without the `full-ci` label. It runs on every pull_request without that
+  # The per-PR Python gate: the only jobs that run Python tests on a PR
+  # without the `full-ci` label. They run on every pull_request without that
   # label and not on a labelled one, whose whole suite the `test` matrix
-  # runs. One host, no coverage; the tests are the ones
-  # scripts/affected_tests.py selects for the diff, not the suite.
+  # runs. No coverage; the tests are the ones scripts/affected_tests.py
+  # selects for the diff, not the suite. Four jobs:
+  #
+  #   python-pr-gate-plan     lock check, hygiene, ruff, then the selection,
+  #                           computed once: `run_affected_tests.py --plan-out`
+  #                           writes the plan (the selection, its depth and a
+  #                           shard count: one shard per 75 selected test
+  #                           files, at most 5) and fails exactly where the
+  #                           selection fails.
+  #   python-pr-gate-shard    one job per (OS, shard) of the plan, Linux and
+  #                           Windows, each running its slice of the SAME
+  #                           selection through tests/_shard.py. Skipped when
+  #                           the plan selects no test file.
+  #   python-pr-gate          the Linux and the Windows verdicts, the checks
+  #   python-pr-gate-windows  merge-policy reads: each fails unless the plan
+  #                           job succeeded and either nothing was selected
+  #                           and no shard ran, or every shard of its OS
+  #                           reported success and every selected test ran in
+  #                           exactly one shard (`run_affected_tests.py
+  #                           --collect`, which runs `tests._shard verify`).
   #
   # scripts/run_affected_tests.py turns the selector's exit status into what
   # runs, never runs the whole suite, and never exits 0 for anything it did
@@ -497,18 +516,24 @@ jobs:
   #                 wide at depth 0 runs in full (a hub module most tests
   #                 import); one that is every test file (a conftest.py or
   #                 dependency-lock change), empty or failed at depth 0 fails
-  #                 the job, which means the change needs the `full-ci` matrix
-  #   anything else the job fails: a crashed selector, an empty selection,
-  #                 or a path that is not an existing tests/**/test_*.py
-  # The selection, its depth, its reasons and the pytest command line go to
-  # the job summary.
-  python-pr-gate:
-    name: Python PR gate (lock, hygiene, ruff, affected tests)
+  #                 the plan job, which means the change needs the `full-ci`
+  #                 matrix
+  #   anything else the plan job fails: a crashed selector, an empty
+  #                 selection, or a path that is not an existing
+  #                 tests/**/test_*.py
+  # The selection, its depth, its reasons and the shard count go to the plan
+  # job's summary and again to each verdict job's summary.
+  python-pr-gate-plan:
+    name: Python PR gate, plan (lock, hygiene, ruff, selection)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 15
     if: >-
       github.event_name == 'pull_request' &&
       !contains(github.event.pull_request.labels.*.name, 'full-ci')
+    outputs:
+      run: ${{ steps.plan.outputs.run }}
+      count: ${{ steps.plan.outputs.count }}
+      shards: ${{ steps.plan.outputs.shards }}
     steps:
       # fetch-depth: 0 is required: the selector diffs from
       # `git merge-base origin/master HEAD` and the hygiene gate's append-only
@@ -528,9 +553,9 @@ jobs:
       - name: Verify uv.lock matches pyproject (no silent drift)
         run: uv lock --check
 
-      # The project venv on PATH, as in the `test` job: pytest, ruff, the
-      # hygiene gate and the `python -m localm` subprocesses some tests spawn
-      # all run from it.
+      # The project venv on PATH, as in the `test` job: ruff, the hygiene
+      # gate and the selector run from it; the selector maps a changed
+      # dependency to its import names through the installed distributions.
       - name: Create the project venv
         run: python -m venv .venv
       - name: Put the venv on PATH
@@ -548,23 +573,45 @@ jobs:
       - name: Lint (ruff)
         run: ruff check .
 
-      - name: Affected tests
-        run: python scripts/run_affected_tests.py --depth 1
+      - name: Affected tests (plan)
+        id: plan
+        run: python scripts/run_affected_tests.py --depth 1 --plan-out "$RUNNER_TEMP/pr-gate-plan/plan.json"
 
-  # Runs the python-pr-gate affected-test selection on windows-latest, with the
-  # same `if`, install and test command; tests that skip on Linux (skipif not
-  # win32) run here. The lock, hygiene and ruff checks run on the Linux job only.
-  # pytest runs under the runner's default shell and the venv goes on PATH the
-  # way the Windows test-shard does it. See
+      # A refused or failed selection still uploads its plan.
+      - name: Upload the plan
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: pr-gate-plan
+          path: ${{ runner.temp }}/pr-gate-plan/plan.json
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 7
+
+  # One job per (OS, shard) of the plan. Each runs the plan's selection with
+  # `-p tests._shard --shard I/N`, so the shards of one OS split the same
+  # selection between them, and records its job status for the verdict job of
+  # its OS. Both OSes run the Linux plan's selection; tests that skip on Linux
+  # (skipif not win32) run on Windows. See
   # test_the_windows_gate_runs_the_linux_gate_selection_on_windows.
-  python-pr-gate-windows:
-    name: Python PR gate, Windows (affected tests)
-    runs-on: windows-latest
-    timeout-minutes: 60
-    if: >-
-      github.event_name == 'pull_request' &&
-      !contains(github.event.pull_request.labels.*.name, 'full-ci')
+  python-pr-gate-shard:
+    name: Python PR gate, tests (${{ matrix.os }}, shard ${{ matrix.shard }}/${{ needs.python-pr-gate-plan.outputs.count }})
+    runs-on: ${{ matrix.os }}
+    # A wedged pytest run makes no progress and never exits, so without this the
+    # job holds a runner for GitHub's 360-minute default.
+    timeout-minutes: 45
+    needs: [python-pr-gate-plan]
+    if: ${{ needs.python-pr-gate-plan.result == 'success' && needs.python-pr-gate-plan.outputs.run == 'true' }}
+    strategy:
+      # A failed shard does not cancel the others; the verdict job names it.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        shard: ${{ fromJSON(needs.python-pr-gate-plan.outputs.shards) }}
     steps:
+      # fetch-depth: 0, as in test-shard: tests that diff against the
+      # published record resolve their baseline via
+      # `git merge-base HEAD origin/master`.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           persist-credentials: false
@@ -579,7 +626,11 @@ jobs:
 
       - name: Create the project venv
         run: python -m venv .venv
-      - name: Put the venv on PATH
+      - name: Put the venv on PATH (POSIX)
+        if: runner.os != 'Windows'
+        run: echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+      - name: Put the venv on PATH (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: Add-Content -Path $env:GITHUB_PATH -Value "$env:GITHUB_WORKSPACE\.venv\Scripts"
       - name: Install
@@ -590,8 +641,137 @@ jobs:
           pip install --require-hashes --no-deps --no-build-isolation -r "$RUNNER_TEMP/requirements.txt"
           pip install --no-deps --no-build-isolation -e .
 
-      - name: Affected tests
-        run: python scripts/run_affected_tests.py --depth 1
+      - name: Download the plan
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          pattern: pr-gate-plan
+          merge-multiple: true
+          path: ${{ runner.temp }}/pr-gate-plan
+
+      # pytest runs under the runner's default shell, as in the Windows test
+      # shard; --shard-env reads the shard number the same way under either.
+      - name: Affected tests (this shard)
+        env:
+          PR_GATE_SHARD: ${{ matrix.shard }}
+        run: python scripts/run_affected_tests.py --plan "${{ runner.temp }}/pr-gate-plan/plan.json" --shard-env PR_GATE_SHARD --shard-out shard-out
+
+      - name: Record this shard's result
+        if: always()
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          mkdir -p shard-out
+          echo "$JOB_STATUS" > "shard-out/status-$SHARD.txt"
+
+      - name: Upload this shard's results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: pr-gate-shard-${{ matrix.os }}-${{ matrix.shard }}
+          path: shard-out/
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 7
+
+  # The Linux verdict, the check merge-policy reads as python-pr-gate. It runs
+  # after the plan and the shards whatever their results, so a failed,
+  # skipped or missing shard is a red verdict, never a skipped one. See
+  # test_the_gate_verdict_cannot_pass_over_a_missing_or_failed_shard.
+  python-pr-gate:
+    name: Python PR gate (lock, hygiene, ruff, affected tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [python-pr-gate-plan, python-pr-gate-shard]
+    if: >-
+      !cancelled() &&
+      github.event_name == 'pull_request' &&
+      !contains(github.event.pull_request.labels.*.name, 'full-ci')
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+
+      # pytest for `python -m tests._shard verify`, as in the `test` job.
+      - name: Install uv (for the requirements export)
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+      - name: Install the verification tooling
+        run: |
+          pip install --require-hashes --no-deps -r .github/requirements/editable.txt
+          uv export --quiet --locked --no-emit-project --extra dev -o "$RUNNER_TEMP/requirements.txt"
+          pip install --require-hashes --no-deps --no-build-isolation -r "$RUNNER_TEMP/requirements.txt"
+
+      - name: Download the plan
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          pattern: pr-gate-plan
+          merge-multiple: true
+          path: ${{ runner.temp }}/pr-gate-plan
+
+      - name: Download this platform's shard results
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          pattern: pr-gate-shard-ubuntu-latest-*
+          merge-multiple: true
+          path: shard-out
+
+      - name: Every selected test ran in exactly one shard
+        env:
+          PLAN_RESULT: ${{ needs.python-pr-gate-plan.result }}
+        run: python scripts/run_affected_tests.py --collect shard-out --plan "$RUNNER_TEMP/pr-gate-plan/plan.json" --plan-result "$PLAN_RESULT"
+
+  # The Windows verdict: the same steps over the windows-latest shards. It
+  # reads files only, so it runs on Linux.
+  python-pr-gate-windows:
+    name: Python PR gate, Windows (affected tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [python-pr-gate-plan, python-pr-gate-shard]
+    if: >-
+      !cancelled() &&
+      github.event_name == 'pull_request' &&
+      !contains(github.event.pull_request.labels.*.name, 'full-ci')
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+
+      # pytest for `python -m tests._shard verify`, as in the `test` job.
+      - name: Install uv (for the requirements export)
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+      - name: Install the verification tooling
+        run: |
+          pip install --require-hashes --no-deps -r .github/requirements/editable.txt
+          uv export --quiet --locked --no-emit-project --extra dev -o "$RUNNER_TEMP/requirements.txt"
+          pip install --require-hashes --no-deps --no-build-isolation -r "$RUNNER_TEMP/requirements.txt"
+
+      - name: Download the plan
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          pattern: pr-gate-plan
+          merge-multiple: true
+          path: ${{ runner.temp }}/pr-gate-plan
+
+      - name: Download this platform's shard results
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          pattern: pr-gate-shard-windows-latest-*
+          merge-multiple: true
+          path: shard-out
+
+      - name: Every selected test ran in exactly one shard
+        env:
+          PLAN_RESULT: ${{ needs.python-pr-gate-plan.result }}
+        run: python scripts/run_affected_tests.py --collect shard-out --plan "$RUNNER_TEMP/pr-gate-plan/plan.json" --plan-result "$PLAN_RESULT"
 
   # Validate the hand-written ctypes binding against the ACTUAL upstream binary.
   # Heavy (downloads the cpu prebuilt) and checks a MOVING upstream target, so it
@@ -667,6 +847,24 @@ jobs:
           python -m pytest "tests/test_pretokenizer_chunking.py::TestChunkedTokensEqualWholeTokens" \
             -q -rs -p no:cacheprovider --junitxml="$RUNNER_TEMP/chunked-tokens.xml"
           python - "$RUNNER_TEMP/chunked-tokens.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          suite = root if root.tag == "testsuite" else root[0]
+          tests, skipped = int(suite.get("tests", 0)), int(suite.get("skipped", 0))
+          print(f"{tests} tests, {skipped} skipped")
+          sys.exit(1 if tests == 0 or skipped else 0)
+          PY
+
+      # Every llama and mtmd function localm calls unconditionally is exported by
+      # the pinned build. It skips without a runtime, so a skip here fails the step.
+      - name: Every function localm binds is exported by the pinned build
+        if: ${{ !cancelled() && steps.provision.outcome == 'success' }}
+        shell: bash
+        run: |
+          python -m pytest "tests/test_check_llama_abi.py::TestBoundFunctionsAreExportedByTheRuntime" \
+            -q -rs -p no:cacheprovider --junitxml="$RUNNER_TEMP/bound-functions.xml"
+          python - "$RUNNER_TEMP/bound-functions.xml" <<'PY'
           import sys
           import xml.etree.ElementTree as ET
           root = ET.parse(sys.argv[1]).getroot()
@@ -1190,9 +1388,10 @@ jobs:
   # with LOCALM_REQUIRE_OPTIONAL naming the packages: a skip for a missing one
   # then FAILS (tests/_require_optional.py). Not required here, on purpose:
   # tkinter (needs a display), playwright and webview (a browser or a window),
-  # and the private manifest checker. Same triggers as the test matrix: the
-  # nightly and weekly schedules, a manual dispatch, or a pull request
-  # labelled full-ci. Not part of merge-policy.
+  # and the private manifest checker. Runs on the nightly and weekly
+  # schedules, a manual dispatch, a pull request labelled full-ci, and a pull
+  # request that changes the dependencies (pyproject.toml, uv.lock,
+  # .github/requirements/) or this workflow. Not part of merge-policy.
   optional-stacks:
     name: optional stacks (tests that need torch, transformers, ... must run, not skip)
     runs-on: ubuntu-latest
@@ -1200,23 +1399,44 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
-      (github.event_name == 'pull_request' &&
-       contains(github.event.pull_request.labels.*.name, 'full-ci'))
+      github.event_name == 'pull_request'
     env:
       LOCALM_REQUIRE_OPTIONAL: torch,transformers,tokenizers,accelerate,psutil,PIL,pypdf,numpy,soundfile,av,packaging,xgrammar
     steps:
+      # fetch-depth: 2 so a pull request's merge commit has its base as HEAD^1.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           persist-credentials: false
+          fetch-depth: 2
+
+      # On a pull request without the full-ci label the remaining steps run
+      # only when it changes the dependencies or this workflow; otherwise the
+      # job ends with a notice saying it was not needed.
+      - name: Does this pull request change the dependencies?
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          FULL_CI: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+        run: |
+          if [ "$EVENT" != "pull_request" ] || [ "$FULL_CI" = "true" ]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if git diff --name-only HEAD^1 HEAD | grep -qE '^(pyproject\.toml|uv\.lock|\.github/requirements/|\.github/workflows/ci\.yml)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No dependency file changed in this pull request; the optional stacks run nightly."
+          fi
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        if: steps.scope.outputs.run == 'true'
         with:
           python-version: "3.12"
 
       - name: Install uv
+        if: steps.scope.outputs.run == 'true'
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
       # torch first, from the CPU index, so no later install pulls a CUDA build.
       - name: Install the optional stacks
+        if: steps.scope.outputs.run == 'true'
         run: |
           pip install --require-hashes --no-deps -r .github/requirements/editable.txt
           pip install --require-hashes --no-deps -r .github/requirements/torch-cpu.txt
@@ -1225,9 +1445,11 @@ jobs:
           pip install --no-deps --no-build-isolation -e .
 
       - name: Show the resolved versions
+        if: steps.scope.outputs.run == 'true'
         run: pip list 2>/dev/null | grep -i -E "^(torch|transformers|tokenizers|accelerate|psutil|pillow|pypdf|numpy|soundfile|av|xgrammar|faster-whisper) "
 
       - name: Run every test file that gates on one of these packages
+        if: steps.scope.outputs.run == 'true'
         run: |
           FILES=$(grep -rlE "importorskip\(.(torch|transformers|tokenizers|accelerate|psutil|PIL|pypdf|numpy|soundfile|av|packaging|xgrammar)" tests --include='*.py' | sort)
           echo "$FILES" | wc -l

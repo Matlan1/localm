@@ -1165,6 +1165,14 @@
                   <button class="btn-primary" id="bug-confirm-send" data-i18n="settings.bug.confirmSendButton">Send this report</button>
                   <button class="btn-secondary" id="bug-cancel-send" data-i18n="settings.bug.cancelSendButton">Don't send</button>
                 </div>
+                <!-- Shown when a send was refused because Network access is off
+                     and the caller is the owner. -->
+                <div id="bug-anyway" hidden>
+                  <div class="sub" data-i18n="settings.bug.sendAnywayHelp">Network access is off. Send anyway makes one connection to the bug-report server to send this report only. Network access stays off.</div>
+                  <div class="actions">
+                    <button class="btn-secondary" id="bug-send-anyway" data-i18n="settings.bug.sendAnywayButton">Send anyway</button>
+                  </div>
+                </div>
               </div>
             </section>
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Subprocess isolation for the embedding-model lifecycle (load, embed, unload).
 
-``llama_load_model_from_file`` and ``llama_decode`` (called by every ``embed()``)
+``llama_model_load_from_file`` and ``llama_decode`` (called by every ``embed()``)
 can hard-``abort()`` the whole process on a native CUDA/HIP driver failure, and
 no Python ``try/except`` can catch that.
 

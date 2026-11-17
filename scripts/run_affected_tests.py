@@ -28,15 +28,44 @@ The selection, its reasons, the depth it was computed at and the mode are
 printed, and appended to the file named by GITHUB_STEP_SUMMARY when that
 variable is set.
 
+CI runs the gate in three steps, so a wide selection runs as parallel shards
+(tests/_shard.py splits it, the same split the full matrix uses):
+
+  --plan-out FILE   select as above, never run pytest, and write the plan: the
+                    mode, the depth, the selection and the shard count
+                    (shard_count()). The exit status is the one the
+                    selection would have without --plan-out: 1 when it is
+                    wide or failed. The GITHUB_OUTPUT outputs are `run`
+                    (true when there are tests to run), `count` and `shards`
+                    (the JSON list 1..count; [1] when nothing runs).
+  --plan FILE --shard I --shard-out DIR
+                    run shard I of the plan's selection, writing
+                    DIR/ids-I.json (--shard-ids-out of tests/_shard.py). A plan
+                    that selects no test file fails.
+  --collect DIR --plan FILE --plan-result RESULT
+                    pass only when the plan job ended `success` and either
+                    the plan selected nothing and DIR holds no shard result,
+                    or `python -m tests._shard verify DIR --count N` passes
+                    (every shard 1..N reported success and every selected test
+                    ran in exactly one shard) and every test that ran is in a
+                    file of the plan's selection.
+
     python scripts/run_affected_tests.py [--depth N] [--base REF] [--files ...]
                                          [--dry-run] [-- pytest args]
+    python scripts/run_affected_tests.py --plan-out FILE [--depth N] [--base REF] [--files ...]
+    python scripts/run_affected_tests.py --plan FILE --shard I --shard-out DIR [-- pytest args]
+    python scripts/run_affected_tests.py --collect DIR --plan FILE --plan-result RESULT
 
-Stdlib only, apart from the pytest it launches.
+Stdlib only, apart from the pytest it launches (and --collect, which runs
+tests/_shard.py and so needs pytest installed).
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import math
+import os
 import re
 import shlex
 import subprocess
@@ -60,6 +89,10 @@ WHOLE_SUITE_SHARE = 0.999999
 PYTEST_NO_TESTS_COLLECTED = 5
 _TEST_PATH = re.compile(r"^tests(?:/[A-Za-z0-9_\-][A-Za-z0-9_.\-]*)*/test_[A-Za-z0-9_.\-]+\.py$")
 _PYTEST_ARGS = ["-m", "not integration", "-n", "auto"]
+#: The shard count grows by one per this many selected test files.
+FILES_PER_SHARD = 75
+#: The most shards a selection is split into, per platform.
+MAX_SHARDS = 5
 
 
 @dataclass
@@ -124,17 +157,20 @@ def _run_selector(depth: int, base: str, files: list[str] | None,
 ARGS_INLINE_MAX = 20000
 
 
-def _run_pytest(args: list[str]) -> int:
-    """Run pytest with *args*, reading them from a temporary ``@file`` when
-    together they are longer than ``ARGS_INLINE_MAX`` characters."""
+def _run_pytest(args: list[str], inline: list[str] | tuple[str, ...] = ()) -> int:
+    """Run pytest with *inline* then *args*, reading *args* from a temporary
+    ``@file`` when together they are longer than ``ARGS_INLINE_MAX``
+    characters. *inline* always stays on the command line: pytest loads
+    ``-p`` plugins from the command line before it expands an ``@file``.
+    See test_the_shard_plugin_stays_on_the_command_line_when_the_paths_go_to_an_argfile."""
+    base = [sys.executable, "-m", "pytest", *inline]
     if sum(len(a) + 1 for a in args) <= ARGS_INLINE_MAX:
-        return subprocess.run([sys.executable, "-m", "pytest", *args], cwd=str(REPO)).returncode
+        return subprocess.run([*base, *args], cwd=str(REPO)).returncode
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
         argfile = Path(tmp) / "pytest-args.txt"
         argfile.write_text("\n".join(args) + "\n", encoding="utf-8")
-        return subprocess.run([sys.executable, "-m", "pytest", f"@{argfile}"],
-                              cwd=str(REPO)).returncode
+        return subprocess.run([*base, f"@{argfile}"], cwd=str(REPO)).returncode
 
 
 def _base_resolves(base: str) -> bool:
@@ -248,6 +284,164 @@ def _publish(text: str) -> None:
     ci_runner_files.append(ci_runner_files.STEP_SUMMARY, text)
 
 
+def shard_count(selection: Selection) -> int:
+    """How many shards per platform the selection runs in: one per
+    FILES_PER_SHARD selected test files, rounded up, at least 1 and at most
+    MAX_SHARDS. 1 when the selection is not ``selected``."""
+    if selection.mode != "selected" or not selection.paths:
+        return 1
+    return max(1, min(MAX_SHARDS, math.ceil(len(selection.paths) / FILES_PER_SHARD)))
+
+
+def _shard_args(index: int, count: int, ids_out: Path) -> list[str]:
+    """The pytest arguments that load tests/_shard.py and run shard *index*
+    of *count*, writing its node ids to *ids_out*."""
+    return ["-p", "tests._shard", "--shard", f"{index}/{count}", "--shard-ids-out", str(ids_out)]
+
+
+def make_plan(selection: Selection, extra: list[str]) -> dict:
+    """The plan file's content for *selection*: its mode, depth, paths, shard
+    count and the rendered step summary."""
+    count = shard_count(selection)
+    summary = render_summary(selection, pytest_args(selection, extra))
+    if selection.mode == "selected":
+        summary += (f"\nSplit into **{count} shard(s)** per platform (one per {FILES_PER_SHARD} "
+                    f"selected test files, at most {MAX_SHARDS}); shard I runs the selection with "
+                    f"`-p tests._shard --shard I/{count}` added.\n")
+    return {"mode": selection.mode, "depth": selection.depth, "paths": list(selection.paths),
+            "count": count, "summary": summary}
+
+
+def load_plan(path: Path) -> tuple[dict | None, str]:
+    """``(plan, "")`` for a well-formed plan file, else ``(None, problem)``.
+    Well-formed: a known mode; every path an existing tests/**/test_*.py file;
+    a ``selected`` plan with paths and the count shard_count() gives them;
+    any other plan without paths and a count of 1."""
+    try:
+        plan = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return None, f"the plan {path} cannot be read: {e}"
+    if not isinstance(plan, dict):
+        return None, f"the plan {path} is not a JSON object"
+    mode, paths, count = plan.get("mode"), plan.get("paths"), plan.get("count")
+    if mode not in ("selected", "nothing", "wide", "failed"):
+        return None, f"the plan {path} has an unknown mode {mode!r}"
+    if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+        return None, f"the plan {path} has no list of paths"
+    for p in paths:
+        if not _TEST_PATH.match(p) or not (REPO / p).is_file():
+            return None, f"the plan {path} names {p!r}, which is not an existing tests/**/test_*.py file"
+    expected = shard_count(Selection(mode, paths=paths))
+    if mode == "selected" and not paths:
+        return None, f"the plan {path} is `selected` with no paths"
+    if mode != "selected" and paths:
+        return None, f"the plan {path} is `{mode}` yet names test files"
+    if count != expected:
+        return None, f"the plan {path} has shard count {count!r}, its selection needs {expected}"
+    return plan, ""
+
+
+def write_plan(selection: Selection, path: Path, extra: list[str]) -> int:
+    """Write the plan for *selection* to *path*, publish its summary and the
+    GITHUB_OUTPUT outputs, run nothing. 0 for a ``selected`` or ``nothing``
+    plan, 1 otherwise."""
+    plan = make_plan(selection, extra)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(plan, indent=1) + "\n", encoding="utf-8")
+    _publish(plan["summary"])
+    run = selection.mode == "selected"
+    shards = list(range(1, plan["count"] + 1))
+    ci_runner_files.append(ci_runner_files.OUTPUT, f"run={'true' if run else 'false'}\n"
+                                                   f"count={plan['count']}\n"
+                                                   f"shards={json.dumps(shards)}\n")
+    return 0 if selection.mode in ("selected", "nothing") else 1
+
+
+def run_shard(plan_path: Path, index: int, out_dir: Path, extra: list[str]) -> int:
+    """Run shard *index* of the plan at *plan_path*, writing
+    ``out_dir/ids-<index>.json``. pytest's exit status, except 5 (no test
+    left in this shard) is 0; 1 without running pytest for a malformed plan,
+    a plan that selects no test file, or an index outside 1..count."""
+    plan, problem = load_plan(plan_path)
+    if plan is not None and plan["mode"] != "selected":
+        problem = f"the plan is `{plan['mode']}`: it selects no test file for a shard to run"
+    if plan is not None and not problem and not 1 <= index <= plan["count"]:
+        problem = f"shard {index} is outside the plan's 1..{plan['count']}"
+    if plan is None or problem:
+        _publish(f"### Affected tests, shard {index}\n\n**No test ran**: {problem}\n")
+        return 1
+    count = plan["count"]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    inline = _shard_args(index, count, (out_dir / f"ids-{index}.json").resolve())
+    args = [*plan["paths"], *_PYTEST_ARGS, *extra]
+    status = _run_pytest(args, inline)
+    lines = [f"### Affected tests, shard {index}/{count}", "",
+             f"Shard {index} of {count} of the {len(plan['paths'])} selected test file(s), "
+             f"selected at `--depth {plan['depth']}`; pytest exited {status}."]
+    if status == PYTEST_NO_TESTS_COLLECTED:
+        lines.append("No test is left in this shard after `-m \"not integration\"` and the split.")
+    lines += ["", f"`pytest {shlex.join([*inline, *args])}`"]
+    _publish("\n".join(lines) + "\n")
+    return 0 if status == PYTEST_NO_TESTS_COLLECTED else status
+
+
+def _verify_shards(directory: Path, count: int) -> tuple[int, str]:
+    """Run ``python -m tests._shard verify`` over *directory*; (exit status, output)."""
+    proc = subprocess.run([sys.executable, "-m", "tests._shard", "verify", str(directory),
+                           "--count", str(count)], cwd=str(REPO), capture_output=True,
+                          text=True, encoding="utf-8", errors="replace")
+    return proc.returncode, (proc.stdout + proc.stderr).strip()
+
+
+def collect(directory: Path, plan_path: Path, plan_result: str) -> int:
+    """The gate's verdict over the plan and the shard results in *directory*
+    (see the module docstring). 0 passes, 1 fails; every reason it fails is
+    printed as a ``::error::`` line and published with the plan's summary."""
+    problems: list[str] = []
+    plan, problem = load_plan(plan_path) if plan_path.is_file() else (None, f"no plan at {plan_path}")
+    results = sorted(directory.glob("ids-*.json")) + sorted(directory.glob("status-*.txt"))
+    verified = ""
+    if plan_result != "success":
+        problems.append(f"the plan job ended {plan_result!r}: its lock check, hygiene gate, ruff "
+                        "or selection failed or did not run, so no shard ran")
+    elif plan is None:
+        problems.append(problem)
+    elif plan["mode"] == "nothing":
+        if results:
+            problems.append(f"the plan selected no test file, yet {len(results)} shard result "
+                            "file(s) were found")
+    elif plan["mode"] != "selected":
+        problems.append(f"the plan job succeeded with a `{plan['mode']}` plan")
+    else:
+        files = set(plan["paths"])
+        for ids in sorted(directory.glob("ids-*.json")):
+            try:
+                selected = json.loads(ids.read_text(encoding="utf-8"))["selected"]
+            except (OSError, ValueError, KeyError, TypeError) as e:
+                problems.append(f"{ids.name} cannot be read: {e}")
+                continue
+            outside = sorted({n.split("::", 1)[0] for n in selected} - files)
+            if outside:
+                problems.append(f"{ids.name} ran tests outside the plan's selection: "
+                                f"{', '.join(outside)}")
+        status, verified = _verify_shards(directory, plan["count"])
+        if status != 0:
+            problems += [ln.removeprefix("::error::") for ln in verified.splitlines()
+                         if ln.startswith("::error::")] or [f"tests._shard verify exited {status}"]
+    lines = [plan["summary"] if plan is not None else "### Affected tests (python-pr-gate)\n", ""]
+    if problems:
+        lines.append("**The gate fails**:")
+        lines += [f"- {p}" for p in problems]
+    elif plan is not None and plan["mode"] == "nothing":
+        lines.append("**The gate passes**: no test file is affected and no shard ran.")
+    else:
+        lines.append(f"**The gate passes**: {verified}")
+    for p in problems:
+        print(f"::error::{p}")
+    _publish("\n".join(lines) + "\n")
+    return 1 if problems else 0
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     ap.add_argument("--depth", type=int, default=1,
@@ -258,10 +452,43 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--files", nargs="*", help="passed to the selector: use these changed paths")
     ap.add_argument("--dry-run", action="store_true",
                     help="print what would run without running pytest")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--plan-out", type=Path, metavar="FILE",
+                      help="write the plan for the selection to FILE and run nothing")
+    mode.add_argument("--shard", type=int, metavar="I",
+                      help="run shard I of the selection in the --plan file")
+    mode.add_argument("--shard-env", metavar="NAME",
+                      help="--shard with I read from environment variable NAME, for a CI step "
+                           "that runs under either shell")
+    mode.add_argument("--collect", type=Path, metavar="DIR",
+                      help="verify the shard results in DIR against the --plan file")
+    ap.add_argument("--plan", type=Path, metavar="FILE", help="the plan file --plan-out wrote")
+    ap.add_argument("--shard-out", type=Path, metavar="DIR",
+                    help="with --shard: the directory the shard's ids-I.json goes to")
+    ap.add_argument("--plan-result", metavar="RESULT",
+                    help="with --collect: how the job that wrote the plan ended")
     ap.add_argument("pytest_args", nargs="*", help="arguments after -- are passed to pytest")
     args = ap.parse_args(argv)
 
+    if args.shard_env is not None:
+        value = os.environ.get(args.shard_env, "")
+        if not value.strip().isdigit():
+            ap.error(f"--shard-env {args.shard_env}: the variable holds {value!r}, not a shard number")
+        args.shard = int(value)
+    if args.shard is not None:
+        if args.plan is None or args.shard_out is None:
+            ap.error("--shard needs --plan and --shard-out")
+        return run_shard(args.plan, args.shard, args.shard_out, args.pytest_args)
+    if args.collect is not None:
+        if args.plan is None or args.plan_result is None:
+            ap.error("--collect needs --plan and --plan-result")
+        return collect(args.collect, args.plan, args.plan_result)
+    if args.plan is not None or args.shard_out is not None or args.plan_result is not None:
+        ap.error("--plan, --shard-out and --plan-result go with --shard or --collect")
+
     selection = select(args.depth, args.base, args.files)
+    if args.plan_out is not None:
+        return write_plan(selection, args.plan_out, args.pytest_args)
     cmd = pytest_args(selection, args.pytest_args)
 
     if cmd is None:

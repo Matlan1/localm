@@ -45,7 +45,7 @@ def _native_crash_block(pad_to, stamp="2026-07-13 15:24:50,000"):
             "Traceback (most recent call last):\n")
     filler = "".join(
         f'  File "localm/inference/backends/llamacpp/_runner.py", line {i}, '
-        f"in _load_native\n    self._lib.llama_load_model_from_file(path)\n"
+        f"in _load_native\n    self._lib.llama_model_load_from_file(path)\n"
         for i in range(400))
     tail = ("RuntimeError: Native llama runtime failed to load: [WinError 2] "
             "The system cannot find the file specified\n")

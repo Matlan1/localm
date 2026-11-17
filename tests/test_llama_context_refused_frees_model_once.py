@@ -21,12 +21,12 @@ from tests.test_kv_cache_type_setting import API, _load_api
 @pytest.mark.parametrize("kind", [None, "q8_0"])
 def test_a_refused_context_frees_the_model_once(kind):
     api, _seen = _load_api(init_results=[None])
-    model = api.llama_load_model_from_file.return_value
+    model = api.llama_model_load_from_file.return_value
     with patch(API, api), \
             patch.object(llama_mod.pretokenizer_guard, "read_pre_type", return_value=None):
         with pytest.raises(RuntimeError, match="Failed to create llama context"):
             LlamaCpp("m.gguf", n_ctx=512, n_gpu_layers=0, verbose=True,
                      kv_cache_type=kind)
         gc.collect()
-    assert api.llama_free_model.call_count == 1
-    api.llama_free_model.assert_called_with(model)
+    assert api.llama_model_free.call_count == 1
+    api.llama_model_free.assert_called_with(model)

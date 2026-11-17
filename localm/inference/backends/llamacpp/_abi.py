@@ -4,7 +4,7 @@
 The ctypes structs in :mod:`._structs` encode specific llama.cpp struct layouts
 (field order + byte offsets). Two of them - ``LlamaModelParams*`` and
 ``LlamaContextParams`` - cross the FFI boundary BY VALUE
-(``llama_load_model_from_file`` / ``llama_init_from_model``).
+(``llama_model_load_from_file`` / ``llama_init_from_model``).
 
 ``llama_model_default_params()`` and ``llama_context_default_params()`` return
 the structs BY VALUE with known defaults (no model, no GPU needed); they are

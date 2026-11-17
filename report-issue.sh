@@ -8,11 +8,12 @@
 #  first. It runs the self-contained reporter on any Python it can find (so a
 #  broken venv still reports fine), and falls back to curl if there is no Python.
 #  With localm's Network access off (LOCALM_NET_MODE, or net_mode in the data dir's
-#  config.json) nothing is sent; when that setting cannot be read you are asked
-#  before anything is sent.
+#  config.json) nothing is sent unless you send that one report anyway (asked at
+#  the prompt, default no, or --send-anyway); when that setting cannot be read
+#  you are asked before anything is sent.
 #
 #  Optional args (used by setup.sh's failure paths) pass straight through:
-#    --summary "..."  --detail "..."  --log <path>  --yes
+#    --summary "..."  --detail "..."  --log <path>  --yes  --send-anyway
 # =============================================================================
 cd "$(dirname "$0")" || exit 1
 
@@ -33,6 +34,10 @@ if [ -n "$RIPY" ]; then
 fi
 
 # --- No Python at all: minimal curl reporter (a rare fallback) ---------------
+ri_anyway=""
+for ri_arg in "$@"; do
+  [ "$ri_arg" = "--send-anyway" ] && ri_anyway=1
+done
 echo ""
 echo "  localm - report a problem (curl fallback; no Python found)"
 echo ""
@@ -191,12 +196,23 @@ net_read="$(ri_net_mode)"
 net_mode="${net_read%%"$tab"*}"
 net_why="${net_read#*"$tab"}"
 
-if [ -n "$url" ] && [ "$net_mode" = "off" ]; then
+send_anyway_effect="Sending anyway makes one connection to the bug-report server to send this report only. Network access stays off."
+if [ -n "$url" ] && [ "$net_mode" = "off" ] && [ -n "$ri_anyway" ]; then
+  echo "  Network access is off; sending this report anyway (--send-anyway). ${send_anyway_effect}"
+elif [ -n "$url" ] && [ "$net_mode" = "off" ]; then
   echo "  Network access is off (net_mode=off), so the report was not sent. ${net_off_remedy}."
-  echo "  Email ${email} if you prefer."
-  exit 1
+  echo "  ${send_anyway_effect}"
+  printf '  Send this one report anyway? [y/N]: '
+  if ! IFS= read -r ans; then ans=""; echo ""; fi
+  ans="$(printf '%s' "$ans" | tr -d '\r[:space:]')"
+  case "$ans" in
+    [Yy]|[Yy][Ee][Ss]) ri_anyway=1 ;;
+    *) echo "  Not sent. Email ${email} if you change your mind."; exit 0 ;;
+  esac
 fi
-if [ -n "$url" ] && [ "$net_mode" = "unknown" ]; then
+if [ -n "$ri_anyway" ]; then
+  :
+elif [ -n "$url" ] && [ "$net_mode" = "unknown" ]; then
   echo "  localm's Network access setting could not be read: ${net_why}. Sending connects to the bug-report server."
   printf '  Send it anyway? [y/N]: '
   if ! IFS= read -r ans; then ans=""; echo ""; fi

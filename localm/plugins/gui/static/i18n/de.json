@@ -1629,6 +1629,8 @@
   "settings.bug.previewLabel": "Zu sendender Fehlerbericht",
   "settings.bug.confirmSendButton": "Diesen Bericht senden",
   "settings.bug.cancelSendButton": "Nicht senden",
+  "settings.bug.sendAnywayButton": "Trotzdem senden",
+  "settings.bug.sendAnywayHelp": "Der Netzwerkzugriff ist aus. Trotzdem senden baut eine Verbindung zum Fehlerbericht-Server auf, nur um diesen Bericht zu senden. Der Netzwerkzugriff bleibt aus.",
   "settings.bug.reviewPrompt": "Gespeichert: {where}  -  prüfen Sie ihn unten und drücken Sie dann Diesen Bericht senden.",
   "settings.bug.reviewUnavailable": "Gespeichert: {where}  -  er konnte nicht zur Prüfung geladen werden und wurde daher nicht gesendet.",
   "settings.bug.notSent": "Nicht gesendet. Der Bericht ist gespeichert: {where}",

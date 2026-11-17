@@ -1963,11 +1963,19 @@ function _showBugReview(markdown) {
       upBtn.hidden = true;
     }
   } else {
+    _showBugSendAnyway(false);
     if (panel) panel.hidden = true;
     if (preview) preview.value = "";
     if (upBtn && _bugUploadWasHidden !== null) upBtn.hidden = _bugUploadWasHidden;
     _bugUploadWasHidden = null;
   }
+}
+
+// The "Send anyway" offer under the review panel, for a send refused because
+// Network access is off.
+function _showBugSendAnyway(show) {
+  const box = $("bug-anyway");
+  if (box) box.hidden = !show;
 }
 
 function _clearBugFields() {
@@ -2062,18 +2070,23 @@ export async function submitBugReport(review) {
 // Send the report on review: the saved file that was shown, named by its
 // filename and digest. isRetry marks the one automatic rate-limit retry, which
 // passes the report that was confirmed as rep; it is sent only while that
-// report is still the one on review.
-export async function sendReviewedBugReport(isRetry = false, rep = _reviewedBugReport) {
+// report is still the one on review. anyway is the "Send anyway" choice: this
+// one report is sent while Network access is off.
+export async function sendReviewedBugReport(isRetry = false, rep = _reviewedBugReport,
+  anyway = false) {
   if (!rep || rep !== _reviewedBugReport) return;
-  const buttons = ["bug-confirm-send", "bug-cancel-send", "bug-retry", "bug-send", "bug-upload"]
-    .map((id) => $(id)).filter(Boolean);
+  const buttons = ["bug-confirm-send", "bug-cancel-send", "bug-retry", "bug-send", "bug-upload",
+    "bug-send-anyway"].map((id) => $(id)).filter(Boolean);
   for (const b of buttons) b.disabled = true;
+  _showBugSendAnyway(false);
   const out = $("bug-result");
   try {
+    const payload = { filename: rep.filename, sha256: rep.sha256 };
+    if (anyway) payload.send_anyway = true;
     const r = await fetch("/api/bug-report/send", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify({ filename: rep.filename, sha256: rep.sha256 }),
+      body: JSON.stringify(payload),
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data.detail || r.statusText);
@@ -2082,13 +2095,14 @@ export async function sendReviewedBugReport(isRetry = false, rep = _reviewedBugR
     const autoRetry = !$("bug-autoretry") || $("bug-autoretry").checked;
     if (data.rate_limited && !isRetry && autoRetry) {
       const secs = Math.max(1, parseInt(data.retry_after, 10) || 30);
-      await countdownRetryBugReport(secs, out, rep);
+      await countdownRetryBugReport(secs, out, rep, anyway);
       return;
     }
     const sent = !!data.uploaded;
     const uploadFailed = !sent && data.upload_error && !data.rate_limited;
     const refused = data.upload_stage === "not_filed" || data.upload_stage === "network_off";
     _showBugActions({ retry: !sent && !refused, download: !sent && !!_lastBugReport });
+    _showBugSendAnyway(!sent && data.upload_stage === "network_off" && data.can_send_anyway === true);
     if (out) {
       out.hidden = false;
       if (sent) {
@@ -2139,9 +2153,10 @@ function cancelBugReview() {
 }
 
 // Show a live countdown in the bug-report result line, then auto-retry sending
-// rep once (isRetry=true, so it never loops). When rep is no longer the report
-// on review, nothing is sent and the result line says so.
-async function countdownRetryBugReport(secs, out, rep) {
+// rep once (isRetry=true, so it never loops), with the same anyway choice. When
+// rep is no longer the report on review, nothing is sent and the result line
+// says so.
+async function countdownRetryBugReport(secs, out, rep, anyway = false) {
   for (let s = secs; s > 0; s--) {
     if (out) {
       out.hidden = false;
@@ -2154,7 +2169,7 @@ async function countdownRetryBugReport(secs, out, rep) {
     return;
   }
   if (out) out.textContent = t("settings.bug.retrying");
-  await sendReviewedBugReport(true, rep);
+  await sendReviewedBugReport(true, rep, anyway);
 }
 
 // Settings "Recent errors": the last errors this page showed (client-log.js),
@@ -2257,6 +2272,8 @@ if ($("bug-upload")) $("bug-upload").onclick = () => submitBugReport(true);
 if ($("bug-confirm-send")) $("bug-confirm-send").onclick = () => sendReviewedBugReport();
 if ($("bug-cancel-send")) $("bug-cancel-send").onclick = () => cancelBugReview();
 if ($("bug-retry")) $("bug-retry").onclick = () => sendReviewedBugReport();
+if ($("bug-send-anyway")) $("bug-send-anyway").onclick = () =>
+  sendReviewedBugReport(false, _reviewedBugReport, true);
 if ($("bug-download")) $("bug-download").onclick = () => downloadBugReport();
 
 // Release notes longer than this (characters or lines) start collapsed behind

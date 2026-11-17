@@ -150,9 +150,9 @@ def test_the_send_menu_offers_no_retry_with_network_off(monkeypatch):
     monkeypatch.setattr(consent.console, "print", lambda *a, **kw: None)
     asked = []
     consent._upload_with_retries("it broke", None, "report text", URL, None,
-                                 lambda q: asked.append(q) or "y", "report.md")
+                                 lambda q: asked.append(q) or "n", "report.md")
     assert opened == []
-    assert asked == []
+    assert asked == ["  Send this one report anyway? [y/N]"]
 
 def test_an_update_download_with_network_off_opens_no_connection(monkeypatch, tmp_path):
     from localm import updater

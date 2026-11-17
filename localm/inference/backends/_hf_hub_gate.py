@@ -122,7 +122,7 @@ def record_kernel_version_ref(repo_id: str, version,
             continue
         info = loaded.repo_info
         if info is not None:
-            if info.repo_id != repo_id or info.revision != commit:
+            if info.repo_id != repo_id or str(info.revision) != commit:
                 continue
         elif parts[i - 1] != cache_folder:
             continue

@@ -883,8 +883,8 @@ def _mock_api(order=None, *, init_result="auto", set_rc=0, lora_api=True):
     m.llama_init_from_model.side_effect = (
         lambda model, cp: order.append(("ctx_init",)) or ctypes.c_void_p(2))
     m.llama_free.side_effect = lambda ctx: order.append(("ctx_free",))
-    m.llama_free_model.side_effect = lambda model: order.append(("model_free",))
-    m.llama_load_model_from_file.return_value = ctypes.c_void_p(1)
+    m.llama_model_free.side_effect = lambda model: order.append(("model_free",))
+    m.llama_model_load_from_file.return_value = ctypes.c_void_p(1)
     return m
 
 
@@ -944,7 +944,7 @@ class TestLlamaCppLifecycle:
         message = str(ei.value)
         assert "bad.gguf" in message and "incorrect shape" in message
         mock_api.llama_init_from_model.assert_not_called()
-        mock_api.llama_free_model.assert_called_once()
+        mock_api.llama_model_free.assert_called_once()
 
     def test_a_runtime_without_the_lora_exports_refuses_with_the_remedy(self):
         mock_api = _mock_api(lora_api=False)
@@ -952,7 +952,7 @@ class TestLlamaCppLifecycle:
             with pytest.raises(AdapterLoadError, match="localm setup-llama"):
                 LlamaCpp("m.gguf", n_ctx=512, n_gpu_layers=99, verbose=True,
                          adapters=[("/a/one.gguf", 1.0)])
-        mock_api.llama_free_model.assert_called_once()
+        mock_api.llama_model_free.assert_called_once()
 
     def test_a_failed_apply_frees_everything_and_raises(self):
         order = []

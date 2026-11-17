@@ -743,6 +743,75 @@ def _state_v4_headers() -> str:
 
 _MTMD_STATE_V4 = _state_v4_headers()
 
+_V5_DELIVERY_LINES = (
+    "    float speed;    // speaking speed relative to a typical pace, > 0 "
+    "(default: 1.0 = the model's own pace)\n"
+    "    float loudness; // target loudness in LUFS, < 0 "
+    "(default: 0.0 = the model's own loudness)\n")
+
+
+def _state_v5_headers() -> str:
+    """The b12424 change: speed and loudness after seed in the helper input,
+    no new function."""
+    text = _MTMD_STATE_V4.replace(_V4_SEED_LINE, _V4_SEED_LINE + _V5_DELIVERY_LINES)
+    assert text.count("float speed;") == 1
+    return text
+
+
+_MTMD_STATE_V5 = _state_v5_headers()
+
+_V6_SPEAKER_REF_LINE = "    mtmd_bitmap * speaker_ref; // optional, can be NULL\n"
+_V6_SPEAKER_REF_TEXT_LINE = (
+    "    const char * speaker_ref_text; // optional, can be NULL: transcript of "
+    "speaker_ref\n")
+
+
+def _state_v6_headers() -> str:
+    """The b12452 change: speaker_ref_text after speaker_ref in the helper
+    input, no new function."""
+    assert _MTMD_STATE_V5.count(_V6_SPEAKER_REF_LINE) == 1
+    text = _MTMD_STATE_V5.replace(_V6_SPEAKER_REF_LINE,
+                                  _V6_SPEAKER_REF_LINE + _V6_SPEAKER_REF_TEXT_LINE)
+    assert text.count("speaker_ref_text;") == 1
+    return text
+
+
+_MTMD_STATE_V6 = _state_v6_headers()
+
+_V7_OUT_TYPE_LINE = "    enum mtmd_helper_gen_audio_outtype out_type;\n"
+_V7_GUIDANCE_LINES = ("    float cfg_scale;\n"
+                      "    int32_t flow_steps;\n")
+_V7_SAMPLE_RATE_LINE = "    int32_t sample_rate; // in Hz\n"
+_V7_N_CHANNELS_LINE = "    int32_t n_channels;  // 1 = mono, 2 = stereo\n"
+_V7_GEN_INPUT = _V2_GEN_INPUT.replace("    size_t        n_feats;\n};\n", """\
+    size_t        n_feats;
+    const uint8_t * backbone_state;
+    size_t          backbone_state_size;
+    int32_t         backbone_n_past;
+    int32_t n_steps;
+};
+""")
+
+
+def _state_v7_headers() -> str:
+    """The b12458 change: cfg_scale and flow_steps before out_type in the
+    helper input, n_channels after sample_rate in mtmd_gen_audio_info, the
+    backbone state fields and n_steps at the end of mtmd_gen_inp, and the new
+    function mtmd_helper_gen_audio_max_frames."""
+    assert _MTMD_STATE_V6.count(_V7_OUT_TYPE_LINE) == 1
+    assert _MTMD_STATE_V6.count(_V7_SAMPLE_RATE_LINE) == 1
+    assert _MTMD_STATE_V6.count(_V2_GEN_INPUT) == 1 and _V7_GEN_INPUT != _V2_GEN_INPUT
+    text = (_MTMD_STATE_V6
+            .replace(_V7_OUT_TYPE_LINE, _V7_GUIDANCE_LINES + _V7_OUT_TYPE_LINE)
+            .replace(_V7_SAMPLE_RATE_LINE, _V7_SAMPLE_RATE_LINE + _V7_N_CHANNELS_LINE)
+            .replace(_V2_GEN_INPUT, _V7_GEN_INPUT))
+    return text + (
+        "MTMD_API int32_t mtmd_helper_gen_audio_max_frames("
+        "const mtmd_helper_gen_audio * ctx);\n")
+
+
+_MTMD_STATE_V7 = _state_v7_headers()
+
 _MTMD_LEGACY = _MTMD_SPEECH_COMMON + """
 struct mtmd_helper_gen_audio_inp {
     llama_seq_id seq_id;
@@ -788,11 +857,17 @@ MTMD_API int32_t mtmd_gen_audio_process(mtmd_context * ctx,
 """
 
 
-@pytest.mark.parametrize("text, interface", [(_MTMD_STATE, "state"),
-                                             (_MTMD_STATE_V2, "state_v2"),
-                                             (_MTMD_STATE_V3, "state_v3"),
-                                             (_MTMD_STATE_V4, "state_v4"),
-                                             (_MTMD_LEGACY, "legacy")])
+_SPEECH_FIXTURES = [(_MTMD_STATE, "state"),
+                    (_MTMD_STATE_V2, "state_v2"),
+                    (_MTMD_STATE_V3, "state_v3"),
+                    (_MTMD_STATE_V4, "state_v4"),
+                    (_MTMD_STATE_V5, "state_v5"),
+                    (_MTMD_STATE_V6, "state_v6"),
+                    (_MTMD_STATE_V7, "state_v7"),
+                    (_MTMD_LEGACY, "legacy")]
+
+
+@pytest.mark.parametrize("text, interface", _SPEECH_FIXTURES)
 def test_speech_binding_matches_each_interface(text, interface, capsys):
     seen = set()
     assert abichk.check_speech(text, "fixture", seen) == 0
@@ -801,13 +876,51 @@ def test_speech_binding_matches_each_interface(text, interface, capsys):
     assert f"[interface: {interface}]" in out and "FAIL" not in out
 
 
-@pytest.mark.parametrize("text, interface", [(_MTMD_STATE, "state"),
-                                             (_MTMD_STATE_V2, "state_v2"),
-                                             (_MTMD_STATE_V3, "state_v3"),
-                                             (_MTMD_STATE_V4, "state_v4"),
-                                             (_MTMD_LEGACY, "legacy")])
+@pytest.mark.parametrize("text, interface", _SPEECH_FIXTURES)
 def test_the_headers_are_classified_by_their_interface_marker(text, interface):
     assert abichk._header_speech_interface(text) == interface
+
+
+def test_the_fixtures_cover_every_speech_interface():
+    assert {i for _t, i in _SPEECH_FIXTURES} == set(abichk.MTMD_SPEECH_REFS)
+
+
+@pytest.mark.parametrize("bound, text, want", [
+    ("state_v4", _MTMD_STATE_V5, "FAIL  size: upstream 80 != localm 72"),
+    ("state_v5", _MTMD_STATE_V4, "FAIL  size: upstream 72 != localm 80"),
+    ("state_v5", _MTMD_STATE_V6, "FAIL  lang: upstream offset 48 size 8 != localm offset 40"),
+    ("state_v6", _MTMD_STATE_V5, "FAIL  size: upstream 80 != localm 88"),
+    ("state_v6", _MTMD_STATE_V7, "FAIL  out_type: upstream offset 88 size 4 != localm offset 80"),
+    ("state_v7", _MTMD_STATE_V6, "FAIL  size: upstream 88 != localm 96"),
+])
+def test_each_delivery_binding_fails_against_its_neighbours_headers(
+        bound, text, want, monkeypatch, capsys):
+    binding = abichk._localm_speech_binding(bound)
+    monkeypatch.setattr(abichk, "_localm_speech_binding", lambda interface: binding)
+    assert abichk.check_speech(text, "fixture", set()) > 0
+    out = capsys.readouterr().out
+    assert "FAIL  fields differ" in out and want in out
+
+
+def test_the_state_v7_audio_info_and_gen_input_are_checked(monkeypatch, capsys):
+    v6 = abichk._localm_speech_binding("state_v6")
+    v7_signatures = abichk._localm_speech_binding("state_v7")[1]
+    monkeypatch.setattr(abichk, "_localm_speech_binding",
+                        lambda interface: (v6[0], v7_signatures))
+    assert abichk.check_speech(_MTMD_STATE_V7, "fixture", set()) > 0
+    out = capsys.readouterr().out
+    assert "FAIL  size: upstream 32 != localm 24" in out
+    assert "FAIL  size: upstream 96 != localm 72" in out
+
+
+def test_an_unknown_field_in_a_state_v3_family_helper_input_fails(capsys):
+    anchor = _V6_SPEAKER_REF_TEXT_LINE
+    grown = _MTMD_STATE_V6.replace(anchor, anchor + "    const char * style;\n")
+    assert grown != _MTMD_STATE_V6
+    assert abichk._header_speech_interface(grown) == "state_v6"
+    assert abichk.check_speech(grown, "fixture", set()) > 0
+    out = capsys.readouterr().out
+    assert "FAIL  fields differ" in out and "style" in out
 
 
 def test_the_state_binding_fails_against_the_state_v2_headers(monkeypatch, capsys):
@@ -1084,6 +1197,7 @@ def offline_main(monkeypatch):
                         lambda h: next(ctx_layouts))
     monkeypatch.setattr(abichk, "_check", lambda *a: 0)
     monkeypatch.setattr(abichk, "_check_enum", lambda *a: 0)
+    monkeypatch.setattr(abichk, "_check_bound_functions", lambda *a: 0)
     fetched = []
 
     def run(argv, headers):
@@ -1099,21 +1213,15 @@ def offline_main(monkeypatch):
 
 def test_the_default_run_checks_every_speech_interface(offline_main):
     refs = abichk.MTMD_SPEECH_REFS
-    assert offline_main([], {refs["legacy"]: _MTMD_LEGACY,
-                             refs["state"]: _MTMD_STATE,
-                             refs["state_v2"]: _MTMD_STATE_V2,
-                             refs["state_v3"]: _MTMD_STATE_V3,
-                             refs["state_v4"]: _MTMD_STATE_V4}) == 0
+    assert offline_main([], {refs[i]: text for text, i in _SPEECH_FIXTURES}) == 0
     assert sorted(offline_main.fetched) == sorted(refs.values())
 
 
 def test_the_default_run_fails_when_an_interface_goes_unchecked(offline_main, capsys):
     refs = abichk.MTMD_SPEECH_REFS
-    assert offline_main([], {refs["legacy"]: _MTMD_STATE,
-                             refs["state"]: _MTMD_STATE,
-                             refs["state_v2"]: _MTMD_STATE_V2,
-                             refs["state_v3"]: _MTMD_STATE_V3,
-                             refs["state_v4"]: _MTMD_STATE_V4}) == 1
+    headers = {refs[i]: text for text, i in _SPEECH_FIXTURES}
+    headers[refs["legacy"]] = _MTMD_STATE
+    assert offline_main([], headers) == 1
     assert "expected to check every speech generation interface" in (
         capsys.readouterr().out)
 
@@ -1125,3 +1233,262 @@ def test_a_ref_run_checks_the_speech_binding_at_that_ref(offline_main, monkeypat
     assert offline_main(["--ref", "b99999"], {"b99999": _MTMD_STATE}) == 1
     assert offline_main.fetched == ["b99999"]
     assert "upstream takes 4 argument(s)" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+#  Bound functions                                                             #
+# --------------------------------------------------------------------------- #
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Every function upstream b12347 removed from llama.h (8ca5a8008b, "llama : prune").
+_REMOVED_AT_B12347 = frozenset({
+    "llama_load_model_from_file", "llama_free_model", "llama_new_context_with_model",
+    "llama_n_ctx_train", "llama_n_embd", "llama_n_layer", "llama_n_head", "llama_n_vocab",
+    "llama_get_state_size", "llama_copy_state_data", "llama_set_state_data",
+    "llama_load_session_file", "llama_save_session_file", "llama_set_warmup",
+    "llama_token_get_text", "llama_token_get_score", "llama_token_get_attr",
+    "llama_token_is_eog", "llama_token_is_control", "llama_token_bos", "llama_token_eos",
+    "llama_token_eot", "llama_token_cls", "llama_token_sep", "llama_token_nl",
+    "llama_token_pad", "llama_add_bos_token", "llama_add_eos_token",
+    "llama_token_fim_pre", "llama_token_fim_suf", "llama_token_fim_mid",
+    "llama_token_fim_pad", "llama_token_fim_rep", "llama_token_fim_sep",
+    "llama_vocab_cls", "llama_sampler_init_grammar_lazy",
+})
+
+_LLAMA_H_FUNCTIONS = """
+#define LLAMA_API __declspec(dllimport)
+#define DEPRECATED(func, hint) func __attribute__((deprecated(hint)))
+extern "C" {
+    typedef bool (*llama_progress_callback)(float progress, void * user_data);
+    struct llama_model_params {
+        llama_progress_callback progress_callback;
+    };
+    // LLAMA_API void llama_only_in_a_comment(void);
+    LLAMA_API struct llama_model * llama_model_load_from_file(
+                             const char * path_model,
+              struct llama_model_params   params);
+    LLAMA_API void llama_model_free(struct llama_model * model);
+    #if defined(LLAMA_SHARED)
+    #    define LLAMA_EXPORT LLAMA_API
+    #endif
+    #define LLAMA_HELPER(x) llama_from_a_macro(x)
+    DEPRECATED(LLAMA_API int32_t llama_decode(
+            struct llama_context * ctx,
+              struct llama_batch   batch),
+            "use llama_vocab_n_tokens() instead");
+    LLAMA_API DEPRECATED(size_t llama_get_state_size(struct llama_context * ctx),
+        "use llama_state_get_size instead");
+    LLAMA_API int32_t llama_vocab_n_tokens(const struct llama_vocab * vocab);
+    LLAMA_API llama_token llama_vocab_bos(const struct llama_vocab * vocab);
+    LLAMA_ATTRIBUTE_FORMAT(2, 3)
+    LLAMA_API void llama_formatted(int level, const char * fmt, ...);
+}
+"""
+
+
+def _bound(**names):
+    """BoundFunction map from name=required."""
+    return {n: abichk.BoundFunction(n, req, (f"localm/x.py:{i}",))
+            for i, (n, req) in enumerate(names.items(), 1)}
+
+
+def test_declared_functions_reads_prototypes_and_deprecations():
+    declared = abichk.declared_functions(_LLAMA_H_FUNCTIONS)
+    assert declared == {
+        "llama_model_load_from_file": False,
+        "llama_model_free": False,
+        "llama_decode": True,
+        "llama_get_state_size": True,
+        "llama_vocab_n_tokens": False,
+        "llama_vocab_bos": False,
+        "llama_formatted": False,
+    }
+
+
+def test_a_bound_function_the_headers_lack_fails(capsys):
+    bound = _bound(llama_model_load_from_file=True, llama_load_model_from_file=True)
+    assert abichk.check_functions(bound, {"llama": _LLAMA_H_FUNCTIONS}, "fixture") == 1
+    out = capsys.readouterr().out
+    assert "FAIL  llama_load_model_from_file is not declared" in out
+    assert "llama_model_load_from_file is not declared" not in out
+
+
+def test_every_function_declared_passes():
+    bound = _bound(llama_model_load_from_file=True, llama_model_free=True,
+                   llama_vocab_n_tokens=True)
+    assert abichk.check_functions(bound, {"llama": _LLAMA_H_FUNCTIONS}, "fixture") == 0
+
+
+def test_a_probed_function_the_headers_lack_is_a_note(capsys):
+    bound = _bound(llama_model_free=True, llama_model_has_mtp=False)
+    assert abichk.check_functions(bound, {"llama": _LLAMA_H_FUNCTIONS}, "fixture") == 0
+    assert "NOTE  llama_model_has_mtp is probed for" in capsys.readouterr().out
+
+
+def test_a_probed_function_the_pin_declared_and_the_ref_lost_fails(capsys):
+    bound = _bound(llama_model_free=True, llama_vocab_bos=False)
+    later = _LLAMA_H_FUNCTIONS.replace(
+        "LLAMA_API llama_token llama_vocab_bos(const struct llama_vocab * vocab);", "")
+    assert later != _LLAMA_H_FUNCTIONS
+    assert abichk.check_functions(bound, {"llama": later}, "later",
+                                  {"llama": _LLAMA_H_FUNCTIONS}) == 1
+    assert "FAIL  llama_vocab_bos was declared at the pin and is gone" in (
+        capsys.readouterr().out)
+
+
+def test_a_deprecated_function_is_noted_and_collected(capsys):
+    deprecated = []
+    bound = _bound(llama_decode=True)
+    assert abichk.check_functions(bound, {"llama": _LLAMA_H_FUNCTIONS}, "fixture",
+                                  deprecated=deprecated) == 0
+    assert deprecated == ["llama_decode (fixture)"]
+    assert "NOTE  llama_decode is DEPRECATED upstream" in capsys.readouterr().out
+
+
+def test_a_group_without_headers_is_not_checked():
+    bound = _bound(llama_model_free=True, mtmd_init_from_file=True)
+    assert abichk.check_functions(bound, {"llama": _LLAMA_H_FUNCTIONS}, "fixture") == 0
+
+
+def test_nothing_checked_fails(capsys):
+    assert abichk.check_functions(_bound(mtmd_init_from_file=True),
+                                  {"llama": _LLAMA_H_FUNCTIONS}, "fixture") == 1
+    assert "no bound function was checked" in capsys.readouterr().out
+
+
+def test_the_scan_finds_the_bindings_localm_makes():
+    bound = abichk.bound_functions(_REPO_ROOT)
+    for name in ("llama_model_load_from_file", "llama_model_free",
+                 "llama_init_from_model", "llama_decode", "llama_vocab_n_tokens",
+                 "llama_vocab_bos", "llama_vocab_eos", "mtmd_init_from_file",
+                 "mtmd_helper_gen_audio_init", "mtmd_support_audio",
+                 "llama_model_default_params"):
+        assert bound[name].required, name
+    for name in ("llama_model_has_mtp", "llama_kv_cache_seq_rm", "ggml_backend_dev_count",
+                 "llama_set_embeddings_nextn"):
+        assert not bound[name].required, name
+    assert not any(site.startswith("localm/media/")
+                   for f in bound.values() for site in f.sites)
+
+
+def test_a_binding_is_guarded_only_by_a_probe_in_its_own_function(tmp_path):
+    pkg = tmp_path / "localm"
+    pkg.mkdir()
+    (pkg / "binding.py").write_text(
+        "def available(lib):\n"
+        "    return hasattr(lib, 'llama_a') and hasattr(lib, 'llama_b')\n"
+        "\n"
+        "def a(lib):\n"
+        "    return _bind('llama_a')\n"
+        "\n"
+        "def b(lib):\n"
+        "    if hasattr(lib, 'llama_b'):\n"
+        "        return _bind('llama_b')\n"
+        "    return None\n", encoding="utf-8")
+    bound = abichk.bound_functions(tmp_path)
+    assert bound["llama_a"].required
+    assert not bound["llama_b"].required
+
+
+def test_a_name_in_a_deprecation_hint_is_not_a_declaration():
+    declared = abichk.declared_functions(
+        'DEPRECATED(MTMD_API int32_t mtmd_encode(void * ctx), "use mtmd_encode_chunk() instead");\n'
+        "MTMD_API int32_t mtmd_encode_chunk(void * ctx);\n")
+    assert declared == {"mtmd_encode": True, "mtmd_encode_chunk": False}
+
+
+def test_localm_binds_none_of_the_functions_upstream_pruned():
+    bound = abichk.bound_functions(_REPO_ROOT)
+    assert sorted(_REMOVED_AT_B12347 & set(bound)) == []
+
+
+def test_the_real_bindings_fail_against_a_header_missing_one(capsys):
+    bound = abichk.bound_functions(_REPO_ROOT)
+    required = sorted(n for n, f in bound.items() if f.required and n.startswith("llama_"))
+    header = "".join(f"LLAMA_API void {n}(void);\n" for n in required[1:])
+    assert abichk.check_functions(bound, {"llama": header}, "fixture") == 1
+    assert f"FAIL  {required[0]} is not declared" in capsys.readouterr().out
+
+
+@pytest.fixture
+def offline_functions(monkeypatch):
+    """main() with the struct, enum and speech halves stubbed, so the bound
+    function check decides; *headers* maps ref -> llama.h text."""
+    layouts = iter(["v1", "v2", "v3", "v3", "v3"] * 4)
+    ctx_layouts = iter(["v1", "v2", "v2", "v3", "v4"] * 4)
+    monkeypatch.setattr(abichk, "_fetch_header", lambda ref: "")
+    monkeypatch.setattr(abichk, "_header_model_params_layout", lambda h: next(layouts))
+    monkeypatch.setattr(abichk, "_header_context_params_layout",
+                        lambda h: next(ctx_layouts))
+    monkeypatch.setattr(abichk, "_check", lambda *a: 0)
+    monkeypatch.setattr(abichk, "_check_enum", lambda *a: 0)
+    monkeypatch.setattr(abichk, "_fetch_mtmd_headers", lambda ref: "")
+    monkeypatch.setattr(abichk, "check_speech",
+                        lambda text, label, seen: seen.update(abichk.MTMD_SPEECH_REFS) or 0)
+    monkeypatch.setattr(abichk, "bound_functions",
+                        lambda root: _bound(llama_model_free=True, llama_vocab_bos=False))
+    fetched = []
+
+    def run(argv, headers):
+        def fetch(ref):
+            fetched.append(ref)
+            return {"llama": headers[ref]}
+        monkeypatch.setattr(abichk, "_fetch_function_headers", fetch)
+        monkeypatch.setattr("sys.argv", ["check_llama_abi.py", *argv])
+        return abichk.main()
+    run.fetched = fetched
+    return run
+
+
+def _pin():
+    import sys
+    sys.path.insert(0, str(_REPO_ROOT / "scripts"))
+    import check_llama_pin
+    return check_llama_pin.pinned_tag()
+
+
+def test_the_default_run_checks_functions_at_the_pin(offline_functions, capsys):
+    pin = _pin()
+    assert offline_functions([], {pin: _LLAMA_H_FUNCTIONS}) == 0
+    assert offline_functions.fetched == [pin]
+    gone = _LLAMA_H_FUNCTIONS.replace("llama_model_free", "llama_model_freed")
+    assert offline_functions([], {pin: gone}) == 1
+    assert "FAIL  llama_model_free is not declared" in capsys.readouterr().out
+
+
+def test_a_ref_run_checks_functions_at_the_ref_against_the_pin(offline_functions,
+                                                                 capsys):
+    pin = _pin()
+    later = _LLAMA_H_FUNCTIONS.replace(
+        "LLAMA_API llama_token llama_vocab_bos(const struct llama_vocab * vocab);", "")
+    assert offline_functions(["--ref", "b99999"],
+                             {pin: _LLAMA_H_FUNCTIONS, "b99999": later}) == 1
+    assert offline_functions.fetched == [pin, "b99999"]
+    assert "llama_vocab_bos was declared at the pin and is gone" in (
+        capsys.readouterr().out)
+
+
+class TestBoundFunctionsAreExportedByTheRuntime:
+    """Every function localm requires is exported by the provisioned runtime
+    (the pinned build in the native ABI drift job)."""
+
+    def test_every_required_llama_function_is_exported(self):
+        from tests._real_gguf import require_native_runtime
+        require_native_runtime()
+        from localm.inference.backends.llamacpp._loader import load_lib
+        lib = load_lib()
+        bound = abichk.bound_functions(_REPO_ROOT)
+        missing = sorted(n for n, f in bound.items()
+                         if f.required and n.startswith("llama_") and not hasattr(lib, n))
+        assert missing == []
+
+    def test_every_required_mtmd_function_is_exported(self):
+        from tests._real_gguf import require_native_runtime
+        require_native_runtime()
+        from localm.inference.backends.llamacpp.mtmd import _load_lib
+        lib = _load_lib()
+        bound = abichk.bound_functions(_REPO_ROOT)
+        missing = sorted(n for n, f in bound.items()
+                         if f.required and n.startswith("mtmd_") and not hasattr(lib, n))
+        assert missing == []

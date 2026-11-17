@@ -29,7 +29,7 @@ from typing import Optional
 #
 # Also the ceiling for main_gpu_index: both values land in the same
 # ctypes.c_int32 main_gpu field (llamacpp/_structs.py) before
-# llama_load_model_from_file, and discover.resolve_main_gpu_index re-applies
+# llama_model_load_from_file, and discover.resolve_main_gpu_index re-applies
 # this ceiling at read time too.
 MAX_GPU_SPLIT_INDEX = 127
 

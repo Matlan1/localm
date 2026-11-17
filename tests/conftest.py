@@ -789,6 +789,28 @@ def _isolate_localm_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_home_bound_work_left_running(request):
+    """Fail the test, by name, that ends with tracked background work
+    (``localm.config.home_bound``) it started still running.
+
+    At teardown, before the test's monkeypatches are undone, waits up to
+    ``tests._home_bound_guard.WAIT_SECONDS`` for every tracked call that started
+    during the test, then fails naming each one still running. Calls that were
+    already running when the test started are not counted against it. See
+    tests/test_background_home_bound.py."""
+    from localm import config
+    from tests._home_bound_guard import describe, unfinished_home_bound_runs
+    before = set(config.home_bound_runs())
+    yield
+    left = unfinished_home_bound_runs(before)
+    if left:
+        pytest.fail(f"{request.node.nodeid} left background work running that "
+                    f"writes into its LOCALM_HOME:\n{describe(left)}\n"
+                    "Wait for it in the test, or stop it, before the test ends.",
+                    pytrace=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_owner_key_env(monkeypatch):
     """Every test starts in open mode: the invoking shell's LOCALM_API_KEY is not visible to it."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)

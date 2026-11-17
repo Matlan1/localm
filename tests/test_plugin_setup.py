@@ -31,6 +31,11 @@ def home_env(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "MODELS_DIR", tmp_path / "models")
     monkeypatch.setattr(cfg, "CONFIG_FILE", tmp_path / "config.json")
     monkeypatch.setattr(cfg, "REGISTRY_FILE", tmp_path / "registry.json")
+    # Installing voice (--all) runs its on_install hook, which prefetches the
+    # Whisper model inline in this app-free process: stub it, no network here.
+    import localm.voice as voice
+    monkeypatch.setattr(voice, "prefetch_stt_model",
+                        lambda allow_download=None, name=None: (False, "stubbed in tests"))
     return tmp_path
 
 

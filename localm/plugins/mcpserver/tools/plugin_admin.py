@@ -51,6 +51,8 @@ def build() -> dict[str, dict]:
             mgr, lambda m: m.set_installed_state(plugin, True), plugin=plugin)
         if err is not None:
             return err
+        note = mgr.pop_install_note(plugin)
+        note_line = f"\n{note}" if note else ""
         dep_result = None
         with _quiet_stdout():
             with_deps = args.get("with_deps")
@@ -72,8 +74,10 @@ def build() -> dict[str, dict]:
             failed = ", ".join(dep_result.failed) or "see error"
             return _text_result(
                 f"Plugin '{plugin}' installed and enabled, but its dependencies "
-                f"failed to install ({failed}): {dep_result.error}", is_error=True)
-        return _text_result(f"Plugin '{plugin}' successfully installed and enabled.")
+                f"failed to install ({failed}): {dep_result.error}{note_line}",
+                is_error=True)
+        return _text_result(
+            f"Plugin '{plugin}' successfully installed and enabled.{note_line}")
 
     def enable_plugin(args: dict) -> dict:
         plugin = args.get("plugin", "")
