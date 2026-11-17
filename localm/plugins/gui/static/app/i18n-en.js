@@ -2800,6 +2800,9 @@ export const I18N_EN = {
   "settings.bug.previewLabel": "Bug report to send",
   "settings.bug.confirmSendButton": "Send this report",
   "settings.bug.cancelSendButton": "Don't send",
+  "settings.bug.sendAnywayButton": "Send anyway",
+  "settings.bug.sendAnywayHelp":
+    "Network access is off. Send anyway makes one connection to the bug-report server to send this report only. Network access stays off.",
   "settings.bug.reviewPrompt": "Saved: {where}  -  review it below, then press Send this report.",
   "settings.bug.reviewUnavailable": "Saved: {where}  -  it could not be loaded for review, so it was not sent.",
   "settings.bug.notSent": "Not sent. The report is saved: {where}",

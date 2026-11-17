@@ -543,7 +543,7 @@ def test_endpoint_uploads_on_request(monkeypatch):
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
     monkeypatch.setattr(bugreport, "upload_report",
-                        lambda title, body: {"url": "https://github.com/x/localm/issues/12"})
+                        lambda title, body, **kw: {"url": "https://github.com/x/localm/issues/12"})
     saved, r = _save_and_send(create_app(_engine()), {"description": "the thing broke"})
     assert r.status_code == 200
     data = r.json()
@@ -605,7 +605,7 @@ def test_endpoint_upload_failure_is_surfaced_not_hidden(monkeypatch):
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
 
-    def boom(title, body):
+    def boom(title, body, **kw):
         raise bugreport.LocalmError("could not reach the bug-report server",
                                     reason="timed out")
 

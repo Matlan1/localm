@@ -273,6 +273,76 @@ test("a send refused because network access is off offers Download but not Retry
   assert.match(doc.getElementById("bug-result").textContent, /Network access is off/);
   assert.equal(doc.getElementById("bug-retry").hidden, true, "a retry would be refused again");
   assert.equal(doc.getElementById("bug-download").hidden, false, "Download revealed");
+  assert.equal(doc.getElementById("bug-anyway").hidden, true,
+    "no Send anyway when the server does not offer it");
+});
+
+const NET_OFF = {
+  uploaded: false, upload_stage: "network_off",
+  upload_message: "Network access is off (net_mode=off), so the report was not sent.",
+  upload_error: "Network access is off (net_mode=off), so the report was not sent.",
+  maintainer: "owner@example.com", can_send_anyway: true,
+};
+
+test("Send anyway is offered in place for a network-off refusal and sends that one report", async () => {
+  const calls = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeSendFetch(calls, [
+    NET_OFF,
+    { uploaded: true, issue_url: "https://github.com/Matlan1/localm/issues/7" },
+  ]) });
+  const doc = window.document;
+  doc.getElementById("bug-desc").value = "network is off";
+  doc.getElementById("bug-upload").click();
+  await flush();
+  doc.getElementById("bug-confirm-send").click();
+  await flush();
+  const box = doc.getElementById("bug-anyway");
+  assert.equal(box.hidden, false, "Send anyway is shown next to the refusal");
+  assert.match(box.textContent, /one connection to the bug-report server/);
+  assert.match(box.textContent, /Network access stays off/);
+  assert.deepEqual(calls[1].body, { filename: "bug-y.md", sha256: SAVED.report_sha256 },
+    "the first send carries no send_anyway");
+
+  doc.getElementById("bug-send-anyway").click();
+  await flush();
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls[2].body,
+    { filename: "bug-y.md", sha256: SAVED.report_sha256, send_anyway: true },
+    "Send anyway sends the same reviewed report with the one-time choice");
+  assert.match(doc.getElementById("bug-result").textContent, /issues\/7/);
+  assert.equal(box.hidden, true, "the offer is gone once sent");
+  assert.equal(doc.getElementById("bug-review").hidden, true);
+});
+
+test("Send anyway is not shown to a caller the server does not offer it to", async () => {
+  const calls = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeSendFetch(calls, [
+    { ...NET_OFF, can_send_anyway: false },
+  ]) });
+  const doc = window.document;
+  doc.getElementById("bug-desc").value = "network is off";
+  doc.getElementById("bug-upload").click();
+  await flush();
+  doc.getElementById("bug-confirm-send").click();
+  await flush();
+  assert.equal(doc.getElementById("bug-anyway").hidden, true);
+});
+
+test("Don't send after a network-off refusal hides Send anyway", async () => {
+  const calls = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeSendFetch(calls, [NET_OFF]) });
+  const doc = window.document;
+  doc.getElementById("bug-desc").value = "network is off";
+  doc.getElementById("bug-upload").click();
+  await flush();
+  doc.getElementById("bug-confirm-send").click();
+  await flush();
+  doc.getElementById("bug-cancel-send").click();
+  await flush();
+  assert.equal(doc.getElementById("bug-anyway").hidden, true);
+  doc.getElementById("bug-send-anyway").click();
+  await flush();
+  assert.equal(calls.length, 2, "nothing is sent once the review is closed");
 });
 
 test("R47: Retry re-sends the SAME reviewed report and Download hands back its markdown", async () => {

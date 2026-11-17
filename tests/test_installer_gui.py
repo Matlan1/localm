@@ -2033,6 +2033,44 @@ class TestReportProblem:
                         f"--send-saved {saved}"]
         assert not [line for line in logged if line.startswith("SAVED_REPORT=")]
 
+    def _net_off_reporter(self, gui):
+        script = gui.reporter_script()
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text(
+            "import sys\nprint('REPORTER', ' '.join(sys.argv[1:]))\n"
+            "if '--save-only' in sys.argv:\n    print('SAVED_REPORT=' + sys.argv[0] + '.md')\n"
+            "elif '--send-anyway' not in sys.argv:\n    sys.exit(3)\n",
+            encoding="utf-8")
+        return str(script) + ".md"
+
+    @pytest.mark.parametrize("anyway", [True, False])
+    def test_network_off_asks_to_send_anyway_and_defaults_to_no(self, gui, anyway):
+        saved = self._net_off_reporter(gui)
+        asked, logged = [], []
+
+        def confirm(text, default):
+            asked.append((text, default))
+            return anyway if len(asked) == 3 else True
+        code = gui.report_problem("s", "d", confirm, logged.append)
+        assert len(asked) == 3
+        assert "Send this one report anyway?" in asked[2][0]
+        assert "Network access stays off" in asked[2][0]
+        assert asked[2][1] is False
+        runs = [line for line in logged if line.startswith("REPORTER")]
+        if anyway:
+            assert code == 0
+            assert runs[-1] == f"REPORTER --summary s --detail d --send-saved {saved} --send-anyway"
+        else:
+            assert code == 3
+            assert not [line for line in runs if "--send-anyway" in line]
+
+    def test_the_net_off_exit_code_matches_the_reporter(self, gui):
+        path = _REPO_ROOT / "scripts" / "report_issue.py"
+        spec = importlib.util.spec_from_file_location("report_issue_exit_pin", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        assert gui._NET_OFF_EXIT == mod.NET_OFF_EXIT
+
     def test_saved_but_not_sent_without_the_second_yes(self, gui):
         self._reporter(gui)
         answers = iter([True, False])

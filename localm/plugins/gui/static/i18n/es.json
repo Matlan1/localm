@@ -1722,6 +1722,8 @@
   "settings.avatars.yourIcon": "Tu icono",
   "settings.bug.autoRetryLabel": "Reintentar automáticamente si se alcanza el límite de envíos",
   "settings.bug.cancelSendButton": "No enviar",
+  "settings.bug.sendAnywayButton": "Enviar de todos modos",
+  "settings.bug.sendAnywayHelp": "El acceso a la red está desactivado. Enviar de todos modos abre una conexión con el servidor de informes de errores solo para enviar este informe. El acceso a la red sigue desactivado.",
   "settings.bug.confirmSendButton": "Enviar este informe",
   "settings.bug.couldNotSend": "No se pudo enviar: {message}  El informe está guardado{whereSuffix}: reinténtalo, descárgalo o envíalo por correo a {maintainer}.",
   "settings.bug.couldNotSendToast": "No se pudo enviar: {message}",

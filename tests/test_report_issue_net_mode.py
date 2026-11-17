@@ -322,8 +322,52 @@ def test_off_sends_nothing_and_says_how_to_turn_it_on(home, monkeypatch, capsys)
     assert sent == []
     assert rc == 1
     assert REFUSAL in out
+    assert "--send-anyway" in out
     assert asked == []
     assert list((ri.REPO_ROOT / "home" / "bug-reports").glob("bug-*.md"))
+
+
+@pytest.mark.parametrize("answer, sends", [("y", True), ("yes", True), ("", False),
+                                           ("n", False)])
+def test_off_at_a_terminal_asks_to_send_anyway_and_defaults_to_no(
+        home, monkeypatch, capsys, answer, sends):
+    (home / "config.json").write_text('{"net_mode": "off"}', encoding="utf-8")
+    asked = _tty(monkeypatch, True, [answer])
+    sent = _sends(monkeypatch)
+    rc = ri.main(["--summary", "x", "--detail", "d"])
+    out = capsys.readouterr().out
+    assert len(sent) == (1 if sends else 0)
+    assert rc == 0
+    assert REFUSAL in out
+    assert ri.SEND_ANYWAY_EFFECT in out
+    assert asked == ["  Send this one report anyway? [y/N]: "]
+    assert json.loads((home / "config.json").read_text(encoding="utf-8")) == {
+        "net_mode": "off"}
+
+
+def test_off_with_send_anyway_sends_once_without_asking(home, monkeypatch, capsys):
+    (home / "config.json").write_text('{"net_mode": "off"}', encoding="utf-8")
+    asked = _tty(monkeypatch, False)
+    sent = _sends(monkeypatch)
+    rc = ri.main(["--send-anyway", "--summary", "x"])
+    out = capsys.readouterr().out
+    assert len(sent) == 1
+    assert rc == 0
+    assert asked == []
+    assert "Sent to the maintainer" in out
+    assert (home / "config.json").read_text(encoding="utf-8") == '{"net_mode": "off"}'
+
+
+def test_send_saved_with_network_off_exits_net_off_unless_send_anyway(
+        home, monkeypatch, tmp_path):
+    (home / "config.json").write_text('{"net_mode": "off"}', encoding="utf-8")
+    sent = _sends(monkeypatch)
+    saved = tmp_path / "bug-1.md"
+    saved.write_text("# localm bug report: x\n", encoding="utf-8")
+    assert ri.main(["--send-saved", str(saved)]) == ri.NET_OFF_EXIT
+    assert sent == []
+    assert ri.main(["--send-saved", str(saved), "--send-anyway"]) == 0
+    assert len(sent) == 1
 
 
 @pytest.mark.parametrize("mode", ["ask", "allow"])
@@ -427,6 +471,16 @@ def test_powershell_off_sends_nothing(tmp_path, recorder):
     assert hits == []
     assert rc == 1, out
     assert REFUSAL in out
+    assert "--send-anyway" in out
+
+
+def test_powershell_off_with_send_anyway_sends_once(tmp_path, recorder):
+    rc, out, hits = _ps1_case(tmp_path, recorder, '{"net_mode": "off"}', "--send-anyway")
+    assert hits == ["/report"], out
+    assert rc == 0, out
+    assert "Sent to the maintainer" in out
+    assert (tmp_path / "data" / "config.json").read_text(encoding="utf-8") == (
+        '{"net_mode": "off"}')
 
 
 @pytest.mark.parametrize("config_text", [None, "{not json"])
@@ -447,9 +501,9 @@ def test_powershell_ask_and_allow_send(tmp_path, recorder, mode):
     assert "Sent to the maintainer" in out
 
 
-def _sh_case(tmp_path, config_text, answers):
+def _sh_case(tmp_path, config_text, answers, *args):
     """Run report-issue.sh's curl fallback (its terminal check dropped) with a fake
-    curl that records a call, typing *answers*."""
+    curl that records a call, typing *answers*, passing *args*."""
     bash = shutil.which("bash")
     if not bash or "system32" in bash.lower() or not shutil.which("perl"):
         pytest.skip("no bash with perl on PATH")
@@ -475,18 +529,30 @@ def _sh_case(tmp_path, config_text, answers):
         [bash, "-c",
          'p="$(cygpath -u "$1" 2>/dev/null || printf %s "$1")"; '
          'export LOCALM_HOME="$(cygpath -u "$3" 2>/dev/null || printf %s "$3")"; '
-         'PATH="$p:$PATH"; cd "$2" && bash fallback.sh',
-         "_", fake.as_posix(), work.as_posix(), data.as_posix()],
+         'PATH="$p:$PATH"; w="$2"; shift 3; cd "$w" && bash fallback.sh "$@"',
+         "_", fake.as_posix(), work.as_posix(), data.as_posix(), *args],
         input="".join(a + "\n" for a in answers), capture_output=True, text=True,
         timeout=120, env=env)
     return proc.returncode, " ".join((proc.stdout + proc.stderr).split()), sink.exists()
 
 
-def test_bash_fallback_off_sends_nothing(tmp_path):
-    rc, out, sent = _sh_case(tmp_path, '{"net_mode": "off"}', ["x", "y"])
-    assert not sent, out
-    assert rc == 1, out
+@pytest.mark.parametrize("answer, sends", [("y", True), ("", False), ("n", False)])
+def test_bash_fallback_off_asks_to_send_anyway_and_defaults_to_no(tmp_path, answer,
+                                                                   sends):
+    rc, out, sent = _sh_case(tmp_path, '{"net_mode": "off"}', ["x", answer])
+    assert sent is sends, out
+    assert rc == 0, out
     assert REFUSAL in out
+    assert "Send this one report anyway? [y/N]" in out
+    assert "Send this to the maintainer now?" not in out
+
+
+def test_bash_fallback_off_with_send_anyway_sends_without_asking(tmp_path):
+    rc, out, sent = _sh_case(tmp_path, '{"net_mode": "off"}', ["x"], "--send-anyway")
+    assert sent, out
+    assert rc == 0, out
+    assert "Send this one report anyway?" not in out
+    assert "Send this to the maintainer now?" not in out
 
 
 @pytest.mark.parametrize("config_text", [None, "{not json"])
