@@ -298,7 +298,7 @@ def test_a_failed_download_ends_in_the_message(rig):
     (vc_runtime.ERROR_INSTALL_USEREXIT, "the installation was cancelled"),
     (vc_runtime.ERROR_INSTALL_FAILURE, "the installer failed (code 1603"),
     (vc_runtime.ERROR_INSTALL_ALREADY_RUNNING, "another installation is in progress"),
-    (vc_runtime.WAIT_TIMEOUT, "still running after 20 minutes"),
+    (vc_runtime.WAIT_TIMEOUT, "the installer was still running after 20 minutes"),
     (1714, "the installer exited with code 1714"),
     (vc_runtime.ERROR_SUCCESS_REBOOT_REQUIRED, "Windows needs a restart"),
     (vc_runtime.ERROR_SUCCESS, "the installer finished but the system folder still lacks it"),
