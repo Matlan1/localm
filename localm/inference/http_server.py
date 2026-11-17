@@ -3059,7 +3059,7 @@ async def get_engine(model_name: str | None, *, load: bool = True,
 
 
 def _add_vram_fields(result: dict, *, before, released, after, before_fresh: bool,
-                     before_scope=None, before_status=None) -> None:
+                     before_scope=None, before_status: str | None = None) -> None:
     """Add vram_freed/vram_before_bytes/vram_after_bytes to *result* when
     measurable (unchanged from before), plus an honest flag when the reading
     cannot be presented as current fact, rather than asserting a wrong
@@ -3098,12 +3098,13 @@ def _add_vram_fields(result: dict, *, before, released, after, before_fresh: boo
     result.update(vram_freed=released, vram_before_bytes=before, vram_after_bytes=after)
     reasons = []
     if not before_fresh:
-        what = {
+        notes: dict[str | None, str] = {
             GPU_PROBE_TIMEOUT: "the GPU probe timed out",
             GPU_PROBE_BUSY: "another GPU probe was still running (probe status busy)",
             GPU_PROBE_INCONCLUSIVE: ("the GPU probe could not ask every GPU source "
                                      "(probe status inconclusive)"),
-        }.get(before_status, "the GPU probe timed out or was busy")
+        }
+        what = notes.get(before_status, "the GPU probe timed out or was busy")
         reasons.append(
             f"{what} when this reading was taken, so it may reflect a stale "
             "cached value rather than the current state")

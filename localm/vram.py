@@ -495,7 +495,9 @@ class FreeReading(tuple):
     """``(free_bytes, fresh, scope)`` from :func:`_vram_free_reading`, with the
     probe status behind it as ``status`` (a ``discover.GPU_PROBE_*`` value)."""
 
-    def __new__(cls, free, fresh: bool, scope, status=None):
+    status: str | None
+
+    def __new__(cls, free, fresh: bool, scope, status: str | None = None):
         reading = super().__new__(cls, (free, fresh, scope))
         reading.status = status
         return reading
