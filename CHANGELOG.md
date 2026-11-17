@@ -11,6 +11,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Added
+- **Send a bug report anyway while Network access is off.** When a bug report is not sent because Network access is off, you can now send that one report anyway without changing the setting: Settings > Report a bug shows a "Send anyway" button next to the refusal, `localm bug-report` asks at its prompt or takes `--send-anyway`, and the standalone `report-issue` reporter asks at its prompt or takes `--send-anyway`. This makes one connection to the bug-report server for that report only, and Network access stays off. Only the owner can use it in the GUI.
+
+### Fixed
+- Saving a different speech model while the speech model was downloading no longer makes the finished download fail with "no model.bin snapshot is present".
+
 ## [0.3.4b3] - 2026-11-17
 
 ### Fixed
