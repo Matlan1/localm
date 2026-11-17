@@ -709,6 +709,9 @@ def runtime_failed(emit: Callable[[str], None], retry: str, detail: str) -> None
 #: The line scripts/report_issue.py --save-only ends with: this, then the saved path.
 _SAVED_REPORT_PREFIX = "SAVED_REPORT="
 
+#: The exit code of scripts/report_issue.py --send-saved when Network access is off.
+_NET_OFF_EXIT = 3
+
 
 def reporter_script() -> Path:
     """The standalone problem reporter of this clone, scripts/report_issue.py."""
@@ -721,7 +724,9 @@ def report_problem(summary: str, detail: str, confirm: Callable[[str, bool], boo
     console installers do: on yes, scripts/report_issue.py (stdlib only) builds
     the report and saves it without sending (``--save-only``), its output goes
     to *emit*, and a second question sends that saved file as it is
-    (``--send-saved``), so one report is saved. *confirm(text, default)* asks a
+    (``--send-saved``), so one report is saved. When Network access is off that
+    send is refused, and a third question (default no) sends it anyway
+    (``--send-anyway``). *confirm(text, default)* asks a
     yes/no question. Runs the reporter in a subprocess and waits for it, so
     call it off the window thread. Returns the reporter's last exit code, or
     None when nothing ran (no reporter, or the person declined)."""
@@ -762,7 +767,15 @@ def report_problem(summary: str, detail: str, confirm: Callable[[str, bool], boo
     if not confirm("The report above was saved on this computer. Send it to the "
                    "maintainer now?", True):
         return code
-    return reporter("--send-saved", saved[-1])
+    code = reporter("--send-saved", saved[-1])
+    if code != _NET_OFF_EXIT:
+        return code
+    if not confirm("Network access is off, so the report was not sent. Send this one "
+                   "report anyway? Sending anyway makes one connection to the "
+                   "bug-report server to send this report only. Network access stays "
+                   "off.", False):
+        return code
+    return reporter("--send-saved", saved[-1], "--send-anyway")
 
 
 def all_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:

@@ -1722,6 +1722,8 @@
   "settings.avatars.yourIcon": "Votre icône",
   "settings.bug.autoRetryLabel": "Réessayer automatiquement en cas de limite de débit",
   "settings.bug.cancelSendButton": "Ne pas envoyer",
+  "settings.bug.sendAnywayButton": "Envoyer quand même",
+  "settings.bug.sendAnywayHelp": "L'accès réseau est désactivé. Envoyer quand même ouvre une seule connexion au serveur de rapports de bogues pour envoyer ce rapport uniquement. L'accès réseau reste désactivé.",
   "settings.bug.confirmSendButton": "Envoyer ce rapport",
   "settings.bug.couldNotSend": "Envoi impossible : {message}  Le rapport est enregistré{whereSuffix} - réessayez, téléchargez-le ou envoyez-le par e-mail à {maintainer}.",
   "settings.bug.couldNotSendToast": "Envoi impossible : {message}",

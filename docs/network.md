@@ -293,9 +293,14 @@ coding agent's shell access, so you can grant one without the other.
   subject to the domain lists. With `net_mode` set to `off` it is refused before
   any connection opens, as are the issue list (`localm issues`) and the update
   download (the update check and download follow "Check for updates even when
-  network access is off" instead). The standalone `report-issue` reporter (for when
+  network access is off" instead). Where a report send is refused, you can send
+  that one report anyway: the GUI's "Send anyway" button (owner only), the
+  "Send this one report anyway?" question at a terminal prompt, or
+  `--send-anyway`. That makes one connection to the bug-report server for that
+  report and leaves `net_mode` off. The standalone `report-issue` reporter (for when
   localm cannot start) reads `LOCALM_NET_MODE` or `net_mode` from the data
-  directory's `config.json`: `off` sends nothing, and when `config.json` is
+  directory's `config.json`: `off` sends nothing unless you send that report
+  anyway as above, and when `config.json` is
   missing or cannot be read it asks before sending (and sends nothing when no
   one can answer).
 - **Requests to your ComfyUI instance.** ComfyUI has its own, narrower

@@ -14,7 +14,9 @@ endpoints are accepted, so an overridden proxy is visible rather than silent. A
 failed or declined send never reports success: it saves the report to a file and
 points at the maintainer email. It honours localm's Network access setting: with
 ``net_mode`` off (``LOCALM_NET_MODE`` or the data dir's ``config.json``) nothing is
-sent, and when the setting cannot be read the user is asked before anything is sent.
+sent unless the user sends that one report anyway (asked at a terminal, default no,
+or ``--send-anyway``), and when the setting cannot be read the user is asked before
+anything is sent.
 
 What it NEVER collects: environment variables (which can hold a key), config
 secrets, or chat/transcript content. Only OS / arch / Python, a few version
@@ -30,6 +32,9 @@ Optional flags used by the setup wiring:
   --yes             SEND immediately, skipping the confirm prompt (the preview
                     still prints to the console first, but does not gate the
                     send); for scripted/automated sends
+  --send-anyway     SEND immediately, also while Network access is off (one
+                    connection to the bug-report server for this report only;
+                    the setting stays off)
 """
 
 from __future__ import annotations
@@ -64,6 +69,18 @@ NET_OFF_REMEDY = ("Turn it on in Settings > Server & network > Network access, "
 
 NET_OFF_REFUSAL = ("Network access is off (net_mode=off), so the report was not sent. "
                    f"{NET_OFF_REMEDY}.")
+
+#: What sending anyway does, said wherever it is offered.
+SEND_ANYWAY_EFFECT = ("Sending anyway makes one connection to the bug-report server to "
+                      "send this report only. Network access stays off.")
+
+#: Names the flag after a refusal made with no one to ask.
+SEND_ANYWAY_OFFER = ("To send this one report anyway, run report-issue again with "
+                     f"--send-anyway. {SEND_ANYWAY_EFFECT}")
+
+#: The exit code of --send-saved when Network access is off and --send-anyway
+#: was not given.
+NET_OFF_EXIT = 3
 
 
 def _load_home_cfg():
@@ -751,12 +768,13 @@ def _timestamp() -> str:
 SAVED_REPORT_PREFIX = "SAVED_REPORT="
 
 
-def send_saved(path: Path, summary: str) -> int:
+def send_saved(path: Path, summary: str, send_anyway: bool = False) -> int:
     """Send the report saved at *path* as it is, titled *summary*: the second
     step of a caller that first had the report saved (no terminal) and then
-    asked whether to send it. Nothing new is built or saved. Network access off,
-    or a setting that cannot be read (no one here can confirm), sends nothing.
-    Returns 0 when it was sent, else 1."""
+    asked whether to send it. Nothing new is built or saved. Network access off
+    sends nothing and returns :data:`NET_OFF_EXIT` unless *send_anyway*; a
+    setting that cannot be read sends nothing unless *send_anyway* (no one here
+    can confirm). Returns 0 when it was sent, else 1."""
     try:
         body = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as e:
@@ -769,12 +787,12 @@ def send_saved(path: Path, summary: str) -> int:
               f"email it to {MAINTAINER_EMAIL}.")
         return 1
     mode, why = network_mode()
-    if mode == "off":
+    if mode == "off" and not send_anyway:
         print(f"  {NET_OFF_REFUSAL}")
         print(f"  The report is saved at {path}; email it to {MAINTAINER_EMAIL} if you "
               "prefer.")
-        return 1
-    if mode is None:
+        return NET_OFF_EXIT
+    if mode is None and not send_anyway:
         print(f"  localm's Network access setting could not be read: {why}. No one can "
               f"confirm sending here, so nothing was sent. The report is saved at {path}; "
               f"email it to {MAINTAINER_EMAIL}.")
@@ -802,11 +820,17 @@ def main(argv=None) -> int:
                          f"output is {SAVED_REPORT_PREFIX}<path>")
     ap.add_argument("--send-saved", default="",
                     help="send the report already saved at this path, without "
-                         "building or saving another one")
+                         "building or saving another one; exits "
+                         f"{NET_OFF_EXIT} when Network access is off")
+    ap.add_argument("--send-anyway", action="store_true",
+                    help="send the report now, also while Network access is off: "
+                         "one connection to the bug-report server for this report "
+                         "only; Network access stays off")
     args = ap.parse_args(argv)
 
     if args.send_saved:
-        return send_saved(Path(args.send_saved), args.summary.strip())
+        return send_saved(Path(args.send_saved), args.summary.strip(),
+                          send_anyway=args.send_anyway)
 
     interactive = stdin_is_interactive()
 
@@ -863,14 +887,33 @@ def main(argv=None) -> int:
         return 0
 
     mode, why = network_mode() if url else ("ask", "")
-    if mode == "off":
+    anyway = args.send_anyway
+    if mode == "off" and anyway:
+        print(f"  Network access is off; sending this report anyway (--send-anyway). "
+              f"{SEND_ANYWAY_EFFECT}")
+    elif mode == "off" and interactive and not args.yes:
+        print(f"  {NET_OFF_REFUSAL}")
+        print(f"  {SEND_ANYWAY_EFFECT}")
+        try:
+            ans = input("  Send this one report anyway? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+        if ans not in ("y", "yes"):
+            path = save_report(body, when)
+            where = str(path) if path else "the text above"
+            print(f"  Not sent. Saved at {where} - email it to {MAINTAINER_EMAIL} if "
+                  "you change your mind.")
+            return 0
+        anyway = True
+    elif mode == "off":
         path = save_report(body, when)
         where = str(path) if path else "the text above"
         print(f"  {NET_OFF_REFUSAL}")
+        print(f"  {SEND_ANYWAY_OFFER}")
         print(f"  The report is saved at {where}; email it to {MAINTAINER_EMAIL} if you "
               "prefer.")
         return 1
-    if mode is None:
+    if mode is None and not anyway:
         print(f"  localm's Network access setting could not be read: {why}. Sending "
               "connects to the destination above.")
         if not interactive:
@@ -892,7 +935,7 @@ def main(argv=None) -> int:
 
     # Confirm. Not a tty and not --yes: save only. A send confirmed above is not
     # asked again.
-    do_send = args.yes or mode is None
+    do_send = args.yes or anyway or mode is None
     if not do_send:
         if not interactive:
             path = save_report(body, when)

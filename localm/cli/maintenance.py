@@ -373,8 +373,12 @@ def _live_server_stall_stacks() -> str:
               help="Send it to the maintainer immediately via the hosted proxy - "
                    "no GitHub account needed. Works from any shell, interactive or "
                    "not (a script, a non-tty launcher, an SSH session).")
+@click.option("--send-anyway", "send_anyway", is_flag=True,
+              help="Send it immediately, as --send does, also with Network access "
+                   "off: one connection to the bug-report server for this report "
+                   "only. Network access stays off.")
 def bug_report_cmd(message: str, expected: str, happened: str,
-                   no_log: bool, send: bool) -> None:
+                   no_log: bool, send: bool, send_anyway: bool) -> None:
     """Generate an editable bug report and offer to send it to the maintainer.
 
     Three DISTINCT questions - what you were doing, what you expected, what
@@ -389,8 +393,9 @@ def bug_report_cmd(message: str, expected: str, happened: str,
     in-memory recent-activity log - never your API key, config secrets, or chat
     content), saves an editable markdown file, and offers to send it via the
     account-less hosted channel, email it, or hand it off yourself. Pass --send
-    to skip the menu and send it immediately. No GitHub account is ever
-    needed."""
+    to skip the menu and send it immediately, or --send-anyway to send it
+    immediately even while Network access is off (this report only; the
+    setting stays off). No GitHub account is ever needed."""
     from localm import bugreport
     from rich.markup import escape
     interactive = bugreport.stdin_is_interactive()
@@ -433,8 +438,8 @@ def bug_report_cmd(message: str, expected: str, happened: str,
         console.print("[yellow]Could not save a report file; you can still copy the "
                       "details above.[/yellow]")
     sent = bugreport.offer_to_send(summary, path, "", interactive=interactive,
-                                   auto_send=send)
-    if send and not sent:
+                                   auto_send=send, send_anyway=send_anyway)
+    if (send or send_anyway) and not sent:
         sys.exit(1)
 
 

@@ -184,7 +184,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/api/bug-report/send",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
-    async def send_bug_report_ep(body: dict):
+    async def send_bug_report_ep(body: dict, request: Request):
         """Upload a report the user has reviewed, as a GitHub issue via the
         configured proxy.
 
@@ -193,12 +193,23 @@ def register(app: FastAPI, ctx) -> None:
         file is uploaded only when its current text has that digest, so what is
         sent is the text the user was shown, without its closing edit note;
         the issue title is the report's own first heading.
+        ``send_anyway: true`` sends this one report while Network access is
+        off, with the setting left as it is; only the owner (open mode, or an
+        owner key or session) may send it, any other caller gets 403 before
+        anything is read or sent. A refusal because Network access is off
+        (``upload_stage`` ``network_off``) carries ``can_send_anyway``, True
+        for the owner.
         400 for a missing or invalid filename or digest, 404 when the file
         cannot be read, 409 when its text no longer matches the digest. A
         failed upload returns 200 with ``uploaded`` False and a diagnosed
         ``upload_stage``/``upload_message``, never success, and the file stays
         saved."""
         from localm import bugreport
+        is_owner = _hs.caller_is_operator(request)
+        send_anyway = body.get("send_anyway") is True
+        if send_anyway and not is_owner:
+            raise HTTPException(
+                403, "Only the owner can choose Send anyway for a bug report.")
         filename = body.get("filename")
         digest = body.get("sha256")
         if not isinstance(digest, str) or not digest:
@@ -219,7 +230,7 @@ def register(app: FastAPI, ctx) -> None:
         # Off the event loop: a blocking HTTPS POST to the upload proxy on
         # upload_report's own 15s socket timeout.
         def _upload():
-            return bugreport.upload_report(title, text)
+            return bugreport.upload_report(title, text, send_anyway=send_anyway)
 
         try:
             up = await run_in_threadpool_bounded(
@@ -241,6 +252,8 @@ def register(app: FastAPI, ctx) -> None:
             result["upload_stage"] = e.stage or "unknown"
             result["upload_message"] = e.hint or e.summary
             result["upload_error"] = format_localm_error(e)
+            if e.stage == "network_off":
+                result["can_send_anyway"] = is_owner
         except ThreadCallTimeout:
             # The offload's own budget, not upload_report's. Reported in the same
             # shape as every other upload failure rather than raised: the report is

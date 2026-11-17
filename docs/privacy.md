@@ -260,7 +260,13 @@ non-interactively), every standalone reporter (Python, PowerShell, and the
 `report-issue.sh` curl fallback used when there is no Python) treats that
 exactly like you said no: nothing is sent. The curl fallback also sends
 nothing when `perl`, which it needs to remove personal details, is missing.
-Every reporter follows Network access: with it off nothing is sent, and when
+Every reporter follows Network access: with it off nothing is sent unless you
+choose to send that one report anyway. Where the send is refused, the GUI
+shows a "Send anyway" button (to the owner only), `localm bug-report` and the
+standalone reporter ask "Send this one report anyway?" at their terminal prompt
+(no is the default), and both take `--send-anyway` for a run without a prompt.
+Sending anyway makes one connection to the bug-report server for that report
+only; Network access stays off and no setting is changed. When
 the standalone reporter cannot read the setting (no `config.json` in the data
 directory yet, or one it cannot parse) it asks before sending, with no as the
 default, and sends nothing without a terminal.
