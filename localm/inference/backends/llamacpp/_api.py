@@ -645,9 +645,10 @@ def llama_chat_apply_template(
 # upstream deprecated at b12470 (llama_batch_init, llama_batch_free,
 # llama_batch_get_one, llama_decode, llama_encode).
 
-# Backing arrays of each batch llama_batch_init made, by the address its ``pos``
-# field holds; llama_batch_free drops them. The value also records the
-# embedding row width the batch was made with.
+# Backing arrays of each batch llama_batch_init made, by the address of its
+# ``embd`` array, or of its ``token`` array when it has no embd (the fields a
+# caller does not repoint before freeing); llama_batch_free drops them. The
+# value also records the embedding row width the batch was made with.
 _BATCH_ARRAYS: dict = {}
 
 
@@ -693,18 +694,22 @@ def llama_batch_init(n_tokens: int, embd: int, n_seq_max: int) -> LlamaBatch:
     batch.n_seq_id = ctypes.cast(n_seq_id, ctypes.c_void_p)
     batch.seq_id = ctypes.cast(seq_ptrs, ctypes.c_void_p)
     batch.logits = ctypes.cast(logits, ctypes.c_void_p)
-    _BATCH_ARRAYS[ctypes.addressof(pos)] = (arrays, embd, n)
+    _BATCH_ARRAYS[ctypes.addressof(values)] = (arrays, embd)
     return batch
 
 
 def llama_batch_free(batch: LlamaBatch) -> None:
     """Release the arrays of a batch :func:`llama_batch_init` made."""
-    _BATCH_ARRAYS.pop(batch.pos or 0, None)
+    _BATCH_ARRAYS.pop(batch.embd or batch.token or 0, None)
 
 
 # llama_process_type
 LLAMA_PROCESS_TYPE_ENCODE = 0
 LLAMA_PROCESS_TYPE_DECODE = 1
+
+# llama_rope_type values whose embedding entries take GGML_MROPE_SECTIONS (4)
+# positions each: LLAMA_ROPE_TYPE_MROPE and LLAMA_ROPE_TYPE_IMROPE.
+_MROPE_TYPES = frozenset({8, 40})
 
 
 class LlamaEmbd(ctypes.Structure):
@@ -729,6 +734,8 @@ class _BatchExt:
     process: Any
     get_memory: Any
     seq_pos_max: Any
+    get_model: Any
+    rope_type: Any
 
 
 def _bind_batch_ext(lib) -> Optional[_BatchExt]:
@@ -740,7 +747,8 @@ def _bind_batch_ext(lib) -> Optional[_BatchExt]:
              "llama_batch_ext_add_embd", "llama_batch_ext_set_embd_token",
              "llama_batch_ext_set_embd_state", "llama_batch_ext_set_pos",
              "llama_batch_ext_set_output_logits", "llama_process",
-             "llama_get_memory", "llama_memory_seq_pos_max")
+             "llama_get_memory", "llama_memory_seq_pos_max", "llama_get_model",
+             "llama_model_rope_type")
     if not all(hasattr(lib, fn) for fn in names):
         return None
     vp, i32, b = ctypes.c_void_p, ctypes.c_int32, ctypes.c_bool
@@ -757,6 +765,8 @@ def _bind_batch_ext(lib) -> Optional[_BatchExt]:
     ext.process = _bind("llama_process", i32, vp, ctypes.c_int, vp)
     ext.get_memory = _bind("llama_get_memory", vp, vp)
     ext.seq_pos_max = _bind("llama_memory_seq_pos_max", i32, vp, i32)
+    ext.get_model = _bind("llama_get_model", vp, vp)
+    ext.rope_type = _bind("llama_model_rope_type", ctypes.c_int, vp)
     return ext
 
 
@@ -794,18 +804,21 @@ def _fill_batch_ext(ext: _BatchExt, handle: int, ctx, batch: LlamaBatch) -> Opti
     logits = ctypes.cast(batch.logits, ctypes.POINTER(ctypes.c_int8)) if batch.logits else None
     embd_addr = batch.embd or 0
     row_floats = 0
-    pos_entries = n
+    sections = 1
     if embd_addr:
-        record = _BATCH_ARRAYS.get(batch.pos or 0)
+        record = _BATCH_ARRAYS.get(embd_addr)
         if record is None or not record[1]:
             return "an embedding batch not made by llama_batch_init"
-        row_floats, pos_entries = record[1], record[2]
+        row_floats = record[1]
+        if tokens is None and int(ext.rope_type(ext.get_model(ctx))) in _MROPE_TYPES:
+            sections = 4
     row_bytes = row_floats * ctypes.sizeof(ctypes.c_float)
     pos_next: dict = {}
     memory = None
     one_pos = (ctypes.c_int32 * 4)()
     for i in range(n):
-        seqs = [seq_id[i][s] for s in range(n_seq_id[i])] if (seq_id and n_seq_id) else [0]
+        n_seqs = n_seq_id[i] if n_seq_id else 1
+        seqs = [seq_id[i][s] for s in range(n_seqs)] if seq_id else [0] * min(n_seqs, 1)
         if not seqs:
             return f"entry {i} names no sequence"
         if tokens is not None:
@@ -814,7 +827,8 @@ def _fill_batch_ext(ext: _BatchExt, handle: int, ctx, batch: LlamaBatch) -> Opti
             idx = ext.add_embd(handle, seqs[0],
                                LlamaEmbd(embd_addr + i * row_bytes, 1, row_floats))
         if idx < 0:
-            return f"entry {i} was refused ({idx}: 1 full, 2 invalid token, 3 invalid sequence)"
+            return (f"entry {i} was refused ({idx}: -1 full, -2 invalid token or "
+                    f"embedding, -3 invalid sequence)")
         for s in seqs[1:]:
             if not ext.add_seq(handle, idx, s):
                 return f"entry {i} could not join sequence {s}"
@@ -824,14 +838,10 @@ def _fill_batch_ext(ext: _BatchExt, handle: int, ctx, batch: LlamaBatch) -> Opti
                     or ext.set_embd_token(handle, idx, row)):
                 return f"entry {i} has an embedding row this context does not take"
         if pos is not None:
-            if tokens is not None:
-                one_pos[0] = pos[i]
-            else:
-                # An embedding entry takes one position per M-RoPE section,
-                # stored section-major; a single-section batch repeats it.
-                for j in range(4):
-                    k = j * n + i
-                    one_pos[j] = pos[k] if k < pos_entries else pos[i]
+            # An embedding entry of an M-RoPE model takes one position per
+            # section, stored section-major (pos[j * n + i]); any other entry one.
+            for j in range(sections):
+                one_pos[j] = pos[j * n + i]
         else:
             if memory is None:
                 memory = ext.get_memory(ctx)

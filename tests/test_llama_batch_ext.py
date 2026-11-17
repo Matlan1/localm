@@ -91,7 +91,8 @@ def test_batch_get_one_points_at_the_callers_tokens_only():
 class _Recorder:
     """An extended-batch API that records the entries it is given."""
 
-    def __init__(self, *, seq_pos_max=None, state_ok=True, refuse_at=None):
+    def __init__(self, *, seq_pos_max=None, state_ok=True, refuse_at=None, rope=0):
+        self.rope = rope
         self.entries: list = []
         self.seq_pos_max_by_seq = seq_pos_max or {}
         self.state_ok = state_ok
@@ -147,6 +148,12 @@ class _Recorder:
 
     def seq_pos_max(self, mem, seq):
         return self.seq_pos_max_by_seq.get(seq, -1)
+
+    def get_model(self, ctx):
+        return 0x30DE1
+
+    def rope_type(self, model):
+        return self.rope
 
     def process(self, ctx, kind, handle):
         self.processed = kind
@@ -264,7 +271,48 @@ def test_an_embedding_batch_adds_one_row_per_entry(recorder):
     finally:
         _api.llama_batch_free(b)
     assert [(e["embd"], e["pos"]) for e in recorder.entries] == [
-        ([1.0, 2.0], [0, 0, 0, 0]), ([3.0, 4.0], [1, 1, 1, 1])]
+        ([1.0, 2.0], [0, 0, 0, 0]), ([3.0, 4.0], [1, 0, 0, 0])]
+
+
+def test_an_mrope_embedding_batch_takes_its_positions_section_major(recorder):
+    """The caller of an M-RoPE embedding batch points ``pos`` at its own
+    4 x n array, as with the runtime's llama_batch_init."""
+    recorder.rope = 40                      # LLAMA_ROPE_TYPE_IMROPE
+    b = _api.llama_batch_init(2, 2, 1)
+    own_pos = (ctypes.c_int32 * 8)(10, 11, 20, 21, 30, 31, 40, 41)
+    try:
+        b.n_tokens = 2
+        b.pos = ctypes.cast(own_pos, ctypes.c_void_p)
+        nsi = ctypes.cast(b.n_seq_id, ctypes.POINTER(ctypes.c_int32))
+        nsi[0] = nsi[1] = 1
+        assert _api.llama_decode(0xC7, b) == 0
+    finally:
+        _api.llama_batch_free(b)
+    assert [e["pos"] for e in recorder.entries] == [[10, 20, 30, 40], [11, 21, 31, 41]]
+
+
+def test_an_embedding_batch_without_positions_continues_from_memory(recorder):
+    recorder.seq_pos_max_by_seq = {0: 4}
+    b = _api.llama_batch_init(2, 2, 1)
+    try:
+        b.n_tokens = 2
+        b.pos = None
+        b.n_seq_id = None
+        b.seq_id = None
+        b.logits = None
+        assert _api.llama_decode(0xC7, b) == 0
+    finally:
+        _api.llama_batch_free(b)
+    assert [(e["pos"][0], e["seqs"], e["out"]) for e in recorder.entries] == [
+        (5, [0], False), (6, [0], True)]
+
+
+def test_free_finds_a_batch_whose_pos_the_caller_repointed():
+    before = len(_api._BATCH_ARRAYS)
+    b = _api.llama_batch_init(2, 2, 1)
+    b.pos = None
+    _api.llama_batch_free(b)
+    assert len(_api._BATCH_ARRAYS) == before
 
 
 def test_a_refused_entry_fails_the_batch_without_processing_it(recorder, caplog):
@@ -318,7 +366,8 @@ def test_a_runtime_with_the_extended_api_never_calls_llama_decode(monkeypatch):
              "llama_batch_ext_add_embd", "llama_batch_ext_set_embd_token",
              "llama_batch_ext_set_embd_state", "llama_batch_ext_set_pos",
              "llama_batch_ext_set_output_logits", "llama_process",
-             "llama_get_memory", "llama_memory_seq_pos_max")
+             "llama_get_memory", "llama_memory_seq_pos_max", "llama_get_model",
+             "llama_model_rope_type")
     fns = {n: _native(1 if n != "llama_memory_seq_pos_max" else -1, calls, n)
            for n in names}
     fns["llama_batch_ext_add_token"] = _native(0, calls, "llama_batch_ext_add_token")

@@ -2361,8 +2361,8 @@ class LlamaCpp:
         if arch in _GGUF_ENCODER_DECODER_ARCHITECTURES:
             raise RuntimeError(
                 f"This model's architecture ('{arch}') is an encoder-decoder "
-                "model, and the loaded llama runtime cannot run an encoder "
-                "pass, so it cannot run it. Update the runtime with  "
+                "model, which needs an encoder pass the loaded llama runtime "
+                "cannot run. Update the runtime with  "
                 "localm setup-llama")
         return False
 
