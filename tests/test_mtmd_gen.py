@@ -819,3 +819,41 @@ class TestSynthesisLoop:
         monkeypatch.setattr(g.SpeechSynthesizer, "has_language", lambda self, name: False)
         with pytest.raises(g.SpeechInputError, match="does not speak"):
             synth.synthesize("hello", language="ko")
+
+
+class _StopAtProjector(Exception):
+    pass
+
+
+class TestProjectorPlacement:
+    """The speech projector is asked for the GPU only when the model has GPU layers."""
+
+    @pytest.mark.parametrize("n_gpu_layers,use_gpu", [(0, False), (-1, False), (99, True)])
+    def test_the_projector_follows_the_gpu_layers(self, monkeypatch, n_gpu_layers, use_gpu):
+        import contextlib
+        from unittest.mock import MagicMock
+
+        import localm.discover as discover
+        from localm.inference.backends.llamacpp import _loader
+        from localm.inference.backends.llamacpp import llama as llama_mod
+        from localm.inference.backends.llamacpp import mtmd as mtmd_mod
+
+        seen = {}
+
+        def projector(*args, **kwargs):
+            seen.update(kwargs)
+            raise _StopAtProjector
+
+        fake_api = MagicMock()
+        fake_api.llama_model_default_params.return_value = MagicMock(main_gpu=0)
+        monkeypatch.setattr(g, "api", fake_api)
+        monkeypatch.setattr(g, "bind_generation_api", lambda lib: MagicMock())
+        monkeypatch.setattr(llama_mod, "_quiet_stderr", contextlib.nullcontext)
+        monkeypatch.setattr(mtmd_mod, "_load_lib", lambda: object())
+        monkeypatch.setattr(mtmd_mod, "MtmdContext", projector)
+        monkeypatch.setattr(_loader, "runtime_binary_dir", lambda: None)
+        monkeypatch.setattr(discover, "apply_main_gpu", lambda mp, slot=None: None)
+        with pytest.raises(_StopAtProjector):
+            g.SpeechSynthesizer("model.gguf", "mmproj.gguf", n_gpu_layers=n_gpu_layers)
+        assert seen["use_gpu"] is use_gpu
+        fake_api.llama_model_free.assert_called_once()

@@ -136,6 +136,7 @@ from localm.inference.backends.base import (
     PretokenizerUnsafeInputError, PretokenizerUnusableModelError,
     UnsupportedInputError, UnsupportedModelRoleError, VisionInputError, WorkerDiedError,
     stream_stop_requested)
+from . import _api
 from ._abi import AbiMismatch
 
 # UnsupportedInputError subclasses carried across the worker boundary by name,
@@ -764,7 +765,7 @@ class NativeLoadCrashError(RuntimeError):
 
     ``phase`` names the native call that was running when it died, read from
     the captured fault trace: ``"context"`` (``llama_init_from_model``, after
-    the weights loaded), ``"weights"`` (``llama_load_model_from_file``),
+    the weights loaded), ``"weights"`` (``llama_model_load_from_file``),
     ``"draft"`` (loading the draft model for speculative drafting), or
     ``None`` when no trace was captured or the trace names none of these."""
 
@@ -776,8 +777,8 @@ class NativeLoadCrashError(RuntimeError):
 # The native entry points a crashed load can die inside, keyed by the function
 # name faulthandler prints for its frame, mapped to the load phase they run.
 _CRASH_PHASE_BY_FRAME = {
-    "llama_init_from_model": "context",
-    "llama_load_model_from_file": "weights",
+    _api.llama_init_from_model.__name__: "context",
+    _api.llama_model_load_from_file.__name__: "weights",
 }
 
 # Frames that put any crash below them in the draft-model load.

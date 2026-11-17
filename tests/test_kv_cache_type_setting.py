@@ -184,7 +184,7 @@ class TestPlumbing:
         api = MagicMock()
         with patch(API, api), pytest.raises(ValueError, match="kv_cache_type"):
             LlamaCpp("m.gguf", n_ctx=512, kv_cache_type="q4_0")
-        api.llama_load_model_from_file.assert_not_called()
+        api.llama_model_load_from_file.assert_not_called()
 
 
 # --------------------------------------------------------------------------- #
@@ -226,7 +226,7 @@ def _load_api(init_results=None):
     api.has_encoder_api.return_value = True
     api.llama_model_has_encoder.return_value = False
     api.llama_model_has_decoder.return_value = True
-    api.llama_load_model_from_file.return_value = ctypes.c_void_p(1)
+    api.llama_model_load_from_file.return_value = ctypes.c_void_p(1)
     return api, seen
 
 

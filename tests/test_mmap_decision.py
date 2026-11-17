@@ -608,13 +608,13 @@ def _native_default(cls):
 
 
 def _load_params(monkeypatch, cls, **kw):
-    """The params LlamaCpp.__init__ hands llama_load_model_from_file for *kw*
+    """The params LlamaCpp.__init__ hands llama_model_load_from_file for *kw*
     (the native load is faked to return NULL, ending __init__)."""
     seen = []
     monkeypatch.setattr(llama_mod.api, "llama_backend_init", lambda: None)
     monkeypatch.setattr(llama_mod.api, "llama_model_default_params",
                         lambda: _native_default(cls))
-    monkeypatch.setattr(llama_mod.api, "llama_load_model_from_file",
+    monkeypatch.setattr(llama_mod.api, "llama_model_load_from_file",
                         lambda path, params: seen.append(params))
     with patch("localm.discover.apply_main_gpu", lambda mp, **_k: None), \
          patch("localm.discover.apply_gpu_split", lambda mp, ratios_override=None: None):

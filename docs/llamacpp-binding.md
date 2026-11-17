@@ -336,10 +336,10 @@ def _bind(fn_name, restype, *argtypes):
 Covered functions (grouped):
 
 **Lifecycle**: `llama_backend_init`, `llama_backend_free`  
-**Model**: `llama_load_model_from_file`, `llama_free_model`, `llama_model_default_params`  
+**Model**: `llama_model_load_from_file`, `llama_model_free`, `llama_model_default_params`  
 **Context**: `llama_init_from_model`, `llama_free`, `llama_context_default_params`  
 **Accessors**: `llama_get_model`, `llama_n_ctx`, `llama_n_ctx_seq`, `llama_model_n_ctx_train`, `llama_model_n_embd`, `llama_model_n_layer`  
-**Vocabulary**: `llama_model_get_vocab`, `llama_vocab_n_tokens`, `llama_n_vocab`, `llama_tokenize`, `llama_token_to_piece`, `llama_detokenize`, `llama_token_bos`, `llama_token_eos`, `llama_vocab_is_eog`, `llama_token_is_eog`  
+**Vocabulary**: `llama_model_get_vocab`, `llama_vocab_n_tokens`, `llama_tokenize`, `llama_token_to_piece`, `llama_detokenize`, `llama_vocab_bos`, `llama_vocab_eos`, `llama_vocab_is_eog`  
 **Chat template**: `llama_model_chat_template`, `llama_chat_apply_template`  
 **Batch**: `llama_batch_get_one`, `llama_batch_init`, `llama_batch_free`  
 **Inference**: `llama_decode`, `llama_get_logits_ith`, `llama_get_logits`  

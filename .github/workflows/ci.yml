@@ -856,6 +856,24 @@ jobs:
           sys.exit(1 if tests == 0 or skipped else 0)
           PY
 
+      # Every llama and mtmd function localm calls unconditionally is exported by
+      # the pinned build. It skips without a runtime, so a skip here fails the step.
+      - name: Every function localm binds is exported by the pinned build
+        if: ${{ !cancelled() && steps.provision.outcome == 'success' }}
+        shell: bash
+        run: |
+          python -m pytest "tests/test_check_llama_abi.py::TestBoundFunctionsAreExportedByTheRuntime" \
+            -q -rs -p no:cacheprovider --junitxml="$RUNNER_TEMP/bound-functions.xml"
+          python - "$RUNNER_TEMP/bound-functions.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          suite = root if root.tag == "testsuite" else root[0]
+          tests, skipped = int(suite.get("tests", 0)), int(suite.get("skipped", 0))
+          print(f"{tests} tests, {skipped} skipped")
+          sys.exit(1 if tests == 0 or skipped else 0)
+          PY
+
       # The provisioning step above proves the pinned build LOADS. This one proves it
       # GENERATES, which is a different claim and the one that matters: "it loads
       # so it will be fine" is what shipped a runtime our own gate then refused.

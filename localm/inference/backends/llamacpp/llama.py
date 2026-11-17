@@ -196,13 +196,13 @@ class _CapturedStderr:
 
     def projector_notices(self) -> dict:
         """What the captured native projector load reported about itself:
-        ``cpu`` (True when mtmd logged ``CLIP using CPU backend``) and
+        ``cpu`` (True when mtmd logged ``using CPU backend``) and
         ``min_tokens`` (the number from an ``--image-min-tokens N`` advice with
         N from 1 to 16384, else None)."""
         text = self._read()
         advised = _IMAGE_MIN_TOKENS_ADVICE.search(text)
         tokens = int(advised.group(1)) if advised else 0
-        return {"cpu": "CLIP using CPU backend" in text,
+        return {"cpu": "using CPU backend" in text,
                 "min_tokens": tokens if 1 <= tokens <= 16384 else None}
 
     def mapped(self) -> Optional[bool]:
@@ -1399,7 +1399,7 @@ def _apply_cpu_moe(mp, n_layers: int, model_path: str):
     Points ``mp.tensor_buft_overrides`` at a NULL-terminated override array and
     returns ``(keepalive, skip_reason)``: *keepalive* is the ``(array,
     patterns)`` pair that must stay alive across
-    ``llama_load_model_from_file`` (ctypes does not own those strings), or
+    ``llama_model_load_from_file`` (ctypes does not own those strings), or
     ``None`` if the override could not be applied; *skip_reason* is ``None``
     on success, or a key into ``MOE_SKIP_MESSAGES`` naming why not.
 
@@ -1711,7 +1711,7 @@ class LlamaCpp:
         elif self._gpu_devices_arg:
             # The parent's placement over 2+ GPUs: exactly those devices, in
             # its order, with its layer counts. The returned arrays must stay
-            # alive through llama_load_model_from_file below.
+            # alive through llama_model_load_from_file below.
             _tensor_split_keepalive = apply_gpu_devices(mp, self._gpu_devices_arg)
             # The vision projector goes on main_gpu (a slot in llama.cpp's
             # device list) when the parent gives one, else on the last device.
@@ -1730,7 +1730,7 @@ class LlamaCpp:
             # ratios (auto free-VRAM-proportional distribution,
             # discover.resolve_auto_split_ratios) into this isolated worker, which
             # must not probe for them itself - see that function's docstring.
-            # The returned buffer must stay alive through llama_load_model_from_file
+            # The returned buffer must stay alive through llama_model_load_from_file
             # below - it is read once at load time, not held as a live pointer.
             _tensor_split_keepalive = apply_gpu_split(
                 mp, ratios_override=gpu_split_ratios)
@@ -1754,7 +1754,7 @@ class LlamaCpp:
         # the throughput is a wash and this stays default-off: a footprint dial,
         # not a free speed-up.
         #
-        # The array must stay alive across llama_load_model_from_file - it is read
+        # The array must stay alive across llama_model_load_from_file - it is read
         # at load time, exactly like tensor_split above - and every `pattern` bytes
         # object with it, hence keeping the list, not just the array.
         self._moe_override_keepalive = None
@@ -1769,7 +1769,7 @@ class LlamaCpp:
 
         # Preemptive model switching: wire llama.cpp's native load-progress
         # callback so a load can be ABORTED mid-flight. The callback returns false
-        # once `cancel_event` is set, at which point llama_load_model_from_file
+        # once `cancel_event` is set, at which point llama_model_load_from_file
         # stops and returns NULL - so a model the user has already switched away
         # from does not run its (slow) load to completion. Keep the CFUNCTYPE
         # object alive on self for the whole load span; ctypes would otherwise GC
@@ -1806,7 +1806,7 @@ class LlamaCpp:
         # setup (GPU split/main_gpu, and _apply_cpu_moe) where fd 2 is back to
         # whatever the CHILD inherited from the PARENT at spawn, i.e. the SAME
         # terminal the parent's Rich load spinner renders to. With one scope,
-        # nothing between llama_backend_init() and llama_load_model_from_file()
+        # nothing between llama_backend_init() and llama_model_load_from_file()
         # can reach fd 2 unredirected. Including the Python-only setup calls is
         # safe - none of them writes to fd 2 (apply_main_gpu/apply_gpu_split's
         # only native call, llama_max_devices(), is a compile-time-constant
@@ -1847,7 +1847,7 @@ class LlamaCpp:
             if n_cpu_moe > 0:
                 self._moe_override_keepalive, self.moe_skip_reason = _apply_cpu_moe(
                     mp, n_cpu_moe, model_path)
-            self._model_ptr = api.llama_load_model_from_file(model_path, mp)
+            self._model_ptr = api.llama_model_load_from_file(model_path, mp)
             if captured is not None:
                 if self._model_ptr:
                     self.weight_placement = captured.model_buffers()
@@ -1875,7 +1875,7 @@ class LlamaCpp:
         refusal = pretokenizer_guard.load_refusal(
             pretokenizer_guard.read_pre_type(self._model_ptr, api))
         if refusal is not None:
-            api.llama_free_model(self._model_ptr)
+            api.llama_model_free(self._model_ptr)
             self._model_ptr = None
             raise pretokenizer_guard.PretokenizerUnusableModelError(refusal)
 
@@ -1883,7 +1883,7 @@ class LlamaCpp:
             self.is_encoder_decoder = self._detect_encoder_decoder()
             self._detect_diffusion()
         except Exception:
-            api.llama_free_model(self._model_ptr)
+            api.llama_model_free(self._model_ptr)
             self._model_ptr = None
             raise
         if self.is_encoder_decoder or self.is_diffusion:
@@ -1980,7 +1980,7 @@ class LlamaCpp:
                 api.llama_set_causal_attn(self._ctx_ptr, False)
         if not self._ctx_ptr:
             self._free_adapters()
-            api.llama_free_model(self._model_ptr)
+            api.llama_model_free(self._model_ptr)
             self._model_ptr = None
             note = context_refused_note(self._kv_cache_type)
             if note:
@@ -1994,7 +1994,7 @@ class LlamaCpp:
                 api.llama_free(self._ctx_ptr)
                 self._ctx_ptr = None
                 self._free_adapters()
-                api.llama_free_model(self._model_ptr)
+                api.llama_model_free(self._model_ptr)
                 self._model_ptr = None
                 raise
         if self.is_encoder_decoder:
@@ -2210,7 +2210,7 @@ class LlamaCpp:
             failure = f"loading LoRA adapters failed: {exc}"
         if failure:
             self._free_adapters()
-            api.llama_free_model(model)
+            api.llama_model_free(model)
             self._model_ptr = None
             raise AdapterLoadError(failure)
 
@@ -2439,7 +2439,7 @@ class LlamaCpp:
             self._ctx_ptr = None
         self._free_adapters()
         if self._model_ptr:
-            api.llama_free_model(self._model_ptr)
+            api.llama_model_free(self._model_ptr)
             self._model_ptr = None
 
     def __del__(self) -> None:
@@ -3039,11 +3039,11 @@ class LlamaCpp:
         tokens = tokenizer.encode(prompt, add_bos=False, untrusted_ranges=ranges)
         vocab = tokenizer._vocab
         if api.llama_vocab_get_add_bos(vocab):
-            bos = api.llama_token_bos(vocab)
+            bos = api.llama_vocab_bos(vocab)
             if bos != api.LLAMA_TOKEN_NULL:
                 tokens.insert(0, bos)
         if api.llama_vocab_get_add_eos(vocab) is not False:
-            eos = api.llama_token_eos(vocab)
+            eos = api.llama_vocab_eos(vocab)
             if eos != api.LLAMA_TOKEN_NULL:
                 tokens.append(eos)
         return tokens
@@ -3086,7 +3086,7 @@ class LlamaCpp:
             raise RuntimeError("Model not loaded")
         token = api.llama_model_decoder_start_token(model)
         if token == api.LLAMA_TOKEN_NULL:
-            token = api.llama_token_bos(self._loaded_tokenizer()._vocab)
+            token = api.llama_vocab_bos(self._loaded_tokenizer()._vocab)
         if token == api.LLAMA_TOKEN_NULL:
             raise RuntimeError(
                 "This encoder-decoder model declares neither a decoder start "
@@ -4816,7 +4816,7 @@ class LlamaCpp:
         _load_ctx = _capture_stderr if not verbose else contextlib.nullcontext
         detail = ""
         with _load_ctx() as captured:
-            model = api.llama_load_model_from_file(path, mp)
+            model = api.llama_model_load_from_file(path, mp)
             if captured is not None and not model:
                 detail = captured.tail()
         if not model:

@@ -128,7 +128,7 @@ def llama_sampler_chain_default_params() -> LlamaSamplerChainParams:
 #  Model loading / freeing
 # ---------------------------------------------------------------------------
 
-def llama_load_model_from_file(
+def llama_model_load_from_file(
     path: str,
     params,
 ) -> Optional[ctypes.c_void_p]:
@@ -142,7 +142,7 @@ def llama_load_model_from_file(
             f"runtime uses {cls.__name__}; build them with "
             "_api.llama_model_default_params()")
     fn = _bind(
-        "llama_load_model_from_file",
+        "llama_model_load_from_file",
         LlamaModel,
         ctypes.c_char_p,
         cls,
@@ -151,8 +151,8 @@ def llama_load_model_from_file(
     return result if result else None
 
 
-def llama_free_model(model: ctypes.c_void_p) -> None:
-    _bind("llama_free_model", None, LlamaModel)(model)
+def llama_model_free(model: ctypes.c_void_p) -> None:
+    _bind("llama_model_free", None, LlamaModel)(model)
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +168,7 @@ def llama_init_from_model(
     Raises TypeError when *params* is not the loaded build's layout."""
     cls = _context_params_class()
     if not isinstance(params, cls):
-        # Same corruption risk llama_load_model_from_file guards against
+        # Same corruption risk llama_model_load_from_file guards against
         # above, on the other params struct: marshaling the wrong
         # context_params layout by value lands rope_scaling_type/pooling_type/
         # attention_type/... at the wrong native offsets with no error from
@@ -283,10 +283,6 @@ def llama_n_ctx_seq(ctx: ctypes.c_void_p) -> Optional[int]:
     if not hasattr(lib, "llama_n_ctx_seq"):
         return None
     return int(_bind("llama_n_ctx_seq", ctypes.c_uint32, LlamaContext)(ctx))
-
-
-def llama_n_vocab(ctx: ctypes.c_void_p) -> int:
-    return _bind("llama_n_vocab", ctypes.c_int32, LlamaContext)(ctx)
 
 
 def llama_model_n_ctx_train(model: ctypes.c_void_p) -> int:
@@ -533,14 +529,6 @@ def llama_detokenize(
 #  Special token helpers
 # ---------------------------------------------------------------------------
 
-def llama_token_bos(vocab: ctypes.c_void_p) -> int:
-    return _bind("llama_token_bos", llama_token, LlamaVocab)(vocab)
-
-
-def llama_token_eos(vocab: ctypes.c_void_p) -> int:
-    return _bind("llama_token_eos", llama_token, LlamaVocab)(vocab)
-
-
 def has_rerank_api() -> bool:
     """True when this llama.dll exports the vocabulary special-token accessors and
     the classifier-head accessors a reranker needs to build and read a query /
@@ -579,10 +567,6 @@ def llama_model_cls_label(model: ctypes.c_void_p, i: int) -> Optional[str]:
 
 def llama_vocab_is_eog(vocab: ctypes.c_void_p, token: int) -> bool:
     return bool(_bind("llama_vocab_is_eog", ctypes.c_bool, LlamaVocab, llama_token)(vocab, token))
-
-
-def llama_token_is_eog(vocab: ctypes.c_void_p, token: int) -> bool:
-    return bool(_bind("llama_token_is_eog", ctypes.c_bool, LlamaVocab, llama_token)(vocab, token))
 
 
 def llama_vocab_mask(vocab: ctypes.c_void_p) -> int:

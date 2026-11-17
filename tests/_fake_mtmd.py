@@ -279,7 +279,7 @@ class FakeLlamaApi:
     def llama_free(self, ctx):
         self.freed.append(ctx)
 
-    def llama_free_model(self, model):
+    def llama_model_free(self, model):
         self.freed.append(model)
 
 

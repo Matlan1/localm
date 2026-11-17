@@ -242,7 +242,7 @@ Both backends run the real model - and every native call it makes - inside a
 disposable child process, never in the server process itself:
 
 - **GGUF** (`llamacpp/_worker.py`'s `GgufWorker`, spawned by `_runner.py`):
-  `llama_load_model_from_file` and every later native call (context growth,
+  `llama_model_load_from_file` and every later native call (context growth,
   token-by-token decode) can hard-abort the whole process on a native
   CUDA/HIP driver failure, which no Python `try`/`except` can catch. The
   model's entire lifecycle - load, generate, grammar-check, unload - runs in

@@ -7,7 +7,7 @@ or soname bump, so localm OVER-allocates both by-value params structs (a named
 trailing field for what we know plus a reserved pad) and round-trips
 ``*_default_params()`` - we only overwrite the fields we name, so any field we do
 not know keeps its native default and a newer build never reads past our buffer
-in ``llama_load_model_from_file`` / ``llama_init_from_model``. A trailing append
+in ``llama_model_load_from_file`` / ``llama_init_from_model``. A trailing append
 is therefore harmless.
 
 A mid-struct REORDER is NOT harmless, and upstream did one:

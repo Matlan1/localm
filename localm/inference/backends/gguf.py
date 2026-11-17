@@ -3,7 +3,7 @@
 isolated worker PROCESS (see llamacpp/_runner.py and llamacpp/_worker.py).
 
 The model's whole lifecycle (load, generate, tokenize, grammar-check, unload)
-runs in a disposable child process, not here: llama_load_model_from_file (and
+runs in a disposable child process, not here: llama_model_load_from_file (and
 every later context-grow, which hits the same native call class) can
 hard-abort the WHOLE PROCESS on a native CUDA/HIP driver failure, and no Python
 try/except can catch that. The isolation boundary wraps the model's ENTIRE

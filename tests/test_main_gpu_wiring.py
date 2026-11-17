@@ -33,7 +33,7 @@ class TestLlamaCppMainGpuWiring:
             # Close deterministically while `api` is still patched: LlamaCpp's
             # cleanup path (_free_native) reads the module-global `api` name,
             # not a stored instance attribute, so a GC-triggered __del__ after
-            # this `with` exits would call the REAL native llama_free_model
+            # this `with` exits would call the REAL native llama_model_free
             # with a MagicMock pointer.
             llm.close()
             return llm

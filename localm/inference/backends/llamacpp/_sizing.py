@@ -10,7 +10,7 @@ native model).
   ``LlamaCpp._prefill_fresh_context`` calls during a mid-generation context
   grow. It runs wherever the loaded model itself lives.
 
-None of these methods call ``llama_load_model_from_file``/
+None of these methods call ``llama_model_load_from_file``/
 ``llama_init_from_model``/``llama_decode``; they only call
 ``torch.cuda.mem_get_info`` or the subprocess-isolated
 ``loader.gpu_memory_isolated()`` (see ``_loader.py``).

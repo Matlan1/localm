@@ -313,7 +313,7 @@ class DraftModelSource(CountedSource):
             api.llama_sampler_free(sampler)
         model, self._model = self._model, None
         if model is not None:
-            api.llama_free_model(model)
+            api.llama_model_free(model)
 
     def on_step_seconds(self, drafted: Optional[int], seconds: float) -> None:
         """``CountedSource.on_step_seconds``, except for a step whose proposal

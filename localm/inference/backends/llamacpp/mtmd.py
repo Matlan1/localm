@@ -677,7 +677,9 @@ class MtmdContext:
 
         *gpu_index* is the text model's resolved primary device. *use_gpu* False
         opens the projector on the CPU only, with no GPU attempt and no warning.
-        Raises MtmdUnavailable when no context can be created."""
+        ``on_gpu`` is then True only when the GPU open succeeded on a runtime
+        that registers a GPU device. Raises MtmdUnavailable when no context can
+        be created."""
         self._m = _load_lib()
         self._mmproj_path = mmproj_path
         self._model_ptr = model_ptr
@@ -724,6 +726,11 @@ class MtmdContext:
             raise MtmdUnavailable(
                 f"mtmd_init_from_file returned NULL for {mmproj_path} "
                 "(mmproj incompatible with this model or build)")
+        if self.on_gpu:
+            # mtmd places a projector asked for the GPU on the CPU when the
+            # runtime registers no GPU device.
+            from .llama import _runtime_has_gpu_device
+            self.on_gpu = _runtime_has_gpu_device()
         self.supports_vision = bool(self._m.mtmd_support_vision(self._ctx))
         self.supports_audio = False
         self.audio_sample_rate = 0
