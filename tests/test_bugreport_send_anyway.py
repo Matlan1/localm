@@ -193,3 +193,22 @@ def test_the_menu_asks_in_place_and_defaults_to_no(home, opened, monkeypatch,
                                  lambda q: asked.append(q) or answer, "report.md")
     assert asked == ["  Send this one report anyway? [y/N]"]
     assert opened == ([URL] if sends else [])
+
+
+def test_a_rate_limited_send_anyway_from_the_menu_is_retried_once(home, monkeypatch):
+    from localm.bugreport import RateLimitedError, consent
+    monkeypatch.setattr(consent.console, "print", lambda *a, **kw: None)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    calls = []
+
+    def _upload(title, body, **kw):
+        calls.append(kw.get("send_anyway"))
+        if not kw.get("send_anyway"):
+            raise LocalmError("off", stage="network_off")
+        if len(calls) == 2:
+            raise RateLimitedError(1)
+        return {"url": "https://example.invalid/issues/1"}
+    monkeypatch.setattr(bugreport, "upload_report", _upload)
+    consent._upload_with_retries("it broke", None, "report text", URL, None,
+                                 lambda q: "y", "report.md")
+    assert calls == [False, True, True]

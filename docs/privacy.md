@@ -269,7 +269,8 @@ Sending anyway makes one connection to the bug-report server for that report
 only; Network access stays off and no setting is changed. When
 the standalone reporter cannot read the setting (no `config.json` in the data
 directory yet, or one it cannot parse) it asks before sending, with no as the
-default, and sends nothing without a terminal.
+default, and sends nothing without a terminal; `--send-anyway` answers that
+question with yes.
 
 **What is redacted from a report:**
 - Your home directory, replaced by `~`, and your account name wherever it is

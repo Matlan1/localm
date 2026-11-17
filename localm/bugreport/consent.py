@@ -298,6 +298,7 @@ def _upload_with_retries(summary: str, path: Optional[Path], text: str, up_url, 
                 anyway = (ask("  Send this one report anyway? [y/N]") or "")
                 if anyway.strip().lower() in ("y", "yes"):
                     send_anyway = True
+                    attempt = 0
                     continue
             if attempt >= 3 or e.stage in ("not_filed", "network_off"):
                 console.print(f"[dim]Email it to {MAINTAINER_EMAIL} when you can.[/dim]")

@@ -302,7 +302,7 @@ coding agent's shell access, so you can grant one without the other.
   directory's `config.json`: `off` sends nothing unless you send that report
   anyway as above, and when `config.json` is
   missing or cannot be read it asks before sending (and sends nothing when no
-  one can answer).
+  one can answer, unless `--send-anyway` was given).
 - **Requests to your ComfyUI instance.** ComfyUI has its own, narrower
   guards instead: a configured `comfy_api_url` (or a media plugin's own
   `comfy.api_url`, the model scan included) that targets a link-local or
