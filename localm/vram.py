@@ -491,11 +491,32 @@ def _evict_via_server_loop(_hs, loop, timeout_s: float) -> str:
     return res.get("status", "unloaded") if isinstance(res, dict) else "unloaded"
 
 
+class FreeReading(tuple):
+    """``(free_bytes, fresh, scope)`` from :func:`_vram_free_reading`, with the
+    probe status behind it as ``status`` (a ``discover.GPU_PROBE_*`` value)."""
+
+    def __new__(cls, free, fresh: bool, scope, status=None):
+        reading = super().__new__(cls, (free, fresh, scope))
+        reading.status = status
+        return reading
+
+
+def free_reading_status(reading) -> str | None:
+    """The probe status of *reading* (a :class:`FreeReading`), or None for a
+    plain ``(free, fresh, scope)`` tuple, which does not say."""
+    return getattr(reading, "status", None)
+
+
 def _vram_free_reading() -> tuple:
-    """``(free_bytes, fresh, scope)``: a free-VRAM reading, whether the probe behind
-    it was fresh (list_gpus() completed inside its deadline) rather than a
-    timed-out or busy fallback to a stale last-known-good value, and the reading's
-    ``free_scope``.
+    """``(free_bytes, fresh, scope)`` as a :class:`FreeReading`: a free-VRAM
+    reading, whether the probe behind it was fresh (list_gpus() completed inside
+    its deadline) rather than a timed-out, busy or inconclusive fallback to a
+    stale last-known-good value, and the reading's ``free_scope``. The probe
+    status is the reading's ``status``.
+
+    Joins a GPU probe already in flight (``discover.vram_capacity_joined``)
+    instead of taking its instant busy answer, so it can block up to
+    list_gpus' deadline: call it off the event loop.
 
     Used for BOTH ends of the before/after delta.
 
@@ -518,17 +539,10 @@ def _vram_free_reading() -> tuple:
     (neither accepts nor implements return_status): such a double is treated as
     "status unknown, assume fresh" rather than raising on a rejected kwarg or an
     unexpected shape - only a REAL probe chain needs to prove itself stale."""
-    from localm.discover import GPU_PROBE_OK, vram_capacity
-    try:
-        result = vram_capacity(return_status=True)
-    except TypeError:
-        result = vram_capacity()
-    if isinstance(result, tuple) and len(result) == 2:
-        info, probe_status = result
-        fresh = probe_status == GPU_PROBE_OK
-    else:
-        info, fresh = result, True
-    return info.get("free"), fresh, info.get("free_scope")
+    from localm.discover import GPU_PROBE_OK, vram_capacity_joined
+    info, probe_status = vram_capacity_joined()
+    return FreeReading(info.get("free"), probe_status == GPU_PROBE_OK,
+                       info.get("free_scope"), probe_status)
 
 
 def _live_free_vram_bytes():

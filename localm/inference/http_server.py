@@ -3059,7 +3059,7 @@ async def get_engine(model_name: str | None, *, load: bool = True,
 
 
 def _add_vram_fields(result: dict, *, before, released, after, before_fresh: bool,
-                     before_scope=None) -> None:
+                     before_scope=None, before_status=None) -> None:
     """Add vram_freed/vram_before_bytes/vram_after_bytes to *result* when
     measurable (unchanged from before), plus an honest flag when the reading
     cannot be presented as current fact, rather than asserting a wrong
@@ -3073,8 +3073,10 @@ def _add_vram_fields(result: dict, *, before, released, after, before_fresh: boo
 
     THREE independent ways this reading can be wrong, and they are not the same bug:
 
-    - NOT FRESH (``before_fresh`` false): the probe timed out or was busy, so the
-      'before' value is a stale cached one (see _vram_free_reading).
+    - NOT FRESH (``before_fresh`` false): the probe timed out, was busy or was
+      inconclusive, so the 'before' value is a stale cached one (see
+      _vram_free_reading). The note names which when ``before_status`` (the
+      reading's ``discover.GPU_PROBE_*`` status) says.
     - AFTER UNVERIFIABLE (``released is None``): wait_for_vram_release() could not
       verify the outcome (the 'after' reading went unmeasurable), so ``vram_freed``
       is null rather than a false "VRAM did not drop", a claim a reading that
@@ -3091,13 +3093,20 @@ def _add_vram_fields(result: dict, *, before, released, after, before_fresh: boo
     points at the right one."""
     if before is None:
         return
-    from localm.discover import FREE_SCOPE_PROCESS
+    from localm.discover import (FREE_SCOPE_PROCESS, GPU_PROBE_BUSY,
+                                 GPU_PROBE_INCONCLUSIVE, GPU_PROBE_TIMEOUT)
     result.update(vram_freed=released, vram_before_bytes=before, vram_after_bytes=after)
     reasons = []
     if not before_fresh:
+        what = {
+            GPU_PROBE_TIMEOUT: "the GPU probe timed out",
+            GPU_PROBE_BUSY: "another GPU probe was still running (probe status busy)",
+            GPU_PROBE_INCONCLUSIVE: ("the GPU probe could not ask every GPU source "
+                                     "(probe status inconclusive)"),
+        }.get(before_status, "the GPU probe timed out or was busy")
         reasons.append(
-            "the GPU probe timed out or was busy when this reading was taken, so "
-            "it may reflect a stale cached value rather than the current state")
+            f"{what} when this reading was taken, so it may reflect a stale "
+            "cached value rather than the current state")
     if released is None:
         reasons.append(
             "the free-VRAM reading went unmeasurable after the unload, so whether "
@@ -3282,7 +3291,7 @@ async def unload_all_models(*, force: bool = False, media: bool = False) -> dict
     global _active_model_name, _last_active_model_name, _engine, _inference_sem
     loop = asyncio.get_running_loop()
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
-                             wait_for_vram_release)
+                             free_reading_status, wait_for_vram_release)
     from localm.inference import embedder as _embedder_mod
 
     _free = _live_free_vram_bytes
@@ -3355,7 +3364,8 @@ async def unload_all_models(*, force: bool = False, media: bool = False) -> dict
     released_anything = bool(unloaded_models) or embedder_was_loaded or media_stopped
     freed_vram = (embedder_was_loaded or media_stopped
                   or any(n not in cpu_only_names for n in unloaded_models))
-    before, before_fresh, before_scope = reading[0] if reading else (None, True, None)
+    before_reading = reading[0] if reading else (None, True, None)
+    before, before_fresh, before_scope = before_reading
     if before is not None and freed_vram:
         released, after = await loop.run_in_executor(
             None, lambda: wait_for_vram_release(_free, before_bytes=before))
@@ -3384,7 +3394,8 @@ async def unload_all_models(*, force: bool = False, media: bool = False) -> dict
     if media_left_running:
         result["media_left_running"] = media_left_running
     _add_vram_fields(result, before=before, released=released, after=after,
-                     before_fresh=before_fresh, before_scope=before_scope)
+                     before_fresh=before_fresh, before_scope=before_scope,
+                     before_status=free_reading_status(before_reading))
     return result
 
 
@@ -3562,12 +3573,12 @@ async def _unload_embedder_if_matches(name: str, loop, *,
         return {"status": "in_use", "model": name, "vram_freed": 0}
 
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
-                             wait_for_vram_release)
+                             free_reading_status, wait_for_vram_release)
 
     _free = _live_free_vram_bytes
 
-    before, before_fresh, before_scope = await loop.run_in_executor(
-        None, _vram_free_reading)
+    before_reading = await loop.run_in_executor(None, _vram_free_reading)
+    before, before_fresh, before_scope = before_reading
     cleared = await loop.run_in_executor(
         None, functools.partial(_embedder_mod.reset_embedder, force=force))
     if not cleared:
@@ -3579,7 +3590,8 @@ async def _unload_embedder_if_matches(name: str, loop, *,
         released, after = 0, before
     result = {"status": "unloaded", "model": name, "was_active": False}
     _add_vram_fields(result, before=before, released=released, after=after,
-                     before_fresh=before_fresh, before_scope=before_scope)
+                     before_fresh=before_fresh, before_scope=before_scope,
+                     before_status=free_reading_status(before_reading))
     return result
 
 
@@ -3616,12 +3628,12 @@ async def _unload_reranker_if_matches(name: str, loop, *,
         return {"status": "in_use", "model": name, "vram_freed": 0}
 
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
-                             wait_for_vram_release)
+                             free_reading_status, wait_for_vram_release)
 
     _free = _live_free_vram_bytes
 
-    before, before_fresh, before_scope = await loop.run_in_executor(
-        None, _vram_free_reading)
+    before_reading = await loop.run_in_executor(None, _vram_free_reading)
+    before, before_fresh, before_scope = before_reading
     cleared = await loop.run_in_executor(
         None, functools.partial(_reranker_mod.reset_reranker, force=force))
     if not cleared:
@@ -3633,7 +3645,8 @@ async def _unload_reranker_if_matches(name: str, loop, *,
         released, after = 0, before
     result = {"status": "unloaded", "model": name, "was_active": False}
     _add_vram_fields(result, before=before, released=released, after=after,
-                     before_fresh=before_fresh, before_scope=before_scope)
+                     before_fresh=before_fresh, before_scope=before_scope,
+                     before_status=free_reading_status(before_reading))
     return result
 
 
@@ -3665,12 +3678,12 @@ async def _unload_speech_if_matches(name: str, loop, *,
         return {"status": "in_use", "model": name, "vram_freed": 0}
 
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
-                             wait_for_vram_release)
+                             free_reading_status, wait_for_vram_release)
 
     _free = _live_free_vram_bytes
 
-    before, before_fresh, before_scope = await loop.run_in_executor(
-        None, _vram_free_reading)
+    before_reading = await loop.run_in_executor(None, _vram_free_reading)
+    before, before_fresh, before_scope = before_reading
     cleared = await loop.run_in_executor(
         None, functools.partial(_speech_mod.reset_speech, force=force))
     if not cleared:
@@ -3682,7 +3695,8 @@ async def _unload_speech_if_matches(name: str, loop, *,
         released, after = 0, before
     result = {"status": "unloaded", "model": name, "was_active": False}
     _add_vram_fields(result, before=before, released=released, after=after,
-                     before_fresh=before_fresh, before_scope=before_scope)
+                     before_fresh=before_fresh, before_scope=before_scope,
+                     before_status=free_reading_status(before_reading))
     return result
 
 
@@ -3715,7 +3729,7 @@ async def unload_one_model(name: str, *, force: bool = False) -> dict:
     global _active_model_name, _last_active_model_name, _engine, _inference_sem
     loop = asyncio.get_running_loop()
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
-                             wait_for_vram_release)
+                             free_reading_status, wait_for_vram_release)
 
     engine = _engines.get(name)
     if engine is None or not engine.loaded:
@@ -3749,10 +3763,11 @@ async def unload_one_model(name: str, *, force: bool = False) -> dict:
     try:
         async with exclusively(sem):
             if _holds_no_vram(engine):
-                before, before_fresh, before_scope = None, True, None
+                before_reading = (None, True, None)
             else:
-                before, before_fresh, before_scope = await loop.run_in_executor(
+                before_reading = await loop.run_in_executor(
                     None, _vram_free_reading)
+            before, before_fresh, before_scope = before_reading
             await loop.run_in_executor(None, engine.unload)
             if name in _engines_lru:
                 _engines_lru.remove(name)
@@ -3779,7 +3794,8 @@ async def unload_one_model(name: str, *, force: bool = False) -> dict:
 
     result = {"status": "unloaded", "model": name, "was_active": was_active}
     _add_vram_fields(result, before=before, released=released, after=after,
-                     before_fresh=before_fresh, before_scope=before_scope)
+                     before_fresh=before_fresh, before_scope=before_scope,
+                     before_status=free_reading_status(before_reading))
     return result
 
 
