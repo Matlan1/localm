@@ -543,17 +543,21 @@ def test_debug_stacks_renders_cold_start_as_json_null_not_zero(app, monkeypatch)
 
 
 def test_debug_stacks_renders_a_real_reading_as_before(app, monkeypatch, clean_stalls):
+    """An injected 1 s stall inside the window is rendered as a float of at
+    least 1 s; a real stall during the request can only make it larger."""
     from localm.inference import http_server as hs
     app.state.bind_host = "127.0.0.1"
     with TestClient(app) as c:
-        monkeypatch.setattr(hs, "_hb_monotonic", time.monotonic())
+        now = time.monotonic()
+        monkeypatch.setattr(hs, "_hb_monotonic", now)
         hs._hb_stalls.clear()
+        hs._hb_stalls.append((now - 3.0, now - 2.0))
         r = c.get("/debug/stacks",
                   headers={"Authorization": f"Bearer {app.state.shell_token}"})
     assert r.status_code == 200, r.text
     body = r.json()
     assert isinstance(body["loop_lag_s"], float), body
-    assert body["loop_lag_s"] == pytest.approx(0.0, abs=0.5)
+    assert 1.0 - 1e-6 <= body["loop_lag_s"] < hs._LOOP_LAG_WINDOW_S, body
 
 
 @pytest.fixture
