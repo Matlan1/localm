@@ -197,6 +197,17 @@ def missing_from_system(folder: Path, system_dir: object = _SYSTEM) -> list[str]
     return sorted(want - provided_by_system(want, _resolve_system(system_dir)))
 
 
+def absent_from_system(folder: Path, system_dir: object = _SYSTEM) -> list[str]:
+    """The runtime DLLs the binaries in *folder* import that neither *folder*
+    nor the system folder holds at any version, sorted (an older copy counts as
+    present). *system_dir* as in :func:`missing_from_system`."""
+    if system_dir is _SYSTEM and sys.platform != "win32":
+        return []
+    sysdir = _resolve_system(system_dir)
+    return sorted(n for n in needed(folder)
+                  if sysdir is None or pe_deps.file_version(sysdir / n) is None)
+
+
 def _older_on_system(names: Iterable[str], system_dir: Optional[Path]) -> bool:
     """Whether the system folder holds any of *names*, at a version older than
     :data:`REDIST_VERSION` (the caller passes only names it lacks at that
@@ -217,8 +228,9 @@ def question(names: list[str], older: bool = False, machine: Optional[str] = Non
     key = redist_machine(machine) or "amd64"
     size_mb = round(_REDIST[key][2] / 1_000_000)
     what = _what(names, older)
-    return (f"{what[0].upper()}{what[1:]}; no model can "
-            f"load without it. Download Microsoft's installer (about {size_mb} MB from "
+    effect = ("models may fail to load or stop with an error until it is updated" if older
+              else "no model can load without it")
+    return (f"{what[0].upper()}{what[1:]}; {effect}. Download Microsoft's installer (about {size_mb} MB from "
             f"{REDIST_HOST}) and install it now? Windows will show one administrator "
             "prompt.")
 
@@ -227,7 +239,8 @@ def absent_message(names: list[str], reason: str, older: bool = False) -> str:
     """The message for every path on which the runtime stays absent: what is
     missing, *reason* (why it was not installed), Microsoft's download page, and
     the command that offers the install again."""
-    return (f"No model can load yet: {_what(names, older)}, and it was not installed "
+    lead = "Models may fail to load or stop with an error" if older else "No model can load yet"
+    return (f"{lead}: {_what(names, older)}, and it was not installed "
             f"({reason.rstrip('. ')}). Install the Visual C++ Redistributable from Microsoft: "
             f"{REDIST_PAGE} (direct download for this PC: {redist_url()}). Or run "
             f"'{RERUN_HINT}' (or setup again), which offers to install it.")

@@ -140,6 +140,15 @@ def test_missing_from_system_counts_absent_and_older_copies(tmp_path):
     assert vc_runtime.missing_from_system(folder, system) == []
 
 
+def test_absent_from_system_counts_only_missing_files(tmp_path):
+    folder = _runtime_folder(tmp_path, ["MSVCP140.dll", "VCRUNTIME140.dll"])
+    system = tmp_path / "system"
+    system.mkdir()
+    (system / "msvcp140.dll").write_bytes(_pe(["KERNEL32.dll"], (14, 29, 30133, 0)))
+    assert vc_runtime.absent_from_system(folder, system) == ["vcruntime140.dll"]
+    assert vc_runtime.missing_from_system(folder, system) == ["msvcp140.dll", "vcruntime140.dll"]
+
+
 def test_nothing_is_missing_when_nothing_imports_the_runtime(tmp_path):
     folder = tmp_path / "lib"
     folder.mkdir()
@@ -199,6 +208,8 @@ def test_an_older_runtime_is_named_as_older(rig):
     rig.answer = False
     assert rig.ensure() is False
     assert "has an older version of" in rig.questions[0]
+    assert "may fail to load" in rig.questions[0]
+    assert rig.said[-1].startswith("Models may fail to load or stop with an error:")
     assert "has an older version of" in rig.said[-1]
 
 
@@ -433,7 +444,8 @@ def test_vc_runtime_missing_skips_the_backend_fallback(tmp_path, monkeypatch):
     assert fell_back == ["universal"]
 
 
-def _run_main(tmp_path, monkeypatch, *, vc_missing: bool, args=("--backend", "cpu")):
+def _run_main(tmp_path, monkeypatch, *, vc_missing: bool, loads: bool = False,
+              args=("--backend", "cpu")):
     from click.testing import CliRunner
     from localm.setup_llama import cli
     target = tmp_path / "runtime" / "lib"
@@ -449,6 +461,7 @@ def _run_main(tmp_path, monkeypatch, *, vc_missing: bool, args=("--backend", "cp
     monkeypatch.setattr(cli, "_provision_release", lambda *a, **k: None)
     monkeypatch.setattr(cli, "_refresh_install_record", lambda t: None)
     monkeypatch.setattr(sl, "vc_runtime_missing", lambda t: vc_missing)
+    monkeypatch.setattr(sl, "_native_loads_ok", lambda: (loads, "" if loads else "no load"))
     monkeypatch.setattr(sl, "_verify", lambda: verified.append(True))
     result = CliRunner().invoke(sl.main, list(args))
     return result, verified, unattended
@@ -462,6 +475,12 @@ def test_setup_llama_exits_3_without_success_when_the_runtime_stays_missing(
     assert verified == []
     assert unattended == [True]
     assert "Native runtime ready" not in result.output
+
+
+def test_setup_llama_succeeds_with_an_older_runtime_that_loads(tmp_path, monkeypatch):
+    result, verified, _ = _run_main(tmp_path, monkeypatch, vc_missing=True, loads=True)
+    assert result.exit_code == 0, result.output
+    assert verified == [True]
 
 
 def test_setup_llama_verifies_when_the_runtime_is_present(tmp_path, monkeypatch):
@@ -492,11 +511,19 @@ def test_a_kept_install_without_the_runtime_exits_3(tmp_path, monkeypatch):
     monkeypatch.setattr(sl, "vc_runtime_missing", lambda t: True)
     monkeypatch.setattr(sl, "offer_vc_runtime", lambda t: False)
     loads: list[bool] = []
-    monkeypatch.setattr(sl, "_native_loads_ok", lambda: loads.append(True) or (True, ""))
+    monkeypatch.setattr(sl, "_native_loads_ok", lambda: loads.append(True) or (False, "x"))
     with pytest.raises(SystemExit) as e:
         cli._vc_runtime_for_kept_install(tmp_path, "cpu")
     assert e.value.code == setup_spec.VC_RUNTIME_ABSENT_EXIT
-    assert loads == []
+    assert loads == [True]
+
+
+def test_a_kept_install_with_an_older_runtime_that_loads_is_kept(tmp_path, monkeypatch):
+    from localm.setup_llama import cli
+    monkeypatch.setattr(sl, "vc_runtime_missing", lambda t: True)
+    monkeypatch.setattr(sl, "offer_vc_runtime", lambda t: False)
+    monkeypatch.setattr(sl, "_native_loads_ok", lambda: (True, ""))
+    cli._vc_runtime_for_kept_install(tmp_path, "cpu")
 
 
 def test_a_kept_install_with_the_runtime_present_offers_nothing(tmp_path, monkeypatch):
@@ -594,13 +621,17 @@ def test_sdcpp_requires_the_runtime_and_passes_its_question(tmp_path, monkeypatc
 
     def ask(text):
         return False
+    monkeypatch.setattr(vc_runtime, "absent_from_system", lambda folder: ["msvcp140.dll"])
     with pytest.raises(sd.VcRuntimeMissingError) as e:
         sd._require_vc_runtime(tmp_path, said.append, ask)
     from localm import netpolicy
     assert seen["ask"] is ask and said
     assert seen["refusal"] is netpolicy.download_refusal
     assert vc_runtime.RERUN_HINT in str(e.value)
+    monkeypatch.setattr(vc_runtime, "absent_from_system", lambda folder: [])
+    sd._require_vc_runtime(tmp_path, said.append, None)
     monkeypatch.setattr(vc_runtime, "ensure", lambda folder, **k: True)
+    monkeypatch.setattr(vc_runtime, "absent_from_system", lambda folder: ["msvcp140.dll"])
     sd._require_vc_runtime(tmp_path, said.append, None)
 
 

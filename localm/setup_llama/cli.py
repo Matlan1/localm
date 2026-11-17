@@ -177,7 +177,8 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
                                    keep_choice=keep_choice)
 
             _refresh_install_record(target)
-            vc_absent = _sl.vc_runtime_missing(target)
+            vc_absent = (_sl.vc_runtime_missing(target)
+                         and not _sl._native_loads_ok()[0])
             if not vc_absent:
                 _sl._verify()
     except ProvisioningBusyError as e:
@@ -199,13 +200,16 @@ def _vc_runtime_for_kept_install(target: Path, have: Optional[str]) -> None:
     """Windows, when the installed runtime is kept: when the Microsoft Visual
     C++ runtime it needs is missing, offer it (:func:`localm.setup_llama.offer_vc_runtime`);
     after an install, add the amd-rocm SIMD CPU backend when it is not in place
-    and load-test the runtime again. Exits with
-    :data:`localm.setup_spec.VC_RUNTIME_ABSENT_EXIT` when the runtime stays
-    missing, and 1 when the runtime still does not load. Returns when nothing
-    is missing or the runtime loads."""
+    and load-test the runtime again. When it is not installed, exits with
+    :data:`localm.setup_spec.VC_RUNTIME_ABSENT_EXIT` unless the installed
+    runtime loads anyway (an older Visual C++ runtime). Exits 1 when the
+    runtime still does not load after an install. Returns when nothing is
+    missing or the runtime loads."""
     if not _sl.vc_runtime_missing(target):
         return
     if not _sl.offer_vc_runtime(target):
+        if _sl._native_loads_ok()[0]:
+            return
         _exit_vc_runtime_absent()
     if have == "amd-rocm" and _sl.installed_cpu_overlay(target) is None:
         try:

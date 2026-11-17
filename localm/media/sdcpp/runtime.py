@@ -314,13 +314,16 @@ def _require_vc_runtime(staging: Path, say: Progress, ask: Optional[Ask]) -> Non
     """Windows: make sure the Microsoft Visual C++ runtime the build in
     *staging* imports is present, offering to install it through *ask* (None:
     not offered) with :func:`localm.vc_runtime.ensure`. Raises
-    :class:`VcRuntimeMissingError` when it stays missing; *say* has then had
-    the message that names it and the remedy."""
+    :class:`VcRuntimeMissingError` when a DLL of it is still absent from the
+    system folder; *say* has then had the message that names it and the remedy.
+    Returns when only an older version is present, and the load test decides."""
     from localm import netpolicy, vc_runtime
     if vc_runtime.ensure(
             staging, ask=ask, say=say, refusal=netpolicy.download_refusal,
             download=lambda url, dest: _download(url, dest, say,
                                                  "the Visual C++ Redistributable")):
+        return
+    if not vc_runtime.absent_from_system(staging):
         return
     raise VcRuntimeMissingError(
         f"the {RUNTIME_LABEL} needs the Microsoft Visual C++ Redistributable, which this "
