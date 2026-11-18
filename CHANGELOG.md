@@ -11,6 +11,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+## [0.3.4b4] - 2026-11-18
+
 ### Added
 - **Send a bug report anyway while Network access is off.** When a bug report is not sent because Network access is off, you can now send that one report anyway without changing the setting: Settings > Report a bug shows a "Send anyway" button next to the refusal, `localm bug-report` asks at its prompt or takes `--send-anyway`, and the standalone `report-issue` reporter asks at its prompt or takes `--send-anyway`. This makes one connection to the bug-report server for that report only, and Network access stays off. Only the owner can use it in the GUI.
 
@@ -54,6 +56,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - A vision model registered in place now finds its own projector when other projectors for the same model family sit beside it.
 - Image to image: the live progress shows the sampling steps that really run when the denoise strength trims the schedule.
 - A Knowledge collection now finds the right excerpts for a short question with no context, such as "How do I connect a phone?", when a reranker is installed.
+- **Models keep loading on newer llama.cpp runtimes.** Those runtimes mark the batch functions localm used as deprecated; text batches now go through their replacement. On a machine with more than one GPU, the vision projector goes on the configured GPU again.
+- Speech generation keeps working with llama.cpp b12497 and newer runtimes selected with "latest".
 
 ### Changed
 - The graphical setup (`setup-gui.bat`) no longer opens a console or asks anything in one: the choice between keeping Python tooling in the folder (Portable) and sharing it from your user profile (Shared) is the first page of the setup window, and setup messages are shown in a window. `setup-gui.sh` asks nothing in the terminal either.
