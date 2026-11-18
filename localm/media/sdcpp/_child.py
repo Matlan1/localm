@@ -371,7 +371,7 @@ def trimmed_sample_steps(steps: int, strength: Optional[float]) -> tuple:
     cut = int(steps * strength)
     if cut < 1:
         return ()
-    return tuple(t for t in (cut, cut + 1) if t != steps)
+    return (cut, cut + 1)
 
 
 def _reset_generation_state() -> None:

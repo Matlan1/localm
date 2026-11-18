@@ -18,8 +18,8 @@ from localm.plugins.builtin.image.backends import native as image_native
     (10, None, ()),
     (10, 0.0, ()),
     (2, 0.2, ()),
-    (2, 0.75, (1,)),
-    (10, 0.95, (9,)),
+    (2, 0.75, (1, 2)),
+    (10, 0.95, (9, 10)),
 ])
 def test_trimmed_sample_steps(steps, strength, expected):
     assert _child.trimmed_sample_steps(steps, strength) == expected

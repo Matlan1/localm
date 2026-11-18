@@ -1058,7 +1058,9 @@ def _pick_mmproj_candidate(model_name: str, names: list[str], *,
 
     A model file whose name contains "mmproj", or whose leading name token
     (:func:`_name_token`) is empty, never pairs. Among candidates containing
-    that token, the only one is picked, and two or more give None. Otherwise a
+    that token, the only one is picked, and with two or more the only one
+    whose :func:`_name_residue` is longer than the token and occurs in the
+    model's own, else None. Otherwise a
     lone candidate is picked when its model name (:func:`_name_identity`) occurs
     in *model_name*, and refused when that name occurs in one of *others* whose
     width does not rule it out (:func:`_may_use`). A lone candidate still
