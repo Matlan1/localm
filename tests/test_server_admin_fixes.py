@@ -195,3 +195,29 @@ def test_an_unreadable_registry_does_not_make_the_held_model_look_removed(
     monkeypatch.setattr("localm.storekit.read_json_checked", lambda path, default: ({}, False))
     client.get("/health")
     assert "model-a" in hs._engines and hs._default_model_name == "model-a"
+
+
+def test_health_with_an_empty_registry_answers_while_registry_reads_are_blocked(
+        setup_multi_model, monkeypatch):
+    import threading
+    import time
+
+    from localm import config, storekit
+    app = hs.create_app(None)
+    monkeypatch.setattr("localm.config.load_registry", lambda: {})
+    release = threading.Event()
+    real = storekit.read_json_checked
+
+    def blocked(path, default):
+        release.wait(30)
+        return real(path, default)
+    monkeypatch.setattr(storekit, "read_json_checked", blocked)
+    try:
+        with TestClient(app) as client:
+            started = time.monotonic()
+            r = client.get("/health")
+            took = time.monotonic() - started
+    finally:
+        release.set()
+    assert r.status_code in (200, 503)
+    assert took < 2 * config.LOOP_READ_WAIT_S + 1.0, took

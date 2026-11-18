@@ -2840,17 +2840,27 @@ def _resolve_unnamed_model_name() -> str | None:
     return _active_model_name or _last_active_model_name or _default_model_name
 
 
-def prune_removed_models(registry: dict) -> bool:
+def load_registry_checked() -> tuple[dict, bool]:
+    """``(registry, read_ok)``: the registry and whether an empty one is a
+    genuine empty file rather than an unreadable one. Blocking file IO; never
+    call it on the event loop thread."""
+    from localm.config import REGISTRY_FILE, load_registry
+    from localm.storekit import read_json_checked
+    registry = load_registry()
+    if registry:
+        return registry, True
+    return registry, read_json_checked(REGISTRY_FILE, {})[1]
+
+
+def prune_removed_models(registry: dict, read_ok: bool = False) -> bool:
     """Forget every model name this process still holds (the startup, active
     and last-active names) that *registry* no longer lists
     (:func:`_forget_removed_model`). An empty *registry* drops only a name this
-    process saw registered. Returns whether anything was dropped."""
-    if not registry:
-        from localm.config import REGISTRY_FILE
-        from localm.storekit import read_json_checked
-        _, read_ok = read_json_checked(REGISTRY_FILE, {})
-        if not read_ok:
-            return False
+    process saw registered, and only when *read_ok* says the empty registry was
+    read successfully (:func:`load_registry_checked`). Never reads a file.
+    Returns whether anything was dropped."""
+    if not registry and not read_ok:
+        return False
     dropped = False
     for held in {_default_model_name, _active_model_name, _last_active_model_name}:
         if (held and held not in registry and (registry or held in _registered_seen)
@@ -3025,8 +3035,13 @@ async def get_engine(model_name: str | None, *, load: bool = True,
         name = _resolve_unnamed_model_name()
 
     from localm.config import load_registry
+    from localm.executor import get_plugin_executor
     registry = load_registry()
-    if prune_removed_models(registry) and (not (model_name or "").strip() or (model_name or "").strip() == "localm"):
+    read_ok = bool(registry)
+    if not registry:
+        registry, read_ok = await asyncio.get_running_loop().run_in_executor(
+            get_plugin_executor(), load_registry_checked)
+    if prune_removed_models(registry, read_ok) and (not (model_name or "").strip() or (model_name or "").strip() == "localm"):
         name = _resolve_unnamed_model_name()
 
     # If no registry is populated, route all requests to the active/loaded engine (classic single-model mode)

@@ -32,14 +32,14 @@ def register(app: FastAPI, ctx) -> None:
             from localm import config
             from localm.executor import get_plugin_executor
             try:
-                registry = await asyncio.wait_for(
+                checked = await asyncio.wait_for(
                     asyncio.get_running_loop().run_in_executor(
-                        get_plugin_executor(), config.load_registry),
+                        get_plugin_executor(), _hs.load_registry_checked),
                     config.LOOP_READ_WAIT_S)
             except TimeoutError:
-                registry = None
-            if registry is not None:
-                _hs.prune_removed_models(registry)
+                checked = None
+            if checked is not None:
+                _hs.prune_removed_models(*checked)
         if _hs._engine is not None:
             return {
                 "status": "ok",
