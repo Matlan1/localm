@@ -5,8 +5,9 @@ Its name is what people see and type. A record that stores a reference to a
 model keeps the name field older builds read, and beside it a ``model_refs`` map
 ``{name as written in this record: id}``.
 
-Only stored references are read through :func:`stored_to_current`. What a person
-or an API client sends matches current names only, so a former name is refused
+Only stored references are read through :func:`stored_to_current`: config.json,
+saved records and a coder project's ``.localcoder/config.toml`` ``model`` (with
+its optional ``model_refs``). What a person or an API client sends matches current names only, so a former name is refused
 there.
 
 Stdlib only: :mod:`localm.config` imports this module.

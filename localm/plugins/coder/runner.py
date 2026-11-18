@@ -108,6 +108,18 @@ def describe_denied(denied) -> str:
             + "; ".join(parts) + ".")
 
 
+def _project_model(proj_cfg: dict) -> Optional[str]:
+    """The project config's ``model`` as the registry calls it now. The name is a
+    stored reference, so it resolves through ``model_ids.stored_to_current`` with
+    the file's ``model_refs``, like every other stored model name."""
+    stored = proj_cfg.get("model")
+    if not isinstance(stored, str) or not stored:
+        return stored
+    from localm.config import model_index
+    from localm.model_ids import stored_to_current
+    return stored_to_current(stored, proj_cfg.get("model_refs"), model_index())
+
+
 def resolve_task_config(work_dir: Path, *, model: Optional[str] = None,
                         max_turns: Optional[int] = None,
                         max_tokens: Optional[int] = None,
@@ -129,7 +141,7 @@ def resolve_task_config(work_dir: Path, *, model: Optional[str] = None,
     cannot be read, and ``InvalidSessionMode`` for an unknown mode."""
     proj_cfg = load_project_config(work_dir)
     if model is None:
-        model = proj_cfg.get("model")
+        model = _project_model(proj_cfg)
     if max_turns is None:
         max_turns = int(proj_cfg.get("max_turns", DEFAULT_MAX_TURNS))
     max_tokens_explicit = max_tokens is not None
