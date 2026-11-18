@@ -237,8 +237,9 @@ def register(app: FastAPI, ctx) -> None:
 
     def _registry_names() -> set[str]:
         from localm.config import load_registry
-        names = set(load_registry())
-        _hs.prune_removed_models(names)
+        registry = load_registry()
+        _hs.prune_removed_models(registry)
+        names = set(registry)
         if _hs._default_model_name:
             names.add(_hs._default_model_name)
         return names
