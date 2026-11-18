@@ -252,7 +252,7 @@ def extract(complete: Complete, session_text: str, *,
 # A candidate fact must share at least this fraction of its content words with
 # what the user wrote; one that does not was invented from the assistant's text.
 GROUNDING_MIN_OVERLAP = 0.5
-_STEM_CHARS = 5
+_STEM_CHARS = 4
 
 
 def _user_turn_text(session_text: str) -> Optional[str]:
