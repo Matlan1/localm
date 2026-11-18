@@ -242,5 +242,5 @@ def test_the_hooks_daemon_stop_ends_the_daemon_and_leaves_a_model_worker(install
     stopped = []
     monkeypatch.setattr(install_manifest, "_stop",
                         lambda pid, timeout=0, start=None: stopped.append(pid) or True)
-    exec(commands[0][2], {})
+    exec(compile(commands[0][2], "hatch_build", "exec"), {})  # noqa: S102
     assert stopped == [11, 10]
