@@ -122,6 +122,7 @@ _BROWSER_PLUGIN_ROUTES = {
     ('api', 'GET', '/api/browser/state'): ('scope:browser',),
     ('api', 'POST', '/api/browser/stop'): ('scope:browser',),
     ('api', 'POST', '/api/browser/type'): ('scope:browser',),
+    ('api', 'POST', '/api/browser/view'): ('scope:browser',),
     ('mount', '*', '/plugins/browser'): (),
 }
 

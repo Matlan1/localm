@@ -1097,18 +1097,18 @@ CORE_FIELDS: list = [
     # attacker-chosen workdir still reaches execution.
     SettingField("comfy_workdir", Widget.FOLDER, "ComfyUI folder",
                  "Your ComfyUI install folder. localm runs it from here and "
-                 "auto-detects a launcher inside. While ComfyUI to use is own and "
-                 "localm's own ComfyUI is installed, it is not started from here.",
+                 "auto-detects a launcher inside. While localm's own ComfyUI is installed and "
+                 "in use, it is not started from here.",
                  group="Media", owner="image", tier=Tier.OWNER),
     SettingField("comfy_launch_cmd", Widget.TEXT, "ComfyUI launch command",
                  "Launcher script (.bat/.sh) that starts ComfyUI. Blank "
-                 "auto-detects one inside the ComfyUI folder. Not used while ComfyUI to "
-                 "use is own and localm's own ComfyUI is installed.",
+                 "auto-detects one inside the ComfyUI folder. Not used while localm's own "
+                 "ComfyUI is installed and in use.",
                  group="Media", owner="image", tier=Tier.OWNER),
     SettingField("comfy_api_url", Widget.TEXT, "ComfyUI API URL",
                  "Where ComfyUI listens. Blank uses FLUX_API_URL, else "
-                 "http://127.0.0.1:8188. Not used while ComfyUI to use is own and "
-                 "localm's own ComfyUI is installed.",
+                 "http://127.0.0.1:8188. Not used while localm's own "
+                 "ComfyUI is installed and in use.",
                  group="Media", owner="image", tier=Tier.OWNER),
     SettingField("comfy_launch_timeout", Widget.NUMBER,
                  "ComfyUI launch timeout (s)",
@@ -2123,8 +2123,8 @@ MEDIA_PLUGIN_FIELDS: list = [
     MediaField("workdir", ("comfy", "workdir"), "comfy_workdir", Widget.FOLDER,
                "ComfyUI folder",
                "This plugin's ComfyUI install folder. Blank uses the shared default. "
-               "Not used while ComfyUI to use is own and localm's own ComfyUI is "
-               "installed.",
+               "Not used while localm's own ComfyUI is "
+               "installed and in use.",
                admin_only=True),
     # launch_cmd is a shell command and api_url is a render target, so both
     # widen a trust boundary the same way the tts library/wasm_paths script-URL
@@ -2134,13 +2134,13 @@ MEDIA_PLUGIN_FIELDS: list = [
     MediaField("launch_cmd", ("comfy", "launch_cmd"), "comfy_launch_cmd", Widget.TEXT,
                "ComfyUI launch command",
                "Launcher that starts ComfyUI for this plugin. Blank auto-detects one "
-               "in the folder. Not used while ComfyUI to use is own and localm's own "
-               "ComfyUI is installed.", admin_only=True),
+               "in the folder. Not used while localm's own "
+               "ComfyUI is installed and in use.", admin_only=True),
     MediaField("api_url", ("comfy", "api_url"), "comfy_api_url", Widget.TEXT,
                "ComfyUI API URL",
                "Where this plugin's ComfyUI listens. Blank uses the shared default. "
-               "Not used while ComfyUI to use is own and localm's own ComfyUI is "
-               "installed.",
+               "Not used while localm's own ComfyUI is "
+               "installed and in use.",
                admin_only=True),
     MediaField("output_dir", ("comfy", "output_dir"), "comfy_output_dir", Widget.FOLDER,
                "ComfyUI output folder",
@@ -2345,7 +2345,7 @@ def validate_media_block(name: str, updates: dict) -> dict:
         # path" invariant to assert without rejecting real commands.
         if f.key == "api_url" and coerced is not None and not _is_http_url(coerced):
             raise ValueError(
-                f"api_url must be a valid http(s) URL "
+                f"api_url: must be a valid http(s) URL "
                 f"(e.g. http://127.0.0.1:8188), got {coerced!r}")
         if f.key in _MEDIA_NUMBER_RANGES and coerced is not None:
             coerced = _media_number(f.key, coerced)

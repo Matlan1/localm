@@ -4,7 +4,7 @@
 
 // --- ES module imports ---
 import { $, authHeaders, confirmDanger, el, toast } from "../app/helpers.js";
-import { t, tn } from "../app/i18n.js";
+import { onLanguageReload, t, tn } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
 import { MEDIA_PLUGIN_ORDER } from "./settings.js";
 
@@ -304,7 +304,7 @@ if (showMmprojCheckbox) {
 // The workflow panels are painted from fetched data, not marked up in
 // index.html, so re-fetch and redraw whichever ones are on the page when the
 // interface language changes.
-document.addEventListener("localm:language", () => {
+onLanguageReload(() => {
   for (const media of MEDIA_PLUGIN_ORDER) refreshWorkflowPanel(media);
 });
 

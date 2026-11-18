@@ -14,7 +14,7 @@
 
 import { lsSetScoped } from "./chat.js";
 import { $, authHeaders, confirmDanger, el, fetchImageURL, openModal, promptText, toast } from "./helpers.js";
-import { t, tn } from "./i18n.js";
+import { onLanguageReload, t, tn } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
 import { pickDirectory } from "./picker.js";
 
@@ -348,7 +348,7 @@ export function createGallery(cfg) {
   // The grid, bulk bar and empty state are painted from fetched data, not
   // marked up in index.html, so they are re-fetched and redrawn when the
   // interface language changes.
-  document.addEventListener("localm:language", refresh);
+  onLanguageReload(refresh);
 
   return { refresh, render, showDetail, state, ctx };
 }

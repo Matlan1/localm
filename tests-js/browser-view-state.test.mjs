@@ -170,3 +170,20 @@ test("a page that did not load is not reported as a refusal", async () => {
   assert.equal(c.status(),
     "Could not load https://down.example/: net::ERR_CONNECTION_REFUSED");
 });
+
+test("a browser taken back after a reload is streamed again", async () => {
+  const { win, calls } = makeEnv((u, m) => {
+    if (u.endsWith("/state") && m === "GET") return json({ open: true });
+    if (u.endsWith("/view") && m === "POST") return json({ job_id: "jv" });
+    if (u.includes("/api/jobs/jv/events")) return sse([{ type: "line", line: "browser ready" }]);
+    return null;
+  });
+  const c = await mount(win);
+  await win.onViewShown("browser");
+  await settle();
+  assert.ok(calls.some((x) => x.url.endsWith("/view") && x.method === "POST"),
+    "the open browser was taken back without asking for its picture");
+  assert.ok(calls.some((x) => x.url.includes("/api/jobs/jv/events")),
+    "the picture of the taken-back browser was never streamed");
+  assert.equal(c.stop.disabled, false);
+});

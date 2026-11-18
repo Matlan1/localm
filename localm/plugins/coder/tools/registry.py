@@ -666,7 +666,8 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
         fn=tool_git_commit,
         description=("Stage files and create a git commit. When files is omitted, "
                      "stages every change, new untracked files included (files "
-                     "listed in .gitignore stay out)."),
+                     "listed in .gitignore stay out; localm's own session files in "
+                     ".localcoder are never committed)."),
         params={
             "message": {"type": "string", "description": "Commit message", "required": True},
             "files":   {"type": "array",  "description": "Specific files to stage (omit to stage all changes)", "required": False},

@@ -9,7 +9,7 @@
 import { iconEl } from "./icons.js";
 import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, elideAudioForWire, elideImagesForWire, isToolEvent, latestTurnHasAudio, latestTurnIsAudioOnly, lsSetScoped, markNotSent, markRefusedBy, maybeCompactConversation, memorySavedText, modelCannotHearAudio, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, persistChatParams, pinnedModelName, refreshWebPolicy, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, resolvePinnedModel, saveConversations, scopedKeyPrivate, setConversationPin, showPinnedGone, syncPinModelToggle, updateStatusIndicator, wireHasImageAndAudio, wireParts } from "./chat.js";
 import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, localizeServerNotes, autoGrow, confirmDanger, confirmDangerAsync, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setCanvasNavigationAllowed, setPreviewAllowed, splitThink, streamJob, stripAsrPrefix, stripThink, toast } from "./helpers.js";
-import { t, tn } from "./i18n.js";
+import { onLanguageReload, t, tn } from "./i18n.js";
 import { isPeerSelected, modelCache, modelSelect, refreshModels, reloadModel, toastLoadResult } from "./models-sidebar.js";
 import { pickPath, saveTextFs } from "./picker.js";
 import { execChatCommand, handleSlashSubmit } from "./slash.js";
@@ -1986,7 +1986,11 @@ export async function refreshPluginCommands() {
     }
     pluginCommands.map = map;
     pluginCommands.suggest = data.suggest_plugins !== false;
+    const activeKey = (list) => list.filter((p) => p && p.active)
+      .map((p) => p.name).sort().join(",");
+    const activeChanged = _capsAnswered && activeKey(pluginState) !== activeKey(data.plugins || []);
     pluginState = data.plugins || [];
+    _capsAnswered = true;
     caps.fsAccess = data.fs_access || "none";
     caps.fsSave = data.fs_save === true;
     caps.networkBind = data.network_bind === true;
@@ -2021,6 +2025,7 @@ export async function refreshPluginCommands() {
     if (isSec) isSec.hidden = !data.issues_available;
     await loadClientPlugins(pluginState);
     renderNav();
+    if (activeChanged) window.dispatchEvent(new CustomEvent("localm:plugins-changed"));
   } catch { /* server unreachable; fall back to plain unknown-command */ }
   finally { _markCapsReady(); }   // see capsReady: must settle on EVERY exit path
 }
@@ -2052,6 +2057,13 @@ export function pluginSuggestion(cmd) {
 /* ---- dynamic nav rail (tabs follow the active plugins) ---- */
 // The most recent /api/plugins entries, refreshed alongside the command cache.
 export let pluginState = [];
+let _capsAnswered = false;
+
+/** False only when /api/capabilities has answered and does not list plugin *name*
+ *  as active for this key; true before it answers, so an unknown is read. */
+export function pluginReadable(name) {
+  return !_capsAnswered || pluginState.some((p) => p && p.name === name && p.active === true);
+}
 
 // Each plugin's manifest icon name -> a shared SVG icon name (see app/icons.js).
 // Kernel nav buttons carry their own data-icon in index.html; "studio" is the
@@ -3632,11 +3644,19 @@ export async function retrieveKnowledge(conv, query, opts = {}) {
 
 /** Populate the params-drawer knowledge selector. pages.js calls this after
  *  collections change on the Knowledge page. */
+export function clearKbSelect() {
+  const sel = $("p-kb");
+  if (!sel) return;
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = t("chat.none");
+  sel.replaceChildren(none);
+}
+
 export async function refreshKbSelect() {
   try {
     const r = await fetch("/api/rag/collections", { headers: authHeaders() });
-    if (!r.ok) return;
-    const data = await r.json();
+    const data = r.ok ? await r.json() : { collections: [] };
     const sel = $("p-kb");
     const current = sel.value;
     sel.replaceChildren();
@@ -3711,6 +3731,8 @@ export async function runChatTurn(work) {
   if (sendBtn) {
     sendBtn.classList.add("stop");
     sendBtn.replaceChildren(iconEl("stop", "ic"));
+    sendBtn.dataset.i18nTitle = "chat.stop";
+    sendBtn.title = t("chat.stop");
   }
   document.querySelectorAll(".message-actions button").forEach((b) => (b.disabled = true));
   let stopped = false;
@@ -3733,6 +3755,8 @@ export async function runChatTurn(work) {
     if (sendBtn) {
       sendBtn.classList.remove("stop");
       sendBtn.replaceChildren(iconEl("send", "ic"));
+      sendBtn.dataset.i18nTitle = "chat.send";
+      sendBtn.title = t("chat.send");
     }
     document.querySelectorAll(".message-actions button").forEach((b) => (b.disabled = false));
     if (!stopped) processChatQueue();
@@ -3885,7 +3909,7 @@ export async function sendChat() {
  *  render as "You:" here either (NEW-WEBSEARCH-UX-EXPORT-ATTRIBUTES-TOOL-
  *  RESULTS-TO-USER). */
 function exportLabel(m) {
-  return noteLabel(m) || (m.role === "user" ? "You" : (modelCache.active || "Model"));
+  return noteLabel(m) || (m.role === "user" ? "You" : (m.model || modelCache.active || "Model"));
 }
 
 /** Every real message that a compaction archived, oldest first, walking
@@ -4004,6 +4028,7 @@ $("chat-send").onclick = () => {
 export function composerEnterToSend(e, send) {
   if (e.key !== "Enter" || e.isComposing) return;
   if (e.shiftKey) return;   // newline - the textarea's default behaviour
+  if (e.defaultPrevented) return;   // another handler (the slash menu) already used this Enter
   const menu = e.target.closest(".composer-wrap")?.querySelector(".slash-menu");
   if (menu && menu.style.display !== "none") return;
   e.preventDefault();
@@ -4064,7 +4089,7 @@ if ($("mtb-new")) {
 
 // The Persona and Knowledge dropdowns replace their own "(none)" option, so
 // they are rebuilt when the interface language changes.
-document.addEventListener("localm:language", () => {
-  refreshPersonas();
-  refreshKbSelect();
+onLanguageReload(() => {
+  if (pluginReadable("chat")) refreshPersonas();
+  if (pluginReadable("rag")) refreshKbSelect();
 });

@@ -403,6 +403,11 @@ class Agent(
         # removed when the identical call later runs. _loop re-arms it.
         self._denied_unconfirmed: list[tuple[str, str, str]] = []
         self._denied_lock = threading.Lock()
+        # Monotonic counters the loop compares across a step: calls the user
+        # refused at an approval prompt, and calls denied only because they were
+        # not written in the <tool_call> format.
+        self._user_declines = 0
+        self._lenient_denials = 0
         # Keys the user answered "a" (always) for at an interactive prompt this
         # session: a tool name, or (tool, exact command) for shell-executing
         # tools. See _ExecutionMixin._session_allow_key.

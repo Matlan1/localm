@@ -1286,6 +1286,15 @@ def test_verify_stamps_last_used_on_the_verified_key_only(auth, monkeypatch):
     assert _last_used(auth, a["id"]) is None
 
 
+def test_verify_without_record_use_leaves_last_used_unset(auth, monkeypatch):
+    monkeypatch.setattr(auth, "_last_used_writes", {})
+    made = auth.create_key("phone", ["chat"])
+    assert auth.verify(made["key"], record_use=False) == {"chat"}
+    assert _last_used(auth, made["id"]) is None
+    assert auth.verify(made["key"]) == {"chat"}
+    assert isinstance(_last_used(auth, made["id"]), float)
+
+
 def test_last_used_is_rewritten_at_most_once_per_throttle_window(auth, monkeypatch):
     monkeypatch.setattr(auth, "_last_used_writes", {})
     clock = _TimeProxy(mono=10_000.0)
