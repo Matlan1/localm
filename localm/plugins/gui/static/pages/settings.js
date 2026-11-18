@@ -1891,6 +1891,7 @@ export function discardSettingsDraft() {
 export function discardSettingsEdits() {
   forEachChangedControl((id, ctrl) => ctrl.write(ctrl.shown));
   _pendingEdits.clear();
+  _dirtySettings.clear();
   _draftRestored = 0;
   try { sessionStorage.removeItem(SETTINGS_DRAFT_KEY); } catch { /* storage blocked: nothing kept */ }
 }

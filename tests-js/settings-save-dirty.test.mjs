@@ -13,6 +13,14 @@ const SCHEMA = {
       group: "Engine", owner: "core", min: 512, step: 512, default: 4096 },
     { key: "require_auth", widget: "toggle", label: "Require an API key",
       help: "", group: "Security", owner: "core", default: false },
+    { key: "user_name", widget: "hidden", label: "Your name", help: "",
+      group: "Chat", owner: "chat", default: "" },
+    { key: "user_avatar", widget: "hidden", label: "user_avatar", help: "",
+      group: "Chat", owner: "chat", default: "" },
+    { key: "model_avatar_default", widget: "hidden", label: "model_avatar_default", help: "",
+      group: "Chat", owner: "chat", default: "" },
+    { key: "model_avatar_overrides", widget: "hidden", label: "model_avatar_overrides", help: "",
+      group: "Chat", owner: "chat", default: "" },
   ],
 };
 
@@ -20,6 +28,9 @@ function makeFetch(patches) {
   return async (url, opts = {}) => {
     if (url === "/v1/config/schema") {
       return { ok: true, status: 200, json: async () => SCHEMA, text: async () => "" };
+    }
+    if (url === "/v1/config" && (opts.method || "GET") === "GET") {
+      return { ok: true, status: 200, json: async () => ({ user_name: "Matt" }), text: async () => "" };
     }
     if (url === "/v1/config" && (opts.method || "GET") === "PATCH") {
       patches.push(JSON.parse(opts.body));
@@ -133,6 +144,24 @@ test("R10: leaving a clean Settings page does not prompt", async () => {
   runScript(win, 'showView("chat");');
   assert.ok(!modalOpen(win), "no prompt when there are no unsaved edits");
   assert.equal(win.isSettingsView(), false, "navigation proceeds");
+});
+
+test("Leave without saving also clears an edit on a field with no control (avatar name)", async () => {
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch([]) });
+  await render(win);
+  await drain(30);
+  makeSettingsActive(win);
+  const name = win.document.querySelector(".avatar-name-input");
+  assert.ok(name, "the avatar name field is drawn");
+  name.value = "Zed";
+  name.dispatchEvent(new win.Event("input", { bubbles: true }));
+  assert.equal(win.settingsDirty(), true, "the control-less field counts as unsaved");
+
+  runScript(win, 'showView("chat");');
+  modalButton(win, "Leave without saving").click();
+  await settle();
+  assert.equal(win.isSettingsView(), false);
+  assert.equal(win.settingsDirty(), false, "a discarded edit no longer counts as unsaved");
 });
 
 test("Leave without saving discards the edit: saved value back, not dirty, not carried, no draft", async () => {
