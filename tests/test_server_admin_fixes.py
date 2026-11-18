@@ -212,6 +212,7 @@ def test_health_with_an_empty_registry_answers_while_registry_reads_are_blocked(
         release.wait(30)
         return real(path, default)
     monkeypatch.setattr(storekit, "read_json_checked", blocked)
+    monkeypatch.setattr(hs, "load_registry_checked", lambda: ({}, True))
     try:
         with TestClient(app) as client:
             started = time.monotonic()
