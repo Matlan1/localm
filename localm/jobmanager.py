@@ -1295,7 +1295,7 @@ class JobManager:
                 })
 
         from localm.config import home_bound
-        threading.Thread(target=home_bound(_run, name=f"job {kind}", track=False),
+        threading.Thread(target=home_bound(_run, name=f"job {kind}"),
                          daemon=True).start()
         return job
 
@@ -1361,7 +1361,7 @@ class JobManager:
                 log_job_end(job, err)
 
         from localm.config import home_bound
-        threading.Thread(target=home_bound(_run, name=f"job {kind}", track=False),
+        threading.Thread(target=home_bound(_run, name=f"job {kind}"),
                          daemon=True).start()
         return job
 

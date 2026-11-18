@@ -186,3 +186,58 @@ def test_a_job_resolves_the_home_it_was_started_in(tmp_path, monkeypatch):
         time.sleep(0.01)
 
     assert seen == [first]
+
+
+def _job_run_appears(before, name: str) -> list:
+    """The names of the tracked runs not in *before*, once one named *name*
+    shows up or 10 s have passed."""
+    deadline = time.monotonic() + 10.0
+    while (not any(r.name == name for r in config.home_bound_runs())
+           and time.monotonic() < deadline):
+        time.sleep(0.01)
+    return [r.name for r in unfinished_home_bound_runs(before, timeout=0.0)]
+
+
+def test_an_in_process_job_is_tracked_until_its_worker_ends():
+    from localm.jobmanager import JobManager
+    release = threading.Event()
+    before = set(config.home_bound_runs())
+    JobManager().start_fn("probe", lambda job: release.wait(10.0))
+    try:
+        assert _job_run_appears(before, "job probe") == ["job probe"]
+    finally:
+        release.set()
+    assert unfinished_home_bound_runs(before, timeout=10.0) == []
+
+
+def test_a_cli_job_is_tracked_until_its_worker_ends(monkeypatch):
+    from localm import jobmanager
+    release = threading.Event()
+
+    class _Child:
+        """A CLI child whose output ends when *release* is set."""
+        pid = None
+        returncode = None
+
+        def __init__(self, argv, **kw):
+            self.stdout = self._lines()
+
+        def _lines(self):
+            release.wait(10.0)
+            yield from ()
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+            return 0
+
+    monkeypatch.setattr(jobmanager.subprocess, "Popen", _Child)
+    before = set(config.home_bound_runs())
+    jobmanager.JobManager().start_cli("probe", ["--version"])
+    try:
+        assert _job_run_appears(before, "job probe") == ["job probe"]
+    finally:
+        release.set()
+    assert unfinished_home_bound_runs(before, timeout=10.0) == []
