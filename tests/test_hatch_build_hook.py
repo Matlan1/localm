@@ -204,3 +204,43 @@ def test_pyproject_declares_the_hook_and_ships_it():
     data = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
     assert "scripts" in data["project"]["dynamic"] and "scripts" not in data["project"]
     assert "hatch_build.py" in data["tool"]["hatch"]["build"]["targets"]["sdist"]["only-include"]
+    assert data["tool"]["hatch"]["metadata"]["hooks"]["custom"]["path"] == "hatch_build.py"
+    assert hatch_build.LocalmScriptsHook.PLUGIN_NAME == "custom"
+
+
+def test_every_build_on_windows_stops_the_daemon_and_spares_running_launchers(install, monkeypatch):
+    calls = []
+    monkeypatch.setattr(hatch_build, "os", types.SimpleNamespace(name="nt"))
+    monkeypatch.setattr(hatch_build, "stop_own_probe_daemon", lambda root: calls.append(("stop", root)))
+    monkeypatch.setattr(hatch_build, "scripts_for_this_build",
+                        lambda root, scripts: calls.append(("scripts", root)) or {"localm": "a:b"})
+    metadata = {}
+    _hook(install).update(metadata)
+    assert calls == [("stop", str(install)), ("scripts", str(install))]
+    assert metadata["scripts"] == {"localm": "a:b"}
+
+
+def test_the_hooks_daemon_stop_ends_the_daemon_and_leaves_a_model_worker(install, monkeypatch):
+    from localm import install_manifest, updater, updater_runtime
+    (install / ".venv/Scripts/python.exe").write_bytes(b"x")
+    commands = []
+    monkeypatch.setattr(hatch_build.subprocess, "run", lambda cmd, **kw: commands.append(cmd))
+    hatch_build.stop_own_probe_daemon(install)
+    assert len(commands) == 1 and commands[0][1] == "-c"
+    launcher = str(install / ".venv" / "Scripts" / "python.exe")
+    base = str(install.parent / "shared" / "python.exe")
+    probe = "x -u -m localm.inference.backends.llamacpp._vram_probe"
+    worker = "x -c from multiprocessing.spawn import spawn_main; spawn_main(parent_pid=5)"
+    rows = [(5, 1, launcher), (10, 5, launcher), (11, 10, base), (20, 5, launcher), (21, 20, base)]
+    monkeypatch.setattr(install_manifest, "list_processes",
+                        lambda: [(pid, ppid, exe, 1000 + i) for i, (pid, ppid, exe) in enumerate(rows)])
+    monkeypatch.setattr(install_manifest, "command_line",
+                        {5: "x -m localm gui", 10: probe, 11: probe, 20: worker, 21: worker}.get)
+    monkeypatch.setattr(updater_runtime, "holders",
+                        lambda lib: [{"pid": 11, "name": "python"}, {"pid": 21, "name": "python"}])
+    monkeypatch.setattr(updater, "repo_root", lambda: install)
+    stopped = []
+    monkeypatch.setattr(install_manifest, "_stop",
+                        lambda pid, timeout=0, start=None: stopped.append(pid) or True)
+    exec(commands[0][2], {})
+    assert stopped == [11, 10]

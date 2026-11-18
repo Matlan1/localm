@@ -758,14 +758,42 @@ def stop_own_probe_daemons(lib, root) -> Optional[int]:
         if pids is None:
             return None
         pids += [p for p in running_own_probe_daemons(root, procs=procs) if p not in pids]
-        started = {p[0]: p[3] for p in procs}
-        for pid in pids:
-            install_manifest._stop(pid, timeout=_STOP_WAIT_S, start=started.get(pid))
-        return len(pids)
+        return _stop_pids(pids, procs)
     except Exception as e:
         from localm.debuglog import logger
         logger.warning("update: could not stop the runtime probe daemon: %s", e)
         return None
+
+
+def stop_running_own_probe_daemons(root) -> Optional[int]:
+    """Stop every runtime probe daemon of the install at *root* that is running
+    (:func:`running_own_probe_daemons`: a venv launcher and its base interpreter,
+    the base interpreter first), waiting for each pid to exit, whatever else
+    holds the runtime. Every other process, a model worker of the same install
+    included, is left running. The build hook (``hatch_build.py``) calls this.
+    Returns how many pids were stopped, 0 when there were none, and None when
+    processes cannot be listed. Never raises."""
+    try:
+        from localm import install_manifest
+        procs = install_manifest.list_processes()
+        if procs is None:
+            return None
+        return _stop_pids(running_own_probe_daemons(root, procs=procs), procs)
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.warning("update: could not stop the runtime probe daemon: %s", e)
+        return None
+
+
+def _stop_pids(pids: list, procs: list) -> int:
+    """Stop each of *pids* in order and wait for it to exit
+    (``install_manifest._stop`` with its start time from *procs*). Returns
+    ``len(pids)``."""
+    from localm import install_manifest
+    started = {p[0]: p[3] for p in procs}
+    for pid in pids:
+        install_manifest._stop(pid, timeout=_STOP_WAIT_S, start=started.get(pid))
+    return len(pids)
 
 
 def in_use_message(found: list, retry: str) -> str:

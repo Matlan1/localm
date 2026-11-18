@@ -151,9 +151,9 @@ GET  /update[?client=V][&channel=prerelease]
                                (version null when there are no releases yet)
                                without client: nothing newer than the last release a
                                legacy updater can apply is offered (reply carries
-                               legacy_ceiling); a client older than the next ceiling is
-                               offered nothing newer than it (reply carries client_ceiling);
-                               when a newer release exists above that ceiling, the reply
+                               legacy_ceiling); a client that names its version is
+                               offered the newest release; when a newer release exists
+                               above the legacy ceiling, the reply
                                carries newer_after (its tag) and the notes start with a
                                line saying a further update follows
 GET  /update/releases       -> 200 { ok, releases: [{ version, name, published_at,
