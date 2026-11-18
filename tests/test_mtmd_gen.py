@@ -77,7 +77,7 @@ def _layout(interface):
 
 _ALL_INTERFACES = [g.INTERFACE_LEGACY, g.INTERFACE_STATE, g.INTERFACE_STATE_V2,
                    g.INTERFACE_STATE_V3, g.INTERFACE_STATE_V4, g.INTERFACE_STATE_V5,
-                   g.INTERFACE_STATE_V6, g.INTERFACE_STATE_V7]
+                   g.INTERFACE_STATE_V6, g.INTERFACE_STATE_V7, g.INTERFACE_STATE_V8]
 
 
 def _offsets(cls):
@@ -229,6 +229,30 @@ class TestAbiGate:
         assert ns.mtmd_helper_gen_audio_max_frames.restype is ctypes.c_int32
         assert ns.mtmd_gen_audio_voice_name.restype is ctypes.c_char_p
 
+    def test_the_g2p_marker_binds_the_state_v8_interface(self):
+        lib = _FakeLib(_exports(g.INTERFACE_STATE_V8), helper_layout=g._HelperInputV7)
+        ns = g.bind_generation_api(lib)
+        assert ns.interface == g.INTERFACE_STATE_V8
+        assert ns.helper_input is g._HelperInputV7
+        assert ns.mtmd_gen_audio_get_info.restype is g._GenAudioInfoV7
+        assert ns.mtmd_gen_inp_default.restype is g._GenInpV8
+        assert ns.mtmd_gen_audio_process.argtypes == [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(g._GenInpV8),
+            ctypes.POINTER(g._GenOut)]
+        assert ns.mtmd_helper_gen_audio_max_frames.restype is ctypes.c_int32
+        assert ns.mtmd_gen_audio_g2p.restype is ctypes.c_int32
+
+    def test_a_library_with_the_max_frames_marker_only_stays_state_v7(self):
+        ns = g.bind_generation_api(_FakeLib(_exports(g.INTERFACE_STATE_V7),
+                                            helper_layout=g._HelperInputV7))
+        assert ns.interface == g.INTERFACE_STATE_V7
+        assert ns.mtmd_gen_inp_default.restype is g._GenInpV7
+        assert not hasattr(ns, "mtmd_gen_audio_g2p")
+
+    def test_the_g2p_marker_comes_before_every_older_marker(self):
+        assert g._INTERFACE_MARKERS[0] == (g._STATE_V8_MARKER, g.INTERFACE_STATE_V8)
+        assert g._STATE_V8_MARKER not in _exports(g.INTERFACE_STATE_V7)
+
     @pytest.mark.parametrize("older", [g.INTERFACE_STATE_V3, g.INTERFACE_STATE_V4,
                                        g.INTERFACE_STATE_V5, g.INTERFACE_STATE_V6])
     def test_a_max_frames_marker_with_an_older_default_input_is_refused(self, older):
@@ -374,6 +398,13 @@ class TestAbiGate:
             "feats": 56, "n_feats": 64, "backbone_state": 72,
             "backbone_state_size": 80, "backbone_n_past": 88, "n_steps": 92}
         assert ctypes.sizeof(g._GenInpV7) == 96
+        assert _offsets(g._GenInpV8) == {
+            "type": 0, "code0": 4, "embd": 8, "top_k": 16, "top_p": 20, "temp": 24,
+            "penalty_repeat": 28, "penalty_last_n": 32, "codes": 40, "n_codes": 48,
+            "feats": 56, "n_feats": 64, "speed": 72, "backbone_state": 80,
+            "backbone_state_size": 88, "backbone_n_past": 96, "n_steps": 100,
+            "cfg_scale": 104}
+        assert ctypes.sizeof(g._GenInpV8) == 112
         assert _offsets(g._GenOut) == {
             "codes": 0, "n_codes": 8, "feats": 16, "n_feats": 24, "embd": 32,
             "is_eos": 40, "audio": 48, "n_samples": 56}
@@ -675,8 +706,8 @@ class TestSynthesisLoop:
 
     def test_a_delivery_input_asks_for_the_model_defaults(self, synth):
         if synth._m.interface not in (g.INTERFACE_STATE_V5, g.INTERFACE_STATE_V6,
-                                      g.INTERFACE_STATE_V7):
-            pytest.skip("the state_v5, state_v6 and state_v7 interfaces only")
+                                      g.INTERFACE_STATE_V7, g.INTERFACE_STATE_V8):
+            pytest.skip("the state_v5 to state_v8 interfaces only")
         out = synth.synthesize("hello", language="en", seed=3)
         assert out.wav == synth._m.wav
         sent = synth._m.inputs[0]
@@ -686,7 +717,7 @@ class TestSynthesisLoop:
         assert sent["out_type"] == 1
         if synth._m.interface != g.INTERFACE_STATE_V5:
             assert sent["speaker_ref_text"] is None
-        if synth._m.interface == g.INTERFACE_STATE_V7:
+        if synth._m.interface in (g.INTERFACE_STATE_V7, g.INTERFACE_STATE_V8):
             assert (sent["cfg_scale"], sent["flow_steps"]) == (0.0, 0)
 
     def test_a_repeated_seed_resets_the_legacy_generator_before_the_request(self, synth):

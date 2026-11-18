@@ -10,7 +10,7 @@ codebook-0 token for every frame with the sampler chain llama.cpp's
 ``llama-tts`` uses, and drives the helper one frame at a time so a caller can
 report progress and stop between frames.
 
-Eight generation interfaces are bound: the legacy one (builds exporting
+Nine generation interfaces are bound: the legacy one (builds exporting
 ``mtmd_gen_inp_default`` but not ``mtmd_gen_state_init``), the state one (builds
 exporting ``mtmd_gen_state_init``, whose helper input starts with a ``stream``
 flag and whose ``mtmd_gen_audio_process`` takes a generation state), the
@@ -26,8 +26,10 @@ bytes ``mtmd_helper_gen_audio_inp_default`` returns, and the state_v7 one
 (builds also exporting ``mtmd_helper_gen_audio_max_frames``: the state_v6 helper
 input with ``cfg_scale`` and ``flow_steps`` before ``out_type``,
 ``n_channels`` in ``mtmd_gen_audio_info`` and the backbone state fields in
-``mtmd_gen_inp``). An mtmd exporting none of the markers lays the input struct
-out differently and is refused with :class:`SpeechUnavailable`, as is a
+``mtmd_gen_inp``) and the state_v8 one (builds also exporting
+``mtmd_gen_audio_g2p``: ``mtmd_gen_inp`` with ``speed`` after ``n_feats`` and
+``cfg_scale`` at the end). An mtmd exporting none of the markers lays the input
+struct out differently and is refused with :class:`SpeechUnavailable`, as is a
 state_v3-marker or state_v7-marker mtmd whose default helper input matches no
 layout of its marker, or more than one.
 
@@ -434,6 +436,31 @@ class _GenInpV7(ctypes.Structure):
                 ("n_steps", ctypes.c_int32)]
 
 
+class _GenInpV8(ctypes.Structure):
+    """``mtmd_gen_inp`` of the state_v8 interface: the state_v7 input with
+    ``speed`` after ``n_feats`` and ``cfg_scale`` at the end. localm only
+    receives it from ``mtmd_gen_inp_default``, so both hold the library's
+    defaults."""
+    _fields_ = [("type", ctypes.c_int),
+                ("code0", ctypes.c_int32),
+                ("embd", ctypes.POINTER(ctypes.c_float)),
+                ("top_k", ctypes.c_int32),
+                ("top_p", ctypes.c_float),
+                ("temp", ctypes.c_float),
+                ("penalty_repeat", ctypes.c_float),
+                ("penalty_last_n", ctypes.c_int32),
+                ("codes", ctypes.POINTER(ctypes.c_int32)),
+                ("n_codes", ctypes.c_size_t),
+                ("feats", ctypes.POINTER(ctypes.c_float)),
+                ("n_feats", ctypes.c_size_t),
+                ("speed", ctypes.c_float),
+                ("backbone_state", ctypes.c_void_p),
+                ("backbone_state_size", ctypes.c_size_t),
+                ("backbone_n_past", ctypes.c_int32),
+                ("n_steps", ctypes.c_int32),
+                ("cfg_scale", ctypes.c_float)]
+
+
 class _GenOut(ctypes.Structure):
     """``mtmd_gen_out`` of the state and state_v2 interfaces."""
     _fields_ = [("codes", ctypes.POINTER(ctypes.c_int32)),
@@ -471,11 +498,15 @@ _FloatPtr = ctypes.POINTER(ctypes.c_float)
 # "state_v4" (the structs of llama.cpp b12219: temp before seed in the helper
 # input), "state_v5" (b12424: speed and loudness after seed in the helper
 # input), "state_v6" (b12452: speaker_ref_text after speaker_ref in the helper
-# input) and "state_v7" (b12458: cfg_scale and flow_steps before out_type in the
+# input), "state_v7" (b12458: cfg_scale and flow_steps before out_type in the
 # helper input, n_channels in mtmd_gen_audio_info, the backbone state fields in
-# mtmd_gen_inp). A library has the first interface in _INTERFACE_MARKERS whose
-# marker it exports; the v2, v3 and v7 markers are functions added by the same
-# upstream changes as the struct fields. state_v4, state_v5 and state_v6 added
+# mtmd_gen_inp) and "state_v8" (b12497: speed after n_feats and cfg_scale at the
+# end of mtmd_gen_inp). A library has the first interface in _INTERFACE_MARKERS
+# whose marker it exports; the v2, v3 and v7 markers are functions added by the
+# same upstream changes as the struct fields, the v8 marker is the first
+# function declared after the v8 layout. mtmd_gen_inp is read only on the legacy
+# interface, so a state_v7 library whose mtmd_gen_inp is already the v8 layout
+# (b12479 to b12496) still runs. state_v4, state_v5 and state_v6 added
 # no function, so a state_v3-marker library is one of the layouts its
 # _HELPER_INPUT_FAMILIES entry lists, chosen by _helper_input_interface.
 INTERFACE_LEGACY = "legacy"
@@ -486,12 +517,15 @@ INTERFACE_STATE_V4 = "state_v4"
 INTERFACE_STATE_V5 = "state_v5"
 INTERFACE_STATE_V6 = "state_v6"
 INTERFACE_STATE_V7 = "state_v7"
+INTERFACE_STATE_V8 = "state_v8"
+_STATE_V8_MARKER = "mtmd_gen_audio_g2p"
 _STATE_V7_MARKER = "mtmd_helper_gen_audio_max_frames"
 _STATE_V3_MARKER = "mtmd_gen_audio_voice_name"
 _STATE_V2_MARKER = "mtmd_helper_gen_audio_next_is_text"
 _STATE_MARKER = "mtmd_gen_state_init"
 _LEGACY_MARKER = "mtmd_gen_inp_default"
-_INTERFACE_MARKERS = ((_STATE_V7_MARKER, INTERFACE_STATE_V7),
+_INTERFACE_MARKERS = ((_STATE_V8_MARKER, INTERFACE_STATE_V8),
+                      (_STATE_V7_MARKER, INTERFACE_STATE_V7),
                       (_STATE_V3_MARKER, INTERFACE_STATE_V3),
                       (_STATE_V2_MARKER, INTERFACE_STATE_V2),
                       (_STATE_MARKER, INTERFACE_STATE),
@@ -553,6 +587,13 @@ _INTERFACE_STRUCTS = {
         "mtmd_gen_out": _GenOut,
         "mtmd_gen_state_params": _GenStateParams,
     },
+    INTERFACE_STATE_V8: {
+        "mtmd_gen_audio_info": _GenAudioInfoV7,
+        "mtmd_helper_gen_audio_inp": _HelperInputV7,
+        "mtmd_gen_inp": _GenInpV8,
+        "mtmd_gen_out": _GenOut,
+        "mtmd_gen_state_params": _GenStateParams,
+    },
 }
 
 # The helper input layouts a library exporting a marker can have, oldest
@@ -561,6 +602,7 @@ _HELPER_INPUT_FAMILIES = {
     INTERFACE_STATE_V3: (INTERFACE_STATE_V3, INTERFACE_STATE_V4,
                          INTERFACE_STATE_V5, INTERFACE_STATE_V6),
     INTERFACE_STATE_V7: (INTERFACE_STATE_V7,),
+    INTERFACE_STATE_V8: (INTERFACE_STATE_V8,),
 }
 
 
@@ -614,6 +656,12 @@ _INTERFACE_SIGNATURES = {
         **_state_v3_signatures(_HelperInputV7, _GenInpV7, _GenAudioInfoV7),
         "mtmd_helper_gen_audio_max_frames": (ctypes.c_int32, [ctypes.c_void_p]),
     },
+    INTERFACE_STATE_V8: {
+        **_state_v3_signatures(_HelperInputV7, _GenInpV8, _GenAudioInfoV7),
+        "mtmd_helper_gen_audio_max_frames": (ctypes.c_int32, [ctypes.c_void_p]),
+        "mtmd_gen_audio_g2p": (ctypes.c_int32, [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t]),
+    },
 }
 
 _SIGNATURES = {
@@ -643,7 +691,8 @@ class GenerationApi:
     :attr:`interface` is :data:`INTERFACE_LEGACY`, :data:`INTERFACE_STATE`,
     :data:`INTERFACE_STATE_V2`, :data:`INTERFACE_STATE_V3`,
     :data:`INTERFACE_STATE_V4`, :data:`INTERFACE_STATE_V5`,
-    :data:`INTERFACE_STATE_V6` or :data:`INTERFACE_STATE_V7`;
+    :data:`INTERFACE_STATE_V6`, :data:`INTERFACE_STATE_V7` or
+    :data:`INTERFACE_STATE_V8`;
     :attr:`helper_input` is the
     ``mtmd_helper_gen_audio_inp`` structure of that interface. The
     ``mtmd_gen_state_*`` functions are bound on the state interfaces only."""
@@ -672,6 +721,7 @@ class GenerationApi:
     mtmd_gen_audio_voice_name: Any
     mtmd_helper_gen_audio_inp_default: Any
     mtmd_helper_gen_audio_max_frames: Any
+    mtmd_gen_audio_g2p: Any
 
 
 def _default_input_matches(raw: bytes, layout: type[ctypes.Structure]) -> bool:
@@ -721,16 +771,17 @@ _bound: dict[int, tuple] = {}
 
 def bind_generation_api(m) -> GenerationApi:
     """The speech generation functions of the loaded mtmd library *m*, bound
-    for the interface it exports: state_v7 when it exports
+    for the interface it exports: state_v8 when it exports
+    ``mtmd_gen_audio_g2p``, else state_v7 when it exports
     ``mtmd_helper_gen_audio_max_frames``, else state_v3, state_v4, state_v5
     or state_v6 when it exports ``mtmd_gen_audio_voice_name``, else state_v2
     when it exports ``mtmd_helper_gen_audio_next_is_text``, else state when it
     exports ``mtmd_gen_state_init``, else legacy when it exports
-    ``mtmd_gen_inp_default``. The state_v3 and state_v7 markers' layouts are
-    confirmed by :func:`_helper_input_interface`.
+    ``mtmd_gen_inp_default``. The state_v3, state_v7 and state_v8 markers'
+    layouts are confirmed by :func:`_helper_input_interface`.
 
     Raises :class:`SpeechUnavailable` when *m* exports no marker, lacks a
-    function of its interface, or exports the state_v3 or state_v7 marker
+    function of its interface, or exports the state_v3, state_v7 or state_v8 marker
     with a helper input layout that is not one of that marker's."""
     with _bind_lock:
         cached = _bound.get(id(m))
