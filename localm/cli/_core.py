@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import sys
-from typing import Optional
+from typing import Any, Optional
 
 from localm.stdio import force_utf8_stdio
 
@@ -356,8 +356,10 @@ class _GracefulGroup(click.Group):
         first = next((a for a in argv if not a.startswith("-")), "")
         if first == "coder":
             windows_expand_args = False
-        return super().main(args, prog_name, complete_var, standalone_mode,
-                            windows_expand_args, **extra)
+        options: dict[str, Any] = dict(
+            extra, prog_name=prog_name, complete_var=complete_var,
+            standalone_mode=standalone_mode, windows_expand_args=windows_expand_args)
+        return super().main(args, **options)
 
     def parse_args(self, ctx, args):
         """Parse as ``click.Group`` does and keep the subcommand's name and
