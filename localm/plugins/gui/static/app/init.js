@@ -610,6 +610,17 @@ export async function runPluginProbes(probes = PLUGIN_BOOT_PROBES) {
   await Promise.allSettled(started);
 }
 
+/** The gate message for a server locked because its config.json is damaged, or
+ *  undefined (the default "requires an API key" message) when it is not. */
+async function configUnreadableNotice() {
+  try {
+    const r = await fetch("/api/session", { headers: authHeaders() });
+    if (!r.ok) return undefined;
+    const j = await r.json();
+    return j && j.config_unreadable === true ? t("keygate.configUnreadable") : undefined;
+  } catch { return undefined; }
+}
+
 // Boot auth probe (AUTH-1b refactor). Returns true when authed (the caller then
 // loads the app). status 0 / unreachable -> reconnect overlay (NOT the gate);
 // 401 -> key gate, OR a one-shot stale-shell self-heal if a prior login should
@@ -653,7 +664,7 @@ export async function bootAuthProbe() {
       await reloadApp();
       return false;
     }
-    lockUI();
+    lockUI(await configUnreadableNotice());
     return false;
   }
   // Authed (or open / loopback mode): clear recovery flags and reveal the app.

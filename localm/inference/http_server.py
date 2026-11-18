@@ -5033,9 +5033,18 @@ def _enforce_request(request: Request, scope: Optional[str]) -> None:
     *scope* (None = 'any valid key') must be granted (the owner key implies every
     scope). Cookie-sourced auth on an unsafe method additionally requires a valid
     CSRF token (an HMAC derived from the session)."""
-    from localm.auth import any_key_configured, require_auth_enabled
+    from localm.auth import (any_key_configured, config_unreadable_detail,
+                             ct_equal, require_auth_state)
     if not any_key_configured():
-        if require_auth_enabled():
+        required, unreadable = require_auth_state()
+        if required:
+            if unreadable:
+                inst_token = getattr(request.app.state, "instance_token", None)
+                if (request.url.path == "/v1/server/shutdown" and inst_token
+                        and ct_equal(_bearer_token(request), inst_token)):
+                    return
+                raise HTTPException(status_code=401,
+                                    detail=config_unreadable_detail())
             raise HTTPException(
                 status_code=401,
                 detail="Auth required but no API key configured "
