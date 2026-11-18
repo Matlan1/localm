@@ -2064,8 +2064,8 @@ export function openModal(title, bodyBuilder) {
   $("modal-title").textContent = title;
   const body = $("modal-body");
   body.innerHTML = "";
-  bodyBuilder(body);
   $("modal").style.display = "flex";
+  bodyBuilder(body);
 }
 /** Close the shared modal. A dialog waiting for an answer reads a close it did
  *  not make itself as a cancel. */

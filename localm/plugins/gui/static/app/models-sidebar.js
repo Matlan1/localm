@@ -586,6 +586,7 @@ async function _readActivity() {
 function _applyActivity(data) {
   const ops = Array.isArray(data.operations) ? data.operations : [];
   _activityOps = ops;
+  for (const op of ops) if (op.status === "running") _attachActivityStream(op);
   _activityServerNow = typeof data.now === "number" ? data.now : null;
   _activityKnown = true;
   _activityStaleReads = 0;
@@ -616,6 +617,39 @@ export async function pollActivity() {
   await _readActivity();
 }
 
+// Follow one running operation's stream so the details modal can show its
+// output and progress, whichever tab started it. Every read that lists a
+// running operation calls this, so an operation started in this tab and one
+// found at boot take the same path.
+function _attachActivityStream(op) {
+  if (_activityLogs.has(op.id)) return;
+  _activityLogs.set(op.id, { lines: [] });
+  streamJob(op.id, (line) => {
+    const entry = _activityLogs.get(op.id);
+    if (entry) entry.lines.push(line);
+    _refreshActivityModalIfOpen();
+  }, (ev) => {
+    const idx = _activityOps.findIndex((o) => o.id === op.id);
+    if (idx !== -1 && (typeof ev.pct === "number" || ev.detail)) {
+      _activityOps[idx] = { ..._activityOps[idx], pct: ev.pct, detail: ev.detail };
+      renderActivityPill(_activityOps);
+      _refreshActivityModalIfOpen();
+    }
+  }).then((end) => {
+    // "disconnected" is a CLIENT-only concept (streamJob gave up
+    // reconnecting) - it is not a real job outcome, so it must never
+    // overwrite the last known SERVER-reported status; the job may well
+    // still be running, we have just lost our own update channel to it.
+    if (end.status === "disconnected") return;
+    const idx = _activityOps.findIndex((o) => o.id === op.id);
+    if (idx !== -1) {
+      _activityOps[idx] = { ..._activityOps[idx], status: end.status };
+      renderActivityPill(_activityOps);
+      _refreshActivityModalIfOpen();
+    }
+  });
+}
+
 // Boot-time reattach, mirroring coder.js's reattachSessions(): ask the server
 // what is running, reattach a live stream to anything found (fire-and-forget -
 // an operation can run far longer than boot should wait), and toast once.
@@ -628,33 +662,6 @@ export async function reattachActivity() {
     if (!ops) return;   // server unreachable at boot - same as reattachSessions()
     const running = ops.filter((op) => op.status === "running");
     if (!running.length) return;
-    for (const op of running) {
-      _activityLogs.set(op.id, { lines: [] });
-      streamJob(op.id, (line) => {
-        const entry = _activityLogs.get(op.id);
-        if (entry) entry.lines.push(line);
-        _refreshActivityModalIfOpen();
-      }, (ev) => {
-        const idx = _activityOps.findIndex((o) => o.id === op.id);
-        if (idx !== -1 && (typeof ev.pct === "number" || ev.detail)) {
-          _activityOps[idx] = { ..._activityOps[idx], pct: ev.pct, detail: ev.detail };
-          renderActivityPill(_activityOps);
-          _refreshActivityModalIfOpen();
-        }
-      }).then((end) => {
-        // "disconnected" is a CLIENT-only concept (streamJob gave up
-        // reconnecting) - it is not a real job outcome, so it must never
-        // overwrite the last known SERVER-reported status; the job may well
-        // still be running, we have just lost our own update channel to it.
-        if (end.status === "disconnected") return;
-        const idx = _activityOps.findIndex((o) => o.id === op.id);
-        if (idx !== -1) {
-          _activityOps[idx] = { ..._activityOps[idx], status: end.status };
-          renderActivityPill(_activityOps);
-          _refreshActivityModalIfOpen();
-        }
-      });
-    }
     toast(running.length === 1
       ? t("activity.reattachedOne", { label: activityLabel(running[0]) })
       : t("activity.reattachedMany", { count: running.length }));
