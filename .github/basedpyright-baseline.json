@@ -6242,6 +6242,14 @@
                     "endColumn": 31,
                     "lineCount": 1
                 }
+            },
+            {
+                "code": "reportAttributeAccessIssue",
+                "range": {
+                    "startColumn": 35,
+                    "endColumn": 49,
+                    "lineCount": 1
+                }
             }
         ],
         "./localm/plugins/coder/cli/repl.py": [
