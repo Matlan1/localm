@@ -111,6 +111,42 @@ class TestScoreGateWithRecordedModels:
             "above every score only a conversation reference, judged by the floor, answers"
 
 
+class TestShortQuestionsWithRecordedModels:
+    """Questions of a few words with no context of their own, such as "How do I
+    connect a phone?" against a collection about localm."""
+
+    ANSWERED = ("short-phone-connect", "short-phone-setup", "short-phone-use",
+                "short-docker", "short-jobs", "short-add-docs")
+
+    def _gate(self, replay, replayed, name):
+        _, coll = replayed
+        fn, min_score, lean = replay.rerankers()[name]
+        queries = [q for q in ev.load_queries() if q["id"] in self.ANSWERED]
+        short_off = [q for q in ev.load_offtopic() if q["category"] == "short"]
+        assert len(queries) == len(self.ANSWERED) and len(short_off) >= 8
+        return ev.evaluate_gate(coll, queries, short_off, embed_fn=replay.embed_fn,
+                                rerank_fn=fn, min_score=min_score, lean_score=lean)
+
+    @pytest.mark.parametrize("name", ["qwen3-reranker-0.6b-q8_0",
+                                      "bge-reranker-v2-m3-Q8_0"])
+    def test_a_short_question_finds_the_document_about_it(self, replay, replayed, name):
+        gate = self._gate(replay, replayed, name)
+        assert gate["recall"] == 1.0, (name, gate)
+
+    @pytest.mark.parametrize("name", ["qwen3-reranker-0.6b-q8_0",
+                                      "bge-reranker-v2-m3-Q8_0"])
+    def test_a_short_question_about_something_else_finds_nothing(
+            self, replay, replayed, name):
+        gate = self._gate(replay, replayed, name)
+        assert gate["precision"] == 1.0, (name, gate["leaks"])
+
+    def test_the_lean_score_keeps_the_off_topic_precision(self, replay, replayed):
+        suite, _ = replayed
+        for name, (_, gate, _, _) in _gate_names(replay).items():
+            categories = suite["gates"][gate]["categories"]
+            assert categories["short"] == 1.0 and categories["unrelated"] == 1.0, name
+
+
 class TestFollowUpsWithRecordedModels:
     def test_the_previous_message_lets_a_follow_up_find_its_topic(
             self, replay, replayed):
