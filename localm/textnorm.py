@@ -616,6 +616,17 @@ def split_think(text: str, exit_marker: Optional[str] = None) -> tuple[str, str]
     return "".join(content), "".join(reasoning)
 
 
+ASR_MARKER = "<asr_text>"
+_ASR_LANGUAGE_RE = re.compile(r"language [^<\n]{0,40}" + re.escape(ASR_MARKER))
+
+
+def strip_asr_header(text: str) -> str:
+    """*text* without the ``language <name>`` and ``<asr_text>`` header a
+    Qwen3-ASR model opens each transcript with (``language None`` for a clip
+    with no speech)."""
+    return _ASR_LANGUAGE_RE.sub("", text).replace(ASR_MARKER, "")
+
+
 def strip_think(text: str) -> str:
     """Visible content of *text* with every reasoning channel removed.
 

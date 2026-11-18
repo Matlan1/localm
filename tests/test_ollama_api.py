@@ -68,7 +68,9 @@ def home(tmp_path, monkeypatch):
 
 
 def _write_registry(home: Path, entries: dict) -> None:
+    import localm.config as _cfg
     (home / "registry.json").write_text(json.dumps(entries), encoding="utf-8")
+    _cfg._loop_reads_invalidate()
 
 
 @pytest.fixture

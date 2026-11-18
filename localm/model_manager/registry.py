@@ -818,7 +818,7 @@ def get_model_path(name: str) -> Optional[Path]:
 
 
 
-def unregistered_model_error(name) -> Optional[str]:
+def unregistered_model_error(name, *, from_cli: bool = False) -> Optional[str]:
     """None when an UNTRUSTED caller may use *name* as a model name, else a
     ready-to-show message explaining the refusal.
 
@@ -843,12 +843,22 @@ def unregistered_model_error(name) -> Optional[str]:
     Callers raise their own exception type from the returned string (HTTP 400 in
     the jobs routes, ValueError in the MCP server, RuntimeError in the runner) so
     this module stays free of any transport dependency.
+
+    ``from_cli`` is for a command whose person typed *name* on the command line
+    but whose job still runs later without them (``localm job add``): the
+    closing sentence then tells them to register the path first instead of
+    saying a command-line run may name one.
     """
     if not name:
         return None
     reg = _mm.load_registry()
     if not reg or name in reg:
         return None
+    if from_cli:
+        return (f"Model {name!r} is not registered, and a scheduled job names a "
+                "registered model, not a file path. Register the file once "
+                "with 'localm add <path>', then use its name ('localm list' "
+                "shows the registered names).")
     # Does NOT list the registered models. This message is returned to callers
     # holding only `jobs` or an MCP scope, while ENUMERATING models requires
     # `models:read` (see inference/routes/models.py), so listing them here would
@@ -1948,12 +1958,12 @@ def list_models(type_filter: Optional[str] = None) -> None:
         return
 
     table = Table(header_style="bold cyan", show_lines=False, expand=False)
-    table.add_column("Name", style="bold white")
+    table.add_column("Name", style="bold white", overflow="fold")
     table.add_column("Format", style="cyan")
     table.add_column("Role", style="magenta")
     table.add_column("Size", justify="right", style="green")
     table.add_column("Source", style="dim")
-    table.add_column("Path", style="dim")
+    table.add_column("Path", style="dim", overflow="fold")
 
     for name, info in sorted(reg.items()):
         epath = _entry_path(info)

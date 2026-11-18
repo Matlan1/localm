@@ -3153,5 +3153,8 @@
   "workflow.uploadedToast": "Subido y seleccionado",
   "workflow.useThisWorkflow": "Usar este flujo de trabajo",
   "chat.modelLoadingBanner": "Cargando {model}. Un modelo grande puede tardar un poco.",
+  "chat.usage.firstToken": "primer token a los {ms} ms",
+  "chat.status.waitingForModel": "Esperando a que se cargue {model}",
+  "chat.modelLoadFailed": "{model} no se cargó, así que este mensaje no se respondió. Vuelve a enviarlo cuando haya un modelo cargado.",
   "coder.controls.verifyNoCheckReason": "Ninguna comprobación puede ejecutarse en este proyecto: {reason}"
 }

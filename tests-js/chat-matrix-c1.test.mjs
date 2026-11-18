@@ -74,7 +74,7 @@ test("the reply stats line gives the first-token time in whole milliseconds", ()
   const { window: win } = loadApp();
   win.updateUsageDisplay({ total_tokens: 10, ttft_ms: 6326.54 });
   const line = win.document.getElementById("chat-usage").textContent;
-  assert.match(line, /TTFT 6327 ms/);
+  assert.match(line, /first token after 6327 ms/);
   assert.doesNotMatch(line, /6326\.5/);
 });
 

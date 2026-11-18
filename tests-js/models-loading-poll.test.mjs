@@ -42,12 +42,16 @@ test("a model load in flight on the server shows as loading and is re-polled wit
   assert.equal(win.__active, "model-a");
 });
 
-test("sendChat tells the user the model is still loading rather than that none is loaded", async () => {
+test("sendChat holds the message for the loading model rather than saying none is loaded", async () => {
   const state = { active: "", loading: "model-a", modelCalls: 0 };
   const { window: win } = loadApp({ fetchImpl: makeFetch(state) });
   runScript(win, "refreshModels();");
   await tick(50);
   win.document.getElementById("chat-input").value = "hello";
-  await win.sendChat();
-  assert.match(win.document.getElementById("toast").textContent, /model-a is still loading/);
+  const sent = win.sendChat();
+  await tick(50);
+  assert.match(win.document.getElementById("chat-messages").textContent, /Waiting for model-a to load/);
+  assert.doesNotMatch(win.document.getElementById("toast").textContent, /No model loaded/);
+  runScript(win, "chat.abort.abort();");
+  await sent;
 });
