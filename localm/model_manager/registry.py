@@ -1930,7 +1930,7 @@ def list_models(type_filter: Optional[str] = None) -> None:
     if type_filter:
         reg = models_of_type(type_filter, reg)
     if not reg and registered:
-        console.print(f"[dim]No [bold]{escape(type_filter)}[/bold] models. "
+        console.print(f"[dim]No [bold]{escape(type_filter or "")}[/bold] models. "
                       f"{registered} model(s) of other types are registered: run "
                       "[bold]localm list[/bold] to see them.[/dim]")
         return
@@ -5078,7 +5078,7 @@ def _backfill_same_size_digests(names: list[str], reg: dict,
     for n in names:
         entry = reg.get(n)
         path = _entry_path(entry) if isinstance(entry, dict) else None
-        if path is not None and not entry.get("sha256"):
+        if isinstance(entry, dict) and path is not None and not entry.get("sha256"):
             by_path.setdefault(str(Path(path).resolve()), []).append((n, Path(path)))
     for owners in by_path.values():
         file = owners[0][1]
