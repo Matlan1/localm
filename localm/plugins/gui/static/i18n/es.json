@@ -3149,5 +3149,6 @@
   "workflow.uploadFailed": "La subida falló",
   "workflow.uploadUse": "Subir y usar",
   "workflow.uploadedToast": "Subido y seleccionado",
-  "workflow.useThisWorkflow": "Usar este flujo de trabajo"
+  "workflow.useThisWorkflow": "Usar este flujo de trabajo",
+  "chat.modelLoadingBanner": "Cargando {model}. Un modelo grande puede tardar un poco."
 }

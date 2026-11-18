@@ -3507,4 +3507,5 @@ export const I18N_EN = {
   "browser.setup.useBundled": "Use the bundled browser instead",
 
   // ---- Setup page (guided runtime + first model, manual entry only) ----
+  "chat.modelLoadingBanner": "Loading {model}. A large model can take a while to load.",
 };
