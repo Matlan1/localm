@@ -446,6 +446,14 @@ def _env_for(plan: Plan) -> dict:
         elif env.get(key) == value:
             # Inherited from the launcher, not chosen by the user.
             env.pop(key)
+    if plan.portable_store:
+        scratch = ROOT / ".cache" / "tmp"
+        try:
+            scratch.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return env
+        for key in ("TEMP", "TMP", "TMPDIR"):
+            env[key] = str(scratch)
     return env
 
 
@@ -946,8 +954,14 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
 
     def install_localm(emit):
         try:
-            _run(uv_argv("pip", "install", "-p", ".venv", "-e", f".[{plan.extras}]"),
-                 emit, plan)
+            locked = spec.install_args(plan.extras, ROOT)
+            if locked is None:
+                emit("uv.lock was not found in this folder: installing the newest "
+                     "versions the project allows instead of the locked set.")
+                _run(uv_argv("pip", "install", "-p", ".venv", "-e", f".[{plan.extras}]"),
+                     emit, plan)
+            else:
+                _run(uv_argv(*locked), emit, plan)
         except StepFailed as e:
             raise StepFailed(f"{str(e).rstrip('.')}. If a LocaLM program is still running from this "
                              "folder, close it and run setup again and pick install "

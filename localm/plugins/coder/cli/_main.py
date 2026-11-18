@@ -826,12 +826,12 @@ def _warn_if_url_leaves_machine(session_mode, provider, url) -> None:
 def _captures_child_output(stdin_tty: bool, stdout_tty: bool, platform: str,
                            machine_output: bool) -> bool:
     """True when an auto-started server's output must go to a log file rather
-    than this process's own stdout: the caller has no terminal on stdin, or (off
-    Windows, where the child otherwise inherits the stream) stdout is not a
-    terminal or carries machine-readable output."""
-    if not stdin_tty:
+    than this process's own stdout: the caller has no terminal on stdin, the
+    platform is Windows (the server runs with no console window at all), or
+    stdout is not a terminal or carries machine-readable output."""
+    if not stdin_tty or platform == "win32":
         return True
-    return platform != "win32" and (machine_output or not stdout_tty)
+    return machine_output or not stdout_tty
 
 
 def _unregistered_model_message(model: str, work_dir) -> Optional[str]:
@@ -1161,7 +1161,9 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                 # console window, so the child's output goes to a LOG FILE: a PIPE
                 # would deadlock a long-lived server once the OS buffer fills with
                 # its normal request logging, a file cannot. The tail is read back
-                # on an early exit. A TTY run keeps the visible console window.
+                # on an early exit. On Windows every run takes this path: a console
+                # window of the server's own cannot be hidden again under Windows
+                # Terminal.
                 headless = _captures_child_output(
                     sys.stdin.isatty(), sys.stdout.isatty(), sys.platform,
                     machine_output)
@@ -1180,8 +1182,6 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                             | subprocess.CREATE_NEW_PROCESS_GROUP)
                     else:
                         kwargs["start_new_session"] = True
-                elif sys.platform == "win32":
-                    kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
                 else:
                     kwargs["start_new_session"] = True
 

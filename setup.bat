@@ -175,6 +175,9 @@ if "%STOREPICK%"=="1" (
     set "CONTAINED=1"
     set "UV_PYTHON_INSTALL_DIR=!CD!\.python"
     set "UV_CACHE_DIR=!CD!\.cache"
+    set "TEMP=!CD!\.cache\tmp"
+    set "TMP=!CD!\.cache\tmp"
+    if not exist ".cache\tmp" mkdir ".cache\tmp" >nul 2>nul
     set "PYPREF=--python-preference only-managed"
     echo  Portable: uv, Python, and downloads all under this folder
 ) else (
@@ -363,7 +366,7 @@ if not exist ".venv" call :jr begin venv & goto venv_create
 echo.
 set "REPLACEVENV="
 set "VENVKIND=Foreign"
-if "%OURS%"=="1" set "VENVKIND=LocalM"
+if "%OURS%"=="1" set "VENVKIND=LocaLM"
 call :flush
 rem SETUP-Q: replace-venv
 set /p "REPLACEVENV=  !VENVKIND! .venv found. Replace it? [y/N]: "
@@ -641,14 +644,22 @@ rem  line is overwritten by the redraw that follows it. Reported live as garbled
 rem  progress bars during the torch install. The heartbeat is ONLY correct where
 rem  uv's output is CAPTURED and the console would otherwise be silent - the ONE
 rem  such site is :venv_retry above. Do not copy it back here.
-uv pip install -p .venv -e ".[%EXTRAS%]"
+rem  The packages come from the uv.lock in this folder (exact versions, each file
+rem  checked against its sha256); localm.setup_spec install-args says how.
+set "INSARGS="
+.venv\Scripts\python -m localm.setup_spec install-args %EXTRAS% > "%STMP%\localm_install.txt"
+if not errorlevel 1 if exist "%STMP%\localm_install.txt" for /f "usebackq delims=" %%a in ("%STMP%\localm_install.txt") do set "INSARGS=%%a"
+del "%STMP%\localm_install.txt" 2>nul
+if not defined INSARGS echo  [^^!] Installing the newest versions the project allows instead of the locked set.
+if defined INSARGS uv %INSARGS%
+if not defined INSARGS uv pip install -p .venv -e ".[%EXTRAS%]"
 if not errorlevel 1 goto install_ok
 echo  [^^!] Install failed - see the error above.
 echo      If it says a file is in use or access is denied, a LocaLM program is still
 echo      running from this folder. Close it, run setup.bat again and pick [1] Install
 echo      again / repair. Until then this folder is partly updated. Your chats,
 echo      settings and models are untouched.
-call :offer_report "localm install failed during setup" "uv pip install -e .[%EXTRAS%] failed - see the error output above."
+call :offer_report "localm install failed during setup" "installing localm and its packages failed - see the error output above."
 pause
 exit /b 1
 :extras_failed

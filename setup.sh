@@ -476,6 +476,8 @@ if [ "$spick" = 1 ]; then
   CONTAINED=1
   export UV_PYTHON_INSTALL_DIR="$(pwd)/.python"
   export UV_CACHE_DIR="$(pwd)/.cache"
+  mkdir -p "$(pwd)/.cache/tmp"
+  export TMPDIR="$(pwd)/.cache/tmp"
   PYPREF="--python-preference only-managed"
   say "  Portable: uv, Python, and downloads all under this folder"
 else
@@ -892,12 +894,24 @@ say "  Installing localm into .venv ..."
 # bars during the torch install. The heartbeat is ONLY correct where uv's output
 # is CAPTURED and the terminal would otherwise be silent - the ONE such site is
 # the create_venv retry loop above. Do not copy it back here.
-uv pip install -p .venv -e ".[${EXTRAS}]" || {
+# The packages come from the uv.lock in this folder (exact versions, each file
+# checked against its sha256); localm.setup_spec install-args says how.
+install_localm_packages() {
+  local insargs
+  if insargs="$(.venv/bin/python -m localm.setup_spec install-args "${EXTRAS}")"; then
+    # shellcheck disable=SC2086
+    uv $insargs
+  else
+    say "  [!] Installing the newest versions the project allows instead of the locked set."
+    uv pip install -p .venv -e ".[${EXTRAS}]"
+  fi
+}
+install_localm_packages || {
   say "  [!] Installing localm failed - see the error above."
   say "      If a LocaLM program is still running from this folder, close it, run setup.sh again"
   say "      and pick [1] Install again / repair. Until then this folder is partly updated."
   say "      Your chats, settings and models are untouched."
-  offer_report "localm install failed during setup" "uv pip install -e .[${EXTRAS}] failed - see the error output above."
+  offer_report "localm install failed during setup" "installing localm and its packages failed - see the error output above."
   exit 1
 }
 

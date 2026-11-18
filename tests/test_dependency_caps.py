@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Upper bounds in pyproject.toml that keep a fresh install resolvable.
 
-setup.bat, setup.sh and the graphical installer run `uv pip install -e .`,
-which resolves from pyproject.toml and never reads uv.lock, so these bounds are
-what a new install actually gets.
+setup.bat, setup.sh and the graphical installer install from uv.lock, and fall
+back to `uv pip install -e .` (which resolves from pyproject.toml) when the
+folder has none, so these bounds are what a new install without a lock gets.
 """
 
 from __future__ import annotations
