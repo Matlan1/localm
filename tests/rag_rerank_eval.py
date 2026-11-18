@@ -173,7 +173,7 @@ def evaluate_gate(coll, queries: list[dict], offtopic: list[dict], *,
                   embed_fn: Optional[Callable] = None,
                   rerank_fn: Optional[Callable] = None,
                   min_score: Optional[float] = None, k: int = 4,
-                  candidates: int = 20) -> dict:
+                  candidates: int = 20, lean_score: Optional[float] = None) -> dict:
     """How a ``relevant_only`` configuration treats on-topic and off-topic questions.
 
     ``recall`` is the share of *queries* with a relevant chunk among the returned
@@ -182,7 +182,7 @@ def evaluate_gate(coll, queries: list[dict], offtopic: list[dict], *,
     def ask(text: str) -> list[dict]:
         return coll.query(text, k=k, embed_fn=embed_fn, relevant_only=True,
                           rerank_fn=rerank_fn, rerank_candidates=candidates,
-                          rerank_min_score=min_score)
+                          rerank_min_score=min_score, rerank_lean_score=lean_score)
 
     on = [(q, ask(q["query"])) for q in queries]
     off = [(q, ask(q["query"])) for q in offtopic]
@@ -201,7 +201,8 @@ def evaluate_gate(coll, queries: list[dict], offtopic: list[dict], *,
 def evaluate_followups(coll, followups: dict, *, embed_fn: Optional[Callable] = None,
                        rerank_fn: Optional[Callable] = None,
                        min_score: Optional[float] = None, k: int = 4,
-                       candidates: int = 20, use_context: bool = True) -> dict:
+                       candidates: int = 20, use_context: bool = True,
+                       lean_score: Optional[float] = None) -> dict:
     """How ``relevant_only`` treats follow-up questions that refer back to the
     previous message. ``recall`` is the share of ``on`` follow-ups with a relevant
     chunk of the previous question's document among the hits and ``precision`` the
@@ -210,7 +211,7 @@ def evaluate_followups(coll, followups: dict, *, embed_fn: Optional[Callable] = 
     def ask(item: dict) -> list[dict]:
         return coll.query(item["query"], k=k, embed_fn=embed_fn, relevant_only=True,
                           rerank_fn=rerank_fn, rerank_candidates=candidates,
-                          rerank_min_score=min_score,
+                          rerank_min_score=min_score, rerank_lean_score=lean_score,
                           context=item["prior"] if use_context else None)
 
     on = [(f, ask(f)) for f in followups["on"]]
@@ -228,14 +229,16 @@ def gate_suite(coll, queries: list[dict], offtopic: list[dict], followups: dict,
                candidates: int = 20) -> dict:
     """Every gate this harness compares, as ``{"gates": {name: evaluate_gate()},
     "followups": {name: evaluate_followups()}}``. *rerankers* maps a name to
-    ``(rerank function, minimum score or None)``."""
+    ``(rerank function, minimum score or None)`` or ``(rerank function, minimum
+    score or None, lean score or None)``."""
     gates = {"floor only": evaluate_gate(coll, queries, offtopic, embed_fn=embed_fn,
                                          k=k)}
     follow = {"floor only, no context": evaluate_followups(
                   coll, followups, embed_fn=embed_fn, k=k, use_context=False),
               "floor only, context": evaluate_followups(
                   coll, followups, embed_fn=embed_fn, k=k)}
-    for name, (fn, min_score) in rerankers.items():
+    for name, spec in rerankers.items():
+        fn, min_score, lean_score = (*spec, None)[:3]
         gates[f"{name}: floor, then rerank"] = evaluate_gate(
             coll, queries, offtopic, embed_fn=embed_fn, rerank_fn=fn, k=k,
             candidates=candidates)
@@ -243,12 +246,12 @@ def gate_suite(coll, queries: list[dict], offtopic: list[dict], followups: dict,
             continue
         gates[f"{name}: score >= {min_score:g}"] = evaluate_gate(
             coll, queries, offtopic, embed_fn=embed_fn, rerank_fn=fn,
-            min_score=min_score, k=k, candidates=candidates)
+            min_score=min_score, k=k, candidates=candidates, lean_score=lean_score)
         for label, use_context in (("no context", False), ("context", True)):
             follow[f"{name}: score >= {min_score:g}, {label}"] = evaluate_followups(
                 coll, followups, embed_fn=embed_fn, rerank_fn=fn,
                 min_score=min_score, k=k, candidates=candidates,
-                use_context=use_context)
+                use_context=use_context, lean_score=lean_score)
     return {"gates": gates, "followups": follow}
 
 
@@ -310,7 +313,9 @@ class Replay:
         return fn
 
     def rerankers(self) -> dict:
-        return {name: (self.rerank_fn(name), info["min_score"])
+        from localm.rag.rerank import CALIBRATED_LEAN_SCORES
+        return {name: (self.rerank_fn(name), info["min_score"],
+                       CALIBRATED_LEAN_SCORES.get(info["sha256"]))
                 for name, info in self.data["rerank"].items()}
 
 
@@ -343,6 +348,7 @@ def record_replay(path: Path, embed_fn: Callable, rerankers: dict, *,
     min_score)}``) over every question and chunk the gates ask about, and write
     them to *path* with the gate results they reproduce. Vectors are stored as
     half-precision floats and the recorded collection is built from those values."""
+    from localm.rag.rerank import CALIBRATED_LEAN_SCORES
     queries, offtopic, followups = load_queries(), load_offtopic(), load_followups()
     with tempfile.TemporaryDirectory(prefix="rerank-record-") as tmp:
         lexical = build_collection(Path(tmp) / "lexical", None)
@@ -371,7 +377,7 @@ def record_replay(path: Path, embed_fn: Callable, rerankers: dict, *,
                 calls[_call_key(query, texts)] = scores
                 return scores
 
-            recorded[name] = (recorder, min_score)
+            recorded[name] = (recorder, min_score, CALIBRATED_LEAN_SCORES.get(sha))
         coll = build_collection(Path(tmp) / "hybrid", replay.embed_fn, model_name)
         gate_suite(coll, queries, offtopic, followups, embed_fn=replay.embed_fn,
                    rerankers=recorded, k=k, candidates=candidates)
@@ -506,7 +512,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     k=args.k, candidates=c)
         ceiling = pool_ceiling(coll, queries, embed_fn=embed_fn)
         if args.gate:
-            from localm.rag.rerank import calibrated_min_score
+            from localm.rag.rerank import calibrated_lean_score, calibrated_min_score
             offtopic = load_offtopic()
             gates["floor only"] = evaluate_gate(
                 coll, queries, offtopic, embed_fn=embed_fn, k=args.k)
@@ -518,10 +524,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                     coll, queries, offtopic, embed_fn=embed_fn,
                     rerank_fn=rerank_fn, k=args.k, candidates=c)
                 if min_score is not None:
+                    lean = (None if args.min_score is not None
+                            else calibrated_lean_score(name))
                     gates[f"{name}: score >= {min_score:g}"] = evaluate_gate(
                         coll, queries, offtopic, embed_fn=embed_fn,
                         rerank_fn=rerank_fn, min_score=min_score, k=args.k,
-                        candidates=c)
+                        candidates=c, lean_score=lean)
     print(format_table(results))
     print("unreranked recall within top N: "
           + ", ".join(f"N={n}: {v:.3f}" for n, v in ceiling.items()))

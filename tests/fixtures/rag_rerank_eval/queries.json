@@ -50,6 +50,13 @@
     {"id": "net-search", "doc": "network.md", "query": "Which search services are used when I have no account or key?", "gold": ["chain of no-key search services"]},
     {"id": "net-pull", "doc": "network.md", "query": "Does disabling network access also stop model downloads?", "gold": ["still kills them, with no exception"]},
     {"id": "net-allow", "doc": "network.md", "query": "Restrict the assistant to a short list of approved websites", "gold": ["only listed domains"]},
-    {"id": "net-redirect", "doc": "network.md", "query": "What stops a malicious page from bouncing the agent into my home network through a redirect?", "gold": ["every hop is re-validated"]}
+    {"id": "net-redirect", "doc": "network.md", "query": "What stops a malicious page from bouncing the agent into my home network through a redirect?", "gold": ["every hop is re-validated"]},
+    {"id": "short-phone-connect", "doc": "phone.md", "query": "How do I connect a phone?", "gold": ["**Same Wi-Fi:** run", "To let your phone reach it", "Install Tailscale on the machine running localm"]},
+    {"id": "short-phone-word", "doc": "phone.md", "query": "phone", "gold": ["**Same Wi-Fi:** run", "To let your phone reach it", "Install Tailscale on the machine running localm"]},
+    {"id": "short-phone-setup", "doc": "phone.md", "query": "How do I set up my phone?", "gold": ["**Same Wi-Fi:** run", "To let your phone reach it", "Install Tailscale on the machine running localm"]},
+    {"id": "short-phone-use", "doc": "phone.md", "query": "Can I use it on my phone?", "gold": ["no app-store download and no localm cloud", "**Same Wi-Fi:** run", "To let your phone reach it"]},
+    {"id": "short-docker", "doc": "docker.md", "query": "How do I run it in Docker?", "gold": ["docker run -d --name localm", "Create the API key in a volume"]},
+    {"id": "short-jobs", "doc": "jobs.md", "query": "How do I schedule a job?", "gold": ["A job runs a chat prompt", "A cron job: 09:00 Monday-Friday"]},
+    {"id": "short-add-docs", "doc": "rag.md", "query": "How do I add documents?", "gold": ["*add docs* with a", "localm rag add manuals"]}
   ]
 }

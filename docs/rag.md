@@ -257,7 +257,13 @@ embedder too rather than quietly returning those vectors.
   and only hits scoring at least 0.5 (Qwen3, a probability) or -1.5 (bge, a
   logit) are kept. A paraphrased question the keyword and cosine floor would
   drop then still finds its answer, and an unrelated question still returns
-  nothing. Any other reranker file leaves the floor in charge, applied to the
+  nothing. A short question with no context of its own ("How do I connect a
+  phone?") can leave the reranker unsure, so a hit the reranker still gives
+  at least 0.05 (Qwen3) or -2.5 (bge) is kept when the other signals agree on
+  it: its cosine reaches the embedding model's lower floor, and every word of
+  the question occurs somewhere in the collection. A question about something
+  the collection never mentions is not rescued this way. Setting another
+  minimum score turns this off. Any other reranker file leaves the floor in charge, applied to the
   candidates before the reranker sees them, as does a question that points back
   at the conversation (with no `context`) and a reranker that fails.
   To gate on the reranker score for another reranker, or with another cut-off,

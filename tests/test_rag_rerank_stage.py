@@ -297,7 +297,7 @@ class TestOfftopicLabels:
         assert len(queries) >= 40
         assert len({q["id"] for q in queries}) == len(queries)
         assert {q["category"] for q in queries} == {
-            "unrelated", "near", "conversation", "chitchat"}
+            "unrelated", "near", "conversation", "chitchat", "short"}
         assert all(q["query"].strip() for q in queries)
 
     def test_no_off_topic_question_is_also_an_on_topic_one(self):
