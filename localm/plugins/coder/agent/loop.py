@@ -626,6 +626,8 @@ class _LoopMixin:
         # Set by Agent (core.py) through _ExecutionMixin.
         def _hooks_may_ask(self, calls) -> bool: ...
 
+        def _may_need_terminal_confirm(self, calls, interactive: bool) -> bool: ...
+
         def _verify_refusal(self, label: str, interactive: bool) -> str | None: ...
 
         # Set by Agent (core.py) through _ContextMixin.
@@ -2082,7 +2084,8 @@ class _LoopMixin:
                 abandoned = self._await_abandoned_peers(abandoned)
                 self._abandoned_peers = abandoned
                 still_live = abandoned
-            if destructive or len(group) == 1 or self._hooks_may_ask(group):
+            if (destructive or len(group) == 1 or self._hooks_may_ask(group)
+                    or self._may_need_terminal_confirm(group, interactive)):
                 # Serial execution
                 for call in group:
                     if still_live:

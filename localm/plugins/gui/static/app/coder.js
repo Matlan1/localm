@@ -382,6 +382,7 @@ export function activateSession(id) {
   for (const [sid, s] of coder.sessions) {
     s.feedEl.classList.toggle("active", sid === id);
   }
+  rebalanceStreams();
   // The inline browser mirror only streams for the session on screen: a
   // session with several coder sessions open must not hold N live
   // screencasts running for the N-1 nobody is looking at.
@@ -460,8 +461,10 @@ export function registerSession(info, { replay }) {
     inlineBrowserAttempted: false,
     inlineBrowser: null,       // {mod, img, status, abort, jobId} once attached
   };
+  s.streamReplay = !!replay;
   coder.sessions.set(info.id, s);
-  streamSession(s, replay);
+  if (!_deferRebalance) rebalanceStreams();
+  if (coder.sessions.size > MAX_LIVE_STREAMS) ensureStreamTick();
   return s;
 }
 
@@ -981,11 +984,22 @@ export function handleCoderEvent(s, ev) {
 }
 
 export async function streamSession(s, replay) {
-  while (coder.sessions.has(s.info.id) && !s.closed) {
+  const ctl = new AbortController();
+  s.streamCtl = ctl;
+  try {
+    await _streamSessionLoop(s, replay, ctl);
+  } finally {
+    if (s.streamCtl === ctl) s.streamCtl = null;
+  }
+}
+
+async function _streamSessionLoop(s, replay, ctl) {
+  const live = () => coder.sessions.has(s.info.id) && !s.closed && s.streamCtl === ctl;
+  while (live()) {
     try {
       const r = await fetch(
         `/api/coder/sessions/${s.info.id}/events${replay ? "?replay=true" : ""}`,
-        { headers: authHeaders() });
+        { headers: authHeaders(), signal: ctl.signal });
       if (r.status === 404) {
         stopInlineBrowserStream(s);
         s.closed = true;
@@ -997,12 +1011,105 @@ export async function streamSession(s, replay) {
       await readSSE(r, (payload) => {
         let ev;
         try { ev = JSON.parse(payload); } catch { return; }
-        if (coder.sessions.has(s.info.id)) handleCoderEvent(s, ev);
+        if (coder.sessions.has(s.info.id) && s.streamCtl === ctl) handleCoderEvent(s, ev);
       });
     } catch {
-      if (!coder.sessions.has(s.info.id) || s.closed) return;
+      if (!live()) return;
       await new Promise((res) => setTimeout(res, 1500));
     }
+  }
+}
+
+/* A browser allows 6 connections per host and the server speaks HTTP/1.1, so
+ * one open events stream per coder session starves every other request once
+ * several sessions are open. Up to MAX_LIVE_STREAMS sessions keep a stream;
+ * beyond that, the session on screen and the busy ones (or those waiting for
+ * an approval) hold the streams and the rest are parked, then re-read in full
+ * from the server (replay) when one of them is shown or becomes busy. */
+const MAX_LIVE_STREAMS = 3;
+let _deferRebalance = false;
+const STREAM_TICK_MS = 4000;
+let _streamTick = null;
+
+function _streamRank(s) {
+  if (s.info.id === coder.activeId) return 0;
+  if (s.busy || s.confirmCards.size > 0) return 1;
+  return 2;
+}
+
+function _closeStream(s) {
+  const ctl = s.streamCtl;
+  s.streamCtl = null;
+  if (ctl) ctl.abort();
+}
+
+function _resetSessionView(s) {
+  stopInlineBrowserStream(s);
+  s.feedEl.replaceChildren();
+  s.liveBody = null;
+  s.liveText = "";
+  s.liveReasoning = "";
+  s.pendingCards = [];
+  s.confirmCards.clear();
+  s.phaseKey = "";
+  s.inlineBrowser = null;
+  s.inlineBrowserAttempted = false;
+}
+
+export function rebalanceStreams() {
+  const all = [...coder.sessions.values()].filter((s) => !s.closed);
+  let keep;
+  if (all.length <= MAX_LIVE_STREAMS) {
+    keep = new Set(all);
+  } else {
+    keep = new Set(all.filter((s) => _streamRank(s) < 2)
+      .sort((a, b) => _streamRank(a) - _streamRank(b))
+      .slice(0, MAX_LIVE_STREAMS));
+  }
+  for (const s of all) {
+    if (keep.has(s)) {
+      if (s.streamCtl) continue;
+      let replay = s.streamReplay;
+      if (s.streamedOnce) {
+        _resetSessionView(s);
+        replay = true;
+      }
+      s.streamedOnce = true;
+      s.streamReplay = false;
+      streamSession(s, replay);
+    } else if (s.streamCtl) {
+      _closeStream(s);
+    }
+  }
+}
+
+async function _pollParkedSessions() {
+  const parked = [...coder.sessions.values()].filter((s) => !s.closed && !s.streamCtl);
+  if (parked.length) {
+    try {
+      const r = await fetch("/api/coder/sessions", { headers: authHeaders() });
+      if (r.ok) {
+        const data = await r.json();
+        for (const info of data.sessions || []) {
+          const s = coder.sessions.get(info.id);
+          if (s && !s.streamCtl) {
+            Object.assign(s.info, info);
+            s.busy = !!(info.busy || info.pending_confirm);
+          }
+        }
+      }
+    } catch { /* server unreachable; the next tick retries */ }
+  }
+  rebalanceStreams();
+  if (coder.sessions.size <= MAX_LIVE_STREAMS && _streamTick !== null) {
+    clearInterval(_streamTick);
+    _streamTick = null;
+  }
+}
+
+function ensureStreamTick() {
+  if (_streamTick === null && typeof setInterval === "function") {
+    _streamTick = setInterval(_pollParkedSessions, STREAM_TICK_MS);
   }
 }
 
@@ -1331,11 +1438,17 @@ export async function reattachSessions() {
     const r = await fetch("/api/coder/sessions", { headers: authHeaders() });
     if (!r.ok) return;
     const data = await r.json();
-    for (const info of data.sessions) {
-      if (!coder.sessions.has(info.id)) {
-        registerSession(info, { replay: true });
+    _deferRebalance = true;
+    try {
+      for (const info of data.sessions) {
+        if (!coder.sessions.has(info.id)) {
+          registerSession(info, { replay: true });
+        }
       }
+    } finally {
+      _deferRebalance = false;
     }
+    rebalanceStreams();
     if (!coder.activeId && data.sessions.length) {
       activateSession(data.sessions[data.sessions.length - 1].id);
       toast(t("coder.session.reattached"));
@@ -1475,6 +1588,7 @@ export async function closeCoderSession(s) {
 export function dropCoderSession(s) {
   stopInlineBrowserStream(s);
   s.closed = true;
+  _closeStream(s);
   _closeModalOf(s);
   s.feedEl.remove();
   if (!coder.sessions.has(s.info.id)) return;
@@ -2530,6 +2644,13 @@ export function openSessionControls() {
     vIn.placeholder = t("coder.controls.verifyOffPlaceholder");
     vIn.spellcheck = false;
     vIn.value = info.verify || "";
+    const vReason = el("div", "sub");
+    const showVerifyReason = (d) => {
+      const reason = d && !d.verify ? d.verify_reason : "";
+      vReason.textContent = reason ? t("coder.controls.verifyNoCheckReason", { reason }) : "";
+      vReason.hidden = !reason;
+    };
+    showVerifyReason(info);
     const vSet = el("button", "btn-secondary", t("coder.controls.setBtn"));
     vSet.onclick = async () => {
       vSet.disabled = true;
@@ -2537,6 +2658,7 @@ export function openSessionControls() {
         const v = vIn.value.trim();
         const d = await postSessionSettings({ verify: v || null }, s);
         vIn.value = d.verify || "";
+        showVerifyReason(d);
         toast(d.verify ? t("coder.controls.verificationIs", { verify: d.verify }) : t("coder.controls.verificationOff"));
       } catch (e) { toast(t("coder.controls.verifySetFailed") + e.message, true); }
       finally { vSet.disabled = false; }
@@ -2548,6 +2670,7 @@ export function openSessionControls() {
       try {
         const d = await postSessionSettings({ auto_verify: true }, s);
         vIn.value = d.verify || "";
+        showVerifyReason(d);
         // A re-detect that found nothing is SAID, not left looking like a set.
         toast(d.verify ? t("coder.controls.verificationIs", { verify: d.verify })
                        : t("coder.controls.noCheckFound"), !d.verify);
@@ -2563,6 +2686,7 @@ export function openSessionControls() {
     vRow.appendChild(vSet);
     vRow.appendChild(vAuto);
     vCard.appendChild(vRow);
+    vCard.appendChild(vReason);
     body.appendChild(vCard);
 
     /* --- working directory (the REPL's /cd) --- */

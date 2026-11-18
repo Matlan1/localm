@@ -3152,5 +3152,6 @@
   "workflow.uploadUse": "Hochladen + verwenden",
   "workflow.uploadedToast": "Hochgeladen und ausgewählt",
   "workflow.useThisWorkflow": "Diesen Workflow verwenden",
-  "chat.modelLoadingBanner": "{model} wird geladen. Ein großes Modell kann etwas dauern."
+  "chat.modelLoadingBanner": "{model} wird geladen. Ein großes Modell kann etwas dauern.",
+  "coder.controls.verifyNoCheckReason": "Keine Prüfung kann in diesem Projekt laufen: {reason}"
 }

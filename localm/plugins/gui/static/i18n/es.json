@@ -3152,5 +3152,6 @@
   "workflow.uploadUse": "Subir y usar",
   "workflow.uploadedToast": "Subido y seleccionado",
   "workflow.useThisWorkflow": "Usar este flujo de trabajo",
-  "chat.modelLoadingBanner": "Cargando {model}. Un modelo grande puede tardar un poco."
+  "chat.modelLoadingBanner": "Cargando {model}. Un modelo grande puede tardar un poco.",
+  "coder.controls.verifyNoCheckReason": "Ninguna comprobación puede ejecutarse en este proyecto: {reason}"
 }
