@@ -42,6 +42,10 @@ def register(app: FastAPI, ctx) -> None:
         if not presented:
             presented = _bearer_token(request)
         if not any_key_configured():
+            from localm.auth import (config_unreadable_detail,
+                                     locked_by_unreadable_config)
+            if await run_in_threadpool(locked_by_unreadable_config):
+                raise HTTPException(503, config_unreadable_detail())
             raise HTTPException(
                 400, "This server runs in open mode (no API key configured); "
                 "there is nothing to log into.")
@@ -353,7 +357,8 @@ def register(app: FastAPI, ctx) -> None:
         *session_mode* is the mode a chat from this caller, sent with these same
         headers, is recorded under (another localm instance reads it before
         forwarding a chat here)."""
-        from localm.auth import any_key_configured, require_auth_enabled
+        from localm.auth import (any_key_configured, locked_by_unreadable_config,
+                                 require_auth_enabled)
 
         def _state() -> dict:
             configured = any_key_configured()
@@ -366,6 +371,7 @@ def register(app: FastAPI, ctx) -> None:
             return {"authed": held is not None,
                     "scopes": sorted(held) if held else [],
                     "required": configured or require_auth_enabled(),
+                    "config_unreadable": locked_by_unreadable_config(),
                     "csrf": csrf,
                     "session_mode": _hs.request_session_mode(request).value}
 

@@ -496,4 +496,4 @@ def test_post_on_an_unreadable_config_without_a_key_is_refused_and_writes_nothin
 
     assert p.read_bytes() == corrupt
     assert r.status_code in (401, 503), r.text
-    assert "Auth required" in r.json()["detail"]
+    assert "config.json" in r.json()["detail"] and "damaged" in r.json()["detail"]
