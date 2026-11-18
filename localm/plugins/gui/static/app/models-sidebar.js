@@ -6,7 +6,7 @@
 import { chat, lsSetScoped } from "./chat.js";
 import { recordGuiError } from "./client-log.js";
 import { $, GIB, SHELL_TOKEN, authHeaders, cancelJob, chooseAsync, confirmDangerAsync, el, fmtDuration, instanceCacheTrusted, openModal, readSSE, streamJob, toast } from "./helpers.js";
-import { applyI18n, t, tn } from "./i18n.js";
+import { applyI18n, onLanguageReload, t, tn } from "./i18n.js";
 import { interruptedCount, loadInterrupted, onInterruptedChange, renderInterrupted } from "./interrupted-pulls.js";
 import { refreshPerfEstimate } from "./settings-perf.js";
 
@@ -1089,7 +1089,9 @@ export async function refreshModels() {
       // browsers suppress prompt(), leaving a phone/LAN client on a blank page
       // (NET-1). After a first successful read the key had been accepted, so
       // the gate says the session ended.
-      showKeyGate(t(_modelsEverRefreshed ? "keygate.sessionEnded" : "models.keyRequired"));
+      if (window.__localmLocked !== true) {
+        showKeyGate(t(_modelsEverRefreshed ? "keygate.sessionEnded" : "models.keyRequired"));
+      }
       return;
     }
     if (r.status === 403) {
@@ -1923,7 +1925,7 @@ if (sidebarUnloadBtn) {
 
 // The model dropdown's placeholder and the status pill are written by
 // refreshModels, so they are redrawn when the interface language changes.
-document.addEventListener("localm:language", () => {
+onLanguageReload(() => {
   refreshModels();
   if (_installEnv) applyInstallUI(_installEnv);
 });

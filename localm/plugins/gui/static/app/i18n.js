@@ -233,6 +233,31 @@ export async function applyLanguage(id) {
   return true;
 }
 
+const _languageReloaders = new Set();
+let _languageReloadOpen = false;
+let _languageReloadMissed = false;
+
+/** Run *fn* when the interface language changes, for a surface painted from
+ *  fetched data. The reads stay closed until setLanguageReloadOpen(true), so a
+ *  language applied at load never sends a request before the page is signed in. */
+export function onLanguageReload(fn) {
+  _languageReloaders.add(fn);
+  document.addEventListener("localm:language", () => {
+    if (_languageReloadOpen) fn();
+    else _languageReloadMissed = true;
+  });
+}
+
+/** Open or close the reads of onLanguageReload. Opening runs every reload once
+ *  when a language change arrived while it was closed. */
+export function setLanguageReloadOpen(open) {
+  _languageReloadOpen = !!open;
+  if (_languageReloadOpen && _languageReloadMissed) {
+    _languageReloadMissed = false;
+    for (const fn of _languageReloaders) fn();
+  }
+}
+
 /** Read the language cached in this browser and apply it. Runs at load so a
  *  returning visitor never sees English first. */
 export function storedLanguage() {

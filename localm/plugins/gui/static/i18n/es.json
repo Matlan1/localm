@@ -1910,6 +1910,7 @@
   "keygate.unreachable": "No se pudo contactar con el servidor de LocaLM para comprobar la clave. Comprueba que está en marcha y vuelve a intentarlo.",
   "keygate.refused": "El servidor rechazó el inicio de sesión (HTTP {status}).",
   "keygate.sessionEnded": "Tu sesión terminó: puede que la clave se haya revocado o haya caducado. Introduce una clave para continuar.",
+  "keygate.keyCreated": "Se creó una clave de API para este servidor después de abrir esta página, por lo que ahora pide una. Introduce la clave para continuar.",
   "qr.title": "Escanea el QR de vinculación",
   "qr.body": "En el ordenador que ejecuta LocaLM, abre <b>Ajustes → Servidor y red → App complementaria</b> y apunta la cámara al QR.",
   "qr.starting": "Iniciando la cámara…",

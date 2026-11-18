@@ -1732,6 +1732,7 @@ export const I18N_EN = {
   "keygate.unreachable": "Could not reach the LocaLM server to check the key. Check that it is running, then try again.",
   "keygate.refused": "The server refused the sign-in (HTTP {status}).",
   "keygate.sessionEnded": "Your sign-in ended: the key may have been revoked or may have expired. Enter a key to continue.",
+  "keygate.keyCreated": "An API key was created for this server after this page opened, so it now asks for one. Enter the key to continue.",
   "qr.title": "Scan the pairing QR",
   "qr.body": "On the computer running LocaLM, open <b>Settings → Server & network → Companion app</b> and point your camera at the QR.",
   "qr.starting": "Starting camera…",

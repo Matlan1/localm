@@ -7,7 +7,7 @@ import { pickDirectory, pickFile } from "../app/picker.js";
 import { signOutSession } from "../app/init.js";
 import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, confirmDangerAsync, copyTextWithFeedback, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, refreshCsrf, reloadApp, safeAvatarImageSrc, SHELL_TOKEN, showInlineError, streamJob, toast, whileBusy } from "../app/helpers.js";
 import { chat, refreshCtxLimit } from "../app/chat.js";
-import { t, tn, tOr, tOrFirst } from "../app/i18n.js";
+import { onLanguageReload, t, tn, tOr, tOrFirst } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
 import { loginWithKey, modelCache } from "../app/models-sidebar.js";
 import { showView } from "../app/tabs.js";
@@ -1494,7 +1494,7 @@ export function buildSettingsNav() {
 
 // The nav labels are built from the catalog, so they are redrawn when the
 // interface language changes.
-document.addEventListener("localm:language", () => {
+onLanguageReload(() => {
   buildSettingsNav();
   // refreshKeysPanel only builds the scope checkboxes once (a real fetch cost,
   // not just a render one - see its own comment). Clear that memo here so the

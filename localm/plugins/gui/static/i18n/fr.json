@@ -1910,6 +1910,7 @@
   "keygate.unreachable": "Impossible de joindre le serveur LocaLM pour vérifier la clé. Vérifiez qu'il fonctionne, puis réessayez.",
   "keygate.refused": "Le serveur a refusé la connexion (HTTP {status}).",
   "keygate.sessionEnded": "Votre connexion a pris fin : la clé a peut-être été révoquée ou a expiré. Saisissez une clé pour continuer.",
+  "keygate.keyCreated": "Une clé API a été créée pour ce serveur après l'ouverture de cette page, il en demande donc une maintenant. Saisissez la clé pour continuer.",
   "qr.title": "Scanner le QR d'appairage",
   "qr.body": "Sur l'ordinateur qui exécute LocaLM, ouvrez <b>Paramètres → Serveur et réseau → Application compagnon</b> et pointez la caméra vers le QR.",
   "qr.starting": "Démarrage de la caméra…",
