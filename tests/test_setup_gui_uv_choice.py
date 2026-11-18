@@ -370,7 +370,7 @@ def test_a_double_click_starts_again_without_a_console_and_ends_at_once(tmp_path
     clone, _, _, out = _run(tmp_path, hidden=True)
     ran = [ln for ln in out.stdout.splitlines() if ln.startswith("CONHOST-RAN")]
     assert len(ran) == 1, out.stdout
-    assert "/d /v:off /c \"\"" in ran[0] and str(clone / "probe.bat") in ran[0], ran[0]
+    assert "/d /v:on /c" in ran[0], ran[0]
     assert len(_fields(out, "WINDOW-UV")) == 1, "the window opened more or less than once"
     assert out.returncode == 0, (out.stdout, out.stderr)
 
@@ -489,5 +489,8 @@ def test_the_start_without_a_console_comes_before_any_work():
     work = min(i for i, ln in enumerate(lines)
                if ln.startswith(("powershell", '"%UVEXE%"', "call :splash_start", "start \"\" /b")))
     assert inplace < start < work
-    assert lines[start + 1].startswith("if errorlevel 1 goto"), "a failed start must not end setup"
-    assert lines[start + 2] == "exit /b 0"
+    assert lines[start - 1] == 'set "LOCALM_SETUP_GUI_CMD="!LOCALM_SETUP_GUI_SELF!""'
+    assert lines[start].endswith("/d /v:on /c ^^!LOCALM_SETUP_GUI_CMD^^!")
+    assert lines[start + 1:start + 5] == [
+        'set "STARTRC=!errorlevel!"', 'endlocal & set "STARTRC=%STARTRC%"',
+        'if not "%STARTRC%"=="0" goto start_setup', "exit /b 0"], "a failed start must not end setup"

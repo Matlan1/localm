@@ -32,14 +32,24 @@ if "%LOCALM_SETUP_GUI_HIDDEN%"=="1" goto start_setup
 if "%USEBOX%"=="0" goto start_setup
 if not exist "%SystemRoot%\System32\conhost.exe" goto start_setup
 set "LOCALM_SETUP_GUI_HIDDEN=1"
-start "" "%SystemRoot%\System32\conhost.exe" --headless "%ComSpec%" /d /v:off /c ""%%LOCALM_SETUP_GUI_SELF%%""
-if errorlevel 1 goto start_setup
+rem  The quoted path travels in LOCALM_SETUP_GUI_CMD, which the started cmd
+rem  expands with delayed expansion (/v:on) after it has parsed its command
+rem  line; the console host re-quotes and expands what is on that line. This
+rem  file turns delayed expansion off again on its first line. See
+rem  test_the_real_start_without_a_console_runs_setup_from_an_awkward_folder.
+setlocal EnableDelayedExpansion
+set "LOCALM_SETUP_GUI_CMD="!LOCALM_SETUP_GUI_SELF!""
+start "" "%SystemRoot%\System32\conhost.exe" --headless "%ComSpec%" /d /v:on /c ^^!LOCALM_SETUP_GUI_CMD^^!
+set "STARTRC=!errorlevel!"
+endlocal & set "STARTRC=%STARTRC%"
+if not "%STARTRC%"=="0" goto start_setup
 exit /b 0
 
 :start_setup
 set "LOCALM_SETUP_GUI_HIDDEN="
 set "LOCALM_SETUP_GUI_INPLACE="
 set "LOCALM_SETUP_GUI_SELF="
+set "LOCALM_SETUP_GUI_CMD="
 for %%n in (1 2 3 4 5) do set "LOCALM_MSG%%n="
 echo.
 echo   LocaLM graphical setup
@@ -322,7 +332,7 @@ rem ===========================================================================
 call :splash_stop
 if not "%USEBOX%"=="1" goto notify_console
 set "LOCALM_MSG_ICON=%~1"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName System.Windows.Forms; $m=@(1..5 | ForEach-Object { [Environment]::GetEnvironmentVariable('LOCALM_MSG'+$_) } | Where-Object { $_ }) -join [Environment]::NewLine; if ($env:LOCALM_MSG_TAIL -and [IO.File]::Exists($env:LOCALM_MSG_TAIL)) { $m += [Environment]::NewLine + [Environment]::NewLine + ((Get-Content -LiteralPath $env:LOCALM_MSG_TAIL -Tail 12) -join [Environment]::NewLine) }; $o=New-Object System.Windows.Forms.Form; $o.TopMost=$true; [void][System.Windows.Forms.MessageBox]::Show($o, $m, 'LocaLM Setup', 'OK', $env:LOCALM_MSG_ICON); $o.Dispose()"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName System.Windows.Forms; $m=@(1..5 | ForEach-Object { [Environment]::GetEnvironmentVariable('LOCALM_MSG'+$_) } | Where-Object { $_ }) -join [Environment]::NewLine; if ($env:LOCALM_MSG_TAIL -and [IO.File]::Exists($env:LOCALM_MSG_TAIL)) { $m += [Environment]::NewLine + [Environment]::NewLine + ((Get-Content -LiteralPath $env:LOCALM_MSG_TAIL -Tail 12) -join [Environment]::NewLine) }; [void][System.Windows.Forms.MessageBox]::Show($m, 'LocaLM Setup', 'OK', $env:LOCALM_MSG_ICON, 'Button1', 'DefaultDesktopOnly')"
 goto notify_clear
 :notify_console
 setlocal EnableDelayedExpansion
