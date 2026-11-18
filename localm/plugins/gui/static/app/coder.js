@@ -1493,17 +1493,24 @@ function _bindModalToSession(body, s) {
   const mark = el("span", "");
   mark.hidden = true;
   mark.dataset.coderSession = s.info.id;
+  _boundMarks.add(mark);
   body.appendChild(mark);
 }
+const _boundMarks = new Set();
 
 /** Close the shared modal when it is a dialog opened for *s*: a dialog must
  *  never outlive its session and act on whichever one is active next. */
 function _closeModalOf(s) {
-  const body = $("modal-body");
-  if ($("modal").style.display === "none" || !body) return;
-  for (const m of body.querySelectorAll("[data-coder-session]")) {
-    if (m.dataset.coderSession === s.info.id) { closeModal(); return; }
+  let shown = false;
+  for (const m of [..._boundMarks]) {
+    if (m.dataset.coderSession !== s.info.id) continue;
+    // A dialog set aside under a picker is not on screen: marking it dead
+    // keeps the picker from putting it back.
+    m.dataset.dead = "1";
+    _boundMarks.delete(m);
+    if (m.isConnected && $("modal").style.display !== "none") shown = true;
   }
+  if (shown) closeModal();
 }
 
 /** A session that ended somewhere else (another tab, the API, the server):
@@ -2625,6 +2632,7 @@ export async function openCoderMemoryModal(s = activeSession()) {
     data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
   } catch (e) { toast(t("coder.memory.readFailed") + e.message, true); return; }
+  if (s.closed) return;
 
   openModal(t("coder.memory.modalTitle", { label: sessionLabel(s.info) }), (body) => {
     _bindModalToSession(body, s);
@@ -2715,6 +2723,7 @@ export async function openBackgroundModal(s = activeSession()) {
     data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
   } catch (e) { toast(t("coder.bg.readFailed") + e.message, true); return; }
+  if (s.closed) return;
 
   openModal(t("coder.bg.modalTitle", { label: sessionLabel(s.info) }), (body) => {
     _bindModalToSession(body, s);

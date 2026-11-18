@@ -163,7 +163,9 @@ export function pickPath(opts = {}) {
       if (settled) return;
       settled = true;
       cleanup();
-      if (prior && !closed) {
+      const dead = prior && prior.nodes.some(
+        (n) => n.matches?.("[data-dead]") || n.querySelector?.("[data-dead]"));
+      if (prior && !closed && !dead) {
         $("modal-title").textContent = prior.title;
         $("modal-body").replaceChildren(...prior.nodes);
         const box = $("modal").querySelector(".modal");

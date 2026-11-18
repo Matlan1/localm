@@ -142,3 +142,16 @@ test("a dialog of another kind is not closed by dropping a session", async () =>
   runScript(win, `dropCoderSession(coder.sessions.get("s1"));`);
   assert.ok(modalOpen(win));
 });
+
+test("a session dropped while the picker is open over its dialog is not brought back", async () => {
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch([]) });
+  seed(win);
+  win.openSessionControls();
+  win.document.getElementById("ctl-cwd").nextElementSibling.click();
+  await ticks();
+  runScript(win, `dropCoderSession(coder.sessions.get("s1"));`);
+  body(win).querySelector(".picker-foot .btn-secondary").click();
+  await ticks();
+  assert.ok(!modalOpen(win), "the ended session's controls do not reappear");
+  assert.equal(win.document.getElementById("ctl-cwd"), null);
+});
