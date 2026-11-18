@@ -964,9 +964,7 @@ async def rag_query(name: str, req: RagQueryRequest, request: Request):
         from localm.rag.rerank import rerank_plan
         plan = rerank_plan(enabled=req.rerank)
         hits = coll.query(req.query, k=k, embed_fn=self_embed,
-                          relevant_only=req.relevant_only, rerank_fn=plan.fn,
-                          rerank_candidates=plan.candidates,
-                          rerank_min_score=plan.min_score,
+                          relevant_only=req.relevant_only, **plan.query_kwargs(),
                           context=(req.context or "")[:_QUERY_CONTEXT_CHARS])
         reranked = any("rerank_score" in h for h in hits)
         return (_neutralise_hits(hits), plan.model if reranked else None,

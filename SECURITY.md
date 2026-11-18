@@ -27,8 +27,9 @@ localm is a local-first, single-owner application. API access is gated by a
   scopes (the owner key implies every scope). The routes that take no bearer key
   are `GET /health` (a liveness probe that returns the status, model name, and
   load state), `GET /whoami` (the instance identity handshake), `GET /localm-ca.crt`
-  (the CA certificate, never the key), `GET /` on a `localm serve` API-only
-  instance (a redirect to the API docs), and the three session routes
+  (the CA certificate, never the key), `GET /` and `HEAD /` on a `localm serve`
+  API-only instance (a redirect to the API docs, and an empty 200 for the
+  heartbeat Ollama clients send), and the three session routes
   `GET /api/session`, `POST /api/session` and `POST /api/session/logout` -
   login exchanges a key for a cookie, so it cannot require one. Five more
   routes take no bearer key but carry a credential of their own:

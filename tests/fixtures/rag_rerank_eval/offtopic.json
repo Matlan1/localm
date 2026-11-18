@@ -1,5 +1,5 @@
 {
-  "description": "Questions the fixture corpus does not answer. A relevance gate must return no hits for any of them. Categories: unrelated (no shared subject), near (shares vocabulary with the corpus but asks for something it never says), conversation (refers back to the chat), chitchat (no information need).",
+  "description": "Questions the fixture corpus does not answer. A relevance gate must return no hits for any of them. Categories: unrelated (no shared subject), near (shares vocabulary with the corpus but asks for something it never says), conversation (refers back to the chat), chitchat (no information need), short (a short question with no context whose subject the corpus does not cover, though it may share words with it).",
   "queries": [
     {"id": "u-capital", "category": "unrelated", "query": "What is the capital city of Australia?"},
     {"id": "u-pasta", "category": "unrelated", "query": "How long should I boil spaghetti before draining it?"},
@@ -48,6 +48,16 @@
     {"id": "h-thanks", "category": "chitchat", "query": "Thanks, that works now"},
     {"id": "h-joke", "category": "chitchat", "query": "Tell me a joke"},
     {"id": "h-name", "category": "chitchat", "query": "What is your name?"},
-    {"id": "h-bored", "category": "chitchat", "query": "I am bored, let's play a word game"}
+    {"id": "h-bored", "category": "chitchat", "query": "I am bored, let's play a word game"},
+
+    {"id": "u-fruit", "category": "unrelated", "query": "Which fruit is the heaviest in the world?"},
+    {"id": "s-moon", "category": "short", "query": "How do I connect to the moon?"},
+    {"id": "s-printer", "category": "short", "query": "How do I connect a printer?"},
+    {"id": "s-speaker", "category": "short", "query": "How do I connect a Bluetooth speaker?"},
+    {"id": "s-tv", "category": "short", "query": "How do I connect my TV?"},
+    {"id": "s-charge", "category": "short", "query": "How do I charge my phone faster?"},
+    {"id": "s-call", "category": "short", "query": "How do I call someone from my phone?"},
+    {"id": "s-cracked", "category": "short", "query": "My phone screen is cracked, can it be repaired?"},
+    {"id": "s-printer-word", "category": "short", "query": "printer"}
   ]
 }

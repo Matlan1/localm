@@ -71,7 +71,7 @@ def _embedder():
 
 @pytest.fixture(scope="module")
 def real_suite(tmp_path_factory):
-    from localm.rag.rerank import CALIBRATED_MIN_SCORES
+    from localm.rag.rerank import CALIBRATED_LEAN_SCORES, CALIBRATED_MIN_SCORES
     home = _real_home()
     with pytest.MonkeyPatch.context() as mp:
         _point_at(mp, home)
@@ -86,8 +86,8 @@ def real_suite(tmp_path_factory):
         suite = ev.gate_suite(
             coll, ev.load_queries(), ev.load_offtopic(), ev.load_followups(),
             embed_fn=embed_fn,
-            rerankers={name: (fn, minimums[name])
-                       for name, (fn, _) in rerankers.items()})
+            rerankers={name: (fn, minimums[name], CALIBRATED_LEAN_SCORES[sha])
+                       for name, (fn, sha) in rerankers.items()})
     return suite, minimums
 
 

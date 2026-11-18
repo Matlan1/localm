@@ -293,9 +293,11 @@ def _patch_query(monkeypatch):
     monkeypatch.setattr(
         store.Collection, "query",
         lambda self, text, k=4, embed_fn=None, relevant_only=False,
-        rerank_fn=None, rerank_candidates=20, rerank_min_score=None, context=None:
+        rerank_fn=None, rerank_candidates=20, rerank_min_score=None,
+        rerank_lean_score=None, context=None:
         captured.update(rerank_fn=rerank_fn, candidates=rerank_candidates,
-                        min_score=rerank_min_score, context=context) or [])
+                        min_score=rerank_min_score, lean_score=rerank_lean_score,
+                        context=context) or [])
     return captured
 
 
@@ -410,6 +412,50 @@ class TestCalibratedScoreGate:
         r = cli_runner.invoke(main, ["rag", "query", "kb", "hello", "--relevant-only"])
         assert r.exit_code == 0, r.output
         assert captured["min_score"] == 0.5
+        assert captured["lean_score"] == 0.05
+
+    @pytest.mark.parametrize("sha,expected", [
+        ("22c9979ce4fbcdc5acdc310c6641c32797eff1aa980b8f7a2db8a8ea23429a48", 0.05),
+        ("A43C7C9B11A4C1517E5BF95151960E1621D1B72F7A493364B01E386CF1AAA1D3", -2.5),
+        ("0" * 64, None),
+        (None, None),
+    ])
+    def test_only_the_measured_files_have_a_lean_score(self, monkeypatch, sha, expected):
+        self._registry(monkeypatch, mine={"sha256": sha})
+        assert rr.calibrated_lean_score("mine") == expected
+
+    def test_every_lean_score_sits_below_its_minimum_score(self):
+        assert set(rr.CALIBRATED_LEAN_SCORES) == set(rr.CALIBRATED_MIN_SCORES)
+        for sha, lean in rr.CALIBRATED_LEAN_SCORES.items():
+            assert lean < rr.CALIBRATED_MIN_SCORES[sha], sha
+
+    def test_the_plan_carries_the_lean_score_only_with_the_measured_minimum(
+            self, home, fake_reranker, monkeypatch):
+        self._qwen(monkeypatch, fake_reranker)
+        assert rr.rerank_plan().lean_score == 0.05
+        _set(home, rag_rerank_min_score=0.9)
+        assert rr.rerank_plan().lean_score is None
+        _set(home, rag_rerank_min_score="not a number")
+        assert rr.rerank_plan().lean_score == 0.05
+        _set(home, rag_rerank_min_score=None)
+        fake_reranker.names[:] = ["qwen"]
+        assert rr.rerank_plan().lean_score is None
+
+    def test_the_plan_is_what_the_query_receives(self, home, fake_reranker, monkeypatch):
+        self._qwen(monkeypatch, fake_reranker)
+        plan = rr.rerank_plan()
+        assert plan.query_kwargs() == {
+            "rerank_fn": plan.fn, "rerank_candidates": plan.candidates,
+            "rerank_min_score": 0.5, "rerank_lean_score": 0.05}
+
+    def test_the_route_passes_the_lean_score(self, rag_app, fake_reranker, monkeypatch):
+        from fastapi.testclient import TestClient
+        self._qwen(monkeypatch, fake_reranker)
+        with TestClient(rag_app) as c:
+            _index(c)
+            captured = _patch_query(monkeypatch)
+            _query(c, relevant_only=True)
+        assert (captured["min_score"], captured["lean_score"]) == (0.5, 0.05)
 
     def test_a_failing_calibrated_reranker_falls_back_to_the_floor_on_the_route(
             self, rag_app, fake_reranker, monkeypatch):
