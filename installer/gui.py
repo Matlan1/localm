@@ -71,6 +71,11 @@ BOOTSTRAP_ENV = "LOCALM_GUI_BOOTSTRAP"
 REPOINTED_ENV = "LOCALM_GUI_REPOINTED"
 SPLASH_ENV = "LOCALM_GUI_SPLASH"
 SPLASH_PREFIX = ".localm-setup-starting-"
+# The file setup-gui.bat sends this window's output to when there is no console.
+LOG_ENV = "LOCALM_GUI_LOG"
+# What the launcher put into the folder and no install has taken over yet; a
+# Portable install takes those folders over, so it is removed when one starts.
+BOOTSTRAP_RECORD = ".localm-gui-bootstrap"
 
 # Exit codes telling the launcher that Shared was chosen on the tooling page and
 # the per-user uv is in place: 46 when it was already there, 47 when this
@@ -103,6 +108,18 @@ def window_runs_on_folder_tooling() -> bool:
     tool = uv_tool()
     exe = find_uv(ROOT)
     return bool((exe and tool.is_inside(exe, ROOT)) or tool.is_inside(sys.executable, ROOT))
+
+
+def take_over_bootstrap() -> str:
+    """Remove ROOT/BOOTSTRAP_RECORD: a Portable install keeps the folders the
+    launcher put there. Returns an empty string, or a warning line when the
+    file is there and could not be removed."""
+    try:
+        (ROOT / BOOTSTRAP_RECORD).unlink(missing_ok=True)
+    except OSError as e:
+        return (f"[!] Could not remove {ROOT / BOOTSTRAP_RECORD} ({e}); choosing Shared in a "
+                "later setup removes the uv, Python and cache folders in this folder.")
+    return ""
 
 
 def close_splash(env=None) -> bool:
@@ -1568,15 +1585,16 @@ class Wizard:
                       "through this.")
         ttk.Label(page, text=spec.TOOLING_STORE_TEXT, wraplength=590,
                   font=("Segoe UI", 10, "bold")).pack(anchor="w")
-        ttk.Radiobutton(page, text=spec.TOOLING_PORTABLE_TEXT, value=True,
-                        variable=self.store_var,
-                        command=self._on_store_changed).pack(anchor="w", pady=(4, 0))
-        ttk.Radiobutton(page, text=spec.tooling_shared_text(), value=False,
-                        variable=self.store_var,
-                        command=self._on_store_changed).pack(anchor="w")
+        portable = ttk.Radiobutton(page, text=spec.TOOLING_PORTABLE_TEXT, value=True,
+                                   variable=self.store_var, command=self._on_store_changed)
+        portable.pack(anchor="w", pady=(4, 0))
+        shared = ttk.Radiobutton(page, text=spec.tooling_shared_text(), value=False,
+                                 variable=self.store_var, command=self._on_store_changed)
+        shared.pack(anchor="w")
         self.get_uv_box = ttk.Checkbutton(
             page, text=f"{spec.UV_MISSING_TEXT} {spec.UV_INSTALL_TEXT}",
             variable=self.get_uv_var)
+        self.tooling_controls = (portable, shared, self.get_uv_box)
         self.tooling_note = ttk.Label(page, text=self.tooling_note_text(),
                                       wraplength=560, style="Dim.TLabel")
         self.tooling_note.pack(anchor="w", pady=(14, 0), side="bottom")
@@ -1652,6 +1670,8 @@ class Wizard:
         self.install_running = True
         self.back.configure(state="disabled")
         self.action.configure(state="disabled")
+        for control in self.tooling_controls:
+            control.state(["disabled"])
         self.status.configure(text="Installing uv at its per-user location ...")
         self.lines = queue.Queue()
 
@@ -1683,6 +1703,8 @@ class Wizard:
                 self.install_running = False
                 self.action.configure(state="normal")
                 self.back.configure(state="normal" if self.existing else "disabled")
+                for control in self.tooling_controls:
+                    control.state(["!disabled"])
                 if exe:
                     self.per_user_uv = exe
                     self._repoint(EXIT_USE_NEW_SHARED_UV)
@@ -2008,6 +2030,7 @@ class Wizard:
 
     def start_install(self) -> None:
         plan = self.current_plan()
+        record_error = take_over_bootstrap() if plan.portable_store else ""
         self.installing = True
         self.install_running = True
         self._show(len(self.pages) - 1)
@@ -2021,6 +2044,8 @@ class Wizard:
         self.lines = queue.Queue()
         global ASK
         ASK = self._ask_from_worker
+        if record_error:
+            self._emit(record_error)
         resume = begin_journal(self._emit)
         steps = window_steps(plan, resume)
         threading.Thread(target=self._worker, args=(steps,), daemon=True).start()
@@ -2267,8 +2292,11 @@ class Wizard:
 
     def _launch(self) -> None:
         exe = venv_bin(ROOT) / ("localm.exe" if IS_WINDOWS else "localm")
+        # With LOG_ENV set, LocaLM gets no handle on this window's output file.
+        quiet = ({"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+                  "stderr": subprocess.DEVNULL} if os.environ.get(LOG_ENV) else {})
         try:
-            subprocess.Popen([str(exe), "gui"], cwd=str(ROOT))
+            subprocess.Popen([str(exe), "gui"], cwd=str(ROOT), **quiet)
         except OSError:
             pass
         self.root.destroy()

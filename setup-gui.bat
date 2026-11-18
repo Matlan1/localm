@@ -32,7 +32,7 @@ if "%LOCALM_SETUP_GUI_HIDDEN%"=="1" goto start_setup
 if "%USEBOX%"=="0" goto start_setup
 if not exist "%SystemRoot%\System32\conhost.exe" goto start_setup
 set "LOCALM_SETUP_GUI_HIDDEN=1"
-start "" "%SystemRoot%\System32\conhost.exe" --headless "%ComSpec%" /d /c ""%%LOCALM_SETUP_GUI_SELF%%""
+start "" "%SystemRoot%\System32\conhost.exe" --headless "%ComSpec%" /d /v:off /c ""%%LOCALM_SETUP_GUI_SELF%%""
 if errorlevel 1 goto start_setup
 exit /b 0
 
@@ -50,14 +50,29 @@ rem  The window reads LOCALM_GUI_STORE (the choice its first page starts on:
 rem  portable or shared), LOCALM_GUI_UV (the uv in use), LOCALM_GUI_BOOTSTRAP
 rem  (what this run put into the folder to open the window: uv, python, cache),
 rem  LOCALM_GUI_SPLASH (the file whose removal closes the "getting ready"
-rem  window) and, once Shared was chosen, LOCALM_GUI_REPOINTED=1 and
+rem  window), LOCALM_GUI_LOG (the file the window's output goes to when there is
+rem  no console) and, once Shared was chosen, LOCALM_GUI_REPOINTED=1 and
 rem  LOCALM_GUI_UV_INSTALLED=1 when the window installed that per-user uv.
 rem  The folder's own .\.uv\uv.exe is used when it is there; an earlier Shared
 rem  install (no .\.uv, an install record) reuses the per-user uv; anything else
 rem  installs uv into .\.uv without asking.
+rem  .localm-gui-bootstrap names what a run of this file put into the folder and
+rem  no install has taken over yet (the window removes it when a Portable
+rem  install starts), so a later Shared choice removes those folders too.
 set "UVEXE="
+set "UVRC="
 set "SPLASHN=0"
 set "LOCALM_GUI_BOOTSTRAP="
+set "B_UV="
+set "B_PYTHON="
+set "B_CACHE="
+set "LOCALM_GUI_LOG="
+if "%USEBOX%"=="1" set "LOCALM_GUI_LOG=%CD%\.localm-setup-gui.log"
+set "PREV="
+if exist ".localm-gui-bootstrap" for /f "usebackq delims=" %%l in (".localm-gui-bootstrap") do set "PREV=%%l"
+for %%n in (%PREV%) do if /i "%%n"=="uv" if exist ".uv\" set "B_UV=1"
+for %%n in (%PREV%) do if /i "%%n"=="python" if exist ".python\" set "B_PYTHON=1"
+for %%n in (%PREV%) do if /i "%%n"=="cache" if exist ".cache\" set "B_CACHE=1"
 set "LOCALM_GUI_REPOINTED="
 set "LOCALM_GUI_UV_INSTALLED="
 set "LOCALM_GUI_SPLASH="
@@ -98,7 +113,7 @@ if "%UVRC%"=="61" goto uv_refused
 if "%UVRC%"=="62" goto uv_refused
 if "%UVRC%"=="63" goto uv_refused
 if not exist ".uv\uv.exe" goto uv_not_callable
-set "LOCALM_GUI_BOOTSTRAP=uv"
+set "B_UV=1"
 
 :portable_have_uv
 set "UVEXE=%CD%\.uv\uv.exe"
@@ -113,6 +128,7 @@ set "LOCALM_MSG1=[!] uv still is not callable, so the graphical setup cannot sta
 if "%LOCALM_GUI_STORE%"=="portable" set "LOCALM_MSG2=Looked for %CD%\.uv\uv.exe (the installer did not leave one there)."
 if not "%LOCALM_GUI_STORE%"=="portable" set "LOCALM_MSG2=Looked on PATH and in %USERPROFILE%\.local\bin for the per-user uv."
 set "LOCALM_MSG3=Open a NEW terminal and run setup.bat instead."
+if defined UVRC if not "%UVRC%"=="0" set "LOCALM_MSG4=The uv installer exited %UVRC%."
 call :notify Error
 exit /b 1
 
@@ -138,15 +154,20 @@ rem  interpreter this window runs on inside the folder, so the install reuses it
 rem  rather than downloading a second copy.
 echo   Opening the setup window ...
 if not "%LOCALM_GUI_STORE%"=="portable" goto window_env_done
-if not exist ".python\" set "LOCALM_GUI_BOOTSTRAP=%LOCALM_GUI_BOOTSTRAP% python"
-if not exist ".cache\" set "LOCALM_GUI_BOOTSTRAP=%LOCALM_GUI_BOOTSTRAP% cache"
+if not exist ".python\" set "B_PYTHON=1"
+if not exist ".cache\" set "B_CACHE=1"
 set "UV_PYTHON_INSTALL_DIR=%CD%\.python"
 set "UV_CACHE_DIR=%CD%\.cache"
 :window_env_done
+call :write_bootstrap
 set "UV_SYSTEM_CERTS=1"
-"%UVEXE%" run --no-project --isolated --python 3.12 python "installer\gui.py"
+if defined LOCALM_GUI_LOG call :run_window > "%LOCALM_GUI_LOG%" 2>&1
+if not defined LOCALM_GUI_LOG call :run_window
 set "RC=%errorlevel%"
 call :splash_stop
+if "%RC%"=="0" call :drop_log
+if "%RC%"=="46" call :drop_log
+if "%RC%"=="47" call :drop_log
 
 rem  46 and 47: Shared was chosen on the first page and the per-user uv is in
 rem  place (47: the window installed it); the window opens again on it. 42 and
@@ -166,6 +187,8 @@ if "%RC%"=="0" exit /b 0
 :window_failed
 set "LOCALM_MSG1=[!] The setup window could not run (exit %RC%)."
 set "LOCALM_MSG2=It runs on Python 3.12, which uv downloads the first time: check the internet connection, or use the console installer instead:  setup.bat"
+if defined LOCALM_GUI_LOG if exist "%LOCALM_GUI_LOG%" set "LOCALM_MSG3=What it printed is in %LOCALM_GUI_LOG%; its last lines:"
+if defined LOCALM_MSG3 set "LOCALM_MSG_TAIL=%LOCALM_GUI_LOG%"
 call :notify Error
 exit /b %RC%
 
@@ -176,8 +199,6 @@ set "LOCALM_GUI_REPOINTED=1"
 set "LOCALM_GUI_STORE=shared"
 set "UV_PYTHON_INSTALL_DIR="
 set "UV_CACHE_DIR="
-call :remove_bootstrap
-set "LOCALM_GUI_BOOTSTRAP="
 call :find_shared_uv
 if defined UVEXE goto shared_found
 rem  Every directory the per-user install may have used, in setup.bat's own order.
@@ -188,6 +209,8 @@ if not defined UVEXE goto uv_not_callable
 :shared_found
 set "LOCALM_GUI_UV=%UVEXE%"
 echo  Shared: using "%UVEXE%"
+call :remove_bootstrap
+call :write_bootstrap
 if not defined LEFTOVER goto shared_reopen
 set "LOCALM_MSG1=[!] Could not remove%LEFTOVER% from this folder."
 set "LOCALM_MSG2=Setup put them there to open its window; the Shared choice does not use them. Close any LocaLM window and delete them by hand."
@@ -199,8 +222,11 @@ goto open_window
 
 :finish_uninstall
 echo   Removing the last LocaLM folders ...
-call ".\setup.bat" finish-uninstall
+del ".localm-gui-bootstrap" >nul 2>nul
+if defined LOCALM_GUI_LOG call ".\setup.bat" finish-uninstall > "%LOCALM_GUI_LOG%" 2>&1
+if not defined LOCALM_GUI_LOG call ".\setup.bat" finish-uninstall
 if errorlevel 1 goto finish_uninstall_left
+call :drop_log
 if defined PARTIAL goto uninstall_partial
 set "LOCALM_MSG1=LocaLM was uninstalled."
 call :notify Information
@@ -218,8 +244,35 @@ exit /b 1
 :finish_uninstall_left
 set "LOCALM_MSG1=[!] Some LocaLM folders could not be removed - close any LocaLM window"
 set "LOCALM_MSG2=and delete them by hand, or run  setup.bat finish-uninstall  again."
+if defined LOCALM_GUI_LOG if exist "%LOCALM_GUI_LOG%" set "LOCALM_MSG_TAIL=%LOCALM_GUI_LOG%"
 call :notify Error
+call :drop_log
 exit /b 1
+
+rem ===========================================================================
+rem  :run_window - runs the setup window; the errorlevel is the window's.
+rem ===========================================================================
+:run_window
+"%UVEXE%" run --no-project --isolated --python 3.12 python "installer\gui.py"
+goto :eof
+
+:drop_log
+if defined LOCALM_GUI_LOG del "%LOCALM_GUI_LOG%" >nul 2>nul
+goto :eof
+
+rem ===========================================================================
+rem  :write_bootstrap - sets LOCALM_GUI_BOOTSTRAP from B_UV, B_PYTHON and
+rem  B_CACHE and writes it to .localm-gui-bootstrap, or removes that file when
+rem  none is set.
+rem ===========================================================================
+:write_bootstrap
+set "LOCALM_GUI_BOOTSTRAP="
+if defined B_UV set "LOCALM_GUI_BOOTSTRAP=uv"
+if defined B_PYTHON set "LOCALM_GUI_BOOTSTRAP=%LOCALM_GUI_BOOTSTRAP% python"
+if defined B_CACHE set "LOCALM_GUI_BOOTSTRAP=%LOCALM_GUI_BOOTSTRAP% cache"
+if not defined LOCALM_GUI_BOOTSTRAP del ".localm-gui-bootstrap" >nul 2>nul
+if defined LOCALM_GUI_BOOTSTRAP echo %LOCALM_GUI_BOOTSTRAP%> ".localm-gui-bootstrap"
+goto :eof
 
 rem ===========================================================================
 rem  :find_shared_uv - sets UVEXE to the first uv on PATH that is not this
@@ -238,6 +291,9 @@ rem ===========================================================================
 :remove_bootstrap
 set "LEFTOVER="
 for %%n in (%LOCALM_GUI_BOOTSTRAP%) do call :remove_tooling "%%n"
+if not exist ".uv\" set "B_UV="
+if not exist ".python\" set "B_PYTHON="
+if not exist ".cache\" set "B_CACHE="
 goto :eof
 
 :remove_tooling
@@ -265,7 +321,7 @@ rem ===========================================================================
 call :splash_stop
 if not "%USEBOX%"=="1" goto notify_console
 set "LOCALM_MSG_ICON=%~1"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName System.Windows.Forms; $m=@(1..5 | ForEach-Object { [Environment]::GetEnvironmentVariable('LOCALM_MSG'+$_) } | Where-Object { $_ }) -join [Environment]::NewLine; $o=New-Object System.Windows.Forms.Form; $o.TopMost=$true; [void][System.Windows.Forms.MessageBox]::Show($o, $m, 'LocaLM Setup', 'OK', $env:LOCALM_MSG_ICON); $o.Dispose()"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName System.Windows.Forms; $m=@(1..5 | ForEach-Object { [Environment]::GetEnvironmentVariable('LOCALM_MSG'+$_) } | Where-Object { $_ }) -join [Environment]::NewLine; if ($env:LOCALM_MSG_TAIL -and [IO.File]::Exists($env:LOCALM_MSG_TAIL)) { $m += [Environment]::NewLine + [Environment]::NewLine + ((Get-Content -LiteralPath $env:LOCALM_MSG_TAIL -Tail 12) -join [Environment]::NewLine) }; $o=New-Object System.Windows.Forms.Form; $o.TopMost=$true; [void][System.Windows.Forms.MessageBox]::Show($o, $m, 'LocaLM Setup', 'OK', $env:LOCALM_MSG_ICON); $o.Dispose()"
 goto notify_clear
 :notify_console
 setlocal EnableDelayedExpansion
@@ -275,6 +331,7 @@ endlocal
 :notify_clear
 for %%n in (1 2 3 4 5) do set "LOCALM_MSG%%n="
 set "LOCALM_MSG_ICON="
+set "LOCALM_MSG_TAIL="
 goto :eof
 
 rem ===========================================================================

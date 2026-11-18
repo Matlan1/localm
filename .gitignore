@@ -63,6 +63,8 @@ localm-home.cfg
 .localm-setup-journal
 .localm-setup-tmp/
 .localm-setup-starting-*
+.localm-gui-bootstrap
+.localm-setup-gui.log
 
 # Personal ComfyUI workflows (which models/encoders we use stays private -
 # the committed *.example.json templates use the vanilla public stack)

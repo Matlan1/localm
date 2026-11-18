@@ -49,15 +49,8 @@ _STUB_INSTALLER = (
     "exit /b 0\r\n")
 _STUB_WINDOW = (
     "@echo off\r\n"
-    "echo WINDOW-UV=%UVEXE%\r\n"
-    "echo WINDOW-STORE=%LOCALM_GUI_STORE%\r\n"
-    "echo WINDOW-PYDIR=%UV_PYTHON_INSTALL_DIR%\r\n"
-    "echo WINDOW-CACHEDIR=%UV_CACHE_DIR%\r\n"
-    "echo WINDOW-GUIUV=%LOCALM_GUI_UV%\r\n"
-    "echo WINDOW-INSTALLED=%LOCALM_GUI_UV_INSTALLED%\r\n"
-    "echo WINDOW-BOOTSTRAP=%LOCALM_GUI_BOOTSTRAP%\r\n"
-    "echo WINDOW-REPOINTED=%LOCALM_GUI_REPOINTED%\r\n"
-    "echo WINDOW-SPLASH=%LOCALM_GUI_SPLASH%\r\n"
+    "call :fields\r\n"
+    'if defined STUB_REPORT call :fields >> "%STUB_REPORT%"\r\n'
     'if defined UV_PYTHON_INSTALL_DIR mkdir "%UV_PYTHON_INSTALL_DIR%" 2>nul\r\n'
     'if defined UV_CACHE_DIR mkdir "%UV_CACHE_DIR%" 2>nul\r\n'
     'set "CODE=0"\r\n'
@@ -73,7 +66,19 @@ _STUB_WINDOW = (
     "ping -n 2 127.0.0.1 >nul\r\n"
     "goto stub_wait\r\n"
     ":stub_exit\r\n"
-    "exit /b %CODE%\r\n")
+    "exit /b %CODE%\r\n"
+    ":fields\r\n"
+    "echo WINDOW-UV=%UVEXE%\r\n"
+    "echo WINDOW-STORE=%LOCALM_GUI_STORE%\r\n"
+    "echo WINDOW-PYDIR=%UV_PYTHON_INSTALL_DIR%\r\n"
+    "echo WINDOW-CACHEDIR=%UV_CACHE_DIR%\r\n"
+    "echo WINDOW-GUIUV=%LOCALM_GUI_UV%\r\n"
+    "echo WINDOW-INSTALLED=%LOCALM_GUI_UV_INSTALLED%\r\n"
+    "echo WINDOW-BOOTSTRAP=%LOCALM_GUI_BOOTSTRAP%\r\n"
+    "echo WINDOW-REPOINTED=%LOCALM_GUI_REPOINTED%\r\n"
+    "echo WINDOW-SPLASH=%LOCALM_GUI_SPLASH%\r\n"
+    "echo WINDOW-LOG=%LOCALM_GUI_LOG%\r\n"
+    "goto :eof\r\n")
 _STUB_CONHOST = (
     "@echo off\r\n"
     "echo CONHOST-RAN %*\r\n"
@@ -101,7 +106,8 @@ def _probe_text(hidden: bool = False) -> str:
 
 def _run(tmp_path: Path, *, system_uv: bool = False, contained_uv: bool = False,
          installer_creates_uv: bool = True, installer_rc: str = "", codes: str = "0",
-         record: bool = False, existing=(), hidden: bool = False, clone_name: str = "clone"):
+         record: bool = False, existing=(), hidden: bool = False, clone_name: str = "clone",
+         marker: str = ""):
     clone = tmp_path / clone_name
     clone.mkdir()
     (clone / "probe.bat").write_text(_probe_text(hidden), encoding="utf-8", newline="")
@@ -110,6 +116,8 @@ def _run(tmp_path: Path, *, system_uv: bool = False, contained_uv: bool = False,
         write_exe_stub(clone / ".uv" / "uv.exe")
     if record:
         (clone / ".localm-install.json").write_text("{}", encoding="utf-8")
+    if marker:
+        (clone / ".localm-gui-bootstrap").write_text(marker + "\n", encoding="ascii")
     for name in existing:
         (clone / name).mkdir()
         (clone / name / "keep").write_bytes(b"x")
@@ -141,9 +149,13 @@ def _run(tmp_path: Path, *, system_uv: bool = False, contained_uv: bool = False,
         env["STUB_RC"] = installer_rc
     if not hidden:
         env["LOCALM_SETUP_GUI_INPLACE"] = "1"
+    report = tmp_path / "window-report.txt"
+    env["STUB_REPORT"] = str(report)
     out = subprocess.run(["cmd", "/c", str(clone / "probe.bat")], cwd=str(clone), env=env,
                          capture_output=True, text=True, timeout=120,
                          stdin=subprocess.DEVNULL)
+    if hidden and report.is_file():
+        out.stdout += report.read_text(encoding="utf-8", errors="replace")
     return clone, sysuv, home, out
 
 
@@ -242,7 +254,32 @@ def test_shared_with_no_per_user_uv_after_all_says_uv_is_not_callable(tmp_path):
     assert len(_fields(out, "WINDOW-UV")) == 1, "the window reopened on no uv"
     assert "uv still is not callable" in out.stdout
     assert "per-user uv" in out.stdout
+    assert (clone / ".uv" / "uv.exe").is_file(), "the folder's uv was removed with nothing to use"
     assert out.returncode == 1, (out.stdout, out.stderr)
+
+
+def test_what_this_run_put_in_the_folder_is_recorded_for_a_later_run(tmp_path):
+    clone, _, _, out = _run(tmp_path)
+    record = (clone / ".localm-gui-bootstrap").read_text(encoding="ascii").split()
+    assert record == ["uv", "python", "cache"], out.stdout
+
+
+def test_shared_also_removes_what_an_earlier_run_put_in_the_folder(tmp_path):
+    clone, sysuv, _, out = _run(tmp_path, system_uv=True, contained_uv=True,
+                                existing=(".python", ".cache"), marker="uv python cache",
+                                codes="46 0")
+    assert _field(out, "WINDOW-BOOTSTRAP", 0).split() == ["uv", "python", "cache"]
+    for name in (".uv", ".python", ".cache", ".localm-gui-bootstrap"):
+        assert not (clone / name).exists(), f"{name} was left behind\n{out.stdout}"
+    assert _field(out, "WINDOW-UV", 1) == str(sysuv / "uv.cmd")
+    assert out.returncode == 0, (out.stdout, out.stderr)
+
+
+def test_a_record_naming_folders_that_are_gone_is_dropped(tmp_path):
+    clone, sysuv, _, out = _run(tmp_path, system_uv=True, record=True, marker="uv python cache")
+    assert _field(out, "WINDOW-UV") == str(sysuv / "uv.cmd")
+    assert _field(out, "WINDOW-BOOTSTRAP") == ""
+    assert not (clone / ".localm-gui-bootstrap").exists()
 
 
 def test_the_window_asking_for_shared_twice_is_a_failure_not_a_loop(tmp_path):
@@ -337,6 +374,26 @@ def test_without_a_console_the_getting_ready_window_shows_and_its_file_is_remove
     assert Path(splash).parent == clone and Path(splash).name.startswith(".localm-setup-starting-")
     assert _field(out, "WINDOW-SPLASH") == splash
     assert not list(clone.glob(".localm-setup-starting-*")), "the getting-ready file was left"
+
+
+def test_without_a_console_a_failed_window_names_its_output_and_shows_its_end(tmp_path):
+    clone, _, _, out = _run(tmp_path, hidden=True, codes="3")
+    log = clone / ".localm-setup-gui.log"
+    assert _field(out, "WINDOW-LOG") == str(log)
+    assert log.is_file() and "WINDOW-UV=" in log.read_text(encoding="utf-8", errors="replace")
+    assert re.search(r"^LOCALM_MSG3=What it printed is in .*\.localm-setup-gui\.log", out.stdout, re.M)
+    assert re.search(r"^LOCALM_MSG_TAIL=.*\.localm-setup-gui\.log$", out.stdout, re.M), out.stdout
+
+
+def test_without_a_console_a_window_that_ended_well_leaves_no_output_file(tmp_path):
+    clone, _, _, out = _run(tmp_path, hidden=True, codes="0")
+    assert _field(out, "WINDOW-LOG") == str(clone / ".localm-setup-gui.log")
+    assert not (clone / ".localm-setup-gui.log").exists()
+
+
+def test_in_this_console_the_window_output_is_not_redirected(tmp_path):
+    _clone, _, _, out = _run(tmp_path)
+    assert _field(out, "WINDOW-LOG") == ""
 
 
 def test_without_a_console_a_refused_download_is_shown_in_a_message_box(tmp_path):

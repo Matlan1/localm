@@ -53,7 +53,10 @@ echo
 # LOCALM_GUI_UV_INSTALLED=1 when the window installed that per-user uv.
 # The folder's own ./.uv/uv is used when it is there; an earlier Shared install
 # (no ./.uv, an install record) reuses the per-user uv; anything else installs
-# uv into ./.uv without asking.
+# uv into ./.uv without asking. ./.localm-gui-bootstrap names what a run of this
+# file put into the folder and no install has taken over yet (the window removes
+# it when a Portable install starts), so a later Shared choice removes those
+# folders too.
 shared_uv() {  # prints the first uv on PATH that is not this folder's ./.uv copy
     local d dirs
     IFS=: read -r -a dirs <<< "$PATH"
@@ -82,8 +85,18 @@ run_uv_installer() {  # the pinned, checksum-verified Astral installer; exits on
     rm -rf "$UVTMP"
     rmdir ./.localm-setup-tmp 2>/dev/null || true
 }
-remove_bootstrap() {  # removes ./.uv ./.python ./.cache as named in LOCALM_GUI_BOOTSTRAP; LEFTOVER lists what stayed
-    local n
+bootstrap_add() {  # bootstrap_add NAME  ->  adds NAME to LOCALM_GUI_BOOTSTRAP once
+    case " $LOCALM_GUI_BOOTSTRAP " in *" $1 "*) ;; *) LOCALM_GUI_BOOTSTRAP="${LOCALM_GUI_BOOTSTRAP:+$LOCALM_GUI_BOOTSTRAP }$1" ;; esac
+}
+write_bootstrap() {  # writes LOCALM_GUI_BOOTSTRAP to ./.localm-gui-bootstrap, or removes that file when empty
+    if [ -n "$LOCALM_GUI_BOOTSTRAP" ]; then
+        printf '%s\n' "$LOCALM_GUI_BOOTSTRAP" > ./.localm-gui-bootstrap 2>/dev/null || true
+    else
+        rm -f ./.localm-gui-bootstrap
+    fi
+}
+remove_bootstrap() {  # removes ./.uv ./.python ./.cache as named in LOCALM_GUI_BOOTSTRAP; LEFTOVER and LOCALM_GUI_BOOTSTRAP then list what stayed
+    local n stayed=""
     LEFTOVER=""
     for n in $LOCALM_GUI_BOOTSTRAP; do
         case "$n" in uv|python|cache) ;; *) continue ;; esac
@@ -91,8 +104,9 @@ remove_bootstrap() {  # removes ./.uv ./.python ./.cache as named in LOCALM_GUI_
             chmod -R u+w "./.$n" 2>/dev/null || true
             rm -rf "./.$n" 2>/dev/null || true
         fi
-        if [ -e "./.$n" ]; then LEFTOVER="$LEFTOVER ./.$n"; fi
+        if [ -e "./.$n" ]; then LEFTOVER="$LEFTOVER ./.$n"; stayed="${stayed:+$stayed }$n"; fi
     done
+    LOCALM_GUI_BOOTSTRAP="$stayed"
 }
 uv_not_callable() {  # says so and exits 1
     echo
@@ -117,6 +131,11 @@ fi
 UVEXE=""
 LOCALM_GUI_BOOTSTRAP=""
 unset LOCALM_GUI_UV_INSTALLED LOCALM_GUI_REPOINTED
+if [ -f ./.localm-gui-bootstrap ]; then
+    for n in $(cat ./.localm-gui-bootstrap 2>/dev/null || true); do
+        case "$n" in uv|python|cache) if [ -e "./.$n" ]; then bootstrap_add "$n"; fi ;; esac
+    done
+fi
 export LOCALM_GUI_STORE=portable
 if [ -x "./.uv/uv" ]; then
     UVEXE="$PWD/.uv/uv"
@@ -133,7 +152,7 @@ else
     unset UV_INSTALL_DIR UV_UNMANAGED_INSTALL
     if [ -x "./.uv/uv" ]; then
         UVEXE="$PWD/.uv/uv"
-        LOCALM_GUI_BOOTSTRAP="uv"
+        bootstrap_add uv
     fi
 fi
 if [ -z "$UVEXE" ]; then uv_not_callable; fi
@@ -151,11 +170,12 @@ while : ; do
     export LOCALM_GUI_UV="$UVEXE"
     echo "  Opening the setup window ..."
     if [ "$LOCALM_GUI_STORE" = portable ]; then
-        if [ ! -d ./.python ]; then LOCALM_GUI_BOOTSTRAP="$LOCALM_GUI_BOOTSTRAP python"; fi
-        if [ ! -d ./.cache ]; then LOCALM_GUI_BOOTSTRAP="$LOCALM_GUI_BOOTSTRAP cache"; fi
+        if [ ! -d ./.python ]; then bootstrap_add python; fi
+        if [ ! -d ./.cache ]; then bootstrap_add cache; fi
         export UV_PYTHON_INSTALL_DIR="$PWD/.python"
         export UV_CACHE_DIR="$PWD/.cache"
     fi
+    write_bootstrap
     export LOCALM_GUI_BOOTSTRAP
     export UV_SYSTEM_CERTS=1
     rc=0
@@ -165,8 +185,6 @@ while : ; do
     if [ "$rc" = 47 ]; then export LOCALM_GUI_UV_INSTALLED=1; fi
     export LOCALM_GUI_REPOINTED=1
     unset UV_PYTHON_INSTALL_DIR UV_CACHE_DIR
-    remove_bootstrap
-    LOCALM_GUI_BOOTSTRAP=""
     export LOCALM_GUI_STORE=shared
     UVEXE="$(shared_uv)"
     if [ -z "$UVEXE" ]; then
@@ -176,6 +194,8 @@ while : ; do
         UVEXE="$(shared_uv)"
     fi
     if [ -z "$UVEXE" ]; then uv_not_callable; fi
+    remove_bootstrap
+    write_bootstrap
     if [ -n "$LEFTOVER" ]; then
         echo "  [!] Could not remove$LEFTOVER from this folder."
         echo "      Setup put them there to open its window; the Shared choice does not use"
@@ -188,6 +208,7 @@ done
 # 45: the uninstall did not finish.
 if [ "$rc" = 42 ] || [ "$rc" = 43 ]; then
     echo "  Removing the last LocaLM folders ..."
+    rm -f ./.localm-gui-bootstrap
     frc=0
     bash ./setup.sh --finish-uninstall || frc=$?
     if [ "$frc" != 0 ]; then

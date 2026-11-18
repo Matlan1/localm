@@ -2135,6 +2135,8 @@ class TestToolingPage:
             wizard.store_var.set(False)
             wizard.next_page()
             assert wizard.installing, "the window was not locked while uv installs"
+            assert all(c.instate(["disabled"]) for c in wizard.tooling_controls), (
+                "the choice could still be changed while uv installs")
             self._pump(root, lambda: destroyed)
             assert calls == [True]
             assert wizard.exit_code == gui.EXIT_USE_NEW_SHARED_UV == 47
@@ -2161,6 +2163,7 @@ class TestToolingPage:
             assert "offline" in wizard.status.cget("text")
             assert box.errors and "offline" in box.errors[0]
             assert str(wizard.action.cget("state")) == "normal"
+            assert not any(c.instate(["disabled"]) for c in wizard.tooling_controls)
         finally:
             tk.Tk.destroy(root)
 
@@ -2214,6 +2217,40 @@ class TestToolingPage:
             assert wizard.tooling_note.cget("text") == ""
         finally:
             tk.Tk.destroy(root)
+
+
+class TestBootstrapRecord:
+    def test_a_portable_install_takes_the_launchers_folders_over(self, gui, tmp_path):
+        record = tmp_path / gui.BOOTSTRAP_RECORD
+        record.write_text("uv python cache\n", encoding="ascii")
+        assert gui.take_over_bootstrap() == ""
+        assert not record.exists()
+
+    def test_no_record_is_nothing_to_do(self, gui, tmp_path):
+        assert gui.take_over_bootstrap() == ""
+
+    def test_starting_a_portable_install_removes_the_record_and_shared_keeps_it(
+            self, gui, tmp_path, monkeypatch):
+        tk = pytest.importorskip("tkinter")
+        from tkinter import filedialog, ttk
+        for name in (gui.STORE_ENV, gui.UV_ENV, gui.BOOTSTRAP_ENV, gui.REPOINTED_ENV):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr(gui, "begin_journal", lambda emit: {})
+        monkeypatch.setattr(gui, "window_steps", lambda plan, resume: [])
+        monkeypatch.setattr(gui.threading, "Thread",
+                            lambda *a, **kw: type("T", (), {"start": lambda self: None})())
+        record = tmp_path / gui.BOOTSTRAP_RECORD
+        for portable, kept in ((False, True), (True, False)):
+            record.write_text("uv\n", encoding="ascii")
+            root = build_tk_root(tk.Tk)
+            root.withdraw()
+            try:
+                wizard = gui.Wizard(root, tk, ttk, filedialog)
+                wizard.store_var.set(portable)
+                wizard.start_install()
+                assert record.exists() is kept, f"portable={portable}"
+            finally:
+                root.destroy()
 
 
 class TestSplash:

@@ -83,7 +83,7 @@ def _tools_path() -> list[str]:
 
 def _run(tmp_path: Path, *, system_uv: bool = False, contained_uv: bool = False,
          installer_creates_uv: bool = True, codes: str = "0", record: bool = False,
-         existing=()):
+         existing=(), marker: str = ""):
     clone = tmp_path / "clone"
     clone.mkdir()
     shutil.copy2(ROOT / "setup-gui.sh", clone / "setup-gui.sh")
@@ -92,6 +92,8 @@ def _run(tmp_path: Path, *, system_uv: bool = False, contained_uv: bool = False,
         _write_exec(clone / ".uv" / "uv", _REPORT)
     if record:
         (clone / ".localm-install.json").write_text("{}", encoding="utf-8")
+    if marker:
+        (clone / ".localm-gui-bootstrap").write_bytes((marker + "\n").encode())
     for name in existing:
         (clone / name).mkdir()
         (clone / name / "keep").write_bytes(b"x")
@@ -214,10 +216,28 @@ def test_shared_with_a_uv_the_window_installed_says_so_to_the_window(tmp_path):
 
 
 def test_shared_with_no_per_user_uv_after_all_says_uv_is_not_callable(tmp_path):
-    _clone, _, _, out = _run(tmp_path, codes="46 0")
+    clone, _, _, out = _run(tmp_path, codes="46 0")
     assert len(_fields(out, "WINDOW-UV")) == 1
     assert "uv still is not callable" in out.stdout and "per-user uv" in out.stdout
+    assert (clone / ".uv" / "uv").is_file(), "the folder's uv was removed with nothing to use"
     assert out.returncode == 1
+
+
+def test_what_this_run_put_in_the_folder_is_recorded_for_a_later_run(tmp_path):
+    clone, _, _, out = _run(tmp_path)
+    record = (clone / ".localm-gui-bootstrap").read_text(encoding="ascii").split()
+    assert record == ["uv", "python", "cache"], out.stdout
+
+
+def test_shared_also_removes_what_an_earlier_run_put_in_the_folder(tmp_path):
+    clone, system, _, out = _run(tmp_path, system_uv=True, contained_uv=True,
+                                 existing=(".python", ".cache"), marker="uv python cache",
+                                 codes="46 0")
+    assert _field(out, "WINDOW-BOOTSTRAP", 0).split() == ["uv", "python", "cache"]
+    for name in (".uv", ".python", ".cache", ".localm-gui-bootstrap"):
+        assert not (clone / name).exists(), f"{name} was left behind\n{out.stdout}"
+    assert _path_field(out, "WINDOW-UV", 1) == str(system / "uv")
+    assert out.returncode == 0, (out.stdout, out.stderr)
 
 
 def test_the_window_asking_for_shared_twice_is_a_failure_not_a_loop(tmp_path):
