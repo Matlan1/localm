@@ -372,6 +372,11 @@ class TestPassWithNoTestsActuallyReachesTheRunner:
 # ---------------------------------------------------------------------------
 
 class TestRunTests:
+    @pytest.fixture(autouse=True)
+    def _no_path_probe(self, monkeypatch):
+        monkeypatch.setattr(
+            "localm.plugins.coder.pyenv._path_interpreters", lambda cwd: [])
+
     def _make_proc(self, stdout="", stderr="", returncode=0):
         p = MagicMock()
         p.stdout = stdout
