@@ -435,10 +435,18 @@ class BrowserSession:
         except Exception:
             pass
 
-    async def _ensure_screencast(self) -> bool:
+    async def _ensure_screencast(self, *, restart: bool = False) -> bool:
         """Start the screencast on the driven page unless it is already running.
-        True when it is running."""
+        True when it is running.
+
+        Chromium sends a frame only when the page changes, so a viewer that
+        attaches to a screencast already running on an idle page would see
+        nothing. *restart* detaches the running one first, which makes Chromium
+        send the current frame to the new viewer."""
         async with self._page_lock:
+            if restart and self._cdp is not None:
+                previous, self._cdp = self._cdp, None
+                await self._detach_quietly(previous)
             if self._cdp is None:
                 await self._start_screencast()
             return self._cdp is not None
@@ -709,7 +717,8 @@ class BrowserSession:
         what = "starting the live view"
         try:
             return bool(self._call(
-                lambda: _within(self._ensure_screencast(), timeout_ms, what),
+                lambda: _within(self._ensure_screencast(restart=True),
+                                timeout_ms, what),
                 what=what))
         except Exception as exc:             # noqa: BLE001
             logger.warning("browser %s could not start a live view: %s",

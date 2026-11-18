@@ -34,6 +34,10 @@
   cursor: not-allowed;
 }
 
+.browser-status.browser-status-error {
+  color: var(--red, #f0707a);
+}
+
 .browser-status {
   font-size: 12.5px;
   color: var(--text-dim, #98a2b4);
