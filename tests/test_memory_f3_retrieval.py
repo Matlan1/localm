@@ -88,7 +88,7 @@ def test_update_without_embedder_keeps_store_consistent(tmp_path, allow_writes):
                  "confidence": 0.9}]})
         return json.dumps({"decision": "UPDATE", "confidence": 0.9})
 
-    res = run_consolidation(store, "User: I switched", complete, embed_fn=None)
+    res = run_consolidation(store, "User: I switched to VS Code", complete, embed_fn=None)
     assert res["updated"] == 1
     vf = store.path.with_suffix(".vec.json")
     if vf.is_file():

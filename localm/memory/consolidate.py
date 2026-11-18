@@ -249,8 +249,10 @@ def extract(complete: Complete, session_text: str, *,
     return out
 
 
-# A candidate fact must share at least this fraction of its content words with
-# what the user wrote; one that does not was invented from the assistant's text.
+# A candidate fact must share at least this many content words, or this fraction
+# of them, with what the user wrote; one that does not was invented from the
+# assistant's text.
+GROUNDING_MIN_WORDS = 2
 GROUNDING_MIN_OVERLAP = 0.5
 _STEM_CHARS = 4
 
@@ -273,14 +275,15 @@ def _user_turn_text(session_text: str) -> Optional[str]:
 
 
 def _is_grounded(fact: str, user_stems: set) -> bool:
-    """True when at least GROUNDING_MIN_OVERLAP of *fact*'s content words (the
-    word "user" aside) appear, by their first letters, in *user_stems*."""
+    """True when at least GROUNDING_MIN_WORDS, or GROUNDING_MIN_OVERLAP of, *fact*'s
+    content words (the word "user" aside) appear, by their first letters, in
+    *user_stems*."""
     from .store import _content_tokens
     words = _content_tokens(fact) - {"user"}
     if not words:
         return False
     hit = sum(1 for w in words if w[:_STEM_CHARS] in user_stems)
-    return hit / len(words) >= GROUNDING_MIN_OVERLAP
+    return hit >= GROUNDING_MIN_WORDS or hit / len(words) >= GROUNDING_MIN_OVERLAP
 
 
 def _fact_item(item) -> tuple:
