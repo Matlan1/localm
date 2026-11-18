@@ -1517,8 +1517,10 @@ class Wizard:
         self.store_var = tk.BooleanVar(value=launcher_store() == "portable")
         self.bootstrap = launcher_bootstrap()
         self.repointed = os.environ.get(REPOINTED_ENV, "") == "1"
-        self.on_folder_tooling = window_runs_on_folder_tooling()
-        self.per_user_uv = uv_tool().per_user_uv(ROOT)
+        # Looked up on first need (only once Shared is chosen): None = not yet.
+        self._folder_tooling: Optional[bool] = None
+        self.per_user_uv: Optional[str] = None
+        self._per_user_looked = False
         # SETUP-Q: uv-install
         self.get_uv_var = tk.BooleanVar(value=spec.default_yes("uv-install"))
         # SETUP-Q: window-mode
@@ -1627,10 +1629,26 @@ class Wizard:
                 + ". Portable keeps using them; Shared removes them again and uses "
                   "the per-user uv and its Python instead.")
 
+    def on_folder_tooling(self) -> bool:
+        """window_runs_on_folder_tooling(), looked up once."""
+        if self._folder_tooling is None:
+            self._folder_tooling = window_runs_on_folder_tooling()
+        return self._folder_tooling
+
+    def _find_per_user_uv(self) -> Optional[str]:
+        """uv_tool.per_user_uv(ROOT), stored in per_user_uv."""
+        self.per_user_uv = uv_tool().per_user_uv(ROOT)
+        self._per_user_looked = True
+        return self.per_user_uv
+
     def _shared_needs_install(self) -> bool:
-        """Whether choosing Shared now would have to install the per-user uv."""
-        return (not self.store_var.get() and self.on_folder_tooling
-                and self.per_user_uv is None)
+        """Whether choosing Shared now would have to install the per-user uv.
+        Looks nothing up while Portable is chosen."""
+        if self.store_var.get() or not self.on_folder_tooling():
+            return False
+        if not self._per_user_looked:
+            self._find_per_user_uv()
+        return self.per_user_uv is None
 
     def _on_store_changed(self) -> None:
         """Show the uv-install question only while Shared is chosen and there
@@ -1647,10 +1665,9 @@ class Wizard:
         it again on the per-user uv: at once when there is one, after
         installing it (asked by the uv-install box) when there is none; with
         the box cleared the page says Shared needs it and stays."""
-        if self.store_var.get() or not self.on_folder_tooling:
+        if self.store_var.get() or not self.on_folder_tooling():
             return True
-        self.per_user_uv = uv_tool().per_user_uv(ROOT)
-        if self.per_user_uv is not None:
+        if self._find_per_user_uv() is not None:
             self._repoint(EXIT_USE_SHARED_UV)
             return False
         if not self.get_uv_var.get():

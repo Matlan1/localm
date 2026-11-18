@@ -1980,8 +1980,15 @@ class TestLauncherStorePreset:
         finally:
             root.destroy()
 
-    def test_the_window_starts_on_shared_when_the_launcher_says_so(self, gui, monkeypatch):
+    def test_the_window_starts_on_shared_when_the_launcher_says_so(
+            self, gui, tmp_path, monkeypatch):
         monkeypatch.setenv(gui.STORE_ENV, "shared")
+        home = tmp_path.parent / f"{tmp_path.name}-home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setenv("PATH", str(tmp_path / "emptypath"))
+        monkeypatch.delenv("XDG_BIN_HOME", raising=False)
+        monkeypatch.delenv(gui.UV_ENV, raising=False)
         root, wizard = self._wizard(gui)
         try:
             assert wizard.store_var.get() is False
@@ -2066,6 +2073,24 @@ class TestToolingPage:
                          f"{spec.UV_MISSING_TEXT} {spec.UV_INSTALL_TEXT}"):
                 assert said in texts, said
             assert wizard.get_uv_var.get() is spec.default_yes("uv-install")
+        finally:
+            tk.Tk.destroy(root)
+
+    def test_building_the_window_and_going_on_with_portable_looks_up_no_uv(
+            self, gui, home, monkeypatch):
+        looked = []
+        monkeypatch.setattr(gui, "window_runs_on_folder_tooling",
+                            lambda: looked.append("folder tooling") or True)
+        monkeypatch.setattr(gui.uv_tool(), "per_user_uv",
+                            lambda root: looked.append("per-user uv"))
+        root, wizard, _, tk = self._build(gui, monkeypatch)
+        try:
+            wizard.next_page()
+            assert wizard.index == 1
+            assert looked == [], f"a uv lookup ran without Shared chosen: {looked}"
+            wizard.store_var.set(False)
+            wizard._on_store_changed()
+            assert looked == ["folder tooling", "per-user uv"]
         finally:
             tk.Tk.destroy(root)
 

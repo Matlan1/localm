@@ -404,10 +404,17 @@ class TestLauncherUv:
         assert rec[rec.index("--uv-exe") + 1] == str(shared)
         assert "--uv-shared-installed" in rec
 
-    def test_the_first_page_asks_and_starts_on_the_launchers_answer(self, gui, monkeypatch):
+    def test_the_first_page_asks_and_starts_on_the_launchers_answer(
+            self, gui, tmp_path, monkeypatch):
         tk = pytest.importorskip("tkinter")
         from tkinter import filedialog, ttk
         monkeypatch.setenv(gui.STORE_ENV, "shared")
+        home = tmp_path.parent / f"{tmp_path.name}-home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setenv("PATH", str(tmp_path / "emptypath"))
+        monkeypatch.delenv("XDG_BIN_HOME", raising=False)
+        monkeypatch.delenv(gui.UV_ENV, raising=False)
         root = build_tk_root(tk.Tk)
         root.withdraw()
         try:
