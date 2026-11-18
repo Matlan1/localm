@@ -44,6 +44,8 @@ _PUBLIC_ROUTES = {
     ("POST", "/api/session/logout"),     # logout: must work post-key-clear
     # api_landing=True only (localm serve): a bare redirect to /docs, no data.
     ("GET", "/"),
+    # api_landing=True only: an empty 200, the heartbeat Ollama clients send first.
+    ("HEAD", "/"),
 }
 
 # Gated by a bespoke mechanism OTHER than a FastAPI Depends (the check runs
