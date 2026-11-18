@@ -1381,6 +1381,22 @@ pre:hover .canvas-btn { opacity: 1; }
 }
 .empty-hint .big { font-size: 26px; margin-bottom: 10px; }
 
+#chat-load-banner {
+  margin: 8px auto 0;
+  padding: 8px 14px;
+  max-width: 560px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: 13px;
+  text-align: center;
+  animation: load-banner-pulse 1.6s ease-in-out infinite;
+}
+#chat-load-banner[hidden] { display: none; }
+@keyframes load-banner-pulse { 50% { opacity: 0.6; } }
+
 /* Designed empty state (emptyState() in app/icons.js): a centred icon + a line +
    an optional 'do this next' hint, so an empty list never reads as a blank gap. */
 .empty-state {

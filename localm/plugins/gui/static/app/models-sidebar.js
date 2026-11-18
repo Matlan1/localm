@@ -3,7 +3,7 @@
 "use strict";
 
 // --- ES module imports ---
-import { chat, lsSetScoped } from "./chat.js";
+import { buildEmptyHint, chat, lsSetScoped } from "./chat.js";
 import { recordGuiError } from "./client-log.js";
 import { $, GIB, SHELL_TOKEN, authHeaders, cancelJob, chooseAsync, confirmDangerAsync, el, fmtDuration, instanceCacheTrusted, openModal, readSSE, streamJob, toast } from "./helpers.js";
 import { applyI18n, onLanguageReload, t, tn } from "./i18n.js";
@@ -27,6 +27,9 @@ let _holdLoadFailed = false;
 // The model switchModel() is loading, "" when none; modelCache.loading carries
 // it until the load ends, whatever the polled list says.
 let _switchingTo = "";
+// Whether the load switchModel() runs makes the loaded model the one this tab
+// answers with (false for a load beside, or one that leaves the selection).
+let _switchActivates = true;
 let _loadingPollTimer = null;
 const LOADING_POLL_MS = 2000;
 
@@ -1071,6 +1074,32 @@ window.refreshInstallGateIfOpen = function () {
 
 export let modelCache = { models: [], active: "" };
 
+/** The model whose load the dropdown and the chat area announce, "" when none.
+ *  A load that leaves the answering model as it is (a load beside, a reload of a
+ *  model that is not the active one) is not announced as the selection. */
+function _announcedLoading(peerRoute) {
+  const loading = !peerRoute && typeof modelCache.loading === "string" ? modelCache.loading : "";
+  if (loading && loading === _switchingTo && !_switchActivates) return "";
+  return loading;
+}
+
+/** Show or hide the chat area's loading line to match the load in flight. */
+function _renderLoadBanner() {
+  const banner = $("chat-load-banner");
+  if (!banner) return;
+  const loading = _announcedLoading(_peerSelected !== null);
+  banner.textContent = loading ? t("chat.modelLoadingBanner", { model: loading }) : "";
+  banner.hidden = !loading;
+}
+
+/** Redraw the empty chat page when it is what the chat area shows, so it names
+ *  the model that is active now instead of the one it was drawn for. */
+function _refreshEmptyHint() {
+  const box = $("chat-messages");
+  const hint = box && box.children.length === 1 && box.firstElementChild;
+  if (hint && hint.classList.contains("empty-hint")) hint.replaceWith(buildEmptyHint());
+}
+
 // Tracks whether refreshModels() has completed at least once, so the very first
 // (boot-time) call can be told apart from a later call that legitimately observes
 // NO active model (an external unload, or a poll landing before anything has ever
@@ -1083,6 +1112,7 @@ let _modelsEverRefreshed = false;
  *  unload to "" included, unlike `localm:model-switched`. */
 function _publishActiveChange(previous) {
   if (modelCache.active === previous) return;
+  _refreshEmptyHint();
   window.dispatchEvent(new CustomEvent("localm:active-model-changed",
     { detail: { model: modelCache.active } }));
 }
@@ -1181,19 +1211,22 @@ export async function refreshModels() {
       const placeholder = document.createElement("option");
       placeholder.value = "";
       const notLoaded = !modelCache.active && !!modelCache.resumable && !peerRoute;
-      placeholder.textContent = notLoaded
-        ? t("sidebar.modelNotLoaded", { model: modelCache.resumable })
-        : t("sidebar.noModelLoaded");
+      const loadingNow = _announcedLoading(!!peerRoute);
+      placeholder.textContent = loadingNow
+        ? t("sidebar.status.loading", { model: loadingNow })
+        : notLoaded
+          ? t("sidebar.modelNotLoaded", { model: modelCache.resumable })
+          : t("sidebar.noModelLoaded");
       placeholder.disabled = true;
-      if (!willServe || notLoaded) placeholder.selected = true;
+      if (!willServe || notLoaded || loadingNow) placeholder.selected = true;
       modelSelect.appendChild(placeholder);
       for (const m of modelCache.models) {
         const opt = document.createElement("option");
         opt.value = m.name;
         const size = m.size_bytes ? ` (${(m.size_bytes / GIB).toFixed(1)} GB)` : "";
         opt.textContent = m.name + size;
-        if (peerRoute ? m.name === _peerSelected
-            : m.active) opt.selected = true;
+        if (!loadingNow && (peerRoute ? m.name === _peerSelected
+            : m.active)) opt.selected = true;
         modelSelect.appendChild(opt);
       }
     }
@@ -1226,6 +1259,7 @@ export async function refreshModels() {
         setStatus("ok", data.active || data.resumable || t("sidebar.status.noModel"));
       }
     }
+    _renderLoadBanner();
     // Present only when there is something to unload - not merely a courtesy,
     // the model this targets (modelCache.active) is the ONLY thing that makes
     // its click handler well-defined.
@@ -1631,7 +1665,9 @@ export function confirmLoadText(data) {
 function _endSwitch(model) {
   if (_switchingTo !== model) return;
   _switchingTo = "";
+  _switchActivates = true;
   if (modelCache.loading === model) modelCache.loading = "";
+  _renderLoadBanner();
 }
 
 /** Undo switchModel()'s marks after the user declined a dialog of the switch,
@@ -1656,7 +1692,9 @@ export async function switchModel(model, { local = false, activate = true, selec
     }
     setStatus("busy", t("sidebar.status.loading", { model }));
     _switchingTo = model;
+    _switchActivates = select && activate;
     modelCache.loading = model;
+    _renderLoadBanner();
     let force = false;
     let asChat = false;
     let keepOthers = false;

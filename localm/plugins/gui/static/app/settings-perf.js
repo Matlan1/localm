@@ -2873,7 +2873,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // selected model is only the preferred one: the server answers with an
   // installed model that has what this request needs when it lacks it.
   const pinnedModel = pinnedModelName(conv);
-  const modelName = pinnedModel || modelSelect.value || modelCache.active;
+  const modelName = pinnedModel || modelSelect.value || modelCache.active || modelCache.resumable || "";
   const body = { model: modelName, messages, stream: true, pin_model: !!pinnedModel };
   if (contextRouting && contextRouting.minContext) body.min_context = contextRouting.minContext;
   for (const k of ["temperature", "top_p", "top_k", "repeat_penalty",
@@ -2904,7 +2904,8 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     m.content.some((p) => p.type === "input_audio"));
 
   const box = $("chat-messages");
-  const { body: liveBody, row: liveRow } = addMessageRow(box, "assistant", "");
+  const { body: liveBody, row: liveRow } = addMessageRow(box, "assistant", "",
+    { model: modelCache.active || modelCache.resumable || "" });
   mountStatusIndicator(liveBody, sentImage ? t("chat.status.encodingImage")
     : sentAudio ? t("chat.status.encodingAudio") : t("chat.status.processing"));
   chat.stick = true;   // R31: a fresh send re-arms autoscroll (follow the reply)
