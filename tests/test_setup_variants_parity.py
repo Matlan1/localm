@@ -37,6 +37,8 @@ VARIANTS = {
 GROUP_PLATFORMS = {"win32": ("win32",), "posix": spec.POSIX}
 SHARED_FILES = ("installer/gui.py",)
 SCRIPTS = ("setup.bat", "setup.sh", "setup-gui.bat", "setup-gui.sh")
+CONSOLE_SCRIPTS = ("setup.bat", "setup.sh")
+LAUNCHERS = ("setup-gui.bat", "setup-gui.sh")
 
 
 def _lines(name: str) -> list:
@@ -272,7 +274,7 @@ def test_every_numbered_menu_lists_exactly_the_spec_choices(name):
     assert not wrong, f"{name}: (line, question, menu, spec): {wrong}"
 
 
-@pytest.mark.parametrize("name", SCRIPTS)
+@pytest.mark.parametrize("name", CONSOLE_SCRIPTS)
 def test_every_menu_question_prints_its_menu(name):
     """At least one prompt of each numbered-menu question prints its [N] menu
     (a follow-up text entry under the same question prints none)."""
@@ -284,22 +286,57 @@ def test_every_menu_question_prints_its_menu(name):
     assert all(printed.values()), f"{name}: menus not printed: {printed}"
 
 
-def test_the_launchers_ask_the_tooling_question_exactly_as_the_consoles_do():
-    def block(name, qid):
-        lines = _lines(name)
-        for fname, i, tag, line in _tagged_prompts():
-            if fname == name and tag == qid:
-                start = i
-                while start > 0 and not re.search(r"Keep localm's Python tooling",
-                                                  lines[start]):
-                    start -= 1
-                body = [re.sub(r"^\s*(echo|say)\s*", "", ln.strip()).strip('"')
-                        for ln in lines[start:i] if re.match(r"\s*(echo|say)\b", ln)]
-                body = [b.replace("^(", "(").replace("^)", ")") for b in body]
-                return body, _shown_default(line)
-        raise AssertionError(f"{name} does not ask {qid}")
-    for console, launcher in (("setup.bat", "setup-gui.bat"), ("setup.sh", "setup-gui.sh")):
-        assert block(launcher, "tooling-store") == block(console, "tooling-store")
+def _said(line: str) -> str:
+    """The text an echo/say line prints, with a menu number, cmd escapes and
+    runs of spaces taken out."""
+    s = re.sub(r"^\s*(echo|say)\s*", "", line.strip()).strip('"')
+    s = s.replace("^(", "(").replace("^)", ")").replace("[^^!]", "[!]")
+    s = re.sub(r"^\[\d\]\s*", "", s.strip())
+    s = re.sub(r"^\[!\]\s*", "", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _printed_above(name: str, qid: str, lines_up: int) -> list:
+    """What the *lines_up* echo/say lines above *qid*'s prompt in *name* print."""
+    lines = _lines(name)
+    for fname, i, tag, _line in _tagged_prompts():
+        if fname == name and tag == qid:
+            said = [_said(ln) for ln in lines[max(0, i - 12):i]
+                    if re.match(r"\s*(echo|say)\b", ln) and _said(ln)]
+            return said[-lines_up:]
+    raise AssertionError(f"{name} does not ask {qid}")
+
+
+def _collapse(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+@pytest.mark.parametrize("name, plat", [("setup.bat", "win32"), ("setup.sh", "linux")])
+def test_the_consoles_word_the_tooling_question_as_the_window_does(name, plat):
+    """The window's first page shows localm.setup_spec's wording; the console
+    installers print the same question and choices."""
+    assert _printed_above(name, "tooling-store", 3) == [
+        _collapse(spec.TOOLING_STORE_TEXT), _collapse(spec.TOOLING_PORTABLE_TEXT),
+        _collapse(spec.tooling_shared_text(plat))]
+    assert _printed_above(name, "uv-install", 1) == [_collapse(spec.UV_MISSING_TEXT)]
+    prompt = next(line for fname, _i, tag, line in _tagged_prompts()
+                  if fname == name and tag == "uv-install")
+    assert spec.UV_INSTALL_TEXT in prompt
+
+
+def test_the_window_shows_the_spec_wording_of_the_tooling_question():
+    text = (ROOT / "installer" / "gui.py").read_text(encoding="utf-8")
+    for name in ("TOOLING_STORE_TEXT", "TOOLING_PORTABLE_TEXT", "tooling_shared_text()",
+                 "UV_MISSING_TEXT", "UV_INSTALL_TEXT"):
+        assert f"spec.{name}" in text, name
+
+
+@pytest.mark.parametrize("name", LAUNCHERS)
+def test_the_graphical_launchers_ask_nothing_in_a_console(name):
+    """setup-gui.bat and setup-gui.sh ask no question: every question of the
+    graphical setup is asked in the window."""
+    assert _prompts(name) == [], _prompts(name)
+    assert _tags([name]) == {}, _tags([name])
 
 
 # --------------------------------------------------------------------------- #
@@ -313,7 +350,8 @@ def _gui_module(tmp_path, monkeypatch):
     sys.modules["localm_installer_gui_spec"] = mod
     s.loader.exec_module(mod)
     monkeypatch.setattr(mod, "ROOT", tmp_path)
-    for name in (mod.STORE_ENV, mod.UV_ENV, mod.UV_INSTALLED_ENV):
+    for name in (mod.STORE_ENV, mod.UV_ENV, mod.UV_INSTALLED_ENV, mod.BOOTSTRAP_ENV,
+                 mod.REPOINTED_ENV, mod.SPLASH_ENV):
         monkeypatch.delenv(name, raising=False)
     return mod
 
@@ -348,6 +386,8 @@ def test_the_window_starts_on_the_spec_defaults(tmp_path, monkeypatch):
 
 # The Wizard variable that answers each spec question the window asks.
 WINDOW_CONTROLS = {
+    "tooling-store": ("store_var",),
+    "uv-install": ("get_uv_var",),
     "existing-install": ("choice_var",),
     "uninstall-data": ("purge_var",),
     "replace-venv": ("replace_venv_var",),
@@ -364,8 +404,8 @@ WINDOW_CONTROLS = {
 # Window questions asked by a dialog or a step, not by a control on a page.
 WINDOW_DIALOGS = {"uninstall-confirm", "venv-lockers", "venv-retry", "runtime-failed",
                   "keep-data", "data-offline", "running-localm", "report-problem"}
-# Questions the launcher asks before the window opens.
-LAUNCHER_QUESTIONS = {"tooling-store", "uv-install"}
+# Questions the launcher asks before the window opens: none.
+LAUNCHER_QUESTIONS: set = set()
 
 
 def test_every_window_control_answers_a_spec_question(tmp_path, monkeypatch):

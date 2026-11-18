@@ -134,6 +134,31 @@ def contained_uv(root) -> Optional[Path]:
     return _uv_in(Path(root) / CONTAINED_DIR)
 
 
+def per_user_dirs() -> list[Path]:
+    """The folders Astral's installer puts uv in when it is not told where:
+    ``$XDG_BIN_HOME`` when set, then ``~/.local/bin`` and ``~/.cargo/bin``."""
+    home = Path.home()
+    dirs = [Path(os.environ["XDG_BIN_HOME"])] if os.environ.get("XDG_BIN_HOME") else []
+    return dirs + [home / ".local" / "bin", home / ".cargo" / "bin"]
+
+
+def per_user_uv(root) -> Optional[str]:
+    """Full path of a uv that is not inside *root*: the first in an absolute
+    folder on PATH, else the first in :func:`per_user_dirs`; None when there is
+    none. A copy inside *root* (``.uv``, also when it is on PATH) is never
+    returned."""
+    places = []
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        entry = entry.strip().strip('"')
+        if entry and os.path.isabs(entry):
+            places.append(Path(entry) / UV_NAME)
+    places += [d / UV_NAME for d in per_user_dirs()]
+    for candidate in places:
+        if usable(candidate) and not is_inside(candidate, root):
+            return str(candidate)
+    return None
+
+
 def uv_version(path) -> Optional[str]:
     """The version the uv at *path* reports (``uv --version``), or None when it
     cannot be run or prints no version."""
@@ -203,13 +228,17 @@ def _run_installer(script: Path, env: dict) -> int:
 def bootstrap_uv(root, *, download: Optional[Callable[[str, Path], None]] = None,
                  run_installer: Optional[Callable[[Path, dict], int]] = None,
                  emit: Callable[[str], None] = lambda s: None,
-                 dest=None) -> Path:
+                 dest=None, shared: bool = False) -> Path:
     """Install the uv pinned by the setup scripts in *root* into ``<root>/.uv``
     (or into the folder *dest* when given) and return its path.
 
     The installer script is downloaded from the pinned release and runs only if
     its sha256 equals the pin in the setup script; it is told to keep uv in
-    ``.uv`` and to leave PATH and the user profile alone. The installer script
+    ``.uv`` and to leave PATH and the user profile alone. With *shared* (and no
+    *dest*) it is given no install folder instead, so it installs uv at its
+    normal per-user location and adds that to the user PATH, as setup.bat's and
+    setup.sh's Shared choice does; the path returned is then the first uv in
+    :func:`per_user_dirs`, else :func:`per_user_uv`. The installer script
     and every temporary file the installer writes (TEMP, TMP and TMPDIR point
     there) stay in a scratch folder under ``<root>/.localm-setup-tmp``, which
     is removed afterwards, together with ``.localm-setup-tmp`` when this call
@@ -223,6 +252,7 @@ def bootstrap_uv(root, *, download: Optional[Callable[[str, Path], None]] = None
     from localm.install_manifest import SETUP_TMP_NAME
     root = Path(root)
     version, expected = read_pin(root)
+    per_user = shared and dest is None
     target = Path(dest) if dest is not None else root / CONTAINED_DIR
     url = f"https://github.com/astral-sh/uv/releases/download/{version}/{_INSTALLER_NAME}"
     parent = root / SETUP_TMP_NAME
@@ -250,9 +280,15 @@ def bootstrap_uv(root, *, download: Optional[Callable[[str, Path], None]] = None
             raise UvBootstrapError(
                 f"the downloaded uv {version} installer did not match its expected "
                 "checksum and was not run")
-        env = dict(os.environ, UV_INSTALL_DIR=str(target), UV_UNMANAGED_INSTALL=str(target),
-                   TEMP=str(installer_tmp), TMP=str(installer_tmp), TMPDIR=str(installer_tmp))
-        emit(f"Installing uv {version} into {target} ...")
+        env = dict(os.environ, TEMP=str(installer_tmp), TMP=str(installer_tmp),
+                   TMPDIR=str(installer_tmp))
+        if per_user:
+            env.pop("UV_INSTALL_DIR", None)
+            env.pop("UV_UNMANAGED_INSTALL", None)
+            emit(f"Installing uv {version} at its per-user location ...")
+        else:
+            env.update(UV_INSTALL_DIR=str(target), UV_UNMANAGED_INSTALL=str(target))
+            emit(f"Installing uv {version} into {target} ...")
         try:
             rc = (run_installer or _run_installer)(script, env)
         except OSError as e:
@@ -264,6 +300,17 @@ def bootstrap_uv(root, *, download: Optional[Callable[[str, Path], None]] = None
         shutil.rmtree(installer_tmp, ignore_errors=True)
         if made_parent and parent.is_dir() and not any(parent.iterdir()):
             parent.rmdir()
+    if per_user:
+        installed = next((d / UV_NAME for d in per_user_dirs()
+                          if usable(d / UV_NAME) and not is_inside(d / UV_NAME, root)), None)
+        if installed is not None:
+            return installed
+        other = per_user_uv(root)
+        if other is not None:
+            return Path(other)
+        raise UvBootstrapError(
+            f"the uv installer finished but no {UV_NAME} appeared at its per-user location ("
+            + "; ".join(str(d) for d in per_user_dirs()) + ")")
     found = _uv_in(target)
     if found is None:
         raise UvBootstrapError(f"the uv installer finished but no {UV_NAME} appeared in {target}")

@@ -22,8 +22,11 @@ order and with its own commands: create (or keep) the venv, install localm
 and the native-runtime wheel, install the PyTorch stack that matches the
 chosen backend, provision llama.cpp, record where data lives, build the
 launcher, optionally create a desktop shortcut, optionally put `localm` on
-PATH, and install the chosen plugins. The tooling question (Portable or
-Shared) is asked once, by setup-gui.bat / setup-gui.sh, and only shown here.
+PATH, and install the chosen plugins. The first page asks the tooling question
+(Portable or Shared). The launcher opens the window on the folder's own uv and
+Python; choosing Shared there ends the window with EXIT_USE_SHARED_UV or
+EXIT_USE_NEW_SHARED_UV once the per-user uv is in place, and the launcher
+removes what it put in the folder and opens the window again on that uv.
 Questions setup-llama asks while it runs are shown as dialogs.
 
 When setup has run in the folder before, it first offers to repair the
@@ -55,19 +58,88 @@ from localm import setup_spec as spec  # noqa: E402
 APP_NAME = "LocaLM"
 PYVER = "3.12"
 
-# Set by setup-gui.bat / setup-gui.sh from the tooling question they ask:
-# "portable" or "shared", the full path of the uv they chose, and "1" when they
-# installed that uv at its per-user location.
+# Set by setup-gui.bat / setup-gui.sh: the choice the tooling page starts on
+# ("portable" or "shared"), the full path of the uv in use, "1" when the window
+# installed that uv at its per-user location, what the launcher put into the
+# folder to open the window (space-separated: uv, python, cache), "1" when the
+# window was opened again on the per-user uv after Shared was chosen, and the
+# file whose removal closes the launcher's "getting ready" window.
 STORE_ENV = "LOCALM_GUI_STORE"
 UV_ENV = "LOCALM_GUI_UV"
 UV_INSTALLED_ENV = "LOCALM_GUI_UV_INSTALLED"
+BOOTSTRAP_ENV = "LOCALM_GUI_BOOTSTRAP"
+REPOINTED_ENV = "LOCALM_GUI_REPOINTED"
+SPLASH_ENV = "LOCALM_GUI_SPLASH"
+SPLASH_PREFIX = ".localm-setup-starting-"
+# The file setup-gui.bat sends this window's output to when there is no console.
+LOG_ENV = "LOCALM_GUI_LOG"
+# What the launcher put into the folder and no install has taken over yet; a
+# Portable install takes those folders over, so it is removed when one starts.
+BOOTSTRAP_RECORD = ".localm-gui-bootstrap"
+
+# Exit codes telling the launcher that Shared was chosen on the tooling page and
+# the per-user uv is in place: 46 when it was already there, 47 when this
+# window installed it.
+EXIT_USE_SHARED_UV = 46
+EXIT_USE_NEW_SHARED_UV = 47
+
+TOOLING_PAGE = "Python tooling"
+SHARED_NEEDS_UV = ("Shared needs uv at its per-user location: tick the box to install it, "
+                   "or choose Portable.")
 
 
 def launcher_store() -> str:
-    """The launcher's answer to the tooling question: "portable" or "shared";
-    the spec's default when the window was started without a launcher."""
+    """The choice the tooling page starts on: "portable" or "shared" from the
+    launcher, the spec's default otherwise."""
     value = os.environ.get(STORE_ENV, "").strip().lower()
     return value if value in ("portable", "shared") else spec.default_choice("tooling-store")
+
+
+def launcher_bootstrap() -> list[str]:
+    """What the launcher put into the folder to open this window, in the order
+    uv, python, cache; only those three names are read from BOOTSTRAP_ENV."""
+    named = os.environ.get(BOOTSTRAP_ENV, "").split()
+    return [n for n in ("uv", "python", "cache") if n in named]
+
+
+def window_runs_on_folder_tooling() -> bool:
+    """Whether this window runs on tooling inside the folder: the uv in use, or
+    the interpreter running this script, lies inside ROOT."""
+    tool = uv_tool()
+    exe = find_uv(ROOT)
+    return bool((exe and tool.is_inside(exe, ROOT)) or tool.is_inside(sys.executable, ROOT))
+
+
+def take_over_bootstrap() -> str:
+    """Remove ROOT/BOOTSTRAP_RECORD: a Portable install keeps the folders the
+    launcher put there. Returns an empty string, or a warning line when the
+    file is there and could not be removed."""
+    try:
+        (ROOT / BOOTSTRAP_RECORD).unlink(missing_ok=True)
+    except OSError as e:
+        return (f"[!] Could not remove {ROOT / BOOTSTRAP_RECORD} ({e}); choosing Shared in a "
+                "later setup removes the uv, Python and cache folders in this folder.")
+    return ""
+
+
+def close_splash(env=None) -> bool:
+    """Remove the launcher's "getting ready" file (SPLASH_ENV) so its window
+    closes. Only a file directly in ROOT whose name starts with SPLASH_PREFIX is
+    removed. Returns True when a file was removed; never raises."""
+    env = os.environ if env is None else env
+    value = env.get(SPLASH_ENV, "").strip()
+    if not value:
+        return False
+    path = Path(value)
+    try:
+        if (not path.name.startswith(SPLASH_PREFIX)
+                or os.path.normcase(str(path.parent.resolve()))
+                != os.path.normcase(str(ROOT.resolve()))):
+            return False
+        path.unlink()
+    except OSError:
+        return False
+    return True
 
 # Exit codes telling setup-gui.bat / setup-gui.sh how an uninstall in the window
 # ended. 42 and 43: the Python runtime folders named in
@@ -1441,7 +1513,16 @@ class Wizard:
                 self.portable_var.set(False)
                 if not exists:
                     self.missing_data = current
+        # SETUP-Q: tooling-store
         self.store_var = tk.BooleanVar(value=launcher_store() == "portable")
+        self.bootstrap = launcher_bootstrap()
+        self.repointed = os.environ.get(REPOINTED_ENV, "") == "1"
+        # Looked up on first need (only once Shared is chosen): None = not yet.
+        self._folder_tooling: Optional[bool] = None
+        self.per_user_uv: Optional[str] = None
+        self._per_user_looked = False
+        # SETUP-Q: uv-install
+        self.get_uv_var = tk.BooleanVar(value=spec.default_yes("uv-install"))
         # SETUP-Q: window-mode
         self.appwin_var = tk.BooleanVar(
             value=spec.default_choice("window-mode") == "app-window")
@@ -1466,6 +1547,7 @@ class Wizard:
         self.purge_var = tk.BooleanVar(value=spec.default_yes("uninstall-data"))
 
         self.pages = []
+        self._build_tooling_page()
         self._build_runtime_page()
         self._build_location_page()
         self._build_features_page()
@@ -1474,7 +1556,10 @@ class Wizard:
         self._build_choice_frame()
         self._build_uninstall_frame()
         self._build_footer()
-        if self.existing:
+        if self.repointed:
+            self.mode = "install"
+            self._show(1)
+        elif self.existing:
             self._show_choice()
         else:
             self._show(0)
@@ -1494,14 +1579,174 @@ class Wizard:
             self.ttk.Label(parent, text=sub, wraplength=590,
                            style="Dim.TLabel").pack(anchor="w", pady=(2, 12))
 
+    def _build_tooling_page(self):
+        ttk = self.ttk
+        page = self._page(TOOLING_PAGE)
+        self._heading(page, f"Install {APP_NAME}",
+                      "Every answer has a sensible default, so you can click "
+                      "through this.")
+        ttk.Label(page, text=spec.TOOLING_STORE_TEXT, wraplength=590,
+                  font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        ttk.Style(self.root).configure("Wrap.TRadiobutton", wraplength=560)
+        portable = ttk.Radiobutton(page, text=spec.TOOLING_PORTABLE_TEXT, value=True,
+                                   variable=self.store_var, command=self._on_store_changed,
+                                   style="Wrap.TRadiobutton")
+        portable.pack(anchor="w", pady=(4, 0))
+        shared = ttk.Radiobutton(page, text=spec.tooling_shared_text(), value=False,
+                                 variable=self.store_var, command=self._on_store_changed,
+                                 style="Wrap.TRadiobutton")
+        shared.pack(anchor="w")
+        self.get_uv_box = ttk.Checkbutton(
+            page, text=f"{spec.UV_MISSING_TEXT} {spec.UV_INSTALL_TEXT}",
+            variable=self.get_uv_var)
+        self.tooling_controls = (portable, shared, self.get_uv_box)
+        self.tooling_note = ttk.Label(page, text=self.tooling_note_text(),
+                                      wraplength=560, style="Dim.TLabel")
+        self.tooling_note.pack(anchor="w", pady=(14, 0), side="bottom")
+        self._on_store_changed()
+
+    def tooling_note_text(self) -> str:
+        """What the tooling page says about the tooling already in use: what the
+        launcher put into the folder to open this window, or the per-user uv
+        the window was opened on again after Shared was chosen."""
+        if self.repointed:
+            exe = find_uv(ROOT) or "uv"
+            said = f"Shared: this window runs on {exe}."
+            if os.environ.get(UV_INSTALLED_ENV) == "1":
+                said += (" Setup installed it at its per-user location and added that "
+                         "to your user PATH.")
+            return said
+        if not self.bootstrap:
+            return ""
+        try:
+            version = uv_tool().read_pin(ROOT)[0]
+        except Exception:
+            version = ""
+        named = {"uv": f"uv {version}".rstrip() + f" in {ROOT / '.uv'}",
+                 "python": f"Python {PYVER} in {ROOT / '.python'}",
+                 "cache": f"its downloads in {ROOT / '.cache'}"}
+        return ("To open this window, setup put " + ", ".join(named[n] for n in self.bootstrap)
+                + ". Portable keeps using them; Shared removes them again and uses "
+                  "the per-user uv and its Python instead.")
+
+    def on_folder_tooling(self) -> bool:
+        """window_runs_on_folder_tooling(), looked up once."""
+        if self._folder_tooling is None:
+            self._folder_tooling = window_runs_on_folder_tooling()
+        return self._folder_tooling
+
+    def _find_per_user_uv(self) -> Optional[str]:
+        """uv_tool.per_user_uv(ROOT), stored in per_user_uv."""
+        self.per_user_uv = uv_tool().per_user_uv(ROOT)
+        self._per_user_looked = True
+        return self.per_user_uv
+
+    def _shared_needs_install(self) -> bool:
+        """Whether choosing Shared now would have to install the per-user uv.
+        Looks nothing up while Portable is chosen."""
+        if self.store_var.get() or not self.on_folder_tooling():
+            return False
+        if not self._per_user_looked:
+            self._find_per_user_uv()
+        return self.per_user_uv is None
+
+    def _on_store_changed(self) -> None:
+        """Show the uv-install question only while Shared is chosen and there
+        is no per-user uv to switch to."""
+        if self._shared_needs_install():
+            self.get_uv_box.pack(anchor="w", pady=(8, 0), padx=(22, 0))
+        else:
+            self.get_uv_box.pack_forget()
+
+    def _leave_tooling_page(self) -> bool:
+        """Whether the dialogue may go on from the tooling page. Portable, or a
+        window that already runs on tooling outside the folder, goes on. Shared
+        on the folder's own tooling ends the window for the launcher to open
+        it again on the per-user uv: at once when there is one, after
+        installing it (asked by the uv-install box) when there is none; with
+        the box cleared the page says Shared needs it and stays."""
+        if self.store_var.get() or not self.on_folder_tooling():
+            return True
+        if self._find_per_user_uv() is not None:
+            self._repoint(EXIT_USE_SHARED_UV)
+            return False
+        if not self.get_uv_var.get():
+            self._on_store_changed()
+            self.status.configure(text=SHARED_NEEDS_UV)
+            return False
+        self._install_shared_uv()
+        return False
+
+    def _repoint(self, code: int) -> None:
+        """End the window with *code* for the launcher to open it again on the
+        per-user uv."""
+        self.exit_code = code
+        self.root.destroy()
+
+    def _install_shared_uv(self) -> None:
+        """Install the pinned uv at its per-user location on a worker thread,
+        with the window locked meanwhile; then _repoint, or say why not."""
+        self.installing = True
+        self.install_running = True
+        self.back.configure(state="disabled")
+        self.action.configure(state="disabled")
+        for control in self.tooling_controls:
+            control.state(["disabled"])
+        self.status.configure(text="Installing uv at its per-user location ...")
+        self.lines = queue.Queue()
+
+        def work():
+            tool = uv_tool()
+            try:
+                exe = tool.bootstrap_uv(ROOT, shared=True,
+                                        emit=lambda s: self.lines.put(("log", s)))
+            except tool.UvBootstrapError as e:
+                self.lines.put(("shared-uv", (None, str(e))))
+                return
+            except Exception as e:              # never leave the UI hanging
+                self.lines.put(("shared-uv", (None, f"the uv installer could not run: {e}")))
+                return
+            self.lines.put(("shared-uv", (str(exe), "")))
+        threading.Thread(target=work, daemon=True).start()
+        self.root.after(80, self._pump_shared_uv)
+
+    def _pump_shared_uv(self) -> None:
+        """Window-thread side of _install_shared_uv."""
+        try:
+            while True:
+                kind, payload = self.lines.get_nowait()
+                if kind == "log":
+                    self.status.configure(text=str(payload))
+                    continue
+                exe, error = payload
+                self.installing = False
+                self.install_running = False
+                self.action.configure(state="normal")
+                self.back.configure(state="normal" if self.existing else "disabled")
+                for control in self.tooling_controls:
+                    control.state(["!disabled"])
+                if exe:
+                    self.per_user_uv = exe
+                    self._repoint(EXIT_USE_NEW_SHARED_UV)
+                    return
+                said = (f"uv was not installed at its per-user location: {error}. "
+                        "Choose Portable, or install uv yourself "
+                        "(winget install astral-sh.uv / Astral's installer) and run setup again.")
+                self.status.configure(text=said)
+                show = getattr(self.messagebox, "showerror", None)
+                if show is not None:
+                    show(f"{APP_NAME} Setup", said)
+                return
+        except queue.Empty:
+            pass
+        self.root.after(80, self._pump_shared_uv)
+
     def _build_runtime_page(self):
         ttk = self.ttk
         page = self._page("Inference runtime")
         detected = (f"Detected: {self.vendor.upper()} graphics" if self.vendor
                     else "No GPU detected")
-        self._heading(page, f"Install {APP_NAME}",
-                      f"{detected}. Every answer has a sensible default, so you "
-                      "can click through this.")
+        self._heading(page, "Inference runtime", f"{detected}.")
         if self.recommended != "cpu":
             ttk.Checkbutton(page, text=f"Use GPU acceleration ({self.vendor or 'GPU'}) - "
                                        "clear for CPU only",
@@ -1556,15 +1801,6 @@ class Wizard:
                                  "that is offline). Connect it before you continue, "
                                  "or choose another folder.",
                       wraplength=560, style="Warn.TLabel").pack(anchor="w", pady=(4, 0))
-
-        ttk.Label(page, text="Python tooling",
-                  font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(16, 0))
-        ttk.Label(page, text=("Portable - uv, its Python and downloads all inside "
-                              "this folder" if self.store_var.get() else
-                              "Shared - uv and its Python + cache at their "
-                              "normal per-user location")
-                  + " (chosen when setup started)",
-                  wraplength=560).pack(anchor="w")
 
         if (ROOT / ".venv").exists():
             kind = "LocaLM" if venv_is_ours(ROOT) else "Foreign"
@@ -1759,6 +1995,8 @@ class Wizard:
         if problem:
             self.status.configure(text=problem)
             return
+        if self.pages[self.index][0] == TOOLING_PAGE and not self._leave_tooling_page():
+            return
         if self.index == self.last_question_page:
             self.start_install()
             return
@@ -1812,6 +2050,7 @@ class Wizard:
 
     def start_install(self) -> None:
         plan = self.current_plan()
+        record_error = take_over_bootstrap() if plan.portable_store else ""
         self.installing = True
         self.install_running = True
         self._show(len(self.pages) - 1)
@@ -1825,6 +2064,8 @@ class Wizard:
         self.lines = queue.Queue()
         global ASK
         ASK = self._ask_from_worker
+        if record_error:
+            self._emit(record_error)
         resume = begin_journal(self._emit)
         steps = window_steps(plan, resume)
         threading.Thread(target=self._worker, args=(steps,), daemon=True).start()
@@ -2071,8 +2312,11 @@ class Wizard:
 
     def _launch(self) -> None:
         exe = venv_bin(ROOT) / ("localm.exe" if IS_WINDOWS else "localm")
+        # With LOG_ENV set, LocaLM gets no handle on this window's output file.
+        quiet = ({"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+                  "stderr": subprocess.DEVNULL} if os.environ.get(LOG_ENV) else {})
         try:
-            subprocess.Popen([str(exe), "gui"], cwd=str(ROOT))
+            subprocess.Popen([str(exe), "gui"], cwd=str(ROOT), **quiet)
         except OSError:
             pass
         self.root.destroy()
@@ -2084,13 +2328,58 @@ def main() -> int:
 
     root = tk.Tk()
     wizard = Wizard(root, tk, ttk, filedialog, messagebox=messagebox)
+    bring_to_front(root)
+    place_on_screen(root)
+    root.after(150, close_splash)
     root.mainloop()
     return wizard.exit_code
 
 
+def window_position(screen_w: int, screen_h: int, w: int, h: int) -> tuple:
+    """(x, y) that centres a w x h window on a screen_w x screen_h screen, 40
+    pixels above the middle (room for a taskbar), never off the top left."""
+    return max(0, (screen_w - w) // 2), max(0, (screen_h - h) // 2 - 40)
+
+
+def place_on_screen(root) -> None:
+    """Move *root* to window_position on its screen."""
+    root.update_idletasks()
+    x, y = window_position(root.winfo_screenwidth(), root.winfo_screenheight(),
+                           root.winfo_width(), root.winfo_height())
+    root.geometry(f"+{x}+{y}")
+
+
+def bring_to_front(root) -> None:
+    """Raise *root* above other windows and give it the focus once it shows;
+    a window manager that refuses leaves it where it opened."""
+    try:
+        root.lift()
+        root.attributes("-topmost", True)
+        root.after(400, lambda: root.attributes("-topmost", False))
+        root.focus_force()
+    except Exception:
+        return
+
+
+def no_uv_exit() -> int:
+    """Say in a dialog (and on stderr) that uv was not found; returns exit
+    code 2."""
+    said = "uv is required and was not found. Run setup.bat / setup.sh instead."
+    print(said, file=sys.stderr)
+    close_splash()
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(f"{APP_NAME} Setup", said)
+        root.destroy()
+    except Exception as e:
+        print(f"[!] the message could not be shown in a window: {e}", file=sys.stderr)
+    return 2
+
+
 if __name__ == "__main__":
     if find_uv(ROOT) is None:
-        print("uv is required and was not found. Run setup.bat / setup.sh instead.",
-              file=sys.stderr)
-        raise SystemExit(2)
+        raise SystemExit(no_uv_exit())
     raise SystemExit(main())
