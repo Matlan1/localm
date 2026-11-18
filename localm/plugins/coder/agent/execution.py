@@ -1173,6 +1173,25 @@ class _ExecutionMixin:
             return False
         return self._hook_run_gate() == "confirm"
 
+    def _may_need_terminal_confirm(self, calls, interactive: bool) -> bool:
+        """Whether a call in *calls* may be asked about at this session's own
+        terminal: it is interactive with no confirm handler, and a call is gated
+        (ask-by-default or code-running tool), reaches the network, or touches
+        localm's own data. Such calls run one at a time with *interactive*
+        passed on, so the prompt is shown instead of the call being denied as
+        unconfirmable."""
+        if not interactive or self.confirm_handler is not None:
+            return False
+        registry = _agent.TOOL_REGISTRY
+        for call in calls:
+            td = registry.get(call.name)
+            if td is None or td.destructive or td.ask_by_default \
+                    or getattr(td, "executes_project_code", False) is True \
+                    or call.name in _NETWORK_TOOLS \
+                    or self._data_guard_verdict(call) is not None:
+                return True
+        return False
+
     def _hook_permit(self, interactive: bool):
         """A callback deciding, per hook run, whether it may run: None to run
         it, else the reason it does not. None when no check is needed. A gated

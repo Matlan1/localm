@@ -1435,3 +1435,23 @@ def test_rejoining_a_session_with_a_peer_routed_model_loads_nothing_here(
         assert r.status_code == 200, r.text
         assert r.json()["id"] == sid
         assert app.state.coder_sessions.get(sid).agent.backend.model_id == "shared"
+
+
+def test_session_info_says_why_no_check_runs_and_whether_it_was_turned_off(
+        tmp_path, monkeypatch):
+    app, proj, owner = _owner(tmp_path, monkeypatch)
+    monkeypatch.setattr("localm.plugins.coder.verify.no_check_reason",
+                        lambda cwd: "no project python found")
+    with TestClient(app) as client:
+        sid = _start(client, owner, proj, verify="pytest -q")
+        r = client.post(f"/api/coder/sessions/{sid}/settings", headers=owner,
+                        json={"auto_verify": True})
+        body = r.json()
+        assert body["verify"] is None
+        assert body["verify_reason"] == "no project python found"
+        assert body["verify_off"] is False
+        r = client.post(f"/api/coder/sessions/{sid}/settings", headers=owner,
+                        json={"verify": None})
+        body = r.json()
+        assert body["verify_off"] is True
+        assert body["verify_reason"] is None
