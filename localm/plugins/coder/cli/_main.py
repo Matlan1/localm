@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 import click
 
@@ -1300,4 +1300,4 @@ def console_main() -> None:
     (a separate ``pip install``) hits it."""
     from localm._venvguard import require_venv
     require_venv()
-    main(windows_expand_args=False)
+    cast(click.Command, main).main(windows_expand_args=False)
