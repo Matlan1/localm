@@ -546,7 +546,7 @@ class TestLoad:
                 LlamaCpp("m.gguf", n_ctx=4096, n_gpu_layers=0, verbose=True)
             message = str(ei.value)
             del ei
-        assert "'t5'" in message and "llama_encode" in message and "setup-llama" in message
+        assert "'t5'" in message and "encoder pass" in message and "setup-llama" in message
         mock_api.llama_model_free.assert_called_once_with(0xB00)
         mock_api.llama_init_from_model.assert_not_called()
         mock_api.llama_model_has_encoder.assert_not_called()

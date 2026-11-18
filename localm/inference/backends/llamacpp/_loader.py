@@ -784,6 +784,22 @@ def compute_devices() -> list[tuple]:
     Returns ``[]`` when the ggml device-registry symbols are unavailable (an
     older build without ``ggml_backend_dev_*``); the caller then has no
     device-level signal and must fall back to the provisioned-backend name."""
+    return [(dname, dtype) for dname, dtype, _ in _compute_device_entries()]
+
+
+def compute_device_handle(name: str) -> Optional[int]:
+    """The ``ggml_backend_dev_t`` of the registered compute device called
+    *name* (as :func:`compute_devices` reports it), or None when no device has
+    that name or the registry cannot be read."""
+    for dname, _, dev in _compute_device_entries():
+        if dname == name and dev:
+            return dev
+    return None
+
+
+def _compute_device_entries() -> list[tuple]:
+    """``(name, type, handle)`` for every registered ggml compute device; see
+    :func:`compute_devices`."""
     load_lib()
     handles = _ggml_dev_handles()
 
@@ -814,7 +830,7 @@ def compute_devices() -> list[tuple]:
             dev = get(i)
             raw = name_fn(dev)
             dname = raw.decode("utf-8", "replace") if raw else f"device{i}"
-            devices.append((dname, int(type_fn(dev))))
+            devices.append((dname, int(type_fn(dev)), dev))
         except Exception:
             # One unreadable device must not lose the others.
             continue

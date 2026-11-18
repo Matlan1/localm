@@ -244,6 +244,8 @@ class _ParamLayout(NamedTuple):
 
     n_threads: int
     image_min_tokens: int
+    # The ``device`` (ggml_backend_dev_t) field, or None in a layout without one.
+    device: Optional[int] = None
 
 
 # (media_marker, layout) for each layout of mtmd_context_params in the runtimes
@@ -251,9 +253,9 @@ class _ParamLayout(NamedTuple):
 # ``mtmd_default_marker()``:
 #   - media_marker at 16: use_gpu, print_timings, n_threads (4), image_marker,
 #     media_marker, flash_attn_type, warmup, image_min_tokens (32), image_max_tokens.
-#   - media_marker at 32: the same with a ``device`` pointer after use_gpu, so
-#     print_timings sits at 16, n_threads at 20 and image_min_tokens at 48.
-_PARAM_LAYOUTS = ((16, _ParamLayout(4, 32)), (32, _ParamLayout(20, 48)))
+#   - media_marker at 32: the same with a ``device`` pointer at 8, after use_gpu,
+#     so print_timings sits at 16, n_threads at 20 and image_min_tokens at 48.
+_PARAM_LAYOUTS = ((16, _ParamLayout(4, 32)), (32, _ParamLayout(20, 48, 8)))
 
 
 def _marker_address(m) -> Optional[int]:
@@ -290,16 +292,17 @@ _MTMD_DEVICE_ENV = "MTMD_BACKEND_DEVICE"
 def _resolve_backend_device_name(gpu_index: int) -> Optional[str]:
     """The ggml device NAME (e.g. ``"Vulkan1"``) to pin the projector to for
     llama.cpp GPU-list index *gpu_index*, or None when localm cannot determine it
-    UNAMBIGUOUSLY - in which case the caller leaves ``MTMD_BACKEND_DEVICE`` unset
-    and clip keeps today's behaviour (the first GPU-type device).
+    UNAMBIGUOUSLY - in which case the caller pins nothing and mtmd keeps its own
+    default (the first GPU-type device).
 
-    ``mtmd_context_params`` has no device field, so the only selector is the
-    process environment variable ``MTMD_BACKEND_DEVICE``, read in clip_ctx's
-    constructor (upstream ``tools/mtmd/clip.cpp:184-195`` at b10361). Unset, clip
-    takes ``ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU)``
-    unconditionally, with zero awareness of tensor_split or main_gpu, so the
-    projector weights and its compute buffer land on device 0 even when the
-    configured split excludes that card.
+    The selector is the ``device`` field of ``mtmd_context_params`` where the
+    runtime's struct has one (upstream ``mtmd_select_device``); in an older
+    layout without it, the process environment variable ``MTMD_BACKEND_DEVICE``
+    read in clip_ctx's constructor (upstream ``tools/mtmd/clip.cpp:184-195`` at
+    b10361). With neither, mtmd takes the first GPU-type device with zero
+    awareness of tensor_split or main_gpu, so the projector weights and its
+    compute buffer land on device 0 even when the configured split excludes that
+    card.
 
     THE INDEX SPACE, WHICH THE TYPE CHECK BELOW IS THE WHOLE GUARD FOR. *gpu_index*
     is ``mp.main_gpu``, which indexes llama.cpp's OWN ``model->devices``, whereas
@@ -781,8 +784,12 @@ class MtmdContext:
         build/GPU where the GPU encode is broken in a way that only shows up
         mid-encode.
 
-        DEVICE PLACEMENT is not a params field at all - clip reads the process
-        environment variable ``MTMD_BACKEND_DEVICE`` instead - so it is set around
+        DEVICE PLACEMENT, on the GPU attempt only, goes into the params' ``device``
+        field where the runtime's layout has one (:class:`_ParamLayout`): the
+        device :func:`_resolve_backend_device_name` names, or the one an exported
+        ``MTMD_BACKEND_DEVICE`` names, which is the user's own choice and outranks
+        it. In an older layout without the field, clip reads the process
+        environment variable ``MTMD_BACKEND_DEVICE`` instead, so it is set around
         THIS CALL ONLY and restored in a ``finally``: it is process-global state
         that would otherwise leak into every later library call, clip gates the
         read on ``use_gpu`` so the CPU attempt and :meth:`retry_on_cpu` never
@@ -806,6 +813,11 @@ class MtmdContext:
         if min_image_tokens is not None and layout is not None:
             ctypes.cast(ctypes.byref(params, layout.image_min_tokens),
                         ctypes.POINTER(ctypes.c_int32))[0] = int(min_image_tokens)
+
+        if use_gpu and layout is not None and layout.device is not None:
+            self._pin_device_field(params, layout.device)
+            return self._m.mtmd_init_from_file(
+                self._mmproj_path.encode("utf-8"), self._model_ptr, params)
 
         # An explicitly exported MTMD_BACKEND_DEVICE is the user's own choice and
         # outranks anything derived from config: it is never overwritten. Only
@@ -838,6 +850,40 @@ class MtmdContext:
             # restore and a user's own export is never clobbered.
             if device_name is not None:
                 os.environ.pop(_MTMD_DEVICE_ENV, None)
+
+    def _pin_device_field(self, params, offset: int) -> None:
+        """Write the device the projector goes on into the params' ``device``
+        field at *offset*: the one an exported ``MTMD_BACKEND_DEVICE`` names
+        (an empty export pins nothing), else the text model's configured primary
+        device. Leaves the runtime's default (the first GPU) when neither names
+        one, or when no registered device has the name, which is logged."""
+        from localm.debuglog import logger
+        if _MTMD_DEVICE_ENV in os.environ:
+            device_name = os.environ[_MTMD_DEVICE_ENV] or None
+            source = f"the {_MTMD_DEVICE_ENV} environment variable"
+        else:
+            device_name = _resolve_backend_device_name(self._gpu_index)
+            source = f"the text model's configured primary device {self._gpu_index}"
+        if device_name is None:
+            return
+        from . import _loader
+        try:
+            handle = _loader.compute_device_handle(device_name)
+        except Exception as e:      # noqa: BLE001 - a probe failure must not lose vision
+            logger.warning(
+                "mtmd: could not read the ggml device registry (%s); the vision "
+                "projector stays on the default GPU device instead of %r (%s)",
+                type(e).__name__, device_name, source)
+            return
+        if not handle:
+            logger.warning(
+                "mtmd: no compute device is named %r (%s); the vision projector "
+                "stays on the default GPU device", device_name, source)
+            return
+        ctypes.cast(ctypes.byref(params, offset), ctypes.POINTER(ctypes.c_void_p))[0] = handle
+        # INFO reaches the always-on ring buffer, so a bug report carries it.
+        logger.info("mtmd: pinning the vision projector to ggml device %r (%s)",
+                    device_name, source)
 
     def apply_min_image_tokens(self, tokens: int) -> bool:
         """Rebuild this context asking mtmd for at least *tokens* image tokens

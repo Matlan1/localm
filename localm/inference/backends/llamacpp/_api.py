@@ -11,7 +11,7 @@ Naming convention mirrors the C API exactly (llama_xyz → llama_xyz).
 from __future__ import annotations
 
 import ctypes
-from typing import Optional
+from typing import Any, Optional
 
 from ._loader import load_lib
 from ._structs import (
@@ -390,14 +390,15 @@ def llama_model_is_hybrid(model: ctypes.c_void_p) -> bool:
 
 _DIFFUSION_SYMBOLS = ("llama_model_is_diffusion", "llama_vocab_mask",
                       "llama_set_causal_attn", "llama_sampler_apply",
-                      "llama_n_ubatch", "llama_encode")
+                      "llama_n_ubatch")
 
 
 def has_diffusion_api() -> bool:
     """True when this llama.dll exports every call the diffusion sampler
-    (``_diffusion.py``) needs. False on a build without them; never raises."""
+    (``_diffusion.py``) needs, an encoder pass included. False on a build
+    without them; never raises."""
     lib = load_lib()
-    return all(hasattr(lib, fn) for fn in _DIFFUSION_SYMBOLS)
+    return all(hasattr(lib, fn) for fn in _DIFFUSION_SYMBOLS) and has_encode()
 
 
 def llama_model_is_diffusion(model: ctypes.c_void_p) -> bool:
@@ -637,32 +638,245 @@ def llama_chat_apply_template(
 #  Batch
 # ---------------------------------------------------------------------------
 
+# A LlamaBatch is localm's own container with the layout of the C struct
+# ``llama_batch``: callers fill its arrays, and llama_decode / llama_encode below
+# hand it to the runtime. The arrays are allocated here rather than by the
+# runtime's llama_batch_init, so no batch call depends on the functions
+# upstream deprecated at b12470 (llama_batch_init, llama_batch_free,
+# llama_batch_get_one, llama_decode, llama_encode).
+
+# Backing arrays of each batch llama_batch_init made, by the address of its
+# ``embd`` array, or of its ``token`` array when it has no embd (the fields a
+# caller does not repoint before freeing); llama_batch_free drops them. The
+# value also records the embedding row width the batch was made with.
+_BATCH_ARRAYS: dict = {}
+
+
 def llama_batch_get_one(
     tokens: ctypes.Array,
     n_tokens: int,
 ) -> LlamaBatch:
-    fn = _bind(
-        "llama_batch_get_one",
-        LlamaBatch,
-        ctypes.POINTER(llama_token),
-        ctypes.c_int32,
-    )
-    return fn(tokens, n_tokens)
+    """A batch over the caller's *tokens* (which must outlive it) for sequence
+    0, positions continuing from the sequence's memory, only the last token
+    output: the same batch the runtime's own llama_batch_get_one returns."""
+    batch = LlamaBatch()
+    batch.n_tokens = int(n_tokens)
+    batch.token = ctypes.cast(tokens, ctypes.c_void_p)
+    return batch
 
 
 def llama_batch_init(n_tokens: int, embd: int, n_seq_max: int) -> LlamaBatch:
-    fn = _bind(
-        "llama_batch_init",
-        LlamaBatch,
-        ctypes.c_int32,
-        ctypes.c_int32,
-        ctypes.c_int32,
-    )
-    return fn(n_tokens, embd, n_seq_max)
+    """A batch with room for *n_tokens* entries of up to *n_seq_max* sequence
+    ids each, holding token ids, or *embd* floats per entry when *embd* is not
+    0, laid out as the runtime's llama_batch_init lays it out (``seq_id`` a
+    null-terminated pointer array). ``n_tokens`` starts at 0. Free it with
+    :func:`llama_batch_free`."""
+    n = max(1, int(n_tokens))
+    n_seq = max(1, int(n_seq_max))
+    embd = max(0, int(embd))
+    batch = LlamaBatch()
+    arrays: list = []
+    if embd:
+        values = (ctypes.c_float * (n * embd))()
+        batch.embd = ctypes.cast(values, ctypes.c_void_p)
+    else:
+        values = (llama_token * n)()
+        batch.token = ctypes.cast(values, ctypes.c_void_p)
+    pos = (ctypes.c_int32 * n)()
+    n_seq_id = (ctypes.c_int32 * n)()
+    seq_store = (ctypes.c_int32 * (n * n_seq))()
+    base = ctypes.addressof(seq_store)
+    stride = n_seq * ctypes.sizeof(ctypes.c_int32)
+    seq_ptrs = (ctypes.c_void_p * (n + 1))(*range(base, base + n * stride, stride))
+    logits = (ctypes.c_int8 * n)()
+    arrays.extend((values, pos, n_seq_id, seq_store, seq_ptrs, logits))
+    batch.pos = ctypes.cast(pos, ctypes.c_void_p)
+    batch.n_seq_id = ctypes.cast(n_seq_id, ctypes.c_void_p)
+    batch.seq_id = ctypes.cast(seq_ptrs, ctypes.c_void_p)
+    batch.logits = ctypes.cast(logits, ctypes.c_void_p)
+    _BATCH_ARRAYS[ctypes.addressof(values)] = (arrays, embd)
+    return batch
 
 
 def llama_batch_free(batch: LlamaBatch) -> None:
-    _bind("llama_batch_free", None, LlamaBatch)(batch)
+    """Release the arrays of a batch :func:`llama_batch_init` made."""
+    _BATCH_ARRAYS.pop(batch.embd or batch.token or 0, None)
+
+
+# llama_process_type
+LLAMA_PROCESS_TYPE_ENCODE = 0
+LLAMA_PROCESS_TYPE_DECODE = 1
+
+# llama_rope_type values whose embedding entries take GGML_MROPE_SECTIONS (4)
+# positions each: LLAMA_ROPE_TYPE_MROPE and LLAMA_ROPE_TYPE_IMROPE.
+_MROPE_TYPES = frozenset({8, 40})
+
+
+class LlamaEmbd(ctypes.Structure):
+    """``struct llama_embd``: *n_rows* rows of *n_embd* floats at *data*."""
+    _fields_ = [("data", ctypes.c_void_p),
+                ("n_rows", ctypes.c_size_t),
+                ("n_embd", ctypes.c_size_t)]
+
+
+class _BatchExt:
+    """The extended batch functions of one loaded runtime, bound once."""
+
+    init: Any
+    free: Any
+    add_token: Any
+    add_seq: Any
+    add_embd: Any
+    set_embd_token: Any
+    set_embd_state: Any
+    set_pos: Any
+    set_output: Any
+    process: Any
+    get_memory: Any
+    seq_pos_max: Any
+    get_model: Any
+    rope_type: Any
+
+
+def _bind_batch_ext(lib) -> Optional[_BatchExt]:
+    """The extended batch API llama_decode and llama_encode use, bound from
+    *lib*, or None when *lib* does not export all of it (every upstream build
+    from b11200 on exports it with these signatures)."""
+    names = ("llama_batch_ext_init", "llama_batch_ext_free",
+             "llama_batch_ext_add_token", "llama_batch_ext_add_seq",
+             "llama_batch_ext_add_embd", "llama_batch_ext_set_embd_token",
+             "llama_batch_ext_set_embd_state", "llama_batch_ext_set_pos",
+             "llama_batch_ext_set_output_logits", "llama_process",
+             "llama_get_memory", "llama_memory_seq_pos_max", "llama_get_model",
+             "llama_model_rope_type")
+    if not all(hasattr(lib, fn) for fn in names):
+        return None
+    vp, i32, b = ctypes.c_void_p, ctypes.c_int32, ctypes.c_bool
+    ext = _BatchExt()
+    ext.init = _bind("llama_batch_ext_init", vp, vp)
+    ext.free = _bind("llama_batch_ext_free", None, vp)
+    ext.add_token = _bind("llama_batch_ext_add_token", i32, vp, i32, llama_token)
+    ext.add_seq = _bind("llama_batch_ext_add_seq", b, vp, i32, i32)
+    ext.add_embd = _bind("llama_batch_ext_add_embd", i32, vp, i32, LlamaEmbd)
+    ext.set_embd_token = _bind("llama_batch_ext_set_embd_token", b, vp, i32, LlamaEmbd)
+    ext.set_embd_state = _bind("llama_batch_ext_set_embd_state", b, vp, i32, LlamaEmbd)
+    ext.set_pos = _bind("llama_batch_ext_set_pos", b, vp, i32, vp)
+    ext.set_output = _bind("llama_batch_ext_set_output_logits", b, vp, i32, b)
+    ext.process = _bind("llama_process", i32, vp, ctypes.c_int, vp)
+    ext.get_memory = _bind("llama_get_memory", vp, vp)
+    ext.seq_pos_max = _bind("llama_memory_seq_pos_max", i32, vp, i32)
+    ext.get_model = _bind("llama_get_model", vp, vp)
+    ext.rope_type = _bind("llama_model_rope_type", ctypes.c_int, vp)
+    return ext
+
+
+_BATCH_EXT: list = [None, None]   # [library, _BatchExt or None]
+
+
+def _batch_ext() -> Optional[_BatchExt]:
+    """The extended batch functions of the loaded runtime, or None when it does
+    not export all of them."""
+    lib = load_lib()
+    if _BATCH_EXT[0] is not lib:
+        _BATCH_EXT[:] = [lib, _bind_batch_ext(lib)]
+    return _BATCH_EXT[1]
+
+
+def has_batch_ext_api() -> bool:
+    """True when the loaded runtime runs batches through the extended batch API
+    (llama_batch_ext_* and llama_process) rather than llama_decode."""
+    return _batch_ext() is not None
+
+
+def _fill_batch_ext(ext: _BatchExt, handle: int, ctx, batch: LlamaBatch) -> Optional[str]:
+    """Add every entry of *batch* to the extended batch *handle*, as the
+    runtime's own llama_decode does with a llama_batch (its llama_batch_compat):
+    sequence 0 and positions continuing from memory where *batch* gives none,
+    only the last entry output where it gives no output flags, an embedding row
+    next to a token id as the entry's state. Returns None, or why an entry was
+    refused."""
+    n = int(batch.n_tokens)
+    i32p = ctypes.POINTER(ctypes.c_int32)
+    tokens = ctypes.cast(batch.token, i32p) if batch.token else None
+    pos = ctypes.cast(batch.pos, i32p) if batch.pos else None
+    n_seq_id = ctypes.cast(batch.n_seq_id, i32p) if batch.n_seq_id else None
+    seq_id = ctypes.cast(batch.seq_id, ctypes.POINTER(i32p)) if batch.seq_id else None
+    logits = ctypes.cast(batch.logits, ctypes.POINTER(ctypes.c_int8)) if batch.logits else None
+    embd_addr = batch.embd or 0
+    row_floats = 0
+    sections = 1
+    if embd_addr:
+        record = _BATCH_ARRAYS.get(embd_addr)
+        if record is None or not record[1]:
+            return "an embedding batch not made by llama_batch_init"
+        row_floats = record[1]
+        if tokens is None and int(ext.rope_type(ext.get_model(ctx))) in _MROPE_TYPES:
+            sections = 4
+    row_bytes = row_floats * ctypes.sizeof(ctypes.c_float)
+    pos_next: dict = {}
+    memory = None
+    one_pos = (ctypes.c_int32 * 4)()
+    for i in range(n):
+        n_seqs = n_seq_id[i] if n_seq_id else 1
+        seqs = [seq_id[i][s] for s in range(n_seqs)] if seq_id else [0] * min(n_seqs, 1)
+        if not seqs:
+            return f"entry {i} names no sequence"
+        if tokens is not None:
+            idx = ext.add_token(handle, seqs[0], tokens[i])
+        else:
+            idx = ext.add_embd(handle, seqs[0],
+                               LlamaEmbd(embd_addr + i * row_bytes, 1, row_floats))
+        if idx < 0:
+            return (f"entry {i} was refused ({idx}: -1 full, -2 invalid token or "
+                    f"embedding, -3 invalid sequence)")
+        for s in seqs[1:]:
+            if not ext.add_seq(handle, idx, s):
+                return f"entry {i} could not join sequence {s}"
+        if tokens is not None and embd_addr:
+            row = LlamaEmbd(embd_addr + i * row_bytes, 1, row_floats)
+            if not (ext.set_embd_state(handle, idx, row)
+                    or ext.set_embd_token(handle, idx, row)):
+                return f"entry {i} has an embedding row this context does not take"
+        if pos is not None:
+            # An embedding entry of an M-RoPE model takes one position per
+            # section, stored section-major (pos[j * n + i]); any other entry one.
+            for j in range(sections):
+                one_pos[j] = pos[j * n + i]
+        else:
+            if memory is None:
+                memory = ext.get_memory(ctx)
+            s0 = seqs[0]
+            if s0 not in pos_next:
+                pos_next[s0] = ext.seq_pos_max(memory, s0) + 1
+            one_pos[0] = pos_next[s0]
+            pos_next[s0] += 1
+        ext.set_pos(handle, idx, ctypes.addressof(one_pos))
+        out = (logits[i] != 0) if logits is not None else (i == n - 1)
+        if out:
+            ext.set_output(handle, idx, True)
+    return None
+
+
+def _process(ctx, batch: LlamaBatch, encode: bool) -> Optional[int]:
+    """Run *batch* through llama_process when the runtime has the extended
+    batch API; None when it does not."""
+    ext = _batch_ext()
+    if ext is None:
+        return None
+    handle = ext.init(ctx)
+    if not handle:
+        return -1
+    try:
+        refused = _fill_batch_ext(ext, handle, ctx, batch)
+        if refused is not None:
+            from localm.debuglog import logger
+            logger.warning("llama.cpp batch of %d entries is invalid: %s",
+                           int(batch.n_tokens), refused)
+            return -1
+        kind = LLAMA_PROCESS_TYPE_ENCODE if encode else LLAMA_PROCESS_TYPE_DECODE
+        return int(ext.process(ctx, kind, handle))
+    finally:
+        ext.free(handle)
 
 
 # ---------------------------------------------------------------------------
@@ -672,8 +886,15 @@ def llama_batch_free(batch: LlamaBatch) -> None:
 def llama_decode(ctx: ctypes.c_void_p, batch: LlamaBatch) -> int:
     """
     Run the model on *batch*.  Returns 0 on success, 1 if no KV slot available,
-    negative on error.
+    negative on error. Uses llama_process where the runtime has it, else the
+    runtime's llama_decode.
     """
+    ret = _process(ctx, batch, encode=False)
+    if ret is not None:
+        return ret
+    if not hasattr(load_lib(), "llama_decode"):
+        raise RuntimeError("this llama.cpp runtime exports neither llama_process "
+                           "nor llama_decode; update it with  localm setup-llama")
     return _bind("llama_decode", ctypes.c_int32, LlamaContext, LlamaBatch)(ctx, batch)
 
 
@@ -686,13 +907,13 @@ LLAMA_TOKEN_NULL = -1
 
 def has_encoder_api() -> bool:
     """True when this llama.dll exports the calls an encoder-decoder model (T5)
-    needs: llama_encode, llama_model_has_encoder, llama_model_has_decoder and
+    needs: an encoder pass (:func:`has_encode`), llama_model_has_encoder, llama_model_has_decoder and
     llama_model_decoder_start_token. A build without them cannot run one;
     callers check this before binding any of the four."""
     lib = load_lib()
     return all(hasattr(lib, fn) for fn in (
-        "llama_encode", "llama_model_has_encoder", "llama_model_has_decoder",
-        "llama_model_decoder_start_token"))
+        "llama_model_has_encoder", "llama_model_has_decoder",
+        "llama_model_decoder_start_token")) and has_encode()
 
 
 def llama_model_has_encoder(model: ctypes.c_void_p) -> bool:
@@ -721,8 +942,22 @@ def llama_encode(ctx: ctypes.c_void_p, batch: LlamaBatch) -> int:
 
     The native side ABORTS THE PROCESS (GGML_ASSERT, not an error return) when
     *batch* holds more tokens than the context's n_ubatch, so the caller must
-    check ``llama_n_ubatch(ctx)`` first. Only call after has_encoder_api()."""
+    check ``llama_n_ubatch(ctx)`` first. Only call after has_encoder_api().
+    Uses llama_process where the runtime has it, else the runtime's
+    llama_encode."""
+    ret = _process(ctx, batch, encode=True)
+    if ret is not None:
+        return ret
+    if not hasattr(load_lib(), "llama_encode"):
+        raise RuntimeError("this llama.cpp runtime exports neither llama_process "
+                           "nor llama_encode; update it with  localm setup-llama")
     return _bind("llama_encode", ctypes.c_int32, LlamaContext, LlamaBatch)(ctx, batch)
+
+
+def has_encode() -> bool:
+    """True when the loaded runtime can run an encoder pass: llama_process, or
+    the older llama_encode."""
+    return has_batch_ext_api() or hasattr(load_lib(), "llama_encode")
 
 
 def llama_n_ubatch(ctx: ctypes.c_void_p) -> Optional[int]:

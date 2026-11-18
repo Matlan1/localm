@@ -563,7 +563,8 @@ def test_resolve_ref_latest_takes_the_newest_upstream_tag(pin_module, monkeypatc
 def test_resolve_ref_latest_falls_back_to_the_pin_when_nothing_is_usable(
         pin_module, monkeypatch, capsys):
     monkeypatch.setattr(pin_module, "upstream_tags", lambda: ([], "boom"))
-    assert abichk._resolve_ref("latest") == abichk.LLAMA_ABI_REF
+    assert abichk._resolve_ref("latest") == pin_module.pinned_tag()
+    assert abichk._resolve_ref("latest") != abichk.LLAMA_ABI_REF
     assert "boom" in capsys.readouterr().err
 
 
@@ -1337,9 +1338,18 @@ def test_a_probed_function_the_pin_declared_and_the_ref_lost_fails(capsys):
         capsys.readouterr().out)
 
 
-def test_a_deprecated_function_is_noted_and_collected(capsys):
+def test_a_deprecated_function_localm_calls_unconditionally_fails(capsys):
     deprecated = []
     bound = _bound(llama_decode=True)
+    assert abichk.check_functions(bound, {"llama": _LLAMA_H_FUNCTIONS}, "fixture",
+                                  deprecated=deprecated) == 1
+    assert deprecated == ["llama_decode (fixture)"]
+    assert "FAIL  llama_decode is DEPRECATED upstream" in capsys.readouterr().out
+
+
+def test_a_deprecated_function_localm_probes_for_is_noted_and_collected(capsys):
+    deprecated = []
+    bound = _bound(llama_decode=False)
     assert abichk.check_functions(bound, {"llama": _LLAMA_H_FUNCTIONS}, "fixture",
                                   deprecated=deprecated) == 0
     assert deprecated == ["llama_decode (fixture)"]
@@ -1360,13 +1370,14 @@ def test_nothing_checked_fails(capsys):
 def test_the_scan_finds_the_bindings_localm_makes():
     bound = abichk.bound_functions(_REPO_ROOT)
     for name in ("llama_model_load_from_file", "llama_model_free",
-                 "llama_init_from_model", "llama_decode", "llama_vocab_n_tokens",
+                 "llama_init_from_model", "llama_vocab_n_tokens",
                  "llama_vocab_bos", "llama_vocab_eos", "mtmd_init_from_file",
                  "mtmd_helper_gen_audio_init", "mtmd_support_audio",
                  "llama_model_default_params"):
         assert bound[name].required, name
     for name in ("llama_model_has_mtp", "llama_kv_cache_seq_rm", "ggml_backend_dev_count",
-                 "llama_set_embeddings_nextn"):
+                 "llama_set_embeddings_nextn", "llama_decode", "llama_encode",
+                 "llama_batch_ext_init", "llama_process"):
         assert not bound[name].required, name
     assert not any(site.startswith("localm/media/")
                    for f in bound.values() for site in f.sites)
@@ -1396,6 +1407,31 @@ def test_a_name_in_a_deprecation_hint_is_not_a_declaration():
         'DEPRECATED(MTMD_API int32_t mtmd_encode(void * ctx), "use mtmd_encode_chunk() instead");\n'
         "MTMD_API int32_t mtmd_encode_chunk(void * ctx);\n")
     assert declared == {"mtmd_encode": True, "mtmd_encode_chunk": False}
+
+
+# Upstream b12470 marks these DEPRECATED (replacements llama_batch_ext_* and
+# llama_process); localm may still bind the ones it falls back to, but only
+# behind a probe, so their removal cannot fail a load.
+_DEPRECATED_AT_B12470 = frozenset({
+    "llama_decode", "llama_encode", "llama_batch_init", "llama_batch_get_one",
+    "llama_batch_free"})
+
+
+def test_localm_calls_none_of_the_b12470_deprecations_unconditionally():
+    bound = abichk.bound_functions(_REPO_ROOT)
+    assert sorted(n for n in _DEPRECATED_AT_B12470 & set(bound) if bound[n].required) == []
+
+
+def test_an_attribute_of_a_held_api_module_is_not_a_binding(tmp_path):
+    pkg = tmp_path / "localm"
+    pkg.mkdir()
+    (pkg / "user.py").write_text(
+        "def run(self, lib):\n"
+        "    self._api.llama_batch_free(None)\n"
+        "    return lib.llama_raw_call()\n", encoding="utf-8")
+    bound = abichk.bound_functions(tmp_path)
+    assert "llama_batch_free" not in bound
+    assert bound["llama_raw_call"].required
 
 
 def test_localm_binds_none_of_the_functions_upstream_pruned():
@@ -1482,6 +1518,12 @@ class TestBoundFunctionsAreExportedByTheRuntime:
         missing = sorted(n for n, f in bound.items()
                          if f.required and n.startswith("llama_") and not hasattr(lib, n))
         assert missing == []
+
+    def test_the_runtime_runs_batches_through_the_extended_batch_api(self):
+        from tests._real_gguf import require_native_runtime
+        require_native_runtime()
+        from localm.inference.backends.llamacpp import _api
+        assert _api.has_batch_ext_api()
 
     def test_every_required_mtmd_function_is_exported(self):
         from tests._real_gguf import require_native_runtime
