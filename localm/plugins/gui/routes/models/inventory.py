@@ -86,6 +86,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         from localm.model_manager import model_packages as _mpk
         from localm.model_manager.registry import entry_is_reranker as _entry_is_reranker
         registry = load_registry()
+        _hs.prune_removed_models(registry)
         current = active_model()
         # Rows whose folder ships code that does not run: the load uses transformers' classes.
         own_code_off: set = set()
@@ -699,6 +700,11 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         available = (free + held) if isinstance(free, int) and held is not None else None
         budget = available if available is not None else free
         fits = (est["needed"] <= budget) if isinstance(budget, int) and not loading else None
+        if not name:
+            return {"model": "", "model_bytes": 0, **est, "free": free, "held": None,
+                    "available": None, "total": total, "fits": None,
+                    "loading": False, "approximate": True, "no_model": True,
+                    "note": "No model is selected: name one with ?model= or load one."}
         return {"model": name, "model_bytes": model_bytes, **est,
                 "free": free, "held": held if isinstance(free, int) else None,
                 "available": available, "total": total, "fits": fits,

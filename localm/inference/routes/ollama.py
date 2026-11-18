@@ -166,6 +166,7 @@ def _listed_models(registry: dict) -> dict[str, dict]:
     out = {name: entry for name, entry in registry.items()
            if isinstance(entry, dict)
            and entry.get("model_type", "llm") in _LISTED_MODEL_TYPES}
+    _hs.prune_removed_models(registry)
     default = _hs._default_model_name
     if default and default not in registry:
         startup = getattr(_hs._engine, "model_path", "")
@@ -237,6 +238,7 @@ def register(app: FastAPI, ctx) -> None:
     def _registry_names() -> set[str]:
         from localm.config import load_registry
         names = set(load_registry())
+        _hs.prune_removed_models(names)
         if _hs._default_model_name:
             names.add(_hs._default_model_name)
         return names

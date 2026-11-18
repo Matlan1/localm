@@ -26,6 +26,9 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/health")
     async def health():
+        if _hs._engine is None or not _hs._engine.loaded:
+            from localm.config import load_registry
+            _hs.prune_removed_models(load_registry())
         if _hs._engine is not None:
             return {
                 "status": "ok",

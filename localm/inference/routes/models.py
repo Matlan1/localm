@@ -70,6 +70,7 @@ def register(app: FastAPI, ctx) -> None:
         from localm.config import load_registry
         from localm.model_manager.registry import is_unlisted_entry
         registry = load_registry()
+        _hs.prune_removed_models(registry)
 
         models = []
         now = int(time.time())

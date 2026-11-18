@@ -118,6 +118,12 @@ _engines_lru: list[str] = []
 _evicting_names: set[str] = set()
 # Default/startup model name
 _default_model_name: str | None = None
+# Names this process has seen in the model registry (the startup model when it
+# was registered, and every model a load resolved through the registry). A name
+# in here that the registry no longer lists was removed, whether or not its
+# file is still on disk; a startup model that was never registered (a direct
+# path) is not in here and is kept while its file exists.
+_registered_seen: set[str] = set()
 # Active model name (most recently used/loaded)
 _active_model_name: str | None = None
 # The name _active_model_name held immediately before a full eviction
@@ -1050,6 +1056,8 @@ async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
                                                 on_status=on_status, reading=reading,
                                                 keep_others=keep_others)
                 if early is not None:
+                    if preempt and _switch_desired != name:
+                        return _superseded_result(name)
                     return early
 
             # *name* may itself be a victim another call detached and is still freeing.
@@ -1175,6 +1183,7 @@ def _switch_load_budget(name: str) -> switch_admission.LoadBudget | None:
     info = get_model_info(name)
     file_size = 0
     if info is not None:
+        _registered_seen.add(name)
         m_path, _ = info
         file_size = residency.model_footprint_bytes(m_path)
     elif registry:
@@ -1288,6 +1297,8 @@ async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
     if attempt is None:
         attempt = switch_admission.EvictionAttempt(started=time.monotonic())
     while True:
+        if preempt and _switch_desired != budget.name:
+            return _superseded_result(budget.name)
         probe = await _switch_probe_vram(loop, budget, reading=reading)
         decision = switch_admission.decide_admission(
             probe, budget, _eviction_order(), _engines)
@@ -1339,6 +1350,8 @@ async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
             if ask is not None:
                 return ask
 
+        if preempt and _switch_desired != budget.name:
+            return _superseded_result(budget.name)
         victim_engine = _engines.get(victim)
         if victim_engine is None or getattr(victim_engine, "unloading", False) is True:
             continue
@@ -1355,6 +1368,12 @@ async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
         attempt.release_wait_extended = attempt.release_wait_extended or release.extended
         if evictions is not None:
             evictions.append(release)
+
+
+def _superseded_result(name: str) -> dict:
+    """The ``superseded`` result for a switch to *name* that a later selection
+    (``_switch_desired``) replaced."""
+    return {"status": "superseded", "model": name, "by": _switch_desired}
 
 
 def _discover_module():
@@ -2821,6 +2840,19 @@ def _resolve_unnamed_model_name() -> str | None:
     return _active_model_name or _last_active_model_name or _default_model_name
 
 
+def prune_removed_models(registry: dict) -> bool:
+    """Forget every model name this process still holds (the startup, active
+    and last-active names) that *registry* no longer lists
+    (:func:`_forget_removed_model`). An empty *registry* drops only a name this
+    process saw registered. Returns whether anything was dropped."""
+    dropped = False
+    for held in {_default_model_name, _active_model_name, _last_active_model_name}:
+        if (held and held not in registry and (registry or held in _registered_seen)
+                and _forget_removed_model(held)):
+            dropped = True
+    return dropped
+
+
 def _model_is_pinned(model_name: str | None) -> bool:
     """Whether the request named a model EXPLICITLY.
 
@@ -2903,19 +2935,27 @@ def plan_capability_route(model_name: str | None, messages: list,
 
 
 def _forget_removed_model(name: str) -> bool:
-    """Drop this process's state for *name* when it left the registry and its
-    model file is gone (``localm rm`` ran in another process). A model that is
-    loaded, whose file still exists, or whose path is not an absolute file path
-    (a hub repo id) is kept. Returns whether anything was
-    dropped. Synchronous and in-memory only, like :func:`rekey_loaded_model`."""
+    """Drop this process's state for *name* when it left the registry
+    (``localm rm`` ran in another process). A model that is loaded, whose path
+    is not an absolute file path (a hub repo id), or that this process never saw
+    registered and whose file still exists (a startup model given by path) is
+    kept. Returns whether anything was dropped. Synchronous and in-memory only,
+    like :func:`rekey_loaded_model`."""
     global _active_model_name, _default_model_name, _last_active_model_name, _engine, _inference_sem
     from pathlib import Path
     engine = _engines.get(name)
     if engine is not None and engine.loaded:
         return False
-    path = getattr(engine, "model_path", None)
-    if not path or not Path(str(path)).is_absolute() or Path(str(path)).exists():
-        return False
+    if engine is None:
+        if name not in _registered_seen:
+            return False
+    else:
+        path = getattr(engine, "model_path", None)
+        if not path or not Path(str(path)).is_absolute():
+            return False
+        if name not in _registered_seen and Path(str(path)).exists():
+            return False
+    _registered_seen.discard(name)
     _engines.pop(name, None)
     _routing_loaded.discard(name)
     if name in _engines_lru:
@@ -2980,7 +3020,9 @@ async def get_engine(model_name: str | None, *, load: bool = True,
 
     from localm.config import load_registry
     registry = load_registry()
-    
+    if prune_removed_models(registry) and (not (model_name or "").strip() or (model_name or "").strip() == "localm"):
+        name = _resolve_unnamed_model_name()
+
     # If no registry is populated, route all requests to the active/loaded engine (classic single-model mode)
     if not registry:
         active = _active_model_name or (_engine.display_name if _engine else None)
@@ -3878,6 +3920,9 @@ def rekey_loaded_model(old_name: str, new_name: str) -> bool:
     ``_resolve_unnamed_model_name`` falls back to it after a full eviction,
     so an unnamed request would resolve to a name that no longer exists."""
     global _active_model_name, _default_model_name, _last_active_model_name
+    if old_name in _registered_seen:
+        _registered_seen.discard(old_name)
+        _registered_seen.add(new_name)
     if _default_model_name == old_name:
         _default_model_name = new_name
     if _last_active_model_name == old_name:
@@ -6226,6 +6271,7 @@ def _init_engine_state(engine: Optional[Engine]) -> None:
 
     _engines.clear()
     _engines_lru.clear()
+    _registered_seen.clear()
     _inference_sems.clear()
     _embedder_sem = None
     _last_activity_per_model.clear()
@@ -6237,6 +6283,9 @@ def _init_engine_state(engine: Optional[Engine]) -> None:
     _last_active_model_name = None
 
     if engine is not None:
+        from localm.config import load_registry
+        if engine.display_name in load_registry():
+            _registered_seen.add(engine.display_name)
         _engines[engine.display_name] = engine
         _engines_lru.append(engine.display_name)
         _default_model_name = engine.display_name
