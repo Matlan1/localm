@@ -32,6 +32,10 @@ let _switchingTo = "";
 let _switchActivates = true;
 let _loadingPollTimer = null;
 const LOADING_POLL_MS = 2000;
+// Chat sends held until the announced load ends (waitForModelLoad), and how the
+// last load this tab ran ended: the model name when it failed, "" otherwise.
+const _loadWaiters = new Set();
+let _lastLoadFailed = "";
 
 // State renders as a .job-state pill; busy maps to st-running. "note" is an ok
 // state the pill keeps visible (a chat routed to another instance).
@@ -1090,6 +1094,44 @@ function _renderLoadBanner() {
   const loading = _announcedLoading(_peerSelected !== null);
   banner.textContent = loading ? t("chat.modelLoadingBanner", { model: loading }) : "";
   banner.hidden = !loading;
+  _releaseLoadWaiters();
+}
+
+/** The model whose load the sidebar announces now, "" when none. */
+export function announcedLoadingModel() {
+  return _announcedLoading(_peerSelected !== null);
+}
+
+function _releaseLoadWaiters() {
+  if (!_loadWaiters.size || _announcedLoading(_peerSelected !== null)) return;
+  const waiting = [..._loadWaiters];
+  _loadWaiters.clear();
+  queueMicrotask(() => {
+    const failed = !!_lastLoadFailed || (!modelCache.active && !modelCache.resumable);
+    for (const w of waiting) w({ aborted: false, failed, failedModel: _lastLoadFailed });
+  });
+}
+
+/** Resolves once no load is announced: {aborted: false, failed, failedModel},
+ *  failed when the last load failed or ended with no model to answer, or
+ *  {aborted: true} when *signal* aborts first. Resolves at once when no load
+ *  is announced. */
+export function waitForModelLoad(signal) {
+  return new Promise((resolve) => {
+    if (signal && signal.aborted) { resolve({ aborted: true }); return; }
+    if (!_announcedLoading(_peerSelected !== null)) {
+      resolve({ aborted: false, failed: false, failedModel: "" });
+      return;
+    }
+    _lastLoadFailed = "";
+    const done = (out) => {
+      if (signal) signal.removeEventListener("abort", onAbort);
+      resolve(out);
+    };
+    const onAbort = () => { _loadWaiters.delete(done); resolve({ aborted: true }); };
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+    _loadWaiters.add(done);
+  });
 }
 
 /** Redraw the empty chat page when it is what the chat area shows, so it names
@@ -1691,6 +1733,7 @@ export async function switchModel(model, { local = false, activate = true, selec
       _storePeerSelected();
     }
     setStatus("busy", t("sidebar.status.loading", { model }));
+    _lastLoadFailed = "";
     _switchingTo = model;
     _switchActivates = select && activate;
     modelCache.loading = model;
@@ -1731,6 +1774,7 @@ export async function switchModel(model, { local = false, activate = true, selec
     }
   } catch (e) {
     // A failed load ends the busy pill and re-reads the server's model state.
+    _lastLoadFailed = model;
     _endSwitch(model);
     setStatus("err", t("sidebar.status.loadFailed"));
     _holdLoadFailed = true;

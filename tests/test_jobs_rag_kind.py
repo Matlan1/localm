@@ -281,9 +281,9 @@ def test_run_job_reports_an_unreachable_folder_instead_of_deleting(home, docs):
 
     result = run_job(_rag_job(collection="kb"), engine=None)
 
-    assert result["status"] == "ok", result.get("error")
-    assert "skipped folder" in result["output"]
-    assert "nothing under it was indexed or flagged" in result["output"]
+    assert result["status"] == "error"
+    assert "nothing was synced" in result["error"]
+    assert "nothing under it was indexed or flagged" in result["error"]
     assert Collection("kb").stats()["n_missing"] == 0
 
 
@@ -303,9 +303,9 @@ def test_run_job_applies_the_indexing_policy(home, docs):
 
     result = run_job(_rag_job(collection="kb"), engine=None)
 
-    assert result["status"] == "ok", result.get("error")
-    assert "skipped folder" in result["output"]
-    assert "denied list" in result["output"]
+    assert result["status"] == "error"
+    assert "nothing was synced" in result["error"]
+    assert "denied list" in result["error"]
     coll = Collection("kb")
     assert not any(s.endswith("two.txt") for s in coll.documents())
     assert coll.stats()["n_missing"] == 0      # blocked is not a delete verdict

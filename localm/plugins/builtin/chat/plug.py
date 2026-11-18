@@ -615,15 +615,31 @@ _ROLE_WORD_INSTRUCTION = (
 )
 
 
+def _has_text(content) -> bool:
+    return isinstance(content, str) and bool(content.strip())
+
+
+def _is_summary_request(messages) -> bool:
+    """True for a compaction-summary request: the client's own "Summarise the
+    following conversation" prompt, which must reach the model unchanged."""
+    from localm.inference.compact import SUMMARY_INSTRUCTION
+    stem = SUMMARY_INSTRUCTION.split(" in under", 1)[0]
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            c = m.get("content")
+            return isinstance(c, str) and c.lstrip().startswith(stem)
+    return False
+
+
 def _role_word_inlet(messages, ctx):
     """Steer the model to speak of itself in the first person rather than a
     bare third-person role word ("Model", "the assistant") or an incorrect
     pronoun for itself.
 
     Applies only on localm's own chat surface (see _own_chat_surface) while the
-    ``chat_style_note`` setting is on. Skips when a system message already
-    mentions third-person self-reference,
-    and when the model's known context capacity is too small to absorb the
+    ``chat_style_note`` setting is on. Skips when any system message with text
+    exists (a user or persona prompt is never extended), for a compaction
+    summary request, and when the model's known context capacity is too small to absorb the
     instruction (see _nudge_fits_capacity). Appends the instruction to the
     first system message, or inserts one when none exists. Exceptions raised
     here are isolated by the chat pipeline."""
@@ -631,14 +647,10 @@ def _role_word_inlet(messages, ctx):
         return None
     if not _nudge_fits_capacity(_ROLE_WORD_INSTRUCTION, ctx):
         return None
-    for m in messages:
-        if m.get("role") == "system" and isinstance(m.get("content"), str) \
-                and "third person" in m["content"].lower():
-            return None                          # already instructed; don't double up
-    for m in messages:
-        if m.get("role") == "system" and isinstance(m.get("content"), str):
-            m["content"] = m["content"].rstrip() + "\n\n" + _ROLE_WORD_INSTRUCTION
-            return messages
+    if any(m.get("role") == "system" and _has_text(m.get("content")) for m in messages):
+        return None
+    if _is_summary_request(messages):
+        return None
     messages.insert(0, {"role": "system", "content": _ROLE_WORD_INSTRUCTION})
     return messages
 
@@ -660,8 +672,8 @@ def rename_notes(old_name: str, new_name: str) -> list[str]:
 def register(host) -> None:
     from localm.model_manager import register_rename_hook
     host.mount_router(_router)
-    host.register_chat_hook("inlet", _thinking_inlet)
     host.register_chat_hook("inlet", _role_word_inlet)
+    host.register_chat_hook("inlet", _thinking_inlet)
     register_rename_hook("saved chats", rename_notes)
 
 

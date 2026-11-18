@@ -2633,8 +2633,11 @@ export function updateUsageDisplay(usage) {
     return;
   }
   const bits = [`${usage.total_tokens} tok`];
-  if (usage.ttft_ms != null) bits.push(`TTFT ${Math.round(usage.ttft_ms)} ms`);
-  if (usage.tokens_per_sec != null) bits.push(`${usage.tokens_per_sec} tok/s`);
+  if (usage.ttft_ms != null) bits.push(t("chat.usage.firstToken", { ms: Math.round(usage.ttft_ms) }));
+  if (usage.tokens_per_sec != null) {
+    const rate = Number(usage.tokens_per_sec);
+    bits.push(`${rate >= 10 ? Math.round(rate) : Math.round(rate * 10) / 10} tok/s`);
+  }
   const mtp = mtpUsageText(usage.mtp);
   if (mtp.text) bits.push(mtp.text);
   const spec = speculationUsageText(usage.speculation);

@@ -321,7 +321,9 @@ def test_bench_spec_stops_when_the_source_cannot_run(cli_runner):
                       _spec_arm([50.0], [70.0], usable=False, status="rewind-unsupported")):
         res = cli_runner.invoke(models_mod.main, ["bench-spec", "model.gguf"])
     assert res.exit_code == 0, res.output
-    assert "cannot run" in res.output and "rewind-unsupported" in res.output
+    flat = " ".join(res.output.split())
+    assert "cannot run" in flat and "rewind-unsupported" not in flat
+    assert "cannot drop rejected drafts" in flat
     assert "decode tok/s" not in res.output
     assert "faster" not in res.output
 

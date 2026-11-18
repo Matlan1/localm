@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import codecs
+import hashlib
 import json
 import re
 import time
@@ -666,12 +667,23 @@ def model_details(*, fmt: str, family: str = "", parameter_size: str = "",
     }
 
 
-def digest_of(entry: dict[str, Any]) -> str:
-    """The registry entry's SHA-256 as bare hex, or "" when none is recorded."""
+_HEX_DIGEST = re.compile(r"[0-9a-f]{64}")
+
+
+def digest_of(entry: dict[str, Any], name: str = "") -> str:
+    """A model's digest as 64 lowercase hex characters, never empty: the registry
+    entry's recorded SHA-256 (with or without its ``sha256:`` prefix), else the
+    SHA-256 of the entry's stable registry ID (or of *name* when it has none),
+    which stays the same across renames. Ollama clients shorten the digest to its
+    first 12 characters for their ID column."""
     sha = entry.get("sha256")
-    if not isinstance(sha, str):
-        return ""
-    return sha[len("sha256:"):] if sha.startswith("sha256:") else sha
+    if isinstance(sha, str):
+        bare = (sha[len("sha256:"):] if sha.startswith("sha256:") else sha).lower()
+        if _HEX_DIGEST.fullmatch(bare):
+            return bare
+    rid = entry.get("id")
+    ident = rid if isinstance(rid, str) and rid else name
+    return hashlib.sha256(("localm-model:" + ident).encode("utf-8")).hexdigest()
 
 
 def resolve_model_name(name: str, known: Iterable[str]) -> str:

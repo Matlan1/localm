@@ -818,7 +818,7 @@ def get_model_path(name: str) -> Optional[Path]:
 
 
 
-def unregistered_model_error(name) -> Optional[str]:
+def unregistered_model_error(name, *, from_cli: bool = False) -> Optional[str]:
     """None when an UNTRUSTED caller may use *name* as a model name, else a
     ready-to-show message explaining the refusal.
 
@@ -843,12 +843,22 @@ def unregistered_model_error(name) -> Optional[str]:
     Callers raise their own exception type from the returned string (HTTP 400 in
     the jobs routes, ValueError in the MCP server, RuntimeError in the runner) so
     this module stays free of any transport dependency.
+
+    ``from_cli`` is for a command whose person typed *name* on the command line
+    but whose job still runs later without them (``localm job add``): the
+    closing sentence then tells them to register the path first instead of
+    saying a command-line run may name one.
     """
     if not name:
         return None
     reg = _mm.load_registry()
     if not reg or name in reg:
         return None
+    if from_cli:
+        return (f"Model {name!r} is not registered, and a scheduled job names a "
+                "registered model, not a file path. Register the file once "
+                "with 'localm add <path>', then use its name ('localm list' "
+                "shows the registered names).")
     # Does NOT list the registered models. This message is returned to callers
     # holding only `jobs` or an MCP scope, while ENUMERATING models requires
     # `models:read` (see inference/routes/models.py), so listing them here would
@@ -1058,7 +1068,9 @@ def _pick_mmproj_candidate(model_name: str, names: list[str], *,
 
     A model file whose name contains "mmproj", or whose leading name token
     (:func:`_name_token`) is empty, never pairs. Among candidates containing
-    that token, the only one is picked, and two or more give None. Otherwise a
+    that token, the only one is picked, and with two or more the only one
+    whose :func:`_name_residue` is longer than the token and occurs in the
+    model's own, else None. Otherwise a
     lone candidate is picked when its model name (:func:`_name_identity`) occurs
     in *model_name*, and refused when that name occurs in one of *others* whose
     width does not rule it out (:func:`_may_use`). A lone candidate still
@@ -1076,7 +1088,13 @@ def _pick_mmproj_candidate(model_name: str, names: list[str], *,
     matches = [n for n in names if token in n.lower()]
     if matches:
         if len(matches) != 1:
-            return None
+            own = _name_residue(model_name)
+            named = [n for n in matches
+                     if len(res := _name_residue(n.lower().replace("mmproj", " "))) > len(token)
+                     and res in own]
+            if len(named) != 1:
+                return None
+            matches = named
         key = _model_key(matches[0])
         # A projector named exactly for another model in the folder is that model's.
         if key and key != _model_key(model_name) and any(
@@ -1940,12 +1958,12 @@ def list_models(type_filter: Optional[str] = None) -> None:
         return
 
     table = Table(header_style="bold cyan", show_lines=False, expand=False)
-    table.add_column("Name", style="bold white")
+    table.add_column("Name", style="bold white", overflow="fold")
     table.add_column("Format", style="cyan")
     table.add_column("Role", style="magenta")
     table.add_column("Size", justify="right", style="green")
     table.add_column("Source", style="dim")
-    table.add_column("Path", style="dim")
+    table.add_column("Path", style="dim", overflow="fold")
 
     for name, info in sorted(reg.items()):
         epath = _entry_path(info)

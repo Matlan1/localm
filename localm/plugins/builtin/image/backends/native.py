@@ -575,7 +575,14 @@ class _EventRelay:
         self._on_preview = on_preview
         self._phase = None
         self._sampled = False
+        self._sampled_steps: Optional[int] = None
         self._warnings = RecoveredWarnings(say, cancel_check)
+
+    def take_sampled_steps(self) -> Optional[int]:
+        """The step count the sampler reported for the image just made, then
+        forgotten; None when it reported none."""
+        steps, self._sampled_steps = self._sampled_steps, None
+        return steps
 
     def flush(self) -> None:
         self._warnings.flush()
@@ -606,6 +613,8 @@ class _EventRelay:
             return
         if phase == "sampling":
             self._sampled = True
+            if self._sampled_steps is None and steps:
+                self._sampled_steps = int(steps)
             self._warnings.sampling()
             secs = info.get("secs") or 0.0
             rate = f" ({secs:.2f} s/step)" if secs else ""
@@ -1074,10 +1083,13 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                 if _is_blank_white(result):
                     raise SdWorkerError(BLANK_IMAGE)
                 path = _batch_path(Path(out_path), index)
+                sampled = relay.take_sampled_steps()
                 record = {
                     "prompt": prompt, "negative_prompt": negative_prompt or None,
                     "seed": image_seed, "cfg": cfg_scale, "guidance": guidance,
-                    "steps": steps, "sample_method": method, "scheduler": sched,
+                    "steps": steps,
+                    "sampled_steps": sampled if sampled and sampled != steps else None,
+                    "sample_method": method, "scheduler": sched,
                     "clip_skip": clip_skip,
                     "width": result["width"], "height": result["height"],
                     "size": f"{int(width)}x{int(height)}",
