@@ -1346,6 +1346,7 @@
   "models.pull.fileOf": "fichier {index} sur {count} : {name}",
   "models.pull.fileOfBare": "fichier {index} sur {count}",
   "models.pull.finishedToast": "Téléchargement terminé",
+  "models.pull.registeredToast": "Modèle enregistré",
   "models.pull.intro": "Depuis HuggingFace (owner/repo[:file.gguf]) ou une URL https, ou ajoutez un modèle déjà présent sur le disque - collez un chemin de dossier/fichier, ou utilisez Parcourir pour choisir un dossier.",
   "models.pull.namePlaceholder": "nom (facultatif)",
   "models.pull.netOffHint": "(si l'échec vient de l'accès réseau désactivé : activez-le, ou autorisez uniquement les téléchargements, dans Paramètres → Serveur et réseau)",
