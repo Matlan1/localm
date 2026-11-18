@@ -1585,11 +1585,14 @@ class Wizard:
                       "through this.")
         ttk.Label(page, text=spec.TOOLING_STORE_TEXT, wraplength=590,
                   font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        ttk.Style(self.root).configure("Wrap.TRadiobutton", wraplength=560)
         portable = ttk.Radiobutton(page, text=spec.TOOLING_PORTABLE_TEXT, value=True,
-                                   variable=self.store_var, command=self._on_store_changed)
+                                   variable=self.store_var, command=self._on_store_changed,
+                                   style="Wrap.TRadiobutton")
         portable.pack(anchor="w", pady=(4, 0))
         shared = ttk.Radiobutton(page, text=spec.tooling_shared_text(), value=False,
-                                 variable=self.store_var, command=self._on_store_changed)
+                                 variable=self.store_var, command=self._on_store_changed,
+                                 style="Wrap.TRadiobutton")
         shared.pack(anchor="w")
         self.get_uv_box = ttk.Checkbutton(
             page, text=f"{spec.UV_MISSING_TEXT} {spec.UV_INSTALL_TEXT}",
