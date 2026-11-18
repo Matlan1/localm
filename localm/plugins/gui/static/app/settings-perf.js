@@ -8,9 +8,9 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
 import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, elideAudioForWire, elideImagesForWire, isToolEvent, latestTurnHasAudio, latestTurnIsAudioOnly, lsSetScoped, markNotSent, markRefusedBy, maybeCompactConversation, memorySavedText, modelCannotHearAudio, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, persistChatParams, pinnedModelName, refreshWebPolicy, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, resolvePinnedModel, saveConversations, scopedKeyPrivate, setConversationPin, showPinnedGone, syncPinModelToggle, updateStatusIndicator, wireHasImageAndAudio, wireParts } from "./chat.js";
-import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, localizeServerNotes, autoGrow, confirmDanger, confirmDangerAsync, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setCanvasNavigationAllowed, setPreviewAllowed, splitThink, streamJob, stripAsrPrefix, stripThink, toast } from "./helpers.js";
+import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, localizeServerNotes, autoGrow, confirmDanger, confirmDangerAsync, el, liveThinkText, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setCanvasNavigationAllowed, setPreviewAllowed, splitThink, streamJob, stripAsrPrefix, stripThink, toast } from "./helpers.js";
 import { onLanguageReload, t, tn } from "./i18n.js";
-import { isPeerSelected, modelCache, modelSelect, refreshModels, reloadModel, toastLoadResult } from "./models-sidebar.js";
+import { announcedLoadingModel, isPeerSelected, modelCache, modelSelect, refreshModels, reloadModel, toastLoadResult, waitForModelLoad } from "./models-sidebar.js";
 import { pickPath, saveTextFs } from "./picker.js";
 import { execChatCommand, handleSlashSubmit } from "./slash.js";
 import { CORE_VIEWS, VIEWS, _applyActiveClasses, closeNav, showView } from "./tabs.js";
@@ -2735,6 +2735,8 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   }
   const signal = chat.abort.signal;
   if (signal.aborted) return { stopped: true, liveRow: null };
+  const held = await holdForModelLoad(conv, signal);
+  if (held) return held;
   // Per-send web state: `seen` holds the keys of calls already issued, `found`
   // the sources and pages already returned, `lookups` the calls run, `stale`
   // the consecutive lookups that added nothing new, `formatRepairs` the
@@ -2985,8 +2987,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       // Rebuild <think> from the reasoning stream so splitThink renders the
       // collapsible block exactly as before. Back-compat: an older server that
       // still inlines <think> in content also renders (reasoning stays empty).
-      renderMarkdown(liveBody,
-        reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full);
+      renderMarkdown(liveBody, liveThinkText(reasoning, full));
       // R31: follow the stream ONLY while the user is at the bottom. chat.stick
       // is latched by the scroll listener, so scrolling up reliably pauses
       // autoscroll (recomputing nearBottom per token fought the user instead).
@@ -3821,9 +3822,41 @@ export async function dispatchChatTurn(conv, text, attachments = [], docs = [], 
   });
 }
 
+/** Holds a chat turn while a model load is announced, under a "waiting for
+ *  <model>" line, so it is sent to the model that load makes active and never
+ *  to the one it replaces. Returns null when the turn goes on, else the turn's
+ *  result: stopped (Stop pressed, the held line removed) or a failure line kept
+ *  on screen when the load failed. */
+async function holdForModelLoad(conv, signal) {
+  const loading = announcedLoadingModel();
+  if (!loading) return null;
+  const pinned = pinnedModelName(conv);
+  if (pinned && pinned !== loading) return null;
+  const box = $("chat-messages");
+  const { body, row } = addMessageRow(box, "assistant", "", { model: loading });
+  mountStatusIndicator(body, t("chat.status.waitingForModel", { model: loading }));
+  chat.stick = true;
+  if (box) box.scrollTop = box.scrollHeight;
+  const res = await waitForModelLoad(signal);
+  removeStatusIndicator(body);
+  if (res.aborted) {
+    row.remove();
+    return { stopped: true, liveRow: null };
+  }
+  if (res.failed) {
+    const name = res.failedModel || loading;
+    renderMarkdown(body, "*[" + t("chat.modelLoadFailed", { model: name }) + "]*");
+    toast(t("chat.modelLoadFailed", { model: name }), true);
+    return { stopped: true, liveRow: row };
+  }
+  row.remove();
+  return null;
+}
+
 /** True, after a toast, when no chat model is loaded or resumable. */
 export function refuseWithoutModel() {
   if (modelCache.active || modelCache.resumable) return false;
+  if (announcedLoadingModel()) return false;
   if (modelCache.loading) {
     toast(t("chat.stillLoading", { model: modelCache.loading }), true);
     return true;

@@ -121,12 +121,14 @@ def build() -> dict[str, dict]:
         return _text_result("\n".join(lines))
 
     def system_stats(args: dict) -> dict:
-        from localm.sysstats import system_stats as _stats
+        from localm.discover import _GPU_PROBE_DEADLINE
+        from localm.sysstats import refresh_vram_now, system_stats as _stats
         # A ONE-SHOT call, unlike the GUI's repeating poll: without
         # wait_first_vram the "Live ... VRAM" promise below omits VRAM on a cold
         # first call while the background probe is still running, because there
         # is no later poll here to pick up the landed reading. MCP stdio serves
         # one request at a time with no event loop to stall.
+        refresh_vram_now(_GPU_PROBE_DEADLINE + 1.0)
         return _text_result(json.dumps(_stats(wait_first_vram=True)))
 
     def run_doctor(args: dict) -> dict:

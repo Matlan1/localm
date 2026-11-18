@@ -135,17 +135,11 @@ def _nesting_depth(value) -> int:
     return deepest
 
 
-def network_mode() -> tuple:
-    """``(mode, why)``: *mode* is ``off``, ``ask`` or ``allow`` as localm reads it
-    (``LOCALM_NET_MODE``, else ``net_mode`` in the data dir's config.json, or its
-    ``.bak`` when config.json is absent; an unset or unknown value, or a file that
-    is not a JSON object, means ``ask``). None when neither file exists, or when
-    one is present and cannot be read the way localm reads it (strict UTF-8 JSON,
-    with or without a BOM), where localm itself turns network access off; *why*
-    says which."""
-    env = os.environ.get("LOCALM_NET_MODE", "").strip().lower()
-    if env in NET_MODES:
-        return env, ""
+def read_home_config() -> tuple:
+    """``(cfg, why)``: the data dir's config.json (or its ``.bak`` when config.json
+    is absent) parsed the way localm reads it (strict UTF-8 JSON, with or without
+    a BOM). *why* is empty when it was read; otherwise *cfg* is None and *why* says
+    that neither file exists or that one could not be read."""
     try:
         main = localm_home() / "config.json"
         bak = main.with_name("config.json.bak")
@@ -162,6 +156,23 @@ def network_mode() -> tuple:
         return None, f"{path} could not be read ({e.__class__.__name__})"
     if _nesting_depth(cfg) > MAX_JSON_DEPTH:
         return None, f"{path} could not be read (nested too deeply)"
+    return cfg, ""
+
+
+def network_mode() -> tuple:
+    """``(mode, why)``: *mode* is ``off``, ``ask`` or ``allow`` as localm reads it
+    (``LOCALM_NET_MODE``, else ``net_mode`` in the data dir's config.json, or its
+    ``.bak`` when config.json is absent; an unset or unknown value, or a file that
+    is not a JSON object, means ``ask``). None when neither file exists, or when
+    one is present and cannot be read the way localm reads it (strict UTF-8 JSON,
+    with or without a BOM), where localm itself turns network access off; *why*
+    says which."""
+    env = os.environ.get("LOCALM_NET_MODE", "").strip().lower()
+    if env in NET_MODES:
+        return env, ""
+    cfg, why = read_home_config()
+    if why:
+        return None, why
     mode = str(cfg.get("net_mode", "ask")).strip().lower() if isinstance(cfg, dict) else "ask"
     return (mode if mode in NET_MODES else "ask"), ""
 
@@ -203,7 +214,10 @@ def read_proxy(config_path: Path | None = None) -> tuple:
     LOCALM_BUGREPORT_TOKEN override per value (a custom proxy, or a test double);
     otherwise the shipped constants are read as TEXT from localm/config.py so the
     account-less GitHub-issue channel works with NO import of a possibly-broken
-    localm/venv. Returns (None, None) if nothing is configured or readable."""
+    localm/venv, and a ``bugreport_upload_url`` or ``bugreport_upload_token``
+    string in the data dir's config.json replaces the shipped value (a blank one
+    means none, as localm itself reads it). Returns (None, None) if nothing is
+    configured or readable."""
     import os
     url_cfg = token_cfg = None
     if config_path is None:
@@ -218,6 +232,12 @@ def read_proxy(config_path: Path | None = None) -> tuple:
                 r'["\']' + re.escape(key) + r'["\']\s*:\s*["\']([^"\']+)["\']', text)
             return m.group(1) if m else None
         url_cfg, token_cfg = _grab("bugreport_upload_url"), _grab("bugreport_upload_token")
+    home_cfg, why = read_home_config()
+    if not why and isinstance(home_cfg, dict):
+        if isinstance(home_cfg.get("bugreport_upload_url"), str):
+            url_cfg = home_cfg["bugreport_upload_url"].strip() or None
+        if isinstance(home_cfg.get("bugreport_upload_token"), str):
+            token_cfg = home_cfg["bugreport_upload_token"].strip() or None
     url = os.environ.get("LOCALM_BUGREPORT_URL") or url_cfg
     token = os.environ.get("LOCALM_BUGREPORT_TOKEN") or token_cfg
     if url:

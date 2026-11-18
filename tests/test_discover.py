@@ -433,7 +433,7 @@ class TestGgufClassifyExpand:
             {"id": "org/fine-gguf", "downloads": 2,
              "tags": ["gguf", "conversational"]},
         ])
-        results = hf_search("x", limit=5, formats=["gguf"], model_types=["llm"])
+        results = hf_search("x", limit=5, formats=["gguf"], model_types=["llm", "unknown"])
         by_id = {r["id"]: r for r in results}
         assert by_id["org/malformed-gguf"]["detected_type"] == "unknown"
         assert by_id["org/fine-gguf"]["detected_type"] == "llm"
@@ -468,7 +468,7 @@ class TestArchitectureMoeParamCount:
             "tags": ["gguf"],
             "gguf": {"architecture": "llama", "total": 46702792704},
         }])
-        r = hf_search("x", limit=5, formats=["gguf"], model_types=["llm"])[0]
+        r = hf_search("x", limit=5, formats=["gguf"], model_types=["llm", "unknown"])[0]
         assert r["architecture"] == "llama"
         assert r["moe"] == "likely"
 
@@ -513,7 +513,7 @@ class TestArchitectureMoeParamCount:
             {"id": "org/fine-total", "downloads": 2, "tags": ["gguf"],
              "gguf": {"architecture": "llama", "total": 7_000_000_000}},
         ])
-        results = hf_search("x", limit=5, formats=["gguf"], model_types=["llm"])
+        results = hf_search("x", limit=5, formats=["gguf"], model_types=["llm", "unknown"])
         by_id = {r["id"]: r for r in results}
         assert by_id["org/string-total"]["param_count"] is None
         assert by_id["org/negative-total"]["param_count"] is None
@@ -862,7 +862,7 @@ class TestTypeScopedSearch:
         """HF has no reliable VAE *type* filter (sd-vae-ft-mse carries no vae
         tag), but the *format* axis IS reliable: filter=safetensors returns
         exactly the canonical diffusers VAEs. So the vae tab's hf side narrows by
-        format, and the badge stays honestly 'unknown'."""
+        format at the query, and the repo name ("vae") types the row."""
         seen = {}
         _mock_fetch(monkeypatch, [
             {"id": "stabilityai/sd-vae-ft-mse", "downloads": 900, "library_name": "diffusers",
@@ -871,7 +871,7 @@ class TestTypeScopedSearch:
         results = hf_search("vae", limit=5, formats=["hf"], model_types=["vae"])
         assert seen["filter"] == "safetensors"
         assert results[0]["id"] == "stabilityai/sd-vae-ft-mse"
-        assert results[0]["detected_type"] == "unknown"   # never a wrong guess
+        assert results[0]["detected_type"] == "vae"
 
     def test_vae_gguf_uses_gguf_format_filter(self, monkeypatch):
         seen = {}
@@ -889,7 +889,7 @@ class TestTypeScopedSearch:
         results = hf_search("text encoder", limit=5, formats=["hf"], model_types=["text-encoder"])
         assert seen["filter"] == "safetensors"
         assert results[0]["id"] == "comfyanonymous/flux_text_encoders"
-        assert results[0]["detected_type"] == "unknown"
+        assert results[0]["detected_type"] == "text-encoder"
 
     def test_unknown_hf_uses_safetensors_format_filter(self, monkeypatch):
         seen = {}
@@ -976,11 +976,13 @@ class TestTypeScopedSearch:
             if q.get("filter") == "transformers":
                 payload = [{"id": "shared/repo", "downloads": 9,
                             "pipeline_tag": "text-generation", "tags": ["transformers"]},
-                           {"id": "llm/only", "downloads": 8, "tags": ["transformers"]}]
+                           {"id": "llm/only", "downloads": 8,
+                            "pipeline_tag": "text-generation", "tags": ["transformers"]}]
             else:   # embedding -> feature-extraction
                 payload = [{"id": "shared/repo", "downloads": 9,
                             "pipeline_tag": "feature-extraction", "tags": ["sentence-transformers"]},
-                           {"id": "emb/only", "downloads": 7, "tags": ["sentence-transformers"]}]
+                           {"id": "emb/only", "downloads": 7,
+                            "pipeline_tag": "feature-extraction", "tags": ["sentence-transformers"]}]
             return url, "application/json", _json.dumps(payload).encode("utf-8")
 
         monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", fake)
@@ -988,6 +990,45 @@ class TestTypeScopedSearch:
         ids = [r["id"] for r in results]
         assert ids.count("shared/repo") == 1          # de-duped across the two queries
         assert {"shared/repo", "llm/only", "emb/only"} == set(ids)
+
+    def test_ticked_type_returns_only_that_type(self, monkeypatch):
+        """MATRIX-MODC-007-2/-3, MODE-019: each (type, format) HF query can
+        answer with repos of other types (llm = the generic transformers tag,
+        the gguf side = filter=gguf for every type); the rows of a type nobody
+        ticked are dropped, and the HF query over-fetches to leave enough."""
+        urls = _urls_capture(monkeypatch, [
+            {"id": "sentence-transformers/all-MiniLM-L6-v2", "downloads": 9,
+             "pipeline_tag": "sentence-similarity", "tags": ["transformers"]},
+            {"id": "Qwen/Qwen3-0.6B", "downloads": 8,
+             "pipeline_tag": "text-generation", "tags": ["transformers"]},
+            {"id": "org/mystery", "downloads": 7, "tags": ["transformers"]},
+        ])
+        llm = hf_search("q", limit=5, formats=["hf"], model_types=["llm"])
+        assert [r["id"] for r in llm] == ["Qwen/Qwen3-0.6B"]
+        assert "limit=25" in urls[0]
+        emb = hf_search("q", limit=5, formats=["hf"], model_types=["embedding"])
+        assert [r["id"] for r in emb] == ["sentence-transformers/all-MiniLM-L6-v2"]
+        other = hf_search("q", limit=5, formats=["hf"], model_types=["unknown"])
+        assert [r["id"] for r in other] == ["org/mystery"]
+        both = hf_search("q", limit=5, formats=["hf"], model_types=["llm", "embedding"])
+        assert {r["id"] for r in both} == {
+            "Qwen/Qwen3-0.6B", "sentence-transformers/all-MiniLM-L6-v2"}
+
+    def test_ticked_type_filters_the_gguf_side_too(self, monkeypatch):
+        _mock_fetch(monkeypatch, [
+            {"id": "org/bge-GGUF", "downloads": 3, "tags": ["gguf"],
+             "gguf": {"architecture": "bert"}},
+            {"id": "org/chat-GGUF", "downloads": 2, "tags": ["gguf", "conversational"]},
+        ])
+        rows = hf_search("q", limit=5, formats=["gguf"], model_types=["embedding"])
+        assert [r["id"] for r in rows] == ["org/bge-GGUF"]
+
+    def test_all_types_ticked_filters_nothing(self, monkeypatch):
+        _mock_fetch(monkeypatch, [{"id": "org/mystery", "downloads": 1, "tags": ["gguf"]}])
+        all_types = ["llm", "embedding", "diffusion-unet", "text-encoder",
+                     "vae", "lora", "unknown"]
+        rows = hf_search("q", limit=5, formats=["gguf"], model_types=all_types)
+        assert [r["id"] for r in rows] == ["org/mystery"]
 
     def test_empty_valid_types_raises(self, monkeypatch):
         _mock_fetch(monkeypatch, [])

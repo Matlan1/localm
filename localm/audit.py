@@ -273,6 +273,9 @@ def project_mode(cwd) -> Optional[SessionMode]:
     return None
 
 
+_warned_unreadable_config = False
+
+
 def effective_mode(surface: str, cwd=None) -> SessionMode:
     """
     Resolve the active session mode for *surface* ("chat" | "coder" | "server").
@@ -302,6 +305,12 @@ def effective_mode(surface: str, cwd=None) -> SessionMode:
     except Exception:
         return SessionMode.PRIVACY
     if not read_ok:
+        global _warned_unreadable_config
+        if not _warned_unreadable_config:
+            _warned_unreadable_config = True
+            logger.warning(
+                "config.json is present but unreadable; session mode is "
+                "privacy (nothing is recorded) until it can be read")
         return SessionMode.PRIVACY
 
     if surface in ("chat", "coder"):
@@ -470,6 +479,10 @@ class AuditLog:
     def path(self) -> Path:
         return self._path
 
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
     def set_turn(self, turn: int) -> None:
         self._turn = turn
 
@@ -609,11 +622,23 @@ def make_audit_log(
     return AuditLog(label=label, session_id=session_id)
 
 
-def make_transcript(mode: SessionMode, label: str = "chat") -> Optional[MarkdownTranscript]:
-    """MarkdownTranscript in ``full`` mode, else None."""
+def make_transcript(mode: SessionMode, label: str = "chat",
+                    session_id: str = "") -> Optional[MarkdownTranscript]:
+    """MarkdownTranscript in ``full`` mode, else None. *session_id* names the
+    file like the audit log's, so the pair of a session can be matched."""
     if mode == SessionMode.FULL:
-        return MarkdownTranscript(label=label)
+        return MarkdownTranscript(label=label, session_id=session_id)
     return None
+
+
+def make_session_recording(
+        mode: SessionMode, label: str = "chat"
+) -> tuple[AuditLogT, Optional[MarkdownTranscript]]:
+    """The audit log and transcript of ONE session for *mode*, carrying the same
+    session id in both file names."""
+    audit = make_audit_log(mode, label=label)
+    return audit, make_transcript(mode, label=label,
+                                  session_id=getattr(audit, "session_id", ""))
 
 
 class SessionRecorder:
@@ -644,8 +669,8 @@ class SessionRecorder:
         self._warned_closed = False
         self._failed_mode: Optional[SessionMode] = None
         self._mode = effective_mode(surface)
-        self._audit: AuditLogT = make_audit_log(self._mode, label=label)
-        self._transcript = make_transcript(self._mode, label=label)
+        self._audit, self._transcript = make_session_recording(
+            self._mode, label=label)
 
     def current(self) -> tuple[AuditLogT, Optional[MarkdownTranscript], SessionMode]:
         """``(audit, transcript, mode)`` for the mode in force now. Never raises
@@ -665,11 +690,15 @@ class SessionRecorder:
             try:
                 if wanted == SessionMode.PRIVACY:
                     audit: AuditLogT = NullAuditLog()
+                    transcript = None
                 elif self._mode == SessionMode.PRIVACY:
-                    audit = make_audit_log(wanted, label=self._label)
+                    audit, transcript = make_session_recording(
+                        wanted, label=self._label)
                 else:
                     audit = self._audit
-                transcript = make_transcript(wanted, label=self._label)
+                    transcript = make_transcript(
+                        wanted, label=self._label,
+                        session_id=getattr(audit, "session_id", ""))
             except OSError as e:
                 if self._failed_mode != wanted:
                     self._failed_mode = wanted

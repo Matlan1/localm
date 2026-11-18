@@ -616,9 +616,11 @@ export async function runPluginProbes(probes = PLUGIN_BOOT_PROBES) {
 // already have authed; 200 -> unlock.
 export async function bootAuthProbe() {
   let status;
+  let configUnreadable = false;
   try {
     const r = await fetch("/api/models", { headers: authHeaders() });
     status = r.status;
+    configUnreadable = r.headers && r.headers.get("X-Localm-Config-Unreadable") === "1";
   } catch {
     // The authed request could not complete. Before declaring the server
     // unreachable (a dead-end overlay), confirm with a header-free probe: if the
@@ -653,7 +655,7 @@ export async function bootAuthProbe() {
       await reloadApp();
       return false;
     }
-    lockUI();
+    lockUI(configUnreadable ? t("keygate.configUnreadable") : undefined);
     return false;
   }
   // Authed (or open / loopback mode): clear recovery flags and reveal the app.

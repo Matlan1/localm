@@ -52,6 +52,7 @@ def test_every_known_site_uses_the_double_caret_escape(bat):
         'echo  [^^!] uv still is not callable after the install attempt.',
         'echo  [^^!] Could not create the environment.',
         'echo  [^^!] Install failed - see the error above.',
+        'if not defined INSARGS echo  [^^!] Installing the newest versions the project allows instead of the locked set.',
         'uv pip install -p .venv -e ".[gpu,audio]" || echo  [^^!] ROCm torch install failed.',
         'uv pip install -p .venv %TORCHSPEC% || echo  [^^!] torch install failed.',
         'uv pip install -p .venv -e ".[hf,audio]" -c ".venv\\localm-torch-pins.txt" || echo  [^^!] transformers install failed.',

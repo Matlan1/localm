@@ -101,7 +101,10 @@ def check_tools(backend) -> Check:
         return Check("tool-calls", OK, "native tool calls (OpenAI tools API)")
     if grammar:
         return Check("tool-calls", OK,
-                     "XML tool calls, grammar-constrained by the localm server")
+                     "XML tool calls; the localm server is asked to hold a call "
+                     "to the tool-call grammar once its opening tag appears (text "
+                     "before it is unconstrained, and a backend that cannot "
+                     "honour a grammar runs without it)")
     return Check("tool-calls", WARN,
                  "XML tool calls taught in the prompt and not grammar-"
                  "constrained: a small model may emit malformed calls. "

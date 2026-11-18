@@ -1831,7 +1831,6 @@ ws     ::= [ \t\n\r]*
                         interrupted = True
                         terminal.finish()
                         print_streaming_done()
-                        print_info("(interrupted)")
 
                     try:
                         full = self._stream_and_record(
@@ -1845,8 +1844,9 @@ ws     ::= [ \t\n\r]*
                     finally:
                         terminal.finish()
                         self._streamed_to_terminal = terminal.printed_tokens
-                    if not interrupted:
-                        print_streaming_done()
+                    if interrupted:
+                        raise KeyboardInterrupt
+                    print_streaming_done()
                     self._record_prompt_usage(messages)
                     return full
                 elif self.report_progress:
