@@ -175,9 +175,6 @@ if "%STOREPICK%"=="1" (
     set "CONTAINED=1"
     set "UV_PYTHON_INSTALL_DIR=!CD!\.python"
     set "UV_CACHE_DIR=!CD!\.cache"
-    set "TEMP=!CD!\.cache\tmp"
-    set "TMP=!CD!\.cache\tmp"
-    if not exist ".cache\tmp" mkdir ".cache\tmp" >nul 2>nul
     set "PYPREF=--python-preference only-managed"
     echo  Portable: uv, Python, and downloads all under this folder
 ) else (
@@ -341,6 +338,13 @@ rem  re-run never ejects with a misleading "could not create" error (uv refuses
 rem  to clobber an existing environment and returns non-zero). Python 3.12 is
 rem  required by the AMD ROCm torch wheels; we standardise on it for all flavours.
 set "PYVER=3.12"
+rem  Portable: uv's scratch files (the lock files its source builds leave) go to
+rem  .cache\tmp in this folder. Set only now, after uv is installed: the uv
+rem  installer step above needs the system temp folder when this folder's path
+rem  contains [ or ].
+if "%CONTAINED%"=="1" if not exist ".cache\tmp" mkdir ".cache\tmp" >nul 2>nul
+if "%CONTAINED%"=="1" set "TEMP=!CD!\.cache\tmp"
+if "%CONTAINED%"=="1" set "TMP=!CD!\.cache\tmp"
 rem  1 = verify against the platform's NATIVE certificate store (the Windows ROOT
 rem  store) - the same trust a browser, or an IT-provisioned corporate/security-
 rem  product proxy's injected root, already has, so a managed machine behind one

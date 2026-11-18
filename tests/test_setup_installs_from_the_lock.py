@@ -130,9 +130,9 @@ def test_the_window_leaves_a_shared_installs_temp_folders_alone(gui, tmp_path):
 
 def test_the_console_setups_point_a_portable_installs_temp_folders_into_the_folder():
     store_choice = SETUP_BAT.split('if "%STOREPICK%"=="1" (')[1]
-    portable_bat = store_choice.split(") else (")[0]
-    assert 'set "TEMP=!CD!\\.cache\\tmp"' in portable_bat
-    assert 'set "TMP=!CD!\\.cache\\tmp"' in portable_bat
+    assert 'if "%CONTAINED%"=="1" set "TEMP=!CD!\\.cache\\tmp"' in SETUP_BAT
+    assert 'if "%CONTAINED%"=="1" set "TMP=!CD!\\.cache\\tmp"' in SETUP_BAT
+    assert SETUP_BAT.index('set "TEMP=') > SETUP_BAT.index("Installing uv ...")
     portable_sh = SETUP_SH.split('if [ "$spick" = 1 ]; then')[1].split("\nelse\n")[0]
     assert 'export TMPDIR="$(pwd)/.cache/tmp"' in portable_sh
     shared_bat = store_choice.split(") else (")[1].split("\n)\n")[0]
