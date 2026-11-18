@@ -181,7 +181,9 @@ class _CollectionSearch:
             if reranked:
                 order = sorted(order, key=lambda i: reranked[i], reverse=True)
                 if gate_min is not None:
-                    order = [i for i in order if reranked[i] >= gate_min]
+                    agreed = self._retrieval_agrees(text, order, index, cosines)
+                    order = [i for i in order
+                             if reranked[i] >= gate_min or i in agreed]
             elif gate_min is not None:
                 order = self._relevant(text, order, index, cosines, conversational)
         order = order[:k]
@@ -262,6 +264,31 @@ class _CollectionSearch:
                        "cosine" if floors is not None else "keyword coverage",
                        ", conversation reference" if conversational else "")
         return keep
+
+    def _retrieval_agrees(self, text: str, order: list[int], index: BM25,
+                          cosines: Optional[list[float]]) -> set[int]:
+        """The members of *order* that both first-stage signals place on *text*:
+        the chunk holds every word of *text* that ``BM25.coverage`` counts, and
+        its raw cosine reaches the weak floor of ``RELEVANCE_FLOORS`` for the
+        collection's embedding model. Empty when *text* has no counted word or
+        there is no calibrated cosine (no vectors, mixed or unmeasured
+        embedding models)."""
+        if cosines is None or not order or self.embedding_model_mixed():
+            return set()
+        floors = calibrated_floors(self.embedding_model() or "")
+        wanted = index.counted_terms(text)
+        if floors is None or not wanted:
+            return set()
+        vectors = self._vectors or []
+        agreed = {i for i, terms in zip(order, index.matched_terms(text, order),
+                                        strict=True)
+                  if terms == wanted and i < len(vectors) and vectors[i]
+                  and cosines[i] >= floors[1]}
+        if agreed:
+            _log.debug("RAG collection %r: %d hit(s) kept below the reranker's "
+                       "minimum score: every query word and the cosine floor "
+                       "match", self.name, len(agreed))
+        return agreed
 
     def _lexical_index(self) -> BM25:
         """The BM25 index over this instance's current chunks, built once per

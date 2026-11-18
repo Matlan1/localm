@@ -179,11 +179,19 @@ class BM25:
         _, _, count = self._match(query, docs)
         return [count[d] for d in docs]
 
+    def counted_terms(self, query: str) -> int:
+        """How many distinct terms of *query* ``coverage`` and ``matched_terms``
+        count."""
+        return len(self._counted(query))
+
+    def _counted(self, query: str) -> set[str]:
+        return set(tokenize(query, self._stop_words)) - QUERY_FILLER
+
     def _match(self, query: str, docs: list[int]):
         """``(total weight, matched weight per doc, matched term count per doc)``
         of *query*'s counted terms against *docs*; the total is 0.0 when the
         query has no counted terms or the index is empty."""
-        terms = set(tokenize(query, self._stop_words)) - QUERY_FILLER
+        terms = self._counted(query)
         weight = dict.fromkeys(docs, 0.0)
         count = dict.fromkeys(docs, 0)
         if not terms or not self._n:
