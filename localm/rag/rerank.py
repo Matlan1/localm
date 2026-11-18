@@ -29,12 +29,22 @@ class RerankPlan(NamedTuple):
     reranker score a hit needs to count as relevant under
     ``relevant_only``: the ``rag_rerank_min_score`` setting, else the measured
     value for the reranker file, else None and the relevance floor stays the
-    gate."""
+    gate; *lean_score* is the measured score at which that reranker file leans
+    toward relevant, which ``Collection.query`` accepts below *min_score* when
+    the cosine and keyword signals agree (None for an unmeasured file or when
+    ``rag_rerank_min_score`` sets another minimum)."""
     fn: Optional[RerankFn]
     candidates: int
     model: Optional[str]
     note: Optional[str]
     min_score: Optional[float] = None
+    lean_score: Optional[float] = None
+
+    def query_kwargs(self) -> dict:
+        """The ``Collection.query`` keyword arguments that carry out this plan."""
+        return {"rerank_fn": self.fn, "rerank_candidates": self.candidates,
+                "rerank_min_score": self.min_score,
+                "rerank_lean_score": self.lean_score}
 
 
 #: Minimum relevant score by the sha256 of the measured reranker file:
@@ -47,16 +57,33 @@ CALIBRATED_MIN_SCORES: dict[str, float] = {
     "22c9979ce4fbcdc5acdc310c6641c32797eff1aa980b8f7a2db8a8ea23429a48": 0.5,
 }
 
+#: The lower score, by the same sha256 and on the same scale, at which each
+#: measured reranker file leans toward relevant: ``RerankPlan.lean_score``.
+CALIBRATED_LEAN_SCORES: dict[str, float] = {
+    "a43c7c9b11a4c1517e5bf95151960e1621d1b72f7a493364b01e386cf1aaa1d3": -2.5,
+    "22c9979ce4fbcdc5acdc310c6641c32797eff1aa980b8f7a2db8a8ea23429a48": 0.05,
+}
+
 
 def calibrated_min_score(name: str) -> Optional[float]:
     """The minimum relevant score for the registered reranker *name*, or None
     when its registered file is not one of the measured files in
     ``CALIBRATED_MIN_SCORES`` (matched by sha256, whatever it is named)."""
+    return CALIBRATED_MIN_SCORES.get(_registered_sha256(name))
+
+
+def calibrated_lean_score(name: str) -> Optional[float]:
+    """The ``CALIBRATED_LEAN_SCORES`` entry for the registered reranker *name*,
+    matched like ``calibrated_min_score``."""
+    return CALIBRATED_LEAN_SCORES.get(_registered_sha256(name))
+
+
+def _registered_sha256(name: str) -> str:
     from localm.config import load_registry
     entry = load_registry().get(name)
     if not isinstance(entry, dict):
-        return None
-    return CALIBRATED_MIN_SCORES.get(str(entry.get("sha256") or "").lower())
+        return ""
+    return str(entry.get("sha256") or "").lower()
 
 
 def configured_min_score(cfg: dict, calibrated: Optional[float]) -> Optional[float]:
@@ -134,5 +161,9 @@ def rerank_plan(cfg: Optional[dict] = None, *,
         name, fn = make_rerank_fn(model)
     except reranker.RerankerModelError as e:
         return RerankPlan(None, candidates, None, str(e))
-    return RerankPlan(fn, candidates, name, None,
-                      configured_min_score(cfg, calibrated_min_score(name)))
+    calibrated = calibrated_min_score(name)
+    min_score = configured_min_score(cfg, calibrated)
+    lean = None
+    if calibrated is not None and min_score == calibrated:
+        lean = calibrated_lean_score(name)
+    return RerankPlan(fn, candidates, name, None, min_score, lean)

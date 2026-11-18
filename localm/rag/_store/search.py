@@ -106,6 +106,7 @@ class _CollectionSearch:
               rerank_fn: Optional[RerankFn] = None,
               rerank_candidates: int = DEFAULT_RERANK_CANDIDATES,
               rerank_min_score: Optional[float] = None,
+              rerank_lean_score: Optional[float] = None,
               context: Optional[str] = None) -> list[dict]:
         """Top-*k* chunks for *text*: max-normalised BM25, blended 50/50 with
         max-normalised cosine similarity when vectors cover the corpus and the
@@ -137,6 +138,16 @@ class _CollectionSearch:
         of *rerank_min_score* is the reranker's own. A query that
         ``refers_to_conversation`` keeps the floor above, and so does a query
         whose reranking degraded.
+
+        Under that gate a hit scoring below *rerank_min_score* is still returned
+        when the first-stage signals agree on it (``_retrieval_agrees``): its raw
+        cosine reaches the weak floor of ``RELEVANCE_FLOORS``, every counted word
+        of the query occurs somewhere in the collection, and either the chunk
+        holds every one of those words or the reranker scores it at least
+        *rerank_lean_score* (same scale, below *rerank_min_score*). A short
+        question with no context of its own ("How do I connect a phone?") that
+        the reranker cannot place then still finds the document about it, while
+        a question naming something the collection never mentions does not.
 
         With *relevant_only* and *context* (the user's previous message), a *text*
         that ``refers_to_conversation`` is searched as ``context`` followed by
@@ -181,7 +192,8 @@ class _CollectionSearch:
             if reranked:
                 order = sorted(order, key=lambda i: reranked[i], reverse=True)
                 if gate_min is not None:
-                    agreed = self._retrieval_agrees(text, order, index, cosines)
+                    agreed = self._retrieval_agrees(text, order, index, cosines,
+                                                    reranked, rerank_lean_score)
                     order = [i for i in order
                              if reranked[i] >= gate_min or i in agreed]
             elif gate_min is not None:
@@ -266,28 +278,33 @@ class _CollectionSearch:
         return keep
 
     def _retrieval_agrees(self, text: str, order: list[int], index: BM25,
-                          cosines: Optional[list[float]]) -> set[int]:
-        """The members of *order* that both first-stage signals place on *text*:
-        the chunk holds every word of *text* that ``BM25.coverage`` counts, and
-        its raw cosine reaches the weak floor of ``RELEVANCE_FLOORS`` for the
-        collection's embedding model. Empty when *text* has no counted word or
-        there is no calibrated cosine (no vectors, mixed or unmeasured
-        embedding models)."""
+                          cosines: Optional[list[float]],
+                          reranked: dict[int, float],
+                          lean_score: Optional[float]) -> set[int]:
+        """The members of *order* the first-stage signals place on *text*, as
+        documented on ``query``: the raw cosine reaches the weak floor of the
+        collection's embedding model, no counted word of *text* is missing from
+        the whole collection (``BM25.unindexed_terms``), and the chunk holds every
+        counted word (``BM25.matched_terms``) or its *reranked* score reaches
+        *lean_score*. Empty when *text* has no counted word or there is no
+        calibrated cosine (no vectors, mixed or unmeasured embedding models)."""
         if cosines is None or not order or self.embedding_model_mixed():
             return set()
         floors = calibrated_floors(self.embedding_model() or "")
         wanted = index.counted_terms(text)
-        if floors is None or not wanted:
+        if floors is None or not wanted or index.unindexed_terms(text):
             return set()
+        weak = floors[1]
         vectors = self._vectors or []
         agreed = {i for i, terms in zip(order, index.matched_terms(text, order),
                                         strict=True)
-                  if terms == wanted and i < len(vectors) and vectors[i]
-                  and cosines[i] >= floors[1]}
+                  if i < len(vectors) and vectors[i] and cosines[i] >= weak
+                  and (terms == wanted
+                       or (lean_score is not None and reranked[i] >= lean_score))}
         if agreed:
-            _log.debug("RAG collection %r: %d hit(s) kept below the reranker's "
-                       "minimum score: every query word and the cosine floor "
-                       "match", self.name, len(agreed))
+            _log.debug("RAG collection %r: %d hit(s) below the reranker's minimum "
+                       "score kept on the cosine and keyword signals",
+                       self.name, len(agreed))
         return agreed
 
     def _lexical_index(self) -> BM25:

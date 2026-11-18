@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""``Collection.query`` with the reranker-score gate: a hit that holds every
-counted word of the question and reaches the embedding model's weak cosine
-floor is kept even when the reranker scores it below the minimum, so a short
-question with no context ("How do I connect a phone?") still finds the
-document about it. Anything less keeps the reranker's verdict.
+"""``Collection.query`` with the reranker-score gate: a hit below the minimum
+score is kept when its cosine reaches the embedding model's weak floor, every
+counted word of the question occurs in the collection, and either the chunk
+holds all of those words or the reranker scores it at least the lean score. A
+short question with no context ("How do I connect a phone?") then still finds
+the document about it. Anything less keeps the reranker's verdict.
 
 Vectors are 5-dimensional as in ``test_rag_relevance_floor``: each chunk embeds
 to its own axis and a query to ``[cA, cB, cC, 0, rest]``.
@@ -29,6 +30,7 @@ BGE_STRONG, BGE_WEAK, _ = RELEVANCE_FLOORS[BGE]
 
 ASK = "How do I set the GPU layers?"
 MISSING_WORD = "How do I set the GPU fans?"
+SPREAD = "How do I set the GPU for web search?"
 FILLER_ONLY = "How do I?"
 CONVERSATION = "How do I set the GPU layers you just mentioned?"
 
@@ -84,9 +86,10 @@ def _scores(coll, **by_name):
     return fn, calls
 
 
-def _gated(coll, text, queries, fn):
+def _gated(coll, text, queries, fn, lean=None):
     return coll.query(text, k=4, embed_fn=_embedder(queries), relevant_only=True,
-                      rerank_fn=fn, rerank_candidates=10, rerank_min_score=0.5)
+                      rerank_fn=fn, rerank_candidates=10, rerank_min_score=0.5,
+                      rerank_lean_score=lean)
 
 
 @pytest.fixture
@@ -107,10 +110,11 @@ class TestEveryWordAndTheCosineFloor:
         hits = _gated(coll, ASK, {ASK: _vec(cos_gpu=BGE_WEAK)}, fn)
         assert _names(hits) == ["gpu"]
 
-    def test_one_missing_word_leaves_the_reranker_in_charge(self, coll):
-        fn, _ = _scores(coll, gpu=0.06)
+    def test_a_word_the_collection_never_mentions_leaves_the_reranker_in_charge(
+            self, coll):
+        fn, _ = _scores(coll, gpu=0.4)
         assert _gated(coll, MISSING_WORD,
-                      {MISSING_WORD: _vec(cos_gpu=BGE_STRONG + 0.2)}, fn) == []
+                      {MISSING_WORD: _vec(cos_gpu=BGE_STRONG + 0.2)}, fn, lean=0.05) == []
 
     def test_a_cosine_below_the_weak_floor_leaves_the_reranker_in_charge(self, coll):
         fn, _ = _scores(coll, gpu=0.06)
@@ -126,6 +130,34 @@ class TestEveryWordAndTheCosineFloor:
         fn, calls = _scores(coll, gpu=0.06)
         _gated(coll, ASK, {ASK: _vec(cos_gpu=BGE_WEAK + 0.01)}, fn)
         assert len(calls) == 1
+
+
+class TestTheLeanScore:
+    def test_a_hit_the_reranker_leans_toward_is_kept_without_every_word(self, coll):
+        fn, _ = _scores(coll, gpu=0.06)
+        hits = _gated(coll, SPREAD, {SPREAD: _vec(cos_gpu=BGE_WEAK + 0.01)}, fn,
+                      lean=0.05)
+        assert _names(hits) == ["gpu"]
+
+    def test_the_lean_score_is_inclusive(self, coll):
+        fn, _ = _scores(coll, gpu=0.05)
+        hits = _gated(coll, SPREAD, {SPREAD: _vec(cos_gpu=BGE_WEAK + 0.01)}, fn,
+                      lean=0.05)
+        assert _names(hits) == ["gpu"]
+
+    def test_below_the_lean_score_a_hit_needs_every_word(self, coll):
+        fn, _ = _scores(coll, gpu=0.049)
+        assert _gated(coll, SPREAD, {SPREAD: _vec(cos_gpu=BGE_WEAK + 0.01)}, fn,
+                      lean=0.05) == []
+
+    def test_without_a_lean_score_a_hit_needs_every_word(self, coll):
+        fn, _ = _scores(coll, gpu=0.4)
+        assert _gated(coll, SPREAD, {SPREAD: _vec(cos_gpu=BGE_WEAK + 0.01)}, fn) == []
+
+    def test_the_lean_score_still_needs_the_cosine_floor(self, coll):
+        fn, _ = _scores(coll, gpu=0.4)
+        assert _gated(coll, SPREAD, {SPREAD: _vec(cos_gpu=BGE_WEAK - 0.01)}, fn,
+                      lean=0.05) == []
 
 
 class TestWhereTheRuleDoesNotApply:

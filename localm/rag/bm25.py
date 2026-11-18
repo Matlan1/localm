@@ -184,8 +184,20 @@ class BM25:
         count."""
         return len(self._counted(query))
 
+    def unindexed_terms(self, query: str) -> set[str]:
+        """The counted terms of *query* (see ``coverage``) that no indexed text
+        holds in any form ``coverage`` would match."""
+        return {term for term in self._counted(query) if not self._variants(term)}
+
     def _counted(self, query: str) -> set[str]:
         return set(tokenize(query, self._stop_words)) - QUERY_FILLER
+
+    def _variants(self, term: str) -> list[str]:
+        """The indexed terms that share *term*'s ``stem``."""
+        root = stem(term)
+        return [v for v in {term} | {b + s for b in (root, root + "e")
+                                     for s in ("", "s", "es", "d", "ed", "ing")}
+                if v in self._postings and stem(v) == root]
 
     def _match(self, query: str, docs: list[int]):
         """``(total weight, matched weight per doc, matched term count per doc)``
@@ -199,10 +211,7 @@ class BM25:
         unseen = math.log(1 + (self._n + 0.5) / 0.5)
         total = 0.0
         for term in terms:
-            root = stem(term)
-            variants = [v for v in {term} | {b + s for b in (root, root + "e")
-                                             for s in ("", "s", "es", "d", "ed", "ing")}
-                        if v in self._postings and stem(v) == root]
+            variants = self._variants(term)
             w = max((self._idf[v] for v in variants), default=unseen)
             total += w
             hit = {i for v in variants for i, _ in self._postings[v] if i in weight}
