@@ -91,12 +91,12 @@ set "UVRC=%errorlevel%"
 set "UV_INSTALL_DIR="
 set "UV_UNMANAGED_INSTALL="
 rd "%STMP%" >nul 2>nul
-set "LOCALM_MSG1="
-if "%UVRC%"=="61" set "LOCALM_MSG1=[!] Could not download the uv %UV_INSTALLER_VERSION% installer from github.com."
-if "%UVRC%"=="61" set "LOCALM_MSG3=Check that this computer can reach github.com (a proxy or firewall may block it), or install uv yourself (winget install astral-sh.uv), then run this again. setup.bat is the console installer."
-if "%UVRC%"=="62" set "LOCALM_MSG1=[!] The downloaded uv installer did not match its expected checksum, or could not be read to check it, and was not run."
-if "%UVRC%"=="63" set "LOCALM_MSG1=[!] Could not create a temporary folder in %CD%\%STMP% for the uv installer."
-if defined LOCALM_MSG1 goto uv_refused
+if "%UVRC%"=="61" echo   [!] Could not download the uv %UV_INSTALLER_VERSION% installer.
+if "%UVRC%"=="62" echo   [!] The downloaded uv installer did not match its expected checksum, or could not be read to check it, and was not run.
+if "%UVRC%"=="63" echo   [!] Could not create a temporary folder in %STMP% for the uv installer.
+if "%UVRC%"=="61" goto uv_refused
+if "%UVRC%"=="62" goto uv_refused
+if "%UVRC%"=="63" goto uv_refused
 if not exist ".uv\uv.exe" goto uv_not_callable
 set "LOCALM_GUI_BOOTSTRAP=uv"
 
@@ -117,8 +117,15 @@ call :notify Error
 exit /b 1
 
 :uv_refused
+rem  With USEBOX=1 the reason echoed above also goes into the message box.
+if not "%USEBOX%"=="1" goto uv_refused_remedy
+if "%UVRC%"=="61" set "LOCALM_MSG1=[!] Could not download the uv %UV_INSTALLER_VERSION% installer from github.com."
+if "%UVRC%"=="62" set "LOCALM_MSG1=[!] The downloaded uv installer did not match its expected checksum, or could not be read to check it, and was not run."
+if "%UVRC%"=="63" set "LOCALM_MSG1=[!] Could not create a temporary folder in %CD%\%STMP% for the uv installer."
+:uv_refused_remedy
 set "LOCALM_MSG2=uv was not installed, so the graphical setup cannot start."
-if not defined LOCALM_MSG3 set "LOCALM_MSG3=Install uv yourself (winget install astral-sh.uv), then run this again. setup.bat is the console installer."
+set "LOCALM_MSG3=Install uv yourself (winget install astral-sh.uv), then run this again. setup.bat is the console installer."
+if "%UVRC%"=="61" set "LOCALM_MSG3=Check that this computer can reach github.com (a proxy or firewall may block it), or install uv yourself (winget install astral-sh.uv), then run this again. setup.bat is the console installer."
 call :notify Error
 exit /b 1
 
@@ -166,6 +173,7 @@ exit /b %RC%
 rem ---- Shared: drop what this run put in the folder, reopen on the per-user uv -
 if defined LOCALM_GUI_REPOINTED goto window_failed
 set "LOCALM_GUI_REPOINTED=1"
+set "LOCALM_GUI_STORE=shared"
 set "UV_PYTHON_INSTALL_DIR="
 set "UV_CACHE_DIR="
 call :remove_bootstrap
@@ -178,7 +186,6 @@ if defined XDG_BIN_HOME set "PATH=%XDG_BIN_HOME%;%PATH%"
 call :find_shared_uv
 if not defined UVEXE goto uv_not_callable
 :shared_found
-set "LOCALM_GUI_STORE=shared"
 set "LOCALM_GUI_UV=%UVEXE%"
 echo  Shared: using "%UVEXE%"
 if not defined LEFTOVER goto shared_reopen

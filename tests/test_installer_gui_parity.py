@@ -119,7 +119,8 @@ class TestExistingVenv:
             root.withdraw()
             try:
                 w = gui.Wizard(root, tk, ttk, filedialog)
-                texts = _texts(w.pages[1][1])
+                page = dict(w.pages)["Where things live"]
+                texts = _texts(page)
                 assert any(".venv found" in t for t in texts) is exists
                 assert w.current_plan().replace_venv is False
             finally:
@@ -403,7 +404,7 @@ class TestLauncherUv:
         assert rec[rec.index("--uv-exe") + 1] == str(shared)
         assert "--uv-shared-installed" in rec
 
-    def test_the_window_shows_the_answer_and_never_asks(self, gui, monkeypatch):
+    def test_the_first_page_asks_and_starts_on_the_launchers_answer(self, gui, monkeypatch):
         tk = pytest.importorskip("tkinter")
         from tkinter import filedialog, ttk
         monkeypatch.setenv(gui.STORE_ENV, "shared")
@@ -411,12 +412,16 @@ class TestLauncherUv:
         root.withdraw()
         try:
             w = gui.Wizard(root, tk, ttk, filedialog)
-            page = w.pages[1][1]
+            title, page = w.pages[0]
+            assert title == gui.TOOLING_PAGE
             radios = [c for c in _widgets(page) if c.winfo_class() == "TRadiobutton"]
-            assert all(str(r.cget("variable")) != str(w.store_var) for r in radios)
-            texts = _texts(page)
-            assert any(t.startswith("Shared") for t in texts)
+            assert len(radios) == 2
+            assert all(str(r.cget("variable")) == str(w.store_var) for r in radios)
+            assert any(str(r.cget("text")).startswith("Shared") for r in radios)
             assert w.current_plan().portable_store is False
+            for other_title, other in w.pages[1:]:
+                others = [c for c in _widgets(other) if c.winfo_class() == "TRadiobutton"]
+                assert all(str(r.cget("variable")) != str(w.store_var) for r in others), other_title
         finally:
             root.destroy()
 
@@ -571,12 +576,15 @@ def test_a_build_folder_with_another_backend_is_not_ignored(gui):
     root.withdraw()
     try:
         w = gui.Wizard(root, tk, ttk, filedialog)
+        w.next_page()
+        runtime = w.index
+        assert w.pages[runtime][0] == "Inference runtime"
         w.backend_var.set("cpu")
         w.own_dir_var.set("D:/llama/build")
         w.next_page()
-        assert w.index == 0 and "build folder" in w.status.cget("text")
+        assert w.index == runtime and "build folder" in w.status.cget("text")
         w.backend_var.set("own")
         w.next_page()
-        assert w.index == 1
+        assert w.index == runtime + 1
     finally:
         root.destroy()
