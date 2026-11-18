@@ -1369,7 +1369,8 @@ class _LoopMixin:
                 "\n\n[tool use not achieved: this model was asked "
                 f"{st.nocall_escalation} more time(s) to call a tool and did not, "
                 f"so nothing was run or written.{why}]")
-            self._last_run_ok = False
+            if self._tool_demanded(getattr(self, "_last_user_request", "") or "", st):
+                self._last_run_ok = False
             self._audit.notice(
                 "no_tool_call",
                 f"escalation exhausted after {st.nocall_escalation} attempt(s); "
