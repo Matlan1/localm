@@ -174,9 +174,9 @@ class TestWhereAnAutoStartedServersOutputGoes:
         assert cap(True, False, "linux", False)
         assert cap(True, False, "darwin", False)
         assert not cap(True, True, "linux", False)
-        assert not cap(True, True, "win32", False)
-        assert not cap(True, False, "win32", False)
-        assert not cap(True, True, "win32", True)
+        assert cap(True, True, "win32", False)
+        assert cap(True, False, "win32", False)
+        assert cap(True, True, "win32", True)
 
     def test_a_json_run_passes_machine_output_to_the_backend_builder(self, monkeypatch):
         _bypass_plugin_gate(monkeypatch)

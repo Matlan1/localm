@@ -41,6 +41,17 @@ function Read-Proxy {
     if (-not $u -and $text -match '"bugreport_upload_url"\s*:\s*"([^"]+)"')   { $u = $Matches[1] }
     if (-not $t -and $text -match '"bugreport_upload_token"\s*:\s*"([^"]+)"') { $t = $Matches[1] }
   }
+  $r = Read-HomeConfig
+  if (-not $r[1] -and $r[0] -is [System.Management.Automation.PSCustomObject]) {
+    foreach ($key in @('bugreport_upload_url', 'bugreport_upload_token')) {
+      $prop = $r[0].PSObject.Properties | Where-Object { $_.Name -ceq $key } | Select-Object -First 1
+      if ($prop -and $prop.Value -is [string]) {
+        $v = $prop.Value.Trim()
+        if ($key -eq 'bugreport_upload_url' -and -not $env:LOCALM_BUGREPORT_URL) { $u = $v }
+        if ($key -eq 'bugreport_upload_token' -and -not $env:LOCALM_BUGREPORT_TOKEN) { $t = $v }
+      }
+    }
+  }
   return @($u, $t)
 }
 
@@ -102,26 +113,32 @@ function Test-StrictJson([string]$t) {
 # unknown when neither file exists, or one is present and cannot be read the way
 # localm reads it (strict UTF-8 JSON, with or without a BOM), where localm itself
 # turns network access off.
-function Get-NetMode {
-  $modes = @('off', 'ask', 'allow')
-  $e = "$env:LOCALM_NET_MODE".Trim().ToLowerInvariant()
-  if ($modes -contains $e) { return @($e, '') }
+function Read-HomeConfig {
   try {
     $main = Join-Path (Get-LocalmHome) 'config.json'
     $p = $null
     foreach ($c in @($main, "$main.bak")) {
       if (Test-Path -LiteralPath $c -PathType Leaf) { $p = $c; break }
     }
-    if (-not $p) { return @('unknown', "$main does not exist") }
+    if (-not $p) { return @($null, "$main does not exist") }
     $bytes = [System.IO.File]::ReadAllBytes($p)
     $start = 0
     if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $start = 3 }
     $raw = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes, $start, $bytes.Length - $start)
-    if (-not (Test-StrictJson $raw)) { return @('unknown', "$p could not be read (not valid JSON)") }
-    $cfg = $raw | ConvertFrom-Json
+    if (-not (Test-StrictJson $raw)) { return @($null, "$p could not be read (not valid JSON)") }
+    return @(($raw | ConvertFrom-Json), '')
   } catch {
-    return @('unknown', "the setting could not be read ($($_.Exception.Message))")
+    return @($null, "the setting could not be read ($($_.Exception.Message))")
   }
+}
+
+function Get-NetMode {
+  $modes = @('off', 'ask', 'allow')
+  $e = "$env:LOCALM_NET_MODE".Trim().ToLowerInvariant()
+  if ($modes -contains $e) { return @($e, '') }
+  $r = Read-HomeConfig
+  if ($r[1]) { return @('unknown', $r[1]) }
+  $cfg = $r[0]
   $m = 'ask'
   if ($cfg -is [System.Management.Automation.PSCustomObject]) {
     $prop = $cfg.PSObject.Properties | Where-Object { $_.Name -ceq 'net_mode' } | Select-Object -First 1

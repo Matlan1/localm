@@ -22,6 +22,10 @@ CLI (one answer per line on stdout, exit 0; exit 2 on a usage error):
         the offered backends as "a|b|c", or "backend" when there are none
     python -m localm.setup_spec extras [app-window]
         the pip extras to install, comma-separated
+    python -m localm.setup_spec install-args <extras>
+        the uv arguments that install localm and those comma-separated extras from
+        the uv.lock in the current folder; exit 1, with a note on stderr, when
+        there is no uv.lock
     python -m localm.setup_spec plugins
         the plugins a user can choose, space-separated
     python -m localm.setup_spec plugin-defaults
@@ -159,6 +163,40 @@ def extras(app_window: bool = False) -> str:
     """The pip extras setup installs into the venv; ``desktop`` only with the app
     window."""
     return BASE_EXTRAS + ("," + DESKTOP_EXTRA if app_window else "")
+
+
+#: The lock file shipped beside ``pyproject.toml``.
+LOCK_NAME = "uv.lock"
+
+#: The uv arguments that install the project from its lock: exact versions,
+#: each file checked against the lock's sha256, the lock left unchanged,
+#: packages the lock does not name left installed, no user uv config.
+SYNC_ARGS = ("sync", "--frozen", "--inexact", "--no-config")
+
+
+def lock_file(root):
+    """The ``uv.lock`` beside the ``pyproject.toml`` at *root*, or None when
+    either is missing."""
+    from pathlib import Path
+    root = Path(root)
+    lock = root / LOCK_NAME
+    return lock if lock.is_file() and (root / "pyproject.toml").is_file() else None
+
+
+def sync_args(extras) -> list:
+    """:data:`SYNC_ARGS` plus ``--extra <name>`` for each of *extras*."""
+    args = list(SYNC_ARGS)
+    for e in extras:
+        args += ["--extra", str(e)]
+    return args
+
+
+def install_args(extras_csv: str, root=".") -> list | None:
+    """The uv arguments (after the program) that install localm and *extras_csv*
+    from the ``uv.lock`` in *root*. None when *root* has no ``uv.lock``."""
+    if lock_file(root) is None:
+        return None
+    return sync_args(e.strip() for e in extras_csv.split(",") if e.strip())
 
 
 # Backend menu order, with each label; a dict maps a platform to its own label.
@@ -330,6 +368,13 @@ def main(argv=None) -> int:
             return 2
         print(extras(len(args) == 2))
         return 0
+    if cmd == "install-args" and len(args) == 2:
+        argv = install_args(args[1])
+        if argv is None:
+            print("uv.lock was not found in this folder.", file=sys.stderr)
+            return 1
+        print(" ".join(argv))
+        return 0
     if cmd == "plugins" and len(args) == 1:
         print(" ".join(n for n, _ in setup_plugins()))
         return 0
@@ -340,7 +385,7 @@ def main(argv=None) -> int:
         sys.stdout.write(menu_entry(args[1], args[2]))
         return 0
     print("usage: python -m localm.setup_spec backend-menu <recommended> | "
-          "backend-hint | extras [app-window] | plugins | plugin-defaults | "
+          "backend-hint | extras [app-window] | install-args <extras> | plugins | plugin-defaults | "
           "menu-entry launcher|gui <install folder>",
           file=sys.stderr)
     return 2
