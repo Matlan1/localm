@@ -125,7 +125,7 @@ def test_the_python_reporter_reads_the_setting_as_localm(corpus, monkeypatch, na
 
 _PS_DRIVER = r"""param([string]$Target, [string]$List)
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($Target, [ref]$null, [ref]$null)
-foreach ($n in @('Expand-Home', 'Get-LocalmHome', 'Test-StrictJson', 'Get-NetMode')) {
+foreach ($n in @('Expand-Home', 'Get-LocalmHome', 'Test-StrictJson', 'Read-HomeConfig', 'Get-NetMode')) {
   $fn = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq $n }, $true)
   if ($fn.Count -ne 1) { Write-Output "MISSING $n"; exit 1 }
   Invoke-Expression $fn[0].Extent.Text
@@ -174,8 +174,9 @@ def bash_reads(corpus, tmp_path_factory):
     if not bash or "system32" in bash.lower() or not shutil.which("perl"):
         pytest.skip("no bash with perl on PATH")
     text = (_REPO / "report-issue.sh").read_text(encoding="utf-8")
-    start = text.index("ri_net_mode() {")
-    func = text[start:text.index("\n}\n", start) + 3]
+    start = text.index("ri_home_cfg() {")
+    mode_start = text.index("ri_net_mode() {")
+    func = text[start:text.index("\n}\n", mode_start) + 3]
     work = tmp_path_factory.mktemp("sh-netmode")
     lines = ["unset LOCALM_NET_MODE", func]
     for name, d in corpus.items():

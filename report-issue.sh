@@ -162,18 +162,43 @@ net_off_remedy="Turn it on in Settings > Server & network > Network access, or r
 # BOM), where localm itself turns network access off. The data dir is
 # LOCALM_HOME, else (in a clone) the first line of localm-home.cfg (relative to
 # the clone), else ./home.
-ri_net_mode() {
-  local env_mode home cfg
-  env_mode="$(printf '%s' "${LOCALM_NET_MODE:-}" | tr '[:upper:]' '[:lower:]' \
-    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-  case "$env_mode" in off|ask|allow) printf '%s\t\n' "$env_mode"; return 0 ;; esac
+ri_home_cfg() {
+  local home
   home="$(printf '%s' "${LOCALM_HOME:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
   if [ -z "$home" ] && [ -f pyproject.toml ] && [ -f localm-home.cfg ]; then
     home="$(perl -ne 'if ($. == 1) { s/\A\xEF\xBB\xBF// } s/^\s+|\s+$//g; if (length) { print; exit }' localm-home.cfg 2>/dev/null)"
   fi
   [ -n "$home" ] || home="$PWD/home"
   case "$home" in "~"|"~/"*) home="${HOME}${home#\~}" ;; esac
-  cfg="$home/config.json"
+  printf '%s' "$home/config.json"
+}
+
+# ri_cfg_string KEY prints "set<TAB><value>" when the data dir's config.json
+# (or its .bak when config.json is absent) holds a string for KEY, so a blank
+# value reads as set and empty; it prints nothing otherwise.
+ri_cfg_string() {
+  local cfg
+  cfg="$(ri_home_cfg)"
+  [ -f "$cfg" ] || cfg="$cfg.bak"
+  [ -f "$cfg" ] || return 0
+  perl -MJSON::PP -e '
+    my ($p, $k) = @ARGV;
+    open(my $fh, "<:raw", $p) or exit 0;
+    local $/; my $raw = <$fh>; close $fh;
+    $raw =~ s/\A\xEF\xBB\xBF//;
+    my $cfg = eval { JSON::PP->new->utf8->allow_nonref->decode($raw) };
+    exit 0 if $@ || ref $cfg ne "HASH" || !defined $cfg->{$k} || ref $cfg->{$k};
+    my $v = "$cfg->{$k}"; $v =~ s/^\s+|\s+$//g;
+    print "set\t$v\n";
+  ' "$cfg" "$1" 2>/dev/null || true
+}
+
+ri_net_mode() {
+  local env_mode cfg
+  env_mode="$(printf '%s' "${LOCALM_NET_MODE:-}" | tr '[:upper:]' '[:lower:]' \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  case "$env_mode" in off|ask|allow) printf '%s\t\n' "$env_mode"; return 0 ;; esac
+  cfg="$(ri_home_cfg)"
   if [ ! -f "$cfg" ] && [ ! -f "$cfg.bak" ]; then
     printf 'unknown\t%s does not exist\n' "$cfg"; return 0
   fi
@@ -195,6 +220,19 @@ tab="$(printf '\t')"
 net_read="$(ri_net_mode)"
 net_mode="${net_read%%"$tab"*}"
 net_why="${net_read#*"$tab"}"
+
+if [ -z "${LOCALM_BUGREPORT_URL:-}" ]; then
+  cfg_url="$(ri_cfg_string bugreport_upload_url)"
+  case "$cfg_url" in "set$tab"*) url="${cfg_url#"set$tab"}" ;; esac
+fi
+if [ -z "${LOCALM_BUGREPORT_TOKEN:-}" ]; then
+  cfg_tok="$(ri_cfg_string bugreport_upload_token)"
+  case "$cfg_tok" in "set$tab"*) tok="${cfg_tok#"set$tab"}" ;; esac
+fi
+if [ -z "$url" ]; then
+  echo "  Destination: none configured - nothing can be sent from here. Email ${email}."
+  exit 1
+fi
 
 send_anyway_effect="Sending anyway makes one connection to the bug-report server to send this report only. Network access stays off."
 if [ -n "$url" ] && [ "$net_mode" = "off" ] && [ -n "$ri_anyway" ]; then

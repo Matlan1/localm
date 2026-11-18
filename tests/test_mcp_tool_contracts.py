@@ -709,10 +709,16 @@ class TestInventoryAndDiagnosticTools:
 
     def test_system_stats_returns_a_live_reading_with_vram_waited_for(self, all_tools):
         stats = {"cpu_percent": 1.0, "vram": {"free": 5}}
-        with patch("localm.sysstats.system_stats", return_value=stats) as fn:
+        order = []
+        with patch("localm.sysstats.refresh_vram_now",
+                   side_effect=lambda *a, **k: order.append("refresh")) as refresh, \
+             patch("localm.sysstats.system_stats",
+                   side_effect=lambda **k: order.append("stats") or stats) as fn:
             reply = _call(all_tools, "system_stats", {})
         assert json.loads(_text(reply)) == stats
         assert fn.call_args.kwargs.get("wait_first_vram") is True
+        refresh.assert_called_once()
+        assert order == ["refresh", "stats"]
 
     def test_search_models_returns_hf_results_as_json(self, all_tools):
         results = [{"id": "owner/repo"}]

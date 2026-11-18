@@ -18,12 +18,19 @@ from ._core import console, err_console, main, _complete_model_name
 
 def _detached_stdio_kwargs() -> dict:
     """``subprocess.Popen`` keyword arguments for a server that outlives this
-    command on POSIX: its own session, and no stdin/stdout/stderr shared with
-    the caller, so a pipe the caller reads (``localm run ... | cat``) reaches
-    end-of-file when this command exits."""
+    command: its own session (POSIX) or process group with no console window
+    (Windows), and no stdin/stdout/stderr shared with the caller, so a pipe the
+    caller reads (``localm run ... | cat``) reaches end-of-file when this
+    command exits."""
     import subprocess
-    return {"start_new_session": True, "stdin": subprocess.DEVNULL,
-            "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    kwargs: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+                    "stderr": subprocess.DEVNULL}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = (subprocess.CREATE_NO_WINDOW
+                                   | subprocess.CREATE_NEW_PROCESS_GROUP)
+    else:
+        kwargs["start_new_session"] = True
+    return kwargs
 
 
 def _attach_fallback_note(no_server: bool, attach_error: Optional[BaseException],
@@ -583,10 +590,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         env = os.environ.copy()
         env["LOCALM_OWN_CONSOLE"] = "1"
         kwargs["env"] = env
-        if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
-        else:
-            kwargs.update(_detached_stdio_kwargs())
+        kwargs.update(_detached_stdio_kwargs())
 
         try:
             subprocess.Popen(cmd, **kwargs)

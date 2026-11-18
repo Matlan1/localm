@@ -543,9 +543,11 @@ update`, or the GUI "Update now" button). The client is signature-verifying:
   has a `uv.lock` and uv. Installs no lock covers use the package index over HTTPS
   without hash checking: a plugin dependency install with no `uv.lock` or no uv (it
   says so as it runs), the managed ComfyUI's packages (ComfyUI's own requirements and
-  PyTorch from the PyTorch index), the PyTorch step setup runs and an update repeats,
-  and the first install by `setup.bat` / `setup.sh`, which resolves from the
-  `pyproject.toml` minimum versions.
+  PyTorch from the PyTorch index), and the PyTorch step setup runs and an update
+  repeats. The first install by `setup.bat`, `setup.sh` and the graphical installer
+  (`installer/gui.py`) takes localm's own dependencies from the `uv.lock` of the
+  folder, the same way an update does; with no `uv.lock` there it installs the
+  newest versions `pyproject.toml` allows, and says so.
 - **Native runtime downloads.** The llama.cpp runtime archives of the release localm
   pins are checked against SHA-256 values compiled into localm; when the release
   listing reports a different digest for one of them, the download is refused. For a

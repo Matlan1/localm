@@ -1327,6 +1327,7 @@
   "models.pull.fileOf": "Datei {index} von {count}: {name}",
   "models.pull.fileOfBare": "Datei {index} von {count}",
   "models.pull.finishedToast": "Download abgeschlossen",
+  "models.pull.registeredToast": "Modell registriert",
   "models.pull.intro": "Von HuggingFace (owner/repo[:file.gguf]) oder einer https-URL, oder fügen Sie eines hinzu, das bereits auf der Festplatte liegt - fügen Sie einen Ordner-/Dateipfad ein, oder nutzen Sie Durchsuchen, um einen Ordner auszuwählen.",
   "models.pull.namePlaceholder": "Name (optional)",
   "models.pull.netOffHint": "(falls dies fehlschlug, weil der Netzwerkzugriff aus ist: schalten Sie ihn ein, oder erlauben Sie nur Downloads, in Einstellungen → Server & Netzwerk)",
@@ -3150,5 +3151,6 @@
   "workflow.uploadFailed": "Upload fehlgeschlagen",
   "workflow.uploadUse": "Hochladen + verwenden",
   "workflow.uploadedToast": "Hochgeladen und ausgewählt",
-  "workflow.useThisWorkflow": "Diesen Workflow verwenden"
+  "workflow.useThisWorkflow": "Diesen Workflow verwenden",
+  "chat.modelLoadingBanner": "{model} wird geladen. Ein großes Modell kann etwas dauern."
 }

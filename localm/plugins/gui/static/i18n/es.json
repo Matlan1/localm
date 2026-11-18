@@ -1348,6 +1348,7 @@
   "models.pull.fileOf": "archivo {index} de {count}: {name}",
   "models.pull.fileOfBare": "archivo {index} de {count}",
   "models.pull.finishedToast": "Descarga terminada",
+  "models.pull.registeredToast": "Modelo registrado",
   "models.pull.intro": "Desde HuggingFace (owner/repo[:file.gguf]) o una URL https, o añade uno que ya esté en el disco - pega la ruta de una carpeta o archivo, o usa Examinar para elegir una carpeta.",
   "models.pull.namePlaceholder": "nombre (opcional)",
   "models.pull.netOffHint": "(si esto falló porque el acceso a la red está desactivado: actívalo, o permite solo las descargas, en Ajustes → Servidor y red)",
@@ -3150,5 +3151,6 @@
   "workflow.uploadFailed": "La subida falló",
   "workflow.uploadUse": "Subir y usar",
   "workflow.uploadedToast": "Subido y seleccionado",
-  "workflow.useThisWorkflow": "Usar este flujo de trabajo"
+  "workflow.useThisWorkflow": "Usar este flujo de trabajo",
+  "chat.modelLoadingBanner": "Cargando {model}. Un modelo grande puede tardar un poco."
 }
