@@ -9,7 +9,6 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from localm.plugins.coder.agent.loop import _echoes_harness_prompt
 from localm.plugins.coder.parser import looks_like_tool_attempt
 
 
@@ -118,6 +117,7 @@ def test_plan_mode_exit_plan_mode_call_settles_it(tmp_path):
 
 
 def test_harness_tag_echo_detection():
+    from localm.plugins.coder.agent.loop import _echoes_harness_prompt
     assert _echoes_harness_prompt("[no tool call] That request needs")
     assert _echoes_harness_prompt("  [Nothing written] x")
     assert not _echoes_harness_prompt("All done.")
