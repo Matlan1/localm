@@ -1457,21 +1457,38 @@ export async function discoverCivitaiFiles(versionId, filesBox, btn) {
   }
 }
 
+// Only the newest search may write the results box: each search aborts the one
+// before it and takes a new generation number, and a reply checks it still holds
+// the latest number before touching the page.
+let _discSearchGen = 0;
+let _discSearchAbort = null;
+
+function _discBeginSearch() {
+  if (_discSearchAbort) _discSearchAbort.abort();
+  _discSearchAbort = new AbortController();
+  return { gen: ++_discSearchGen, signal: _discSearchAbort.signal };
+}
+
+function _discCancelSearch() {
+  _discBeginSearch();
+  _discSearchAbort = null;
+  const btn = $("disc-search");
+  if (btn) btn.disabled = false;
+}
+
 export async function discoverSearch() {
   if (discSource() === "civitai") return _discoverSearchCivitai();
   const box = $("disc-results");
   const formats = discFormats();
   const types = discTypes();
-  if (!formats.length) {
-    box.replaceChildren(el("div", "sub", t("models.disc.selectFormat")));
+  if (!formats.length || !types.length) {
+    _discCancelSearch();
+    box.replaceChildren(el("div", "sub", t(formats.length ? "models.disc.selectType" : "models.disc.selectFormat")));
+    $("disc-vram").textContent = "";
     hideHfHint();
     return;
   }
-  if (!types.length) {
-    box.replaceChildren(el("div", "sub", t("models.disc.selectType")));
-    hideHfHint();
-    return;
-  }
+  const { gen, signal } = _discBeginSearch();
   box.replaceChildren(el("div", "sub", t("models.disc.searchingHf")));
   $("disc-search").disabled = true;
   try {
@@ -1479,11 +1496,13 @@ export async function discoverSearch() {
     const r = await fetch("/api/discover/search?q=" + encodeURIComponent(q)
                           + "&formats=" + encodeURIComponent(formats.join(","))
                           + "&types=" + encodeURIComponent(types.join(",")),
-                          { headers: authHeaders() });
+                          { headers: authHeaders(), signal });
     const data = await r.json();
+    if (gen !== _discSearchGen) return;
     if (!r.ok) throw new Error(data.detail || r.statusText);
     // One GPU probe drives both the basis caption and the per-row split hint.
     const gpuInfo = await _gpuInfo();
+    if (gen !== _discSearchGen) return;
     $("disc-vram").textContent = data.vram.total
       ? vramBasisCaption(data.vram.total, gpuInfo)
       : t("models.disc.noGpuVram");
@@ -1503,9 +1522,10 @@ export async function discoverSearch() {
     }
     for (const m of data.results) box.appendChild(discRepoRow(m, gpuInfo.gpus));
   } catch (e) {
+    if (gen !== _discSearchGen) return;
     box.replaceChildren(el("div", "sub", t("models.disc.searchFailed", { message: e.message })));
   } finally {
-    $("disc-search").disabled = false;
+    if (gen === _discSearchGen) $("disc-search").disabled = false;
   }
 }
 
@@ -1513,10 +1533,13 @@ async function _discoverSearchCivitai() {
   const box = $("disc-results");
   const types = discCivitaiTypes();
   if (!types.length) {
+    _discCancelSearch();
     box.replaceChildren(el("div", "sub", t("models.disc.selectType")));
+    $("disc-vram").textContent = "";
     return;
   }
   hideHfHint();
+  const { gen, signal } = _discBeginSearch();
   box.replaceChildren(el("div", "sub", t("models.disc.searchingCivitai")));
   $("disc-search").disabled = true;
   try {
@@ -1526,8 +1549,9 @@ async function _discoverSearchCivitai() {
                           + "&source=civitai"
                           + "&types=" + encodeURIComponent(types.join(","))
                           + "&nsfw=" + (nsfw ? "true" : "false"),
-                          { headers: authHeaders() });
+                          { headers: authHeaders(), signal });
     const data = await r.json();
+    if (gen !== _discSearchGen) return;
     if (!r.ok) throw new Error(data.detail || r.statusText);
     $("disc-vram").textContent = "";
     box.replaceChildren();
@@ -1538,9 +1562,10 @@ async function _discoverSearchCivitai() {
     }
     for (const m of results) box.appendChild(discCivitaiRow(m));
   } catch (e) {
+    if (gen !== _discSearchGen) return;
     box.replaceChildren(el("div", "sub", t("models.disc.searchFailed", { message: e.message })));
   } finally {
-    $("disc-search").disabled = false;
+    if (gen === _discSearchGen) $("disc-search").disabled = false;
   }
 }
 
@@ -1670,6 +1695,7 @@ function applyDiscSource() {
   const q = $("disc-query");
   if (q) q.placeholder = t(DISC_SOURCE_PLACEHOLDER[source]);
   hideHfHint();
+  _discCancelSearch();
   const box = $("disc-results");
   if (box) box.replaceChildren();
   const vram = $("disc-vram");

@@ -77,42 +77,61 @@ def _split_lines(text: str) -> tuple[list[str], list[str]]:
 
 
 def _parse_hunks(diff_text: str) -> list[_Hunk]:
-    """Parse a unified diff string into a list of _Hunk objects."""
+    """Parse a unified diff string into a list of _Hunk objects.
+
+    An empty line inside a hunk is a blank context line whose leading space was
+    lost (``git apply`` accepts it the same way). It counts as context when more
+    diff lines follow it in the hunk, or when the header counts still expect it.
+    """
     hunks: list[_Hunk] = []
     current: Optional[_Hunk] = None
+    new_count = 0
     in_hunk = False
+    pending_blank = 0
+
+    def _close() -> None:
+        nonlocal pending_blank
+        assert current is not None
+        if pending_blank:
+            seen_old = sum(1 for l in current.lines if l.startswith((" ", "-")))
+            seen_new = sum(1 for l in current.lines if l.startswith((" ", "+")))
+            room = min(current.old_count - seen_old, new_count - seen_new)
+            current.lines.extend([" "] * max(0, min(pending_blank, room)))
+        pending_blank = 0
+        hunks.append(current)
 
     for line in _split_lines(diff_text)[0]:
+        m = _HUNK_RE.match(line)
         if not in_hunk:
             # Outside a hunk: skip file headers and noise
             if line.startswith(("--- ", "+++ ")):
                 continue
-            m = _HUNK_RE.match(line)
             if m:
-                old_start = int(m.group(1))
                 old_count = int(m.group(2)) if m.group(2) is not None else 1
-                current = _Hunk(old_start=old_start, old_count=old_count, lines=[])
+                new_count = int(m.group(4)) if m.group(4) is not None else 1
+                current = _Hunk(old_start=int(m.group(1)), old_count=old_count, lines=[])
                 in_hunk = True
         else:
-            # Inside a hunk
-            m = _HUNK_RE.match(line)
+            assert current is not None
             if m:
                 # New hunk starts - save current and open next
-                assert current is not None
-                hunks.append(current)
-                old_start = int(m.group(1))
+                _close()
                 old_count = int(m.group(2)) if m.group(2) is not None else 1
-                current = _Hunk(old_start=old_start, old_count=old_count, lines=[])
+                new_count = int(m.group(4)) if m.group(4) is not None else 1
+                current = _Hunk(old_start=int(m.group(1)), old_count=old_count, lines=[])
+            elif line == "":
+                pending_blank += 1
             elif line.startswith((" ", "+", "-")):
-                assert current is not None
+                current.lines.extend([" "] * pending_blank)
+                pending_blank = 0
                 current.lines.append(line)
             elif line.startswith("\\"):
                 # "\ No newline at end of file" - silently ignore
                 pass
-            # Blank / unrecognised lines are silently skipped
+            # Unrecognised lines are silently skipped
 
     if current is not None:
-        hunks.append(current)
+        _close()
 
     return hunks
 

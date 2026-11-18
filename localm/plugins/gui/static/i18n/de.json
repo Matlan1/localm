@@ -1750,6 +1750,7 @@
   "keygate.wrongKey": "Dieser Schlüssel wurde nicht akzeptiert. Prüfen Sie ihn auf Tippfehler oder bitten Sie den Besitzer dieses Servers um einen gültigen Schlüssel.",
   "keygate.unreachable": "Der LocaLM-Server war nicht erreichbar, um den Schlüssel zu prüfen. Prüfen Sie, ob er läuft, und versuchen Sie es erneut.",
   "keygate.refused": "Der Server hat die Anmeldung abgelehnt (HTTP {status}).",
+  "keygate.configUnreadable": "LocaLM konnte seine config.json nicht lesen (die Datei ist beschädigt) und ist deshalb gesperrt. Ein API-Schlüssel spielt dabei keine Rolle. Reparieren Sie die Datei oder stellen Sie config.json.bak daneben wieder her und starten Sie LocaLM neu.",
   "keygate.sessionEnded": "Ihre Anmeldung ist beendet: Der Schlüssel wurde vielleicht widerrufen oder ist abgelaufen. Geben Sie einen Schlüssel ein, um fortzufahren.",
   "keygate.keyCreated": "Für diesen Server wurde ein API-Schlüssel erstellt, nachdem diese Seite geöffnet wurde, daher wird jetzt einer verlangt. Geben Sie den Schlüssel ein, um fortzufahren.",
   "qr.title": "Kopplungs-QR scannen",
@@ -3153,5 +3154,6 @@
   "workflow.useThisWorkflow": "Diesen Workflow verwenden",
   "chat.modelLoadingBanner": "{model} wird geladen. Ein großes Modell kann etwas dauern.",
   "chat.status.waitingForModel": "Warte auf das Laden von {model}",
-  "chat.modelLoadFailed": "{model} wurde nicht geladen, daher wurde diese Nachricht nicht beantwortet. Sende sie erneut, sobald ein Modell geladen ist."
+  "chat.modelLoadFailed": "{model} wurde nicht geladen, daher wurde diese Nachricht nicht beantwortet. Sende sie erneut, sobald ein Modell geladen ist.",
+  "coder.controls.verifyNoCheckReason": "Keine Prüfung kann in diesem Projekt laufen: {reason}"
 }

@@ -8,6 +8,8 @@ engine from the http_server module global, so a model swap is reflected here.
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
@@ -26,6 +28,18 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/health")
     async def health():
+        if _hs._engine is None or not _hs._engine.loaded:
+            from localm import config
+            from localm.executor import get_plugin_executor
+            try:
+                checked = await asyncio.wait_for(
+                    asyncio.get_running_loop().run_in_executor(
+                        get_plugin_executor(), _hs.load_registry_checked),
+                    config.LOOP_READ_WAIT_S)
+            except TimeoutError:
+                checked = None
+            if checked is not None:
+                _hs.prune_removed_models(*checked)
         if _hs._engine is not None:
             return {
                 "status": "ok",

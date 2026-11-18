@@ -455,6 +455,55 @@ def require_auth_refusal() -> Optional[str]:
             "LOCALM_API_KEY) or create a named key first, then enable it.")
 
 
+def config_unreadable_detail() -> str:
+    """What to tell a person whose server is locked because its config file
+    could not be read: names the file (never its path), says no API key is
+    involved, and how to recover."""
+    from localm.config import CONFIG_FILE
+    name = CONFIG_FILE.name
+    return (f"{name} exists but could not be read (it is damaged), so this "
+            f"server is locked until it is fixed. No API key is involved. "
+            f"Fix {name} or restore it from {name}.bak next to it, then "
+            f"restart the server.")
+
+
+def require_auth_state() -> tuple:
+    """``(required, unreadable)``: *required* as :func:`require_auth_enabled`
+    resolves it, and *unreadable* True when it is True ONLY because config.json
+    (or its ``.bak``) is present but cannot be read, with no
+    ``LOCALM_REQUIRE_AUTH`` override."""
+    if os.environ.get(REQUIRE_ENV_VAR, "").strip().lower() in _TRUTHY:
+        return True, False
+    from localm.config import ConfigReadSlow
+    try:
+        from localm.config import load_config_checked
+        cfg, read_ok = load_config_checked()
+        if not read_ok:
+            logger.warning(
+                "config.json is present but unreadable; cannot confirm "
+                "require_auth - treating as required (fail closed) until it "
+                "can be read")
+            return True, True
+        return bool(cfg.get("require_auth", False)), False
+    except ConfigReadSlow:
+        raise
+    except Exception:
+        # The load itself raised (e.g. ensure_dirs() on an inaccessible home
+        # dir): fail closed, same as an unreadable config.json above.
+        logger.warning(
+            "config unreadable; cannot confirm require_auth - treating as "
+            "required (fail closed) until it can be read")
+        return True, True
+
+
+def locked_by_unreadable_config() -> bool:
+    """True when no API key is configured and the server refuses requests only
+    because config.json could not be read."""
+    if any_key_configured():
+        return False
+    return require_auth_state()[1]
+
+
 def require_auth_enabled() -> bool:
     """True when the server must refuse requests if no key is configured.
 
@@ -467,28 +516,7 @@ def require_auth_enabled() -> bool:
     present but cannot be read (read_ok False). Raises
     ``config.ConfigReadSlow`` (answered 503 by the server) when a read on the
     event loop cannot finish in time; the caller then decides nothing."""
-    if os.environ.get(REQUIRE_ENV_VAR, "").strip().lower() in _TRUTHY:
-        return True
-    from localm.config import ConfigReadSlow
-    try:
-        from localm.config import load_config_checked
-        cfg, read_ok = load_config_checked()
-        if not read_ok:
-            logger.warning(
-                "config.json is present but unreadable; cannot confirm "
-                "require_auth - treating as required (fail closed) until it "
-                "can be read")
-            return True
-        return bool(cfg.get("require_auth", False))
-    except ConfigReadSlow:
-        raise
-    except Exception:
-        # The load itself raised (e.g. ensure_dirs() on an inaccessible home
-        # dir): fail closed, same as an unreadable config.json above.
-        logger.warning(
-            "config unreadable; cannot confirm require_auth - treating as "
-            "required (fail closed) until it can be read")
-        return True
+    return require_auth_state()[0]
 
 
 def _restrict_perms(path: Path) -> bool:

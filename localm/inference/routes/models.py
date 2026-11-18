@@ -70,6 +70,7 @@ def register(app: FastAPI, ctx) -> None:
         from localm.config import load_registry
         from localm.model_manager.registry import is_unlisted_entry
         registry = load_registry()
+        _hs.prune_removed_models(registry)
 
         models = []
         now = int(time.time())
@@ -120,6 +121,7 @@ def register(app: FastAPI, ctx) -> None:
         from localm.config import load_registry
         from localm.model_manager import _entry_path
         registry = load_registry()
+        _hs.prune_removed_models(registry)
         entry = registry.get(model_id)
 
         # If it is the default startup model but not in registry, provide a virtual entry

@@ -986,7 +986,7 @@ def _build_app(engine, make_engine, plan: _BindPlan, *, api_mode: bool):
     Returns the app."""
     from localm.inference import http_server as hs
     from .web import attach_gui
-    app = hs.create_app(engine)
+    app = hs.create_app(engine, api_landing=api_mode)
 
     async def switch_model(name: str, *, force: bool = False, activate: bool = True,
                            keep_others: bool = False) -> dict:

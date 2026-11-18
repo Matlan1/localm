@@ -1734,6 +1734,7 @@ export const I18N_EN = {
   "keygate.wrongKey": "This key was not accepted. Check it for a typo, or ask the owner of this server for a valid key.",
   "keygate.unreachable": "Could not reach the LocaLM server to check the key. Check that it is running, then try again.",
   "keygate.refused": "The server refused the sign-in (HTTP {status}).",
+  "keygate.configUnreadable": "LocaLM could not read its config.json (the file is damaged), so it is locked. No API key is involved. Fix the file or restore config.json.bak next to it, then restart LocaLM.",
   "keygate.sessionEnded": "Your sign-in ended: the key may have been revoked or may have expired. Enter a key to continue.",
   "keygate.keyCreated": "An API key was created for this server after this page opened, so it now asks for one. Enter the key to continue.",
   "qr.title": "Scan the pairing QR",
@@ -3506,6 +3507,7 @@ export const I18N_EN = {
   "browser.setup.systemMissing":
     "No supported browser was found on this computer. localm looked for {names}.",
   "browser.setup.useBundled": "Use the bundled browser instead",
+  "coder.controls.verifyNoCheckReason": "No check can run in this project: {reason}",
 
   // ---- Setup page (guided runtime + first model, manual entry only) ----
   "chat.modelLoadingBanner": "Loading {model}. A large model can take a while to load.",

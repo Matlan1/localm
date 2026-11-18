@@ -287,6 +287,7 @@ _NOT_TREE_SCANNERS: dict[str, str] = {
     "tests/test_bugreport_stdin_interactive.py": "the report script lists home/logs, which is not tracked",
     "tests/test_report_issue_standalone.py": "the report script lists home/logs, which is not tracked",
     "tests/test_report_issue_url.py": "the report script lists home/logs, which is not tracked",
+    "tests/test_report_issue_blank_url.py": "the report script lists home/logs, which is not tracked",
     "tests/test_installer_gui_journal.py": "reads the install journal of a root in tmp_path",
     "tests/test_installer_gui.py": "loads scripts.report_issue to read one constant; it calls nothing that lists a folder",
     "tests/test_docker_image_files.py": "puts the checkout path into an environment mapping",

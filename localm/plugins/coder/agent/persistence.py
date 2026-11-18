@@ -167,7 +167,7 @@ class _PersistenceMixin:
                         if original is not None else "")
             abs_path = (self.cwd / key)
             try:
-                new_text = (abs_path.read_text(encoding="utf-8", errors="replace")
+                new_text = (abs_path.read_bytes().decode("utf-8", errors="replace")
                             if abs_path.is_file() else "")
             except Exception:
                 new_text = ""

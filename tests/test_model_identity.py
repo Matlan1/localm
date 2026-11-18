@@ -369,6 +369,40 @@ class TestProjectConfigName:
         (proj / ".localcoder" / "config.toml").write_text(f'model = "{name}"\n', encoding="utf-8")
         return proj
 
+    def _resolved(self, tmp_path):
+        from localm.plugins.coder.runner import resolve_task_config
+        return resolve_task_config(tmp_path / "proj", yes=True, mode="privacy").model
+
+    def _trust(self, monkeypatch):
+        import localm.plugins.coder.hook_trust as ht
+        monkeypatch.setattr(ht, "project_trusted", lambda *a, **k: True)
+
+    def test_a_renamed_model_is_followed_from_a_name_only_project_config(
+            self, home, tmp_path, monkeypatch):
+        self._trust(monkeypatch)
+        _add(tmp_path, "orig")
+        assert mm.rename_model("orig", "renamed")
+        self._project(tmp_path, "orig")
+        assert self._resolved(tmp_path) == "renamed"
+
+    def test_model_refs_in_the_project_config_follow_a_rename_and_a_reused_name(
+            self, home, tmp_path, monkeypatch):
+        self._trust(monkeypatch)
+        _add(tmp_path, "orig")
+        rid = _rid(home, "orig")
+        assert mm.rename_model("orig", "renamed")
+        _add(tmp_path, "orig", content=b"other")
+        proj = self._project(tmp_path, "orig")
+        (proj / ".localcoder" / "config.toml").write_text(
+            f'model = "orig"\n[model_refs]\norig = "{rid}"\n', encoding="utf-8")
+        assert self._resolved(tmp_path) == "renamed"
+
+    def test_a_flag_name_stays_current_names_only(self, home, tmp_path):
+        from localm.plugins.coder.cli._main import _unregistered_model_message
+        _add(tmp_path, "orig")
+        assert mm.rename_model("orig", "renamed")
+        assert "'orig' is not registered" in _unregistered_model_message("orig", tmp_path)
+
     def test_a_name_that_resolves_to_nothing_says_so_before_any_server_starts(
             self, home, tmp_path, monkeypatch):
         from click.testing import CliRunner
@@ -378,16 +412,15 @@ class TestProjectConfigName:
         from localm.plugins.engine import PluginManager
         PluginManager(None).set_installed_state("coder", True)
         _add(tmp_path, "orig")
-        assert mm.rename_model("orig", "renamed")
         started = []
         monkeypatch.setattr(coder_cli, "make_localm_backend",
                             lambda *a, **k: started.append(a) or pytest.fail("a server was started"))
         result = CliRunner().invoke(
-            _main.main, ["--cwd", str(self._project(tmp_path, "orig")), "--trust-hooks",
+            _main.main, ["--cwd", str(self._project(tmp_path, "gone")), "--trust-hooks",
                          "-y", "say ok"])
         assert result.exit_code == 1, result.output
         text = " ".join(result.output.split())
-        assert "'orig' is not registered" in text
+        assert "'gone' is not registered" in text
         assert ".localcoder/config.toml" in text
         assert started == []
 

@@ -264,6 +264,9 @@ class Agent(
         # process execution at all (SAFE_RESTRICTED_TOOLS), and an oracle would
         # hand it straight back.
         self.verify_cmd     = None if restricted else verify_cmd
+        # True once the user turned verification off (--no-verify, /verify off),
+        # as opposed to it having no command because none was detected.
+        self.verify_off     = False
         self.verify_max_retries = verify_max_retries
         # /goal in cli/repl.py routes each plain-text message through
         # cli/goal.py's _run_goal_loop instead of a single chat() turn, using

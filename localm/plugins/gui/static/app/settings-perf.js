@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
 import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, elideAudioForWire, elideImagesForWire, isToolEvent, latestTurnHasAudio, latestTurnIsAudioOnly, lsSetScoped, markNotSent, markRefusedBy, maybeCompactConversation, memorySavedText, modelCannotHearAudio, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, persistChatParams, pinnedModelName, refreshWebPolicy, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, resolvePinnedModel, saveConversations, scopedKeyPrivate, setConversationPin, showPinnedGone, syncPinModelToggle, updateStatusIndicator, wireHasImageAndAudio, wireParts } from "./chat.js";
-import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, localizeServerNotes, autoGrow, confirmDanger, confirmDangerAsync, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setCanvasNavigationAllowed, setPreviewAllowed, splitThink, streamJob, stripAsrPrefix, stripThink, toast } from "./helpers.js";
+import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, localizeServerNotes, autoGrow, confirmDanger, confirmDangerAsync, el, liveThinkText, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setCanvasNavigationAllowed, setPreviewAllowed, splitThink, streamJob, stripAsrPrefix, stripThink, toast } from "./helpers.js";
 import { onLanguageReload, t, tn } from "./i18n.js";
 import { announcedLoadingModel, isPeerSelected, modelCache, modelSelect, refreshModels, reloadModel, toastLoadResult, waitForModelLoad } from "./models-sidebar.js";
 import { pickPath, saveTextFs } from "./picker.js";
@@ -2987,8 +2987,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       // Rebuild <think> from the reasoning stream so splitThink renders the
       // collapsible block exactly as before. Back-compat: an older server that
       // still inlines <think> in content also renders (reasoning stays empty).
-      renderMarkdown(liveBody,
-        reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full);
+      renderMarkdown(liveBody, liveThinkText(reasoning, full));
       // R31: follow the stream ONLY while the user is at the bottom. chat.stick
       // is latched by the scroll listener, so scrolling up reliably pauses
       // autoscroll (recomputing nearBottom per token fought the user instead).
