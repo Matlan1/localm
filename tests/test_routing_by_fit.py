@@ -163,6 +163,49 @@ def test_unloading_the_users_model_is_asked():
     assert fit.ask_reason() == "loading it unloads mine"
 
 
+class _Splits(_Sized):
+    """An engine that runs split on the CPU with less than *need* bytes free
+    and wholly on the GPU with at least *need*."""
+
+    def predict_placement(self, free, total, ram_available, ram_total):
+        if free >= self.need:
+            return super().predict_placement(free, total, ram_available, ram_total)
+        return {"layers": 7, "full": False, "n_cpu_moe": 0, "reads_from_disk": False,
+                "cpu_read_bytes": 0}
+
+
+def _assess_split(residents, *, policy="always", reading=None):
+    return routing_fit.assess(
+        ["v"], residents={r.name: r for r in residents}, build=lambda n: _Splits(100),
+        reading=reading or _reading(), ram_available=_BIG, ram_total=_BIG,
+        unload_policy=policy)["v"]
+
+
+def test_a_split_load_gives_way_to_a_gpu_fit_that_unloads_the_users_model():
+    mine = routing_fit.Resident("mine", hold=200, user_chosen=True)
+    fit = _assess_split([mine])
+    assert fit.cls == cr.FIT_GPU and fit.evicts_user == ("mine",) and fit.needs_ask
+
+
+def test_a_split_load_stays_when_unloading_the_users_model_would_not_help():
+    mine = routing_fit.Resident("mine", hold=20, user_chosen=True)
+    fit = _assess_split([mine])
+    assert fit.cls == cr.FIT_PARTIAL and fit.evicts_user == () and not fit.needs_ask
+
+
+@pytest.mark.parametrize("policy", ["never", "ask"])
+def test_a_split_load_stays_when_the_policy_unloads_nothing_for_a_route(policy):
+    mine = routing_fit.Resident("mine", hold=200, user_chosen=True)
+    fit = _assess_split([mine], policy=policy)
+    assert fit.cls == cr.FIT_PARTIAL and not fit.needs_ask
+
+
+def test_a_split_load_with_no_gpu_is_not_offered_an_unload():
+    mine = routing_fit.Resident("mine", hold=200, user_chosen=True)
+    fit = _assess_split([mine], reading=_reading(free=0, present=False))
+    assert fit.evicts_user == ()
+
+
 def test_an_unknown_hold_does_not_count_as_freed_vram():
     mine = routing_fit.Resident("mine", hold=0, user_chosen=True)
     assert _assess(["v"], [mine])["v"].cls == cr.FIT_CPU_ONLY
@@ -261,7 +304,7 @@ class TestClassifyWithoutAPrediction:
 #  The chat route: one vision candidate in every fit class                    #
 # --------------------------------------------------------------------------- #
 
-def _fix_classes(monkeypatch, plan_cls, *, plain_hold=0, need=None):
+def _fix_classes(monkeypatch, plan_cls, *, plain_hold=0, need=None, below=cr.FIT_CPU_ONLY):
     """Plan-time measurement: the vision model is *plan_cls*; with *need*,
     it reaches FIT_GPU only once that many bytes are free (the user's plain
     model holds *plain_hold*). The load-time re-check agrees with the plan."""
@@ -271,7 +314,7 @@ def _fix_classes(monkeypatch, plan_cls, *, plain_hold=0, need=None):
 
     def classify(engine, free, *a, **k):
         if need is not None:
-            return (cr.FIT_GPU, 0) if (free or 0) >= need else (cr.FIT_CPU_ONLY, 0)
+            return (cr.FIT_GPU, 0) if (free or 0) >= need else (below, 0)
         return plan_cls, (7 << 30 if plan_cls == cr.FIT_DISK else 0)
     monkeypatch.setattr(routing_fit, "classify", classify)
     if plain_hold:
@@ -319,6 +362,19 @@ def test_a_vision_model_that_needs_the_users_model_unloaded_is_offered(
     assert r.status_code == 400
     blob = json.loads(r.headers["X-Localm-Model-Routing"])
     assert blob["suggested"] == "seer"
+    assert blob["ask_reason"] == "loading it unloads plain"
+    assert engines["plain"].loaded
+    assert not getattr(engines.get("seer"), "loaded", False)
+
+
+def test_a_vision_model_that_would_run_split_is_offered_when_unloading_reaches_the_gpu(
+        vision_server, monkeypatch):
+    client, engines, _ = vision_server
+    _fix_classes(monkeypatch, None, plain_hold=500, need=100, below=cr.FIT_PARTIAL)
+    r = _post_image(client)
+    assert r.status_code == 400
+    blob = json.loads(r.headers["X-Localm-Model-Routing"])
+    assert blob["suggested"] == "seer" and blob["fit"] == "gpu"
     assert blob["ask_reason"] == "loading it unloads plain"
     assert engines["plain"].loaded
     assert not getattr(engines.get("seer"), "loaded", False)
