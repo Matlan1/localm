@@ -146,6 +146,7 @@ class _ExecutionMixin:
         # Set by Agent (core.py), which this class is mixed into.
         cwd: Path
         restricted: bool
+        _undo_stack: list
         @property
         def stop_pending(self) -> bool: ...
         @property
@@ -938,6 +939,7 @@ class _ExecutionMixin:
         # edit_files targets several files in one call and needs one undo entry
         # per file.
         snapshots: dict[str, bytes | None] = {}
+        undo_call_id = 0
         if call.name in _UNDOABLE_TOOLS:
             # One id per CALL: a multi-file call pushes several entries and undo()
             # reverts them together (see persistence.undo), so /undo never leaves a

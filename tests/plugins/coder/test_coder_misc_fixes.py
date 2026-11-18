@@ -102,8 +102,9 @@ def test_root_group_does_not_expand_windows_globs_for_coder():
     from localm.cli._core import main as root
     seen = {}
 
-    def fake_main(self, args=None, **extra):
-        seen.update(extra)
+    def fake_main(self, args=None, prog_name=None, complete_var=None,
+                  standalone_mode=True, windows_expand_args=True, **extra):
+        seen["windows_expand_args"] = windows_expand_args
         return 0
 
     with patch.object(click.Group, "main", fake_main):
@@ -111,7 +112,7 @@ def test_root_group_does_not_expand_windows_globs_for_coder():
         assert seen.get("windows_expand_args") is False
         seen.clear()
         root.main(["list"], standalone_mode=False)
-        assert "windows_expand_args" not in seen
+        assert seen["windows_expand_args"] is True
 
 
 # ---- CODA-003: doctor with no -m does not refuse ------------------------

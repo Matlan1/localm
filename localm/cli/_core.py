@@ -347,15 +347,17 @@ class _GracefulGroup(click.Group):
     through untouched. A model load refusal (ModelRefusedError) is printed as a
     refusal and exits 1, with no bug report."""
 
-    def main(self, args=None, **extra):
+    def main(self, args=None, prog_name=None, complete_var=None,
+             standalone_mode=True, windows_expand_args=True, **extra):
         """Run as ``click.Group.main`` does, except that ``localm coder`` keeps its
         arguments as typed: Click would otherwise expand a quoted glob such as
         ``--scope "src/**/*.py"`` into file names on Windows, from any shell."""
         argv = sys.argv[1:] if args is None else list(args)
         first = next((a for a in argv if not a.startswith("-")), "")
         if first == "coder":
-            extra.setdefault("windows_expand_args", False)
-        return super().main(args, **extra)
+            windows_expand_args = False
+        return super().main(args, prog_name, complete_var, standalone_mode,
+                            windows_expand_args, **extra)
 
     def parse_args(self, ctx, args):
         """Parse as ``click.Group`` does and keep the subcommand's name and
