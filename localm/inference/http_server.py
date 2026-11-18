@@ -2852,6 +2852,13 @@ def load_registry_checked() -> tuple[dict, bool]:
     return registry, read_json_checked(REGISTRY_FILE, {})[1]
 
 
+def _holds_registered_name() -> bool:
+    """Whether any model name this process holds (startup, active, last-active)
+    was seen registered, so an empty registry could mean it was removed."""
+    return any(n in _registered_seen for n in (
+        _default_model_name, _active_model_name, _last_active_model_name) if n)
+
+
 def prune_removed_models(registry: dict, read_ok: bool = False) -> bool:
     """Forget every model name this process still holds (the startup, active
     and last-active names) that *registry* no longer lists
@@ -3038,7 +3045,7 @@ async def get_engine(model_name: str | None, *, load: bool = True,
     from localm.executor import get_plugin_executor
     registry = load_registry()
     read_ok = bool(registry)
-    if not registry:
+    if not registry and _holds_registered_name():
         registry, read_ok = await asyncio.get_running_loop().run_in_executor(
             get_plugin_executor(), load_registry_checked)
     if prune_removed_models(registry, read_ok) and (not (model_name or "").strip() or (model_name or "").strip() == "localm"):
