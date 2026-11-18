@@ -332,7 +332,7 @@ rem ===========================================================================
 call :splash_stop
 if not "%USEBOX%"=="1" goto notify_console
 set "LOCALM_MSG_ICON=%~1"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName System.Windows.Forms; $m=@(1..5 | ForEach-Object { [Environment]::GetEnvironmentVariable('LOCALM_MSG'+$_) } | Where-Object { $_ }) -join [Environment]::NewLine; if ($env:LOCALM_MSG_TAIL -and [IO.File]::Exists($env:LOCALM_MSG_TAIL)) { $m += [Environment]::NewLine + [Environment]::NewLine + ((Get-Content -LiteralPath $env:LOCALM_MSG_TAIL -Tail 12) -join [Environment]::NewLine) }; [void][System.Windows.Forms.MessageBox]::Show($m, 'LocaLM Setup', 'OK', $env:LOCALM_MSG_ICON, 'Button1', 'DefaultDesktopOnly')"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName System.Windows.Forms; $m=@(1..5 | ForEach-Object { [Environment]::GetEnvironmentVariable('LOCALM_MSG'+$_) } | Where-Object { $_ }) -join [Environment]::NewLine; if ($env:LOCALM_MSG_TAIL -and [IO.File]::Exists($env:LOCALM_MSG_TAIL)) { $m += [Environment]::NewLine + [Environment]::NewLine + ((Get-Content -LiteralPath $env:LOCALM_MSG_TAIL -Tail 12) -join [Environment]::NewLine) }; $o=New-Object System.Windows.Forms.Form; $o.TopMost=$true; $o.ShowInTaskbar=$false; $o.Opacity=0; $o.FormBorderStyle='None'; $o.StartPosition='CenterScreen'; $o.Width=1; $o.Height=1; $o.Show(); $o.Activate(); [void][System.Windows.Forms.MessageBox]::Show($o, $m, 'LocaLM Setup', 'OK', $env:LOCALM_MSG_ICON); $o.Close()"
 goto notify_clear
 :notify_console
 setlocal EnableDelayedExpansion
