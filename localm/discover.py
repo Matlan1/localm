@@ -48,7 +48,10 @@ _FORMAT_FILTER = {"gguf": "gguf", "hf": "transformers"}
 # per-repo fetch to classify a result), and both `pipeline_tag=` and repeated
 # `filter=` (ANDed) work as query params.
 #
-# The "hf" (non-gguf / safetensors) side of the format axis narrows PER TYPE
+# The HF query narrows each (type, format) pair as far as HF's own filters allow;
+# hf_search then keeps only rows whose detected type is one the caller ticked
+# (_keep_requested_types), so a ticked type chip is never answered with another
+# type. The "hf" (non-gguf / safetensors) side of the format axis narrows PER TYPE
 # where HF exposes a reliable signal:
 _HF_TYPE_FILTER = {
     "llm": {"filter": "transformers"},
@@ -63,8 +66,9 @@ _HF_TYPE_FILTER = {
 # exactly the repos users search for. But the FORMAT axis is still reliable for
 # them: filter=safetensors returns the canonical diffusers VAEs/encoders, and
 # filter=gguf the GGUF ones (both verified live). So these types narrow by format
-# only; their type comes from the result badge (classify_hf_metadata) and, at
-# pull time, from the checkbox the user searched under.
+# only at the query; their type comes from the result badge (classify_hf_metadata,
+# plus _refine_unknown_type's repo-name hint) and the row filter, and at pull
+# time from the checkbox the user searched under.
 _HF_TYPE_FILTER_DEFAULT = {"filter": "safetensors"}
 _ALL_SEARCHABLE_TYPES = frozenset(
     {"llm", "embedding", "diffusion-unet", "lora", "vae", "text-encoder", "unknown"})
@@ -346,7 +350,7 @@ def _rows_from_items(data: object, limit: int, *, fmt: Optional[str],
 
     ``classify``: attach a ``detected_type`` (localm.model_manager.registry
     MODEL_TYPES value, or "unknown") from the item's pipeline_tag/library_name/
-    tags fields for DISPLAY ONLY - never a filter on results. Also attaches
+    tags fields: the row badge, and what hf_search filters a type-scoped search on. Also attaches
     ``architecture`` (the raw gguf.architecture/config.model_type string),
     ``moe`` ("confirmed"/"likely"/None, see _moe_signal), and ``param_count``
     (see _param_count) - all display-only, all omitted entirely when False, so
@@ -396,6 +400,40 @@ def _rows_from_items(data: object, limit: int, *, fmt: Optional[str],
                 row_fmt, gguf_meta, item.get("safetensors"))
         out.append(row)
     return out
+
+
+# Over-fetch factor for a type-scoped query: the row filter below drops rows of
+# other types, so each HF query asks for more than the caller's limit.
+_TYPED_FETCH_FACTOR = 5
+_HF_FETCH_CAP = 100
+
+_VAE_NAME_RE = re.compile(r"(?i)(?<![a-z0-9])vae(?![a-z0-9])")
+_ENCODER_NAME_RE = re.compile(
+    r"(?i)text[_-]?encoders?|(?<![a-z0-9])clip(?![a-z0-9])")
+
+
+def _refine_unknown_type(repo_id: str) -> str:
+    """Type hinted by a repo NAME, for a repo whose metadata carries no type
+    signal (the canonical VAE and text-encoder repos have none). Only ever used
+    on rows classify_hf_metadata left as 'unknown'."""
+    name = repo_id.split("/", 1)[-1]
+    if _VAE_NAME_RE.search(name):
+        return "vae"
+    if _ENCODER_NAME_RE.search(name):
+        return "text-encoder"
+    return "unknown"
+
+
+def _keep_requested_types(rows: list[dict], wanted: frozenset) -> list[dict]:
+    """Rows whose detected type is one of *wanted*. A row classified 'unknown'
+    by its metadata is first re-typed from its repo name."""
+    kept = []
+    for row in rows:
+        if row.get("detected_type") == "unknown":
+            row["detected_type"] = _refine_unknown_type(row["id"])
+        if row.get("detected_type") in wanted:
+            kept.append(row)
+    return kept
 
 
 def _type_fmt_filter(model_type: Optional[str], fmt: str) -> dict:
@@ -558,9 +596,16 @@ def hf_search(query: str = "", limit: int = 20, formats: Sequence[str] = ("gguf"
     # appeared in and unions its formats there.
     seen: dict[str, dict] = {}
     per_query: list[list[dict]] = []
+    narrow_to = (frozenset(types) if types is not None
+                 and set(types) != _ALL_SEARCHABLE_TYPES else None)
+    fetch_limit = (min(_HF_FETCH_CAP, limit * _TYPED_FETCH_FACTOR)
+                   if narrow_to is not None else limit)
     for mt, fmt in query_specs:
         lst: list[dict] = []
-        for item in _run_query(query, limit, fmt, mt, classify, token=token):
+        rows = _run_query(query, fetch_limit, fmt, mt, classify, token=token)
+        if narrow_to is not None:
+            rows = _keep_requested_types(rows, narrow_to)
+        for item in rows:
             existing = seen.get(item["id"])
             if existing:
                 for f in item["formats"]:
