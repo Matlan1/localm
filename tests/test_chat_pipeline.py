@@ -153,6 +153,11 @@ def test_thinking_inlet_applies_when_capacity_comfortable():
 #  role-word self-reference nudge (REC-D1-ROLEWORD) in regular chat           #
 # --------------------------------------------------------------------------- #
 
+@pytest.fixture(autouse=True)
+def _style_note_on(monkeypatch):
+    monkeypatch.setattr("localm.plugins.builtin.chat.plug._style_note_enabled", lambda: True)
+
+
 def test_role_word_inlet_inserts_system_when_absent():
     from localm.plugins.builtin.chat.plug import _role_word_inlet, _ROLE_WORD_INSTRUCTION
     msgs = [{"role": "user", "content": "hi"}]

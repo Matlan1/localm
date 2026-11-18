@@ -544,9 +544,9 @@ def _own_chat_surface(ctx) -> bool:
 
 
 def _style_note_enabled() -> bool:
-    """The ``chat_style_note`` setting (default on)."""
+    """The ``chat_style_note`` setting (default off)."""
     from localm.config import load_config
-    return bool(load_config().get("chat_style_note", True))
+    return bool(load_config().get("chat_style_note", False))
 
 
 def _nudge_fits_capacity(instruction: str, ctx) -> bool:

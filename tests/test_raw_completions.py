@@ -420,6 +420,10 @@ def test_an_api_caller_with_no_system_prompt_gets_none_inserted(env):
 
 
 def test_localms_own_chat_still_gets_both_notes(env):
+    from localm.config import load_config, save_config
+    cfg = load_config()
+    cfg["chat_style_note"] = True
+    save_config(cfg)
     engine = _recording_engine(reply="BANANA", name="qwen3-8b")
     with TestClient(_app(engine)) as c:
         r = c.post("/v1/chat/completions", headers={"X-Client-Id": "chat"}, json={
