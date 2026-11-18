@@ -1015,12 +1015,14 @@ export const _convPushTimers = new Map();
 let _convPushWarned = false;   // one warning per breakage, re-armed on success
 const _convTooLargeWarned = new Set();   // conversation ids already toasted for a 413
 
-/** Debounced upsert of one conversation to the server store. */
-export function pushConversation(conv) {
+/** Debounced upsert of one conversation to the server store. An edit stamps
+ *  updated_at; a sync of an unchanged copy (keepStamp) leaves the stamp alone,
+ *  so a reload does not reorder the list. */
+export function pushConversation(conv, { keepStamp = false } = {}) {
   if (!chat.persist || conv.deleted) return;
   // Brand-new conversations with nothing in them yet aren't worth a file.
   if (!conv.messages.length && conv.title === "New chat") return;
-  conv.updated_at = Date.now();
+  if (!keepStamp || !conv.updated_at) conv.updated_at = Date.now();
   clearTimeout(_convPushTimers.get(conv.id));
   _convPushTimers.set(conv.id, setTimeout(async () => {
     _convPushTimers.delete(conv.id);
@@ -1211,15 +1213,18 @@ export async function initServerConversations() {
         // offline boot, must still work) - but only a CONFIRMED match
         // (chat.instanceMatch) may write it into the backend's own store.
         if (chat.instanceState !== "mismatched") byId.set(local.id, local);
-        if (chat.instanceMatch) pushConversation(local);
+        if (chat.instanceMatch) pushConversation(local, { keepStamp: true });
         continue;
       }
       // Keep the local FULL copy unless the server has a strictly newer version
       // (>= keeps it on a tie, so an already-cached conversation is not demoted to
       // an index-only placeholder that would need a needless re-fetch / break offline).
-      if ((local.updated_at || 0) >= (remote.updated_at || 0)) {
+      // Only a strictly newer local copy is uploaded, with its own stamp.
+      const localAt = local.updated_at || 0;
+      const remoteAt = remote.updated_at || 0;
+      if (localAt >= remoteAt) {
         byId.set(local.id, local);
-        pushConversation(local);
+        if (localAt > remoteAt) pushConversation(local, { keepStamp: true });
       }
     }
     chat.conversations = [...byId.values()]
@@ -1701,6 +1706,8 @@ export function latestTurnIsAudioOnly(conv) {
 
 export const convUI = {
   search: "",
+  remoteHits: new Map(),   // id -> snippet: server-side content matches for remoteTerm
+  remoteTerm: "",
   collapsed: new Set(readStoredJSON("localm.convCollapsed", [])),
 };
 
@@ -1832,7 +1839,8 @@ export function renderConvList() {
     } else if ((conv.title || "").toLowerCase().includes(term)) {
       visible.push({ conv, snippet: null });
     } else {
-      const snippet = searchSnippet(conv, term);
+      const snippet = searchSnippet(conv, term) ??
+        (conv._meta && convUI.remoteTerm === term ? convUI.remoteHits.get(conv.id) ?? null : null);
       if (snippet !== null) visible.push({ conv, snippet });
     }
   }
@@ -1887,9 +1895,31 @@ export function renderConvList() {
   }
 }
 
+let _remoteSearchTimer = 0;
+
+/** Ask the server which chats mention the term in their messages: the browser
+ *  holds only index rows for chats it has not opened. */
+export async function searchRemoteConversations(term) {
+  if (!chat.persist || !term) return;
+  try {
+    const r = await fetch("/api/conversations?meta=true&limit=200&offset=0&q=" +
+                          encodeURIComponent(term), { headers: authHeaders() });
+    if (!r.ok) return;
+    const data = await r.json();
+    if (convUI.search.trim().toLowerCase() !== term) return;   // the term moved on
+    convUI.remoteHits = new Map((data.conversations || [])
+      .filter((c) => c.snippet).map((c) => [c.id, c.snippet]));
+    convUI.remoteTerm = term;
+    renderConvList();
+  } catch { /* offline: the local search still answers */ }
+}
+
 $("conv-search").addEventListener("input", (e) => {
   convUI.search = e.target.value;
   renderConvList();
+  clearTimeout(_remoteSearchTimer);
+  const term = convUI.search.trim().toLowerCase();
+  if (term) _remoteSearchTimer = setTimeout(() => searchRemoteConversations(term), 250);
 });
 
 // A sensible download name for a chat image (VIS-2): from the data: URI's mime,
