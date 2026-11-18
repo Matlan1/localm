@@ -92,6 +92,8 @@ def _write_registry(home, reg, after=(), offset=60):
     rf.write_text(json.dumps(reg), encoding="utf-8")
     newest = max([os.stat(p).st_mtime for p in after] or [os.stat(rf).st_mtime])
     os.utime(rf, (newest + offset, newest + offset))
+    import localm.config as cfg
+    cfg._loop_reads_invalidate()
 
 
 class TestReuse:
