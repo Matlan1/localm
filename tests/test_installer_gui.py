@@ -2253,6 +2253,24 @@ class TestBootstrapRecord:
                 root.destroy()
 
 
+class TestWindowPlacement:
+    @pytest.mark.parametrize("screen, window", [((1520, 823), (676, 639)),
+                                                ((1366, 768), (676, 639)),
+                                                ((1920, 1080), (676, 639))])
+    def test_the_window_opens_centred_above_the_taskbar(self, gui, screen, window):
+        x, y = gui.window_position(*screen, *window)
+        assert abs((x + window[0] / 2) - screen[0] / 2) <= 1
+        assert y >= 0 and y + window[1] <= screen[1] - 40
+
+    def test_a_window_taller_than_the_screen_keeps_its_title_bar_on_screen(self, gui):
+        assert gui.window_position(800, 500, 676, 639) == (62, 0)
+
+    def test_the_window_is_placed_after_it_is_brought_to_front(self, gui):
+        import inspect
+        source = inspect.getsource(gui.main)
+        assert source.index("bring_to_front(root)") < source.index("place_on_screen(root)")
+
+
 class TestSplash:
     def test_the_getting_ready_file_in_the_folder_is_removed(self, gui, tmp_path):
         marker = tmp_path / (gui.SPLASH_PREFIX + "1")

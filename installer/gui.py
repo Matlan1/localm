@@ -2312,9 +2312,24 @@ def main() -> int:
     root = tk.Tk()
     wizard = Wizard(root, tk, ttk, filedialog, messagebox=messagebox)
     bring_to_front(root)
+    place_on_screen(root)
     root.after(150, close_splash)
     root.mainloop()
     return wizard.exit_code
+
+
+def window_position(screen_w: int, screen_h: int, w: int, h: int) -> tuple:
+    """(x, y) that centres a w x h window on a screen_w x screen_h screen, 40
+    pixels above the middle (room for a taskbar), never off the top left."""
+    return max(0, (screen_w - w) // 2), max(0, (screen_h - h) // 2 - 40)
+
+
+def place_on_screen(root) -> None:
+    """Move *root* to window_position on its screen."""
+    root.update_idletasks()
+    x, y = window_position(root.winfo_screenwidth(), root.winfo_screenheight(),
+                           root.winfo_width(), root.winfo_height())
+    root.geometry(f"+{x}+{y}")
 
 
 def bring_to_front(root) -> None:
