@@ -463,7 +463,7 @@ export function registerSession(info, { replay }) {
   };
   s.streamReplay = !!replay;
   coder.sessions.set(info.id, s);
-  rebalanceStreams();
+  if (!_deferRebalance) rebalanceStreams();
   if (coder.sessions.size > MAX_LIVE_STREAMS) ensureStreamTick();
   return s;
 }
@@ -1027,6 +1027,7 @@ async function _streamSessionLoop(s, replay, ctl) {
  * an approval) hold the streams and the rest are parked, then re-read in full
  * from the server (replay) when one of them is shown or becomes busy. */
 const MAX_LIVE_STREAMS = 3;
+let _deferRebalance = false;
 const STREAM_TICK_MS = 4000;
 let _streamTick = null;
 
@@ -1437,11 +1438,17 @@ export async function reattachSessions() {
     const r = await fetch("/api/coder/sessions", { headers: authHeaders() });
     if (!r.ok) return;
     const data = await r.json();
-    for (const info of data.sessions) {
-      if (!coder.sessions.has(info.id)) {
-        registerSession(info, { replay: true });
+    _deferRebalance = true;
+    try {
+      for (const info of data.sessions) {
+        if (!coder.sessions.has(info.id)) {
+          registerSession(info, { replay: true });
+        }
       }
+    } finally {
+      _deferRebalance = false;
     }
+    rebalanceStreams();
     if (!coder.activeId && data.sessions.length) {
       activateSession(data.sessions[data.sessions.length - 1].id);
       toast(t("coder.session.reattached"));
