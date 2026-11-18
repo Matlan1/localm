@@ -16,7 +16,7 @@
 // routes and is MANDATORY for the update routes (they serve release builds).
 //
 // Deploy + secrets: see README.md.
-import { clientOlderThan, isPrereleaseTag, tagAtMost } from "./versionorder.js";
+import { isPrereleaseTag, tagAtMost } from "./versionorder.js";
 
 export default {
   async fetch(request, env) {
@@ -337,13 +337,11 @@ async function latestRelease(request, env, url) {
   const wantsPrerelease = url.searchParams.get("channel") === "prerelease";
   // A request without "client" comes from localm 0.3.1 or earlier; it is offered
   // nothing newer than LEGACY_CLIENT_CEILING.
+  // A client that names its version is offered the newest release.
   const legacy = !url.searchParams.get("client");
-  // A client older than OLD_CLIENT_CEILING is offered nothing newer than it.
-  const old = !legacy && clientOlderThan(url.searchParams.get("client"), OLD_CLIENT_CEILING);
-  const maxTag = legacy ? LEGACY_CLIENT_CEILING : (old ? OLD_CLIENT_CEILING : null);
+  const maxTag = legacy ? LEGACY_CLIENT_CEILING : null;
   const rel = await latestAppRelease(env, wantsPrerelease, maxTag);
-  const ceiling = legacy ? { legacy_ceiling: LEGACY_CLIENT_CEILING }
-    : (old ? { client_ceiling: OLD_CLIENT_CEILING } : {});
+  const ceiling = legacy ? { legacy_ceiling: LEGACY_CLIENT_CEILING } : {};
   if (rel === null) return json({ ok: true, version: null, note: "no releases yet", ...ceiling });
   if (rel === undefined) return json({ error: "release lookup failed", status: 502 }, 502);
   // Serve the signature: the text of the first *.sig asset, verbatim (trimmed). From
@@ -477,12 +475,6 @@ const APP_TAG_RE = /^v\d+\.\d+\.\d+/;
 // dependencies, so this release must not change them relative to v0.3.0 or v0.3.1;
 // the release tooling reads this constant and refuses such a build.
 const LEGACY_CLIENT_CEILING = "v0.3.2";
-
-// The newest release offered to a client that names a version older than this one.
-// Those clients reinstall the project over their running launcher in an update that
-// changes Python dependencies, so this release carries the build hook that makes that
-// work; later releases need not. The release tooling checks the deployed value.
-const OLD_CLIENT_CEILING = "v0.3.3";
 
 // The single most recent NON-DRAFT release matching APP_TAG_RE, optionally
 // including prereleases. Returns the release object, null (no qualifying

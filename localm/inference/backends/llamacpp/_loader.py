@@ -1351,11 +1351,33 @@ def probe_daemon_running() -> bool:
         return _PROBE_PROC is not None and _PROBE_PROC.poll() is None
 
 
+def _probe_descendants(proc) -> list:
+    """``(pid, start)`` of each running descendant of the process *proc*,
+    deepest first (``install_manifest.descendants``). On Windows a daemon started through a
+    venv launcher is that launcher, and the process that loads the runtime is
+    its child. Empty when processes cannot be listed. Never raises."""
+    try:
+        from localm import install_manifest
+        pid = proc.pid
+        procs = install_manifest.list_processes()
+        if not procs:
+            return []
+        by_pid = {p[0]: p for p in procs}
+        return [(d, by_pid[d][3]) for d in install_manifest.descendants(by_pid, pid)
+                if d != pid]
+    except Exception as e:
+        logger.debug("vram-probe: could not list the daemon's processes (%s)", e)
+        return []
+
+
 def stop_probe_daemon(wait: float = 5.0) -> None:
-    """Stop the probe daemon, if one is running, waiting up to *wait* seconds
-    for it to exit. The next query spawns a fresh one. Never raises."""
+    """Stop the probe daemon, if one is running, and its descendants
+    (:func:`_probe_descendants`), waiting up to *wait* seconds for each of them
+    to exit, so the runtime it loaded is free on return. The next query spawns a
+    fresh one. Never raises."""
     with _PROBE_LOCK:
         proc = _PROBE_PROC
+        children = _probe_descendants(proc) if proc is not None and proc.poll() is None else []
         _kill_and_clear_probe()
         if proc is not None:
             try:
@@ -1363,6 +1385,12 @@ def stop_probe_daemon(wait: float = 5.0) -> None:
             except Exception as e:
                 logger.debug("vram-probe: stopped daemon did not exit within "
                              "%.1fs (%s)", wait, type(e).__name__)
+            if children:
+                from localm import install_manifest
+                for pid, start in children:
+                    if not install_manifest._stop(pid, timeout=wait, start=start):
+                        logger.debug("vram-probe: process %s of the stopped daemon did "
+                                     "not exit within %.1fs", pid, wait)
 
 
 class probe_daemon_held:
