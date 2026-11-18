@@ -3711,6 +3711,8 @@ export async function runChatTurn(work) {
   if (sendBtn) {
     sendBtn.classList.add("stop");
     sendBtn.replaceChildren(iconEl("stop", "ic"));
+    sendBtn.dataset.i18nTitle = "chat.stop";
+    sendBtn.title = t("chat.stop");
   }
   document.querySelectorAll(".message-actions button").forEach((b) => (b.disabled = true));
   let stopped = false;
@@ -3733,6 +3735,8 @@ export async function runChatTurn(work) {
     if (sendBtn) {
       sendBtn.classList.remove("stop");
       sendBtn.replaceChildren(iconEl("send", "ic"));
+      sendBtn.dataset.i18nTitle = "chat.send";
+      sendBtn.title = t("chat.send");
     }
     document.querySelectorAll(".message-actions button").forEach((b) => (b.disabled = false));
     if (!stopped) processChatQueue();
@@ -3885,7 +3889,7 @@ export async function sendChat() {
  *  render as "You:" here either (NEW-WEBSEARCH-UX-EXPORT-ATTRIBUTES-TOOL-
  *  RESULTS-TO-USER). */
 function exportLabel(m) {
-  return noteLabel(m) || (m.role === "user" ? "You" : (modelCache.active || "Model"));
+  return noteLabel(m) || (m.role === "user" ? "You" : (m.model || modelCache.active || "Model"));
 }
 
 /** Every real message that a compaction archived, oldest first, walking
@@ -4004,6 +4008,7 @@ $("chat-send").onclick = () => {
 export function composerEnterToSend(e, send) {
   if (e.key !== "Enter" || e.isComposing) return;
   if (e.shiftKey) return;   // newline - the textarea's default behaviour
+  if (e.defaultPrevented) return;   // another handler (the slash menu) already used this Enter
   const menu = e.target.closest(".composer-wrap")?.querySelector(".slash-menu");
   if (menu && menu.style.display !== "none") return;
   e.preventDefault();

@@ -219,6 +219,11 @@ def extract(complete: Complete, session_text: str, *,
         facts = _fact_list(raw)
     if facts is None:
         raise ConsolidationReplyError(_unreadable_reason(raw))
+    from localm.debuglog import logger
+    from .store import _content_tokens
+    user_text = _user_turn_text(session_text)
+    user_stems = (None if user_text is None
+                  else {w[:_STEM_CHARS] for w in _content_tokens(user_text)})
     out: list[dict] = []
     for item in facts:
         text, confidence = _fact_item(item)
@@ -232,12 +237,50 @@ def extract(complete: Complete, session_text: str, *,
         conf = 0.0 if conf < 0 else 1.0 if conf > 1 else conf
         if conf < CONFIDENCE_FLOOR:
             continue
+        if user_stems is not None and not _is_grounded(text, user_stems):
+            logger.info("memory consolidation: dropped a candidate fact that "
+                        "the user's own words do not support")
+            continue
         if _is_dup(text, [c["text"] for c in out]):
             continue                              # collapse near-dup candidates
         out.append({"text": text, "confidence": conf})
         if len(out) >= max_candidates:
             break
     return out
+
+
+# A candidate fact must share at least this fraction of its content words with
+# what the user wrote; one that does not was invented from the assistant's text.
+GROUNDING_MIN_OVERLAP = 0.5
+_STEM_CHARS = 5
+
+
+def _user_turn_text(session_text: str) -> Optional[str]:
+    """The text of the ``User:`` turns of a ``User:`` / ``Assistant:`` transcript,
+    or None when the transcript carries no ``User:`` turn."""
+    lines: list[str] = []
+    in_user = False
+    seen = False
+    for line in session_text.splitlines():
+        if line.startswith("User: "):
+            in_user = seen = True
+            line = line[len("User: "):]
+        elif line.startswith("Assistant: "):
+            in_user = False
+        if in_user:
+            lines.append(line)
+    return "\n".join(lines) if seen else None
+
+
+def _is_grounded(fact: str, user_stems: set) -> bool:
+    """True when at least GROUNDING_MIN_OVERLAP of *fact*'s content words (the
+    word "user" aside) appear, by their first letters, in *user_stems*."""
+    from .store import _content_tokens
+    words = _content_tokens(fact) - {"user"}
+    if not words:
+        return False
+    hit = sum(1 for w in words if w[:_STEM_CHARS] in user_stems)
+    return hit / len(words) >= GROUNDING_MIN_OVERLAP
 
 
 def _fact_item(item) -> tuple:
