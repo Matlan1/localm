@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { addMessageRow, isWarnStatus, lsSetScoped, statusLabel } from "./chat.js";
-import { $, authHeaders, autoGrow, chooseAsync, closeModal, confirmDanger, confirmDangerAsync, el, nearBottom, openModal, readSSE, renderMarkdown, toast } from "./helpers.js";
+import { $, authHeaders, autoGrow, chooseAsync, closeModal, confirmDanger, confirmDangerAsync, el, liveThinkText, nearBottom, openModal, readSSE, renderMarkdown, toast } from "./helpers.js";
 import { t, tn } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
 import { confirmLoadText, modelCache, refreshModels } from "./models-sidebar.js";
@@ -585,7 +585,7 @@ function renderLiveBlock(s) {
   // imageScope: a coder session is its own conversation, so a "load images
   // from this site" answer given in one must not carry into another.
   renderMarkdown(s.liveBody,
-    s.liveReasoning ? `<think>\n${s.liveReasoning}\n</think>\n${s.liveText}` : s.liveText,
+    liveThinkText(s.liveReasoning, s.liveText),
     { imageScope: "coder:" + s.info.id });
   if (stick) s.feedEl.scrollTop = s.feedEl.scrollHeight;
 }

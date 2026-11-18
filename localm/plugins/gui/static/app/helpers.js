@@ -503,6 +503,16 @@ export function splitThink(text) {
   };
 }
 
+/** The text renderMarkdown draws while a reply streams: the reasoning wrapped
+ *  as a <think> block that stays open until the answer's first character
+ *  arrives, so the box reads "Thinking..." (and open) while the model reasons
+ *  and "Thoughts" once it answers. */
+export function liveThinkText(reasoning, content) {
+  if (!reasoning) return content;
+  const open = "<think>\n" + reasoning;
+  return content ? open + "\n</think>\n" + content : open;
+}
+
 /** *text* with every fenced block and inline code span overwritten by spaces
  *  (same length), so a tag inside code is never mistaken for a real one. */
 function maskCode(text) {
