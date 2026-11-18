@@ -166,3 +166,20 @@ def test_the_pin_update_refusal_does_not_blame_a_copy_fallback(monkeypatch):
     assert result.ok is False
     assert "no recorded source commit" in result.message
     assert "fallback" not in result.message
+
+
+def test_a_refused_api_url_leads_with_the_key_the_page_relabels():
+    from localm.settings_schema import validate_media_block
+    for name in ("image", "music", "video"):
+        with pytest.raises(ValueError) as err:
+            validate_media_block(name, {"api_url": "127.0.0.1:8188"})
+        assert str(err.value).startswith("api_url: must be a valid http(s) URL")
+
+
+def test_no_comfyui_help_names_a_control_the_page_may_not_draw():
+    from localm import settings_schema as ss
+    texts = [f.help for f in ss.CORE_FIELDS if f.key.startswith("comfy_")]
+    texts += [f.help for f in ss.MEDIA_PLUGIN_FIELDS]
+    assert len(texts) > 5
+    for text in texts:
+        assert "ComfyUI to use" not in text, text
