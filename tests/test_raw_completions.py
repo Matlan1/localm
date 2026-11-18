@@ -419,7 +419,26 @@ def test_an_api_caller_with_no_system_prompt_gets_none_inserted(env):
         {"role": "user", "content": "What is the capital of France? One word."}]
 
 
-def test_localms_own_chat_still_gets_both_notes(env):
+def _enable_style_note(on: bool) -> None:
+    from localm.config import load_config, save_config
+    cfg = load_config()
+    cfg["chat_style_note"] = on
+    save_config(cfg)
+
+
+def test_localms_own_chat_with_the_note_on_gets_both_notes_when_no_prompt_is_set(env):
+    _enable_style_note(True)
+    engine = _recording_engine(reply="BANANA", name="qwen3-8b")
+    with TestClient(_app(engine)) as c:
+        r = c.post("/v1/chat/completions", headers={"X-Client-Id": "chat"}, json={
+            "model": "qwen3-8b", "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 200, r.text
+    system = _system_text(engine.calls[0])
+    assert _ROLE_WORD_INSTRUCTION in system and _THINK_INSTRUCTION in system
+
+
+def test_localms_own_chat_never_adds_the_style_note_to_the_users_system_prompt(env):
+    _enable_style_note(True)
     engine = _recording_engine(reply="BANANA", name="qwen3-8b")
     with TestClient(_app(engine)) as c:
         r = c.post("/v1/chat/completions", headers={"X-Client-Id": "chat"}, json={
@@ -428,23 +447,18 @@ def test_localms_own_chat_still_gets_both_notes(env):
     assert r.status_code == 200, r.text
     system = _system_text(engine.calls[0])
     assert system.startswith(SYSTEM)
-    assert _ROLE_WORD_INSTRUCTION in system and _THINK_INSTRUCTION in system
+    assert _ROLE_WORD_INSTRUCTION not in system
+    assert _THINK_INSTRUCTION in system
 
 
 def test_the_setting_turns_the_style_note_off_for_the_own_chat(env):
-    from localm.config import load_config, save_config
-    cfg = load_config()
-    cfg["chat_style_note"] = False
-    save_config(cfg)
+    _enable_style_note(False)
     engine = _recording_engine(reply="BANANA", name="qwen3-8b")
     with TestClient(_app(engine)) as c:
         r = c.post("/v1/chat/completions", headers={"X-Client-Id": "chat"}, json={
-            "model": "qwen3-8b", "messages": [
-                {"role": "system", "content": SYSTEM}, {"role": "user", "content": "hi"}]})
+            "model": "qwen3-8b", "messages": [{"role": "user", "content": "hi"}]})
     assert r.status_code == 200, r.text
-    system = _system_text(engine.calls[0])
-    assert _ROLE_WORD_INSTRUCTION not in system
-    assert _THINK_INSTRUCTION in system
+    assert _ROLE_WORD_INSTRUCTION not in _system_text(engine.calls[0])
 
 
 def test_the_coder_surface_gets_neither_note(env):

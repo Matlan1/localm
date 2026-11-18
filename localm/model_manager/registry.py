@@ -1068,7 +1068,9 @@ def _pick_mmproj_candidate(model_name: str, names: list[str], *,
 
     A model file whose name contains "mmproj", or whose leading name token
     (:func:`_name_token`) is empty, never pairs. Among candidates containing
-    that token, the only one is picked, and two or more give None. Otherwise a
+    that token, the only one is picked, and with two or more the only one
+    whose :func:`_name_residue` is longer than the token and occurs in the
+    model's own, else None. Otherwise a
     lone candidate is picked when its model name (:func:`_name_identity`) occurs
     in *model_name*, and refused when that name occurs in one of *others* whose
     width does not rule it out (:func:`_may_use`). A lone candidate still
@@ -1086,7 +1088,13 @@ def _pick_mmproj_candidate(model_name: str, names: list[str], *,
     matches = [n for n in names if token in n.lower()]
     if matches:
         if len(matches) != 1:
-            return None
+            own = _name_residue(model_name)
+            named = [n for n in matches
+                     if len(res := _name_residue(n.lower().replace("mmproj", " "))) > len(token)
+                     and res in own]
+            if len(named) != 1:
+                return None
+            matches = named
         key = _model_key(matches[0])
         # A projector named exactly for another model in the folder is that model's.
         if key and key != _model_key(model_name) and any(

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 
 import pytest
@@ -470,11 +471,25 @@ def test_iter_sse_json_skips_comments_done_and_garbage():
 
 # ------------------------------------------------------------------ listings
 
-def test_digest_of_strips_the_prefix_and_tolerates_absence():
-    assert P.digest_of({"sha256": "sha256:abc"}) == "abc"
-    assert P.digest_of({"sha256": "abc"}) == "abc"
-    assert P.digest_of({}) == ""
-    assert P.digest_of({"sha256": None}) == ""
+SHA = "ab" * 32
+
+
+def test_digest_of_strips_the_prefix_of_a_recorded_sha256():
+    assert P.digest_of({"sha256": "sha256:" + SHA}) == SHA
+    assert P.digest_of({"sha256": SHA.upper()}) == SHA
+
+
+def test_digest_of_is_never_empty_and_always_sha256_shaped():
+    for entry, name in (({}, "m"), ({"sha256": None}, "m"), ({"sha256": "abc"}, "m"),
+                        ({"sha256": ""}, ""), ({"id": "r1"}, "m"), ({}, "")):
+        d = P.digest_of(entry, name)
+        assert re.fullmatch(r"[0-9a-f]{64}", d), (entry, name, d)
+
+
+def test_digest_of_follows_the_registry_id_not_the_name():
+    assert P.digest_of({"id": "r1"}, "old-name") == P.digest_of({"id": "r1"}, "new-name")
+    assert P.digest_of({"id": "r1"}, "m") != P.digest_of({"id": "r2"}, "m")
+    assert P.digest_of({}, "a") != P.digest_of({}, "b")
 
 
 def test_model_details_shape():

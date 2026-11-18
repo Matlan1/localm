@@ -509,6 +509,20 @@ class TestPickMmprojCandidate:
         from localm.model_manager.registry import _pick_mmproj_candidate
         assert _pick_mmproj_candidate("gemma-3-4b", []) is None
 
+    def test_two_projectors_sharing_the_family_word_pick_the_one_named_for_the_model(self):
+        from localm.model_manager.registry import _pick_mmproj_candidate
+        model = "Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q8_K_P.gguf"
+        own = "mmproj-Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-f16.gguf"
+        other = "mmproj-google_gemma-3-4b-it-f16.gguf"
+        assert _pick_mmproj_candidate(model, [own, other]) == own
+        assert _pick_mmproj_candidate(model, [other, own]) == own
+
+    def test_two_projectors_sharing_the_family_word_none_named_for_the_model_gives_none(self):
+        from localm.model_manager.registry import _pick_mmproj_candidate
+        assert _pick_mmproj_candidate(
+            "gemma-3-4b-it", ["mmproj-google_gemma-2-9b-f16.gguf",
+                              "mmproj-gemma-2-9b-f16.gguf"]) is None
+
     def test_lone_candidate_matching_stem_returns_name(self):
         from localm.model_manager.registry import _pick_mmproj_candidate
         assert _pick_mmproj_candidate(

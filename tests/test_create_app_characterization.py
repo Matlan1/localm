@@ -217,6 +217,9 @@ _KERNEL_ROUTES = {
     ("api", "GET", "/api/version"): ("auth",),
     ("api", "GET", "/api/tags"): ("scope:models:read",),
     ("api", "GET", "/api/ps"): ("scope:models:read",),
+    ("api", "HEAD", "/api/version"): ("auth",),
+    ("api", "HEAD", "/api/tags"): ("scope:models:read",),
+    ("api", "HEAD", "/api/ps"): ("scope:models:read",),
     ("api", "POST", "/api/show"): ("scope:models:read",),
     ("api", "POST", "/api/chat"): ("scope:chat",),
     ("api", "POST", "/api/generate"): ("scope:chat",),
@@ -265,7 +268,7 @@ _CHAT_PLUGIN_ROUTES = {
     ("api", "POST", "/api/chat/extract"): ("scope:chat",),
 }
 
-_API_LANDING_ROUTES = {("api", "GET", "/"): ()}
+_API_LANDING_ROUTES = {("api", "GET", "/"): (), ("api", "HEAD", "/"): ()}
 
 
 def _expected_routes(api_landing: bool) -> dict:
@@ -328,6 +331,9 @@ _HIDDEN_FROM_SCHEMA = {
     ("DELETE", "/api/delete"),
     ("POST", "/api/blobs/{digest}"),
     ("HEAD", "/api/blobs/{digest}"),
+    ("HEAD", "/api/version"),
+    ("HEAD", "/api/tags"),
+    ("HEAD", "/api/ps"),
 }
 
 
@@ -341,7 +347,7 @@ def test_schema_documents_every_walked_route_except_the_hidden_ones(api_landing)
         if method.upper() in {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
     }
     walked = {(method, path) for kind, method, path in _route_table(app) if kind == "api"}
-    hidden = _HIDDEN_FROM_SCHEMA | ({("GET", "/")} if api_landing else set())
+    hidden = _HIDDEN_FROM_SCHEMA | ({("GET", "/"), ("HEAD", "/")} if api_landing else set())
     assert ("GET", "/api/conversations") in documented
     assert documented <= walked, (
         "the route walk misses operations the OpenAPI schema documents:\n"

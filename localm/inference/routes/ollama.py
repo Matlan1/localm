@@ -216,7 +216,7 @@ def _tag_object(name: str, entry: dict, facts: tuple[int, Optional[float], str])
         "model": name,
         "modified_at": P.iso_from_timestamp(mtime if mtime is not None else 0),
         "size": size,
-        "digest": P.digest_of(entry),
+        "digest": P.digest_of(entry, name),
         "details": _entry_details(entry, fmt),
     }
 
@@ -257,10 +257,12 @@ def register(app: FastAPI, ctx) -> None:
     #  Reads                                                            #
     # ---------------------------------------------------------------- #
 
+    @route("/api/version", methods=["HEAD"], include_in_schema=False, dependencies=[Depends(_require_auth)])
     @route("/api/version", methods=["GET"], dependencies=[Depends(_require_auth)])
     async def ollama_version():
         return {"version": localm.__version__}
 
+    @route("/api/tags", methods=["HEAD"], include_in_schema=False, dependencies=read_models)
     @route("/api/tags", methods=["GET"], dependencies=read_models)
     async def ollama_tags():
         from localm.config import load_registry
@@ -273,6 +275,7 @@ def register(app: FastAPI, ctx) -> None:
         loop = asyncio.get_running_loop()
         return {"models": await loop.run_in_executor(get_plugin_executor(), _collect)}
 
+    @route("/api/ps", methods=["HEAD"], include_in_schema=False, dependencies=read_models)
     @route("/api/ps", methods=["GET"], dependencies=read_models)
     async def ollama_ps():
         from localm.config import load_registry
@@ -289,7 +292,7 @@ def register(app: FastAPI, ctx) -> None:
             for name, entry, engine in loaded:
                 if entry is None:
                     obj = {"name": name, "model": name, "size": 0,
-                           "digest": "", "details": {}}
+                           "digest": P.digest_of({}, name), "details": {}}
                 else:
                     obj = _tag_object(name, entry, _file_facts(entry))
                     obj.pop("modified_at")
