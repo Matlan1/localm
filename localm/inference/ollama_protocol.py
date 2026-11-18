@@ -667,7 +667,7 @@ def model_details(*, fmt: str, family: str = "", parameter_size: str = "",
     }
 
 
-_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+_HEX_DIGEST = re.compile(r"[0-9a-f]{64}")
 
 
 def digest_of(entry: dict[str, Any], name: str = "") -> str:
@@ -679,7 +679,7 @@ def digest_of(entry: dict[str, Any], name: str = "") -> str:
     sha = entry.get("sha256")
     if isinstance(sha, str):
         bare = (sha[len("sha256:"):] if sha.startswith("sha256:") else sha).lower()
-        if _SHA256_HEX.fullmatch(bare):
+        if _HEX_DIGEST.fullmatch(bare):
             return bare
     rid = entry.get("id")
     ident = rid if isinstance(rid, str) and rid else name
