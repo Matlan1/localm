@@ -813,6 +813,25 @@ def _state_v7_headers() -> str:
 
 _MTMD_STATE_V7 = _state_v7_headers()
 
+_V8_GEN_INPUT = _V7_GEN_INPUT.replace(
+    "    size_t        n_feats;\n    const uint8_t * backbone_state;\n",
+    "    size_t        n_feats;\n    float speed;\n    const uint8_t * backbone_state;\n"
+).replace("    int32_t n_steps;\n};\n", "    int32_t n_steps;\n    float cfg_scale;\n};\n")
+
+
+def _state_v8_headers() -> str:
+    """The b12494 and b12479 changes in the layout the b12497 headers declare:
+    speed after n_feats and cfg_scale at the end of mtmd_gen_inp, and the new
+    function mtmd_gen_audio_g2p."""
+    assert _MTMD_STATE_V7.count(_V7_GEN_INPUT) == 1 and _V8_GEN_INPUT != _V7_GEN_INPUT
+    assert "float speed;" in _V8_GEN_INPUT and "float cfg_scale;" in _V8_GEN_INPUT
+    return _MTMD_STATE_V7.replace(_V7_GEN_INPUT, _V8_GEN_INPUT) + (
+        "MTMD_API int32_t mtmd_gen_audio_g2p(const mtmd_context * ctx, "
+        "const char * word, char * buf, size_t buf_size);\n")
+
+
+_MTMD_STATE_V8 = _state_v8_headers()
+
 _MTMD_LEGACY = _MTMD_SPEECH_COMMON + """
 struct mtmd_helper_gen_audio_inp {
     llama_seq_id seq_id;
@@ -865,6 +884,7 @@ _SPEECH_FIXTURES = [(_MTMD_STATE, "state"),
                     (_MTMD_STATE_V5, "state_v5"),
                     (_MTMD_STATE_V6, "state_v6"),
                     (_MTMD_STATE_V7, "state_v7"),
+                    (_MTMD_STATE_V8, "state_v8"),
                     (_MTMD_LEGACY, "legacy")]
 
 
@@ -893,6 +913,9 @@ def test_the_fixtures_cover_every_speech_interface():
     ("state_v6", _MTMD_STATE_V5, "FAIL  size: upstream 80 != localm 88"),
     ("state_v6", _MTMD_STATE_V7, "FAIL  out_type: upstream offset 88 size 4 != localm offset 80"),
     ("state_v7", _MTMD_STATE_V6, "FAIL  size: upstream 88 != localm 96"),
+    ("state_v7", _MTMD_STATE_V8, "FAIL  size: upstream 112 != localm 96"),
+    ("state_v7", _MTMD_STATE_V8,
+     "FAIL  backbone_state: upstream offset 80 size 8 != localm offset 72 size 8"),
 ])
 def test_each_delivery_binding_fails_against_its_neighbours_headers(
         bound, text, want, monkeypatch, capsys):
@@ -912,6 +935,16 @@ def test_the_state_v7_audio_info_and_gen_input_are_checked(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "FAIL  size: upstream 32 != localm 24" in out
     assert "FAIL  size: upstream 96 != localm 72" in out
+
+
+def test_the_state_v8_gen_input_is_checked(monkeypatch, capsys):
+    v7 = abichk._localm_speech_binding("state_v7")
+    v8_signatures = abichk._localm_speech_binding("state_v8")[1]
+    monkeypatch.setattr(abichk, "_localm_speech_binding",
+                        lambda interface: (v7[0], v8_signatures))
+    assert abichk.check_speech(_MTMD_STATE_V8, "fixture", set()) > 0
+    out = capsys.readouterr().out
+    assert "FAIL  size: upstream 112 != localm 96" in out
 
 
 def test_an_unknown_field_in_a_state_v3_family_helper_input_fails(capsys):

@@ -28,9 +28,9 @@ The two enum outcomes are DISTINCT:
 
 IT ALSO CHECKS THE LIBMTMD SPEECH GENERATION BINDING (``mtmd_gen.py``) against
 ``tools/mtmd/mtmd.h`` and ``tools/mtmd/mtmd-helper.h`` at the same ref: the
-interface is read from the headers (``mtmd_helper_gen_audio_max_frames``
-declared = state_v7, else ``mtmd_gen_audio_voice_name`` declared = state_v3,
-state_v4, state_v5 or state_v6 by the fields of ``mtmd_helper_gen_audio_inp``,
+interface is read from the headers (``mtmd_gen_audio_g2p`` declared =
+state_v8, else ``mtmd_helper_gen_audio_max_frames`` declared = state_v7,
+else ``mtmd_gen_audio_voice_name`` declared = state_v3, state_v4, state_v5 or state_v6 by the fields of ``mtmd_helper_gen_audio_inp``,
 else ``mtmd_helper_gen_audio_next_is_text`` declared = state_v2,
 else ``mtmd_gen_state_init`` declared = state, else legacy), every struct localm allocates must match field for field with the
 same total size, and every function localm binds must take as many arguments as
@@ -80,7 +80,7 @@ LLAMA_ABI_REF = LLAMA_ABI_REFS["v3"]
 _REPO = "ggml-org/llama.cpp"
 
 # One upstream ref per libmtmd speech generation interface localm binds
-# (localm.inference.backends.llamacpp.mtmd_gen). The default run checks all eight.
+# (localm.inference.backends.llamacpp.mtmd_gen). The default run checks all nine.
 MTMD_SPEECH_REFS = {
     "legacy": "b11757",    # stateless: seed and state_data in mtmd_gen_inp/out
     "state": "b11908",     # mtmd_gen_state, 4-argument mtmd_gen_audio_process
@@ -90,6 +90,7 @@ MTMD_SPEECH_REFS = {
     "state_v5": "b12424",  # speed and loudness after seed in the helper input
     "state_v6": "b12452",  # speaker_ref_text after speaker_ref in the helper input
     "state_v7": "b12458",  # cfg_scale/flow_steps, n_channels, backbone state in mtmd_gen_inp
+    "state_v8": "b12497",  # speed and cfg_scale in mtmd_gen_inp, marker mtmd_gen_audio_g2p
 }
 _MTMD_HEADERS = ("tools/mtmd/mtmd.h", "tools/mtmd/mtmd-helper.h")
 
@@ -769,7 +770,8 @@ def check_speech(mtmd_text: str, label: str, seen: set) -> int:
           f"[interface: {interface}] ############")
     if interface is None:
         print("  FAIL  no speech generation interface localm binds is declared "
-              "(none of mtmd_helper_gen_audio_max_frames, mtmd_gen_audio_voice_name, "
+              "(none of mtmd_gen_audio_g2p, mtmd_helper_gen_audio_max_frames, "
+              "mtmd_gen_audio_voice_name, "
               "mtmd_helper_gen_audio_next_is_text, mtmd_gen_state_init "
               "or mtmd_gen_inp_default); speech is refused on this runtime")
         return 1
