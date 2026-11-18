@@ -66,6 +66,7 @@ class _State:
     crash_fh: Optional[TextIO] = None
     generating = False
     sample_steps = 0
+    trimmed_steps = 0
     hires_steps = 0
     upscaling = False
     decoding = False
@@ -260,7 +261,8 @@ def _make_callbacks(resp_q):
         _State.last_progress = now
         if _State.upscaling:
             phase = "upscaling"
-        elif steps and steps in (_State.sample_steps, _State.hires_steps) and not _State.decoding:
+        elif steps and steps in (_State.sample_steps, _State.trimmed_steps,
+                                 _State.hires_steps) and not _State.decoding:
             phase = "sampling"
         elif _State.decoding:
             phase = "decoding"
@@ -281,7 +283,8 @@ def _make_callbacks(resp_q):
             if not img.data or w < 1 or h < 1:
                 return
             png = preview_png(w, h, c, ctypes.string_at(img.data, w * h * c))
-            resp_q.put(("preview", {"step": abs(int(step)), "steps": int(_State.sample_steps),
+            shown = int(_State.trimmed_steps or _State.sample_steps)
+            resp_q.put(("preview", {"step": abs(int(step)), "steps": shown,
                                     "width": w, "height": h, "png": png}))
         except Exception as e:  # noqa: BLE001
             if not _State.preview_failed:
@@ -355,6 +358,16 @@ def _error_with_native(message: str) -> str:
     if _State.last_errors:
         return f"{message}: {' | '.join(_State.last_errors[-3:])}"
     return message
+
+
+def trimmed_sample_steps(steps: int, strength: Optional[float]) -> int:
+    """The step count the sampler reports for an image-to-image job: the
+    schedule is cut to ``int(steps * strength)`` steps. 0 when the job is not
+    image-to-image, or when the cut leaves the schedule whole or empty."""
+    if strength is None or not 0.0 < strength < 1.0:
+        return 0
+    trimmed = int(steps * strength)
+    return trimmed if 0 < trimmed < steps else 0
 
 
 def _reset_generation_state() -> None:
@@ -783,6 +796,8 @@ def _do_generate_image(payload, cancel_event):
     lib.sd_cancel_generation(ctx, b.SD_CANCEL_RESET)
     _reset_generation_state()
     _State.sample_steps = int(p.sample_params.sample_steps)
+    _State.trimmed_steps = trimmed_sample_steps(
+        _State.sample_steps, float(p.strength) if init else None)
     _State.hires_steps = (int(p.hires.steps) or _State.sample_steps) if p.hires.enabled else 0
     _State.decoding = False
     previewing = _arm_preview(lib, payload, _State.sample_steps)
@@ -839,7 +854,7 @@ def _do_upscale_image(payload):
                          f"image; each side is limited to {max_side} pixels")
     _State.last_errors = []
     _State.decoding = False
-    _State.sample_steps = _State.hires_steps = 0
+    _State.sample_steps = _State.trimmed_steps = _State.hires_steps = 0
     if path not in _State.paths:
         _State.paths = _State.paths + (path,)
     keep = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
@@ -915,7 +930,7 @@ def _do_generate_video(payload, cancel_event):
     lib.sd_cancel_generation(ctx, b.SD_CANCEL_RESET)
     _reset_generation_state()
     _State.sample_steps = int(p.sample_params.sample_steps)
-    _State.hires_steps = 0
+    _State.trimmed_steps = _State.hires_steps = 0
     _State.decoding = False
     previewing = _arm_preview(lib, payload, _State.sample_steps)
     _State.generating = True

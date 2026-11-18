@@ -505,9 +505,11 @@ CORE_FIELDS: list = [
                  applies=Applies.LIVE, tier=Tier.CONFIG_WRITE),
     SettingField("chat_style_note", Widget.TOGGLE,
                  "Add the chat style note",
-                 "In this app's chat and in localm run, add a short note to the "
-                 "system prompt asking the model to answer directly and to speak of "
-                 "itself as \"I\". API requests from other programs never get it.",
+                 "In this app's chat and in localm run, add a short note asking the "
+                 "model to answer directly and to speak of itself as \"I\". It is "
+                 "added only when you have set no system prompt. Small models may "
+                 "refuse ordinary requests with it on. API requests from other "
+                 "programs never get it.",
                  group="Chat", owner="chat", applies=Applies.LIVE, tier=Tier.CONFIG_WRITE),
     # HIDDEN: the Settings > Model > Avatars panel renders these with its own
     # upload/emoji picker, not a generic text box - see settings.js.

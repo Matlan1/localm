@@ -11,7 +11,9 @@ localm serve <model> --port 11434     # Ollama's default port, for clients that 
 ```
 
 Point the client at `http://127.0.0.1:<port>` and use a model name from
-`GET /api/tags`.
+`GET /api/tags`. The `ollama` command-line tool checks that a server is there
+with `HEAD /` before every command: `localm serve` and `localm gui` both answer
+it with 200, and `HEAD` works on `/api/version`, `/api/tags` and `/api/ps` too.
 
 ## How it is mounted
 
