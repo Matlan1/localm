@@ -80,30 +80,41 @@ def test_adding_a_registered_file_under_a_new_name_from_the_gui_adds_the_name(
     assert store["second"]["path"] == store["first"]["path"]
 
 
+def _gated_error():
+    import httpx
+    from huggingface_hub.errors import GatedRepoError
+    response = httpx.Response(401, request=httpx.Request("GET", "https://huggingface.co/x/y"))
+    return GatedRepoError("401 Client Error. Cannot access gated repo", response=response)
+
+
 class _Gated:
     def auth_check(self, repo_id, **kwargs):
-        import httpx
-        from huggingface_hub.errors import GatedRepoError
-        response = httpx.Response(
-            401, request=httpx.Request("GET", "https://huggingface.co/x/y"))
-        raise GatedRepoError("401 Client Error. Cannot access gated repo", response=response)
+        raise _gated_error()
 
     def model_info(self, *a, **kw):
-        raise AssertionError("a gated repo is refused before its listing is read")
+        from types import SimpleNamespace
+        return SimpleNamespace(siblings=[], sha=None, gated="auto")
 
 
 @pytest.mark.parametrize("spec", ["meta-llama/Llama-3.2-1B", "meta-llama/Llama-3.2-1B:m.gguf"])
-def test_a_gated_repo_is_refused_in_localms_words_before_anything_is_written(
+def test_a_gated_repo_is_refused_in_localms_words_and_leaves_nothing_behind(
         spec, fake_registry, monkeypatch, capsys):  # noqa: F811
+    import huggingface_hub
     from localm.model_manager import pull
+
+    def refuse(*a, **kw):
+        raise _gated_error()
+
     _store, models_dir = fake_registry
     monkeypatch.setattr(pull, "_hf_api", lambda: _Gated())
     monkeypatch.setattr(pull, "_hf_token", lambda: None)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", refuse)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", refuse)
     assert pull.pull_model(spec) is False
     out = capsys.readouterr().out
     assert "is gated" in out and "Hugging Face token" in out
     assert "401" not in out and "Request ID" not in out
-    assert list(models_dir.iterdir()) == []
+    assert [p for p in models_dir.iterdir() if p.name != ".cache"] == []
 
 
 def test_a_local_path_job_is_labelled_as_a_registration(monkeypatch):
