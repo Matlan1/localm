@@ -21,6 +21,43 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - After `localm.bat update` or `localm.bat update --rollback` on Windows, the window no longer shows unrelated help text and setup hints and no longer reports failure after a successful update. On Linux and macOS, `./localm.sh` and the other launch scripts keep their execute permission after an update.
 - Model loads and unloads on Windows AMD installs with PyTorch no longer wait several seconds for a GPU check each time, and the unload's VRAM note says why a reading may be stale.
 - On a Windows PC without the Microsoft Visual C++ Redistributable, no model could load and the error did not say why. Setup now offers to install it: it downloads Microsoft's installer, checks it, and runs it (Windows shows one administrator prompt). If you decline or the install cannot happen, setup tells you where to get it and that `localm setup-llama` offers it again, and a load error names the missing DLL and how to fix it.
+- **Updating from 0.3.2 with a model loaded no longer rolls back.** When localm was started from `localm.exe`, the global `localm` command or a terminal, an update with a model loaded could say "Updated. Restarting ..." and come back on the old version. Versions older than 0.3.3 now update straight to the newest release.
+- Choosing "Leave without saving" on the unsaved Settings dialog now really discards the changes instead of showing them again as if saved.
+- The coder now runs a Python project's tests with the project's own Python (its virtual environment, or the Python on PATH) instead of failing with "No module named pytest", and says what to install when the project has no pytest.
+- A newly created key no longer shows as used recently before any device has used it.
+- The coder's `git_commit` no longer commits its own session transcripts and input history (`.localcoder/sessions`, `.localcoder/repl_history`) into your repository, and git now ignores them.
+- **The coder no longer reports a task as finished when it did nothing.** A model that answered "run the tests" with a claim and no tool call, wrote a tool call as plain text, or wrote a plan in plan mode without presenting it, now ends as not finished or is asked again. Refusing a write, or running a dry run, no longer makes the agent ask for the same write over and over, and an unattended run with a model that writes its calls loosely now gets its calls through.
+- A browser with a remembered non-English language no longer sends requests or shows an error toast at the "Connect to LocaLM" box; a coder-only key no longer gets a persona error on every load; and a key created while the page is open now shows a clear message at the key gate.
+- A server started with `localm serve` or `localm gui --api-mode` redirects `/` to the API docs; a model removed from the library no longer lingers in the health check and model lists; a model load replaced by a newer selection stops evicting loaded models; the VRAM estimate says when no model is selected; the MCP `system_stats` tool reports current VRAM right after a load.
+- Chat: picking a slash command with Enter waits for its argument, the stop button is labelled Stop, an image or video being generated stays in the chat while you keep working, and double-click rename, Copy image and exported model names work; Memory no longer saves the assistant's own text as facts about you.
+- A damaged config.json is now named at the sign-in page and on login instead of asking for an API key, `localm stop` shuts such a server down cleanly, and a session's transcript and audit trail share one session id.
+- Opening a page from the palette or a link opens its collapsed menu group, a reload keeps you on a plugin page, the Knowledge search window takes typing immediately, and the activity details show a running download's output without a reload.
+- Adding a folder of models no longer reads every file first; a gated Hugging Face repo is refused before anything downloads; Cancel during a download's start is honoured; a model folder with a dot in its name keeps its name; an ACE-Step checkpoint is registered; `localm list --type` no longer says the library is empty; adding a model already registered under another name from the GUI adds the name.
+- Coder: "browse..." in Session controls now fills the working-directory field instead of closing the dialog, and the controls always change the session they were opened for.
+- A refused ComfyUI API URL names the field by its label, and ComfyUI field help no longer refers to a setting that is not on the page.
+- Browser: a refused address now shows on the Browser page's status line instead of an error pop-up over the Go and Stop buttons; a browser left open across a reload shows its picture again; watching the agent's browser a second time shows the page straight away; and the coding agent's browser steps in one reply run in order.
+- Turning the Knowledge or voice plugin off or on updates the chat drawer and microphone without a reload, and installing a plugin from a folder that does not exist or has no plugin.toml says so.
+- Setup now installs the exact package versions localm is tested with, a Portable install no longer leaves files in the system temp folder, `localm run` no longer opens a console window for its background server on Windows, and the problem reporter respects a blank bug-report URL.
+- Picker dialogs: Escape in the filter clears it instead of closing the dialog, opening a folder clears the filter, folder rows look clickable, and the buttons sit at the bottom of the dialog.
+- Chat: a page reload no longer scrambles the conversation order, and the sidebar search finds text in chats you have not opened yet.
+- While a model loads, the chat shows a loading line and the model dropdown says it is loading; the empty chat page follows the active model; a reply after "unload model" names the reloaded model.
+- Coder: a diff with empty blank context lines applies, a failed edit no longer breaks the first Undo, `/diff` and `--patch-mode` handle CRLF files, `--scope` globs work on Windows, `localm coder doctor` works without `-m`, Ctrl+C mid-reply keeps your progress, and approvals are asked for when a call comes with a read.
+- GUI: opening many coder sessions no longer freezes the page, and the session controls say why no check can run.
+- A thinking model's reasoning now streams in an open "Thinking..." box instead of staying hidden until the answer starts.
+- A coder project whose `.localcoder/config.toml` names a model keeps working after the model is renamed.
+- Command-line tables keep full model names, paths and ports; `rag query` and `speak` no longer print loader output; `localm run` handles Ctrl+C cleanly and strips the ASR header; benchmark TTFT now measures real prefill; clearer job errors.
+- Sending a chat message while a model loads now waits for that model and answers with it, instead of refusing or answering with the previous model; Stop cancels the wait and a failed load shows an error.
+- Model search on the Models page: a slow reply no longer replaces newer results, and ticking a model type shows only models of that type.
+- A picture sent to a model that cannot read it no longer loads the vision model split onto the CPU beside your other models; you are offered the vision model with the models it would unload, and it runs on the GPU once you agree.
+- Chat: the chat style note is never added next to your own system prompt or to a conversation summary request.
+- The `ollama` command-line tool can now list and talk to a localm server (it checks the server with `HEAD /`).
+- A vision model registered in place now finds its own projector when other projectors for the same model family sit beside it.
+- Image to image: the live progress shows the sampling steps that really run when the denoise strength trims the schedule.
+- A Knowledge collection now finds the right excerpts for a short question with no context, such as "How do I connect a phone?", when a reranker is installed.
+
+### Changed
+- The graphical setup (`setup-gui.bat`) no longer opens a console or asks anything in one: the choice between keeping Python tooling in the folder (Portable) and sharing it from your user profile (Shared) is the first page of the setup window, and setup messages are shown in a window. `setup-gui.sh` asks nothing in the terminal either.
+- Chat: the chat style note is now off by default; turn it on in Settings > Model if you want it.
 
 ## [0.3.4b3] - 2026-11-17
 
