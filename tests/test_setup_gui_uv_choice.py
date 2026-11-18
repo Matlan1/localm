@@ -41,12 +41,17 @@ _CONHOST = 'start "" "%SystemRoot%\\System32\\conhost.exe" --headless '
 
 _STUB_INSTALLER = (
     "@echo off\r\n"
-    "echo INSTALLER-RAN INSTALL_DIR=[%UV_INSTALL_DIR%] UNMANAGED=[%UV_UNMANAGED_INSTALL%]\r\n"
+    "call :say\r\n"
     'if defined STUB_RC exit /b %STUB_RC%\r\n'
     'if not "%STUB_CREATES%"=="1" exit /b 0\r\n'
     'mkdir "%UV_INSTALL_DIR%" 2>nul\r\n'
     'type nul > "%UV_INSTALL_DIR%\\uv.exe"\r\n'
-    "exit /b 0\r\n")
+    "exit /b 0\r\n"
+    ":say\r\n"
+    "setlocal EnableDelayedExpansion\r\n"
+    "echo INSTALLER-RAN INSTALL_DIR=[!UV_INSTALL_DIR!] UNMANAGED=[!UV_UNMANAGED_INSTALL!]\r\n"
+    "endlocal\r\n"
+    "goto :eof\r\n")
 _STUB_WINDOW = (
     "@echo off\r\n"
     "call :fields\r\n"
@@ -68,16 +73,18 @@ _STUB_WINDOW = (
     ":stub_exit\r\n"
     "exit /b %CODE%\r\n"
     ":fields\r\n"
-    "echo WINDOW-UV=%UVEXE%\r\n"
-    "echo WINDOW-STORE=%LOCALM_GUI_STORE%\r\n"
-    "echo WINDOW-PYDIR=%UV_PYTHON_INSTALL_DIR%\r\n"
-    "echo WINDOW-CACHEDIR=%UV_CACHE_DIR%\r\n"
-    "echo WINDOW-GUIUV=%LOCALM_GUI_UV%\r\n"
-    "echo WINDOW-INSTALLED=%LOCALM_GUI_UV_INSTALLED%\r\n"
-    "echo WINDOW-BOOTSTRAP=%LOCALM_GUI_BOOTSTRAP%\r\n"
-    "echo WINDOW-REPOINTED=%LOCALM_GUI_REPOINTED%\r\n"
-    "echo WINDOW-SPLASH=%LOCALM_GUI_SPLASH%\r\n"
-    "echo WINDOW-LOG=%LOCALM_GUI_LOG%\r\n"
+    "setlocal EnableDelayedExpansion\r\n"
+    "echo WINDOW-UV=!UVEXE!\r\n"
+    "echo WINDOW-STORE=!LOCALM_GUI_STORE!\r\n"
+    "echo WINDOW-PYDIR=!UV_PYTHON_INSTALL_DIR!\r\n"
+    "echo WINDOW-CACHEDIR=!UV_CACHE_DIR!\r\n"
+    "echo WINDOW-GUIUV=!LOCALM_GUI_UV!\r\n"
+    "echo WINDOW-INSTALLED=!LOCALM_GUI_UV_INSTALLED!\r\n"
+    "echo WINDOW-BOOTSTRAP=!LOCALM_GUI_BOOTSTRAP!\r\n"
+    "echo WINDOW-REPOINTED=!LOCALM_GUI_REPOINTED!\r\n"
+    "echo WINDOW-SPLASH=!LOCALM_GUI_SPLASH!\r\n"
+    "echo WINDOW-LOG=!LOCALM_GUI_LOG!\r\n"
+    "endlocal\r\n"
     "goto :eof\r\n")
 _STUB_CONHOST = (
     "@echo off\r\n"
@@ -366,6 +373,47 @@ def test_a_double_click_starts_again_without_a_console_and_ends_at_once(tmp_path
     assert "/d /v:off /c \"\"" in ran[0] and str(clone / "probe.bat") in ran[0], ran[0]
     assert len(_fields(out, "WINDOW-UV")) == 1, "the window opened more or less than once"
     assert out.returncode == 0, (out.stdout, out.stderr)
+
+
+def test_the_real_start_without_a_console_runs_setup_from_an_awkward_folder(tmp_path):
+    """The real `start "" conhost --headless` line (no stand-in): the started
+    copy ends at once, and the copy under the windowless console host finds
+    its folder and opens the window, from a folder whose name holds cmd's
+    special characters."""
+    import time
+    report = tmp_path / "window-report.txt"
+    clone_name = "a&b %PATH% !x ^(y)"
+    text = _probe_text(hidden=False)
+    clone = tmp_path / clone_name
+    clone.mkdir()
+    (clone / "probe.bat").write_text(text, encoding="utf-8", newline="")
+    stubs = {}
+    for name, body in (("installer", _STUB_INSTALLER), ("window", _STUB_WINDOW)):
+        stubs[name] = tmp_path / f"stub-{name}.bat"
+        stubs[name].write_text(body, encoding="ascii", newline="")
+    home = tmp_path / "home"
+    home.mkdir()
+    system32 = Path(os.environ["SystemRoot"]) / "System32"
+    env = dict(os.environ, PATH=str(system32), USERPROFILE=str(home),
+               STUB_INSTALLER=str(stubs["installer"]), STUB_WINDOW=str(stubs["window"]),
+               STUB_CREATES="1", WINDOW_CODES="0", STUB_REPORT=str(report))
+    for var in ("LOCALM_SETUP_GUI_HIDDEN", "LOCALM_SETUP_GUI_INPLACE", "LOCALM_GUI_STORE",
+                "LOCALM_GUI_UV", "UV_PYTHON_INSTALL_DIR", "UV_CACHE_DIR", "STUB_RC"):
+        env.pop(var, None)
+    started = time.monotonic()
+    out = subprocess.run(["cmd", "/c", ".\\probe.bat"], cwd=str(clone), env=env,
+                         capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    assert out.returncode == 0 and time.monotonic() - started < 30, (out.stdout, out.stderr)
+    assert "WINDOW-UV=" not in out.stdout, "the window ran in the double-clicked copy"
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline and not (
+            report.is_file() and "WINDOW-LOG=" in report.read_text(encoding="utf-8", errors="replace")
+            and not (clone / ".localm-setup-gui.log").exists()):
+        time.sleep(0.25)
+    said = report.read_text(encoding="utf-8", errors="replace") if report.is_file() else ""
+    assert f"WINDOW-UV={clone / '.uv' / 'uv.exe'}" in said, said
+    assert f"WINDOW-LOG={clone / '.localm-setup-gui.log'}" in said, said
+    assert not (clone / ".localm-setup-gui.log").exists()
 
 
 def test_without_a_console_the_getting_ready_window_shows_and_its_file_is_removed(tmp_path):
