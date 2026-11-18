@@ -3,10 +3,10 @@
 "use strict";
 
 // --- ES module imports ---
-import { chat, lsSetScoped } from "./chat.js";
+import { buildEmptyHint, chat, lsSetScoped } from "./chat.js";
 import { recordGuiError } from "./client-log.js";
 import { $, GIB, SHELL_TOKEN, authHeaders, cancelJob, chooseAsync, confirmDangerAsync, el, fmtDuration, instanceCacheTrusted, openModal, readSSE, streamJob, toast } from "./helpers.js";
-import { applyI18n, t, tn } from "./i18n.js";
+import { applyI18n, onLanguageReload, t, tn } from "./i18n.js";
 import { interruptedCount, loadInterrupted, onInterruptedChange, renderInterrupted } from "./interrupted-pulls.js";
 import { refreshPerfEstimate } from "./settings-perf.js";
 
@@ -27,8 +27,15 @@ let _holdLoadFailed = false;
 // The model switchModel() is loading, "" when none; modelCache.loading carries
 // it until the load ends, whatever the polled list says.
 let _switchingTo = "";
+// Whether the load switchModel() runs makes the loaded model the one this tab
+// answers with (false for a load beside, or one that leaves the selection).
+let _switchActivates = true;
 let _loadingPollTimer = null;
 const LOADING_POLL_MS = 2000;
+// Chat sends held until the announced load ends (waitForModelLoad), and how the
+// last load this tab ran ended: the model name when it failed, "" otherwise.
+const _loadWaiters = new Set();
+let _lastLoadFailed = "";
 
 // State renders as a .job-state pill; busy maps to st-running. "note" is an ok
 // state the pill keeps visible (a chat routed to another instance).
@@ -586,6 +593,7 @@ async function _readActivity() {
 function _applyActivity(data) {
   const ops = Array.isArray(data.operations) ? data.operations : [];
   _activityOps = ops;
+  for (const op of ops) if (op.status === "running") _attachActivityStream(op);
   _activityServerNow = typeof data.now === "number" ? data.now : null;
   _activityKnown = true;
   _activityStaleReads = 0;
@@ -616,6 +624,39 @@ export async function pollActivity() {
   await _readActivity();
 }
 
+// Follow one running operation's stream so the details modal can show its
+// output and progress, whichever tab started it. Every read that lists a
+// running operation calls this, so an operation started in this tab and one
+// found at boot take the same path.
+function _attachActivityStream(op) {
+  if (_activityLogs.has(op.id)) return;
+  _activityLogs.set(op.id, { lines: [] });
+  streamJob(op.id, (line) => {
+    const entry = _activityLogs.get(op.id);
+    if (entry) entry.lines.push(line);
+    _refreshActivityModalIfOpen();
+  }, (ev) => {
+    const idx = _activityOps.findIndex((o) => o.id === op.id);
+    if (idx !== -1 && (typeof ev.pct === "number" || ev.detail)) {
+      _activityOps[idx] = { ..._activityOps[idx], pct: ev.pct, detail: ev.detail };
+      renderActivityPill(_activityOps);
+      _refreshActivityModalIfOpen();
+    }
+  }).then((end) => {
+    // "disconnected" is a CLIENT-only concept (streamJob gave up
+    // reconnecting) - it is not a real job outcome, so it must never
+    // overwrite the last known SERVER-reported status; the job may well
+    // still be running, we have just lost our own update channel to it.
+    if (end.status === "disconnected") return;
+    const idx = _activityOps.findIndex((o) => o.id === op.id);
+    if (idx !== -1) {
+      _activityOps[idx] = { ..._activityOps[idx], status: end.status };
+      renderActivityPill(_activityOps);
+      _refreshActivityModalIfOpen();
+    }
+  });
+}
+
 // Boot-time reattach, mirroring coder.js's reattachSessions(): ask the server
 // what is running, reattach a live stream to anything found (fire-and-forget -
 // an operation can run far longer than boot should wait), and toast once.
@@ -628,33 +669,6 @@ export async function reattachActivity() {
     if (!ops) return;   // server unreachable at boot - same as reattachSessions()
     const running = ops.filter((op) => op.status === "running");
     if (!running.length) return;
-    for (const op of running) {
-      _activityLogs.set(op.id, { lines: [] });
-      streamJob(op.id, (line) => {
-        const entry = _activityLogs.get(op.id);
-        if (entry) entry.lines.push(line);
-        _refreshActivityModalIfOpen();
-      }, (ev) => {
-        const idx = _activityOps.findIndex((o) => o.id === op.id);
-        if (idx !== -1 && (typeof ev.pct === "number" || ev.detail)) {
-          _activityOps[idx] = { ..._activityOps[idx], pct: ev.pct, detail: ev.detail };
-          renderActivityPill(_activityOps);
-          _refreshActivityModalIfOpen();
-        }
-      }).then((end) => {
-        // "disconnected" is a CLIENT-only concept (streamJob gave up
-        // reconnecting) - it is not a real job outcome, so it must never
-        // overwrite the last known SERVER-reported status; the job may well
-        // still be running, we have just lost our own update channel to it.
-        if (end.status === "disconnected") return;
-        const idx = _activityOps.findIndex((o) => o.id === op.id);
-        if (idx !== -1) {
-          _activityOps[idx] = { ..._activityOps[idx], status: end.status };
-          renderActivityPill(_activityOps);
-          _refreshActivityModalIfOpen();
-        }
-      });
-    }
     toast(running.length === 1
       ? t("activity.reattachedOne", { label: activityLabel(running[0]) })
       : t("activity.reattachedMany", { count: running.length }));
@@ -1064,6 +1078,70 @@ window.refreshInstallGateIfOpen = function () {
 
 export let modelCache = { models: [], active: "" };
 
+/** The model whose load the dropdown and the chat area announce, "" when none.
+ *  A load that leaves the answering model as it is (a load beside, a reload of a
+ *  model that is not the active one) is not announced as the selection. */
+function _announcedLoading(peerRoute) {
+  const loading = !peerRoute && typeof modelCache.loading === "string" ? modelCache.loading : "";
+  if (loading && loading === _switchingTo && !_switchActivates) return "";
+  return loading;
+}
+
+/** Show or hide the chat area's loading line to match the load in flight. */
+function _renderLoadBanner() {
+  const banner = $("chat-load-banner");
+  if (!banner) return;
+  const loading = _announcedLoading(_peerSelected !== null);
+  banner.textContent = loading ? t("chat.modelLoadingBanner", { model: loading }) : "";
+  banner.hidden = !loading;
+  _releaseLoadWaiters();
+}
+
+/** The model whose load the sidebar announces now, "" when none. */
+export function announcedLoadingModel() {
+  return _announcedLoading(_peerSelected !== null);
+}
+
+function _releaseLoadWaiters() {
+  if (!_loadWaiters.size || _announcedLoading(_peerSelected !== null)) return;
+  const waiting = [..._loadWaiters];
+  _loadWaiters.clear();
+  queueMicrotask(() => {
+    const failed = !!_lastLoadFailed || (!modelCache.active && !modelCache.resumable);
+    for (const w of waiting) w({ aborted: false, failed, failedModel: _lastLoadFailed });
+  });
+}
+
+/** Resolves once no load is announced: {aborted: false, failed, failedModel},
+ *  failed when the last load failed or ended with no model to answer, or
+ *  {aborted: true} when *signal* aborts first. Resolves at once when no load
+ *  is announced. */
+export function waitForModelLoad(signal) {
+  return new Promise((resolve) => {
+    if (signal && signal.aborted) { resolve({ aborted: true }); return; }
+    if (!_announcedLoading(_peerSelected !== null)) {
+      resolve({ aborted: false, failed: false, failedModel: "" });
+      return;
+    }
+    _lastLoadFailed = "";
+    const done = (out) => {
+      if (signal) signal.removeEventListener("abort", onAbort);
+      resolve(out);
+    };
+    const onAbort = () => { _loadWaiters.delete(done); resolve({ aborted: true }); };
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+    _loadWaiters.add(done);
+  });
+}
+
+/** Redraw the empty chat page when it is what the chat area shows, so it names
+ *  the model that is active now instead of the one it was drawn for. */
+function _refreshEmptyHint() {
+  const box = $("chat-messages");
+  const hint = box && box.children.length === 1 && box.firstElementChild;
+  if (hint && hint.classList.contains("empty-hint")) hint.replaceWith(buildEmptyHint());
+}
+
 // Tracks whether refreshModels() has completed at least once, so the very first
 // (boot-time) call can be told apart from a later call that legitimately observes
 // NO active model (an external unload, or a poll landing before anything has ever
@@ -1076,6 +1154,7 @@ let _modelsEverRefreshed = false;
  *  unload to "" included, unlike `localm:model-switched`. */
 function _publishActiveChange(previous) {
   if (modelCache.active === previous) return;
+  _refreshEmptyHint();
   window.dispatchEvent(new CustomEvent("localm:active-model-changed",
     { detail: { model: modelCache.active } }));
 }
@@ -1089,7 +1168,9 @@ export async function refreshModels() {
       // browsers suppress prompt(), leaving a phone/LAN client on a blank page
       // (NET-1). After a first successful read the key had been accepted, so
       // the gate says the session ended.
-      showKeyGate(t(_modelsEverRefreshed ? "keygate.sessionEnded" : "models.keyRequired"));
+      if (window.__localmLocked !== true) {
+        showKeyGate(t(_modelsEverRefreshed ? "keygate.sessionEnded" : "models.keyRequired"));
+      }
       return;
     }
     if (r.status === 403) {
@@ -1172,19 +1253,22 @@ export async function refreshModels() {
       const placeholder = document.createElement("option");
       placeholder.value = "";
       const notLoaded = !modelCache.active && !!modelCache.resumable && !peerRoute;
-      placeholder.textContent = notLoaded
-        ? t("sidebar.modelNotLoaded", { model: modelCache.resumable })
-        : t("sidebar.noModelLoaded");
+      const loadingNow = _announcedLoading(!!peerRoute);
+      placeholder.textContent = loadingNow
+        ? t("sidebar.status.loading", { model: loadingNow })
+        : notLoaded
+          ? t("sidebar.modelNotLoaded", { model: modelCache.resumable })
+          : t("sidebar.noModelLoaded");
       placeholder.disabled = true;
-      if (!willServe || notLoaded) placeholder.selected = true;
+      if (!willServe || notLoaded || loadingNow) placeholder.selected = true;
       modelSelect.appendChild(placeholder);
       for (const m of modelCache.models) {
         const opt = document.createElement("option");
         opt.value = m.name;
         const size = m.size_bytes ? ` (${(m.size_bytes / GIB).toFixed(1)} GB)` : "";
         opt.textContent = m.name + size;
-        if (peerRoute ? m.name === _peerSelected
-            : m.active) opt.selected = true;
+        if (!loadingNow && (peerRoute ? m.name === _peerSelected
+            : m.active)) opt.selected = true;
         modelSelect.appendChild(opt);
       }
     }
@@ -1217,6 +1301,7 @@ export async function refreshModels() {
         setStatus("ok", data.active || data.resumable || t("sidebar.status.noModel"));
       }
     }
+    _renderLoadBanner();
     // Present only when there is something to unload - not merely a courtesy,
     // the model this targets (modelCache.active) is the ONLY thing that makes
     // its click handler well-defined.
@@ -1622,7 +1707,9 @@ export function confirmLoadText(data) {
 function _endSwitch(model) {
   if (_switchingTo !== model) return;
   _switchingTo = "";
+  _switchActivates = true;
   if (modelCache.loading === model) modelCache.loading = "";
+  _renderLoadBanner();
 }
 
 /** Undo switchModel()'s marks after the user declined a dialog of the switch,
@@ -1646,8 +1733,11 @@ export async function switchModel(model, { local = false, activate = true, selec
       _storePeerSelected();
     }
     setStatus("busy", t("sidebar.status.loading", { model }));
+    _lastLoadFailed = "";
     _switchingTo = model;
+    _switchActivates = select && activate;
     modelCache.loading = model;
+    _renderLoadBanner();
     let force = false;
     let asChat = false;
     let keepOthers = false;
@@ -1684,6 +1774,7 @@ export async function switchModel(model, { local = false, activate = true, selec
     }
   } catch (e) {
     // A failed load ends the busy pill and re-reads the server's model state.
+    _lastLoadFailed = model;
     _endSwitch(model);
     setStatus("err", t("sidebar.status.loadFailed"));
     _holdLoadFailed = true;
@@ -1923,7 +2014,7 @@ if (sidebarUnloadBtn) {
 
 // The model dropdown's placeholder and the status pill are written by
 // refreshModels, so they are redrawn when the interface language changes.
-document.addEventListener("localm:language", () => {
+onLanguageReload(() => {
   refreshModels();
   if (_installEnv) applyInstallUI(_installEnv);
 });

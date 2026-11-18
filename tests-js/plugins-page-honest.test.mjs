@@ -101,3 +101,26 @@ test("an external install that cannot reach the server says so", async () => {
   await settle();
   assert.match(win.document.getElementById("toast-errors").textContent, /Install failed: Failed to fetch/);
 });
+
+test("an install shows the plugin's own install note (voice: the speech model download)", async () => {
+  const note = "Network access is off (net_mode=off), so the Whisper 'base' speech model was not downloaded.";
+  const { window: win } = setup([], {
+    "/api/plugins/voice/install": () => ok({ status: "installed", name: "voice", enabled: true, note }),
+  });
+  runScript(win, "pluginCatalogAction('install', 'voice');");
+  await settle();
+  const shown = win.document.getElementById("toast").textContent;
+  assert.match(shown, /^voice: installed\. /);
+  assert.ok(shown.endsWith(note), shown);
+});
+
+test("an external install shows the plugin's install note", async () => {
+  const { window: win } = setup([], {
+    "/api/plugins/install-external": () => ok({ status: "installed", name: "ext", version: "1.0",
+                                                enabled: true, note: "ext says hello" }),
+  });
+  win.document.getElementById("plugin-source").value = "/some/folder";
+  win.document.getElementById("plugin-install").click();
+  await settle();
+  assert.match(win.document.getElementById("toast").textContent, /'ext' 1\.0\. ext says hello$/);
+});

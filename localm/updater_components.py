@@ -923,18 +923,22 @@ def _stop_comfy(root: Path, say: Callable) -> list:
     import time
 
     from localm import install_manifest, updater_runtime
-    found = _running_in(root)
-    if not found:
+    if not root.is_dir():
         return []
     procs = install_manifest.list_processes() or []
+    found = install_manifest.running_from([root], procs=procs)
+    if not found:
+        return []
     by_pid = {p[0]: p for p in procs}
+    starts = {p[0]: p[3] for p in procs}
     deadline = time.monotonic() + _STOP_WAIT_S
     left = []
     for pid, _exe in found:
         if pid not in by_pid:
             continue
         say(f"Stopping the managed ComfyUI (pid {pid})...")
-        left += updater_runtime._stop_tree(updater_runtime._subtree(by_pid, pid), deadline)
+        left += updater_runtime._stop_tree(install_manifest.descendants(by_pid, pid), deadline,
+                                           starts)
     return [{"pid": pid, "name": "the managed ComfyUI"} for pid in left]
 
 
@@ -1800,7 +1804,7 @@ def _commands(p: dict, root: Path):
             yield [uv, *c]
         return
     if p["name"] == "sdcpp":
-        yield from ([sys.executable, "-m", "localm", "setup-sdcpp", "--backend", b]
+        yield from ([sys.executable, "-m", "localm", "setup-sdcpp", "--backend", b, "--yes"]
                     for b in p["items"])
         return
     if p["name"] == "koboldcpp":
@@ -1990,9 +1994,11 @@ def finish_pending(*, root=None, home=None, runner: Optional[Callable] = None,
             existed |= {str(d) for d in base.iterdir() if d.is_dir()}
     done = []
     problem = None
+    from localm.setup_spec import VC_RUNTIME_ABSENT_EXIT
     for p in todo:
         done.append(p)
         say(f"Updating the {p['label']}...")
+        vc_absent = False
         try:
             if p["name"] == "uv":
                 problem = _update_uv(p, root, say, bootstrap)
@@ -2005,6 +2011,9 @@ def finish_pending(*, root=None, home=None, runner: Optional[Callable] = None,
                             problem = str(e)
                             break
                     rc = int(run(cmd))
+                    if rc == VC_RUNTIME_ABSENT_EXIT and p["name"] == "sdcpp":
+                        vc_absent = True
+                        break
                     if rc != 0:
                         what = (" ".join(cmd[2:4]) if cmd[1:2] == ["-m"]
                                 else f"{Path(str(cmd[0])).name} {' '.join(cmd[1:3])}")
@@ -2012,6 +2021,12 @@ def finish_pending(*, root=None, home=None, runner: Optional[Callable] = None,
                         break
         except Exception as e:
             problem = f"could not run its update: {e}"
+        if problem is None and vc_absent:
+            p["result"] = "skipped"
+            say(f"The {p['label']} was not updated: the Microsoft Visual C++ "
+                "Redistributable is missing. Run 'localm setup-llama', which offers to "
+                "install it.")
+            continue
         if problem is None:
             problem = _verify(p, root, home)
         if problem is not None:
@@ -2029,9 +2044,12 @@ def finish_pending(*, root=None, home=None, runner: Optional[Callable] = None,
                       "a rollback puts back every package that differs", e)
         rest = summary([p for p in plans if not p["update"]])
         status.update(state="updated", note="; ".join(
-            "updated the " + p["label"] + (f": {p['current']} -> {p['target']}"
-                                           if p["name"] in ("sdcpp", "koboldcpp", "uv")
-                                           else "")
+            ("updated the " + p["label"] + (f": {p['current']} -> {p['target']}"
+                                            if p["name"] in ("sdcpp", "koboldcpp", "uv")
+                                            else ""))
+            if p.get("result") != "skipped" else
+            (f"the {p['label']} was not updated: the Microsoft Visual C++ Redistributable "
+             "is missing; run 'localm setup-llama', which offers to install it")
             for p in todo) + (f"; {rest}" if rest else ""))
         _write_status(status, root, installed_version)
         _mark_checked(root, installed_version)

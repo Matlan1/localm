@@ -21,12 +21,16 @@ if not defined RBPY for %%P in (py.exe python.exe python3.exe) do if not defined
     where %%P >nul 2>nul && set "RBPY=%%P"
 )
 
+rem The rollback replaces this file while it runs, so the run, the hold and the
+rem exit are one block: nothing more is read from the file after it returns.
 if defined RBPY (
     "%RBPY%" "%~dp0scripts\rollback_update.py" %*
-) else (
-    echo No Python found to run the rollback. Restore the previous version by hand:
-    echo copy the contents of home\updates\backup back into this folder.
+    call set "RC=%%errorlevel%%"
+    echo.
+    pause
+    call exit /b %%RC%%
 )
-
+echo No Python found to run the rollback. Restore the previous version by hand:
+echo copy the contents of home\updates\backup back into this folder.
 echo.
 pause

@@ -24,6 +24,8 @@ import time
 
 from fastapi.testclient import TestClient
 
+from localm import config
+from tests._home_bound_guard import unfinished_home_bound_runs
 from tests.test_gui import _FAKE_REGISTRY, gui_app  # noqa: F401
 
 
@@ -69,12 +71,15 @@ def test_start_cli_host_label_is_reported_as_label_in_the_listing(gui_app):  # n
     Runs `--version`, not a pull.
     """
     app, _ = gui_app
+    before = set(config.home_bound_runs())
     job = app.state.jobs.start_cli("pull", ["--version"],
                                    host_label="Model pull owner/repo")
     rows = [j for j in app.state.jobs.snapshot() if j["id"] == job.id]
     assert rows, "start_cli produced no listing row"
     assert rows[0]["label"] == "Model pull owner/repo", rows[0]
     assert rows[0]["kind"] == "pull", rows[0]
+    assert unfinished_home_bound_runs(before, timeout=60.0) == [], (
+        "the job's worker never finished")
 
 
 def test_the_route_labels_its_job_with_the_spec(gui_app, monkeypatch):  # noqa: F811

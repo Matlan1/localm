@@ -150,11 +150,30 @@ export function pickPath(opts = {}) {
   return new Promise((resolve) => {
     let settled = false;
     let cleanup = () => {};
-    const finish = (value) => {
+    // The one #modal holds a single dialog, so opening the picker would
+    // destroy the dialog it was opened from. Its content is set aside here and
+    // put back when the picker is answered, so the caller's dialog (its fields
+    // and handlers) is still there to receive the pick.
+    const prior = $("modal").style.display !== "none" ? {
+      title: $("modal-title").textContent,
+      nodes: Array.from($("modal-body").childNodes),
+      cls: ($("modal").querySelector(".modal") || $("modal")).className,
+    } : null;
+    const finish = (value, { closed = false } = {}) => {
       if (settled) return;
       settled = true;
       cleanup();
-      $("modal").style.display = "none";
+      const dead = prior && prior.nodes.some(
+        (n) => n.matches?.("[data-dead]") || n.querySelector?.("[data-dead]"));
+      if (prior && !closed && !dead) {
+        $("modal-title").textContent = prior.title;
+        $("modal-body").replaceChildren(...prior.nodes);
+        const box = $("modal").querySelector(".modal");
+        if (box) box.className = prior.cls;
+        $("modal").style.display = "flex";
+      } else {
+        $("modal").style.display = "none";
+      }
       resolve(value);
     };
 
@@ -378,7 +397,8 @@ export function pickPath(opts = {}) {
         const canSelect = selectable(entry);
         const full = joinPath(current, entry.name);
         const row = el("div", "picker-row " +
-          (entry.is_dir ? "is-dir" : "is-file") + (canSelect ? "" : " unselectable"));
+          (entry.is_dir ? "is-dir" : "is-file")
+          + (canSelect || entry.is_dir ? "" : " unselectable"));
         row.dataset.path = full;
         row._entry = entry;
         if (multi) {
@@ -545,6 +565,7 @@ export function pickPath(opts = {}) {
         return fetchDirs(path, true, true, true).then((d) => {
           if (seq !== reqSeq) return;                 // superseded by a newer nav
           if (push && current !== d.path) history.push(current);
+          if (current !== d.path && filterText) { filterIn.value = ""; filterText = ""; }
           current = d.path;
           data = d;
           // Landing in a dot-directory turns the Hidden toggle on.
@@ -630,7 +651,9 @@ export function pickPath(opts = {}) {
         if (e.key === "ArrowDown") { e.preventDefault(); listEl.focus(); moveActive(1); }
         else if (e.key === "Enter") { e.preventDefault(); if (visibleRows.length) onRowActivate(visibleRows[0]); }
         else if (e.key === "Escape") {
-          if (filterText) { filterIn.value = ""; filterText = ""; renderList(); }
+          e.preventDefault();
+          e.stopPropagation();
+          if (filterText) { filterIn.value = ""; filterText = ""; renderList(); updateCount(); }
           else finish(null);
         }
       };
@@ -699,7 +722,7 @@ export function pickPath(opts = {}) {
       // Dismissing via the shared modal chrome (x / Escape) sets
       // display:none; poll for that and resolve null.
       const watch = setInterval(() => {
-        if ($("modal").style.display === "none") { clearInterval(watch); finish(null); }
+        if ($("modal").style.display === "none") { clearInterval(watch); finish(null, { closed: true }); }
       }, 200);
       const escHandler = (e) => {
         if (e.key !== "Escape") return;

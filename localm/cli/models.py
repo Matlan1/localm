@@ -76,6 +76,11 @@ def benchmark(model, gen_tokens, prompts, ctx, gpu_layers):
 
     rows = []
     try:
+        for _ in engine.chat_stream(
+            [{"role": "user", "content": "Hi"}], max_tokens=1,
+            temperature=0.0, cache_prompt=False,
+        ):
+            pass
         for target in sizes:
             # Build a prompt of roughly `target` tokens using the real tokenizer
             padding = pad_block
@@ -90,7 +95,7 @@ def benchmark(model, gen_tokens, prompts, ctx, gpu_layers):
             pieces = []
             for piece in engine.chat_stream(
                 [{"role": "user", "content": prompt}],
-                max_tokens=gen_tokens, temperature=0.0,
+                max_tokens=gen_tokens, temperature=0.0, cache_prompt=False,
             ):
                 if first_at is None:
                     first_at = _time.perf_counter()
@@ -122,8 +127,20 @@ def benchmark(model, gen_tokens, prompts, ctx, gpu_layers):
             f"{ttft_ms:.0f}", f"{tps:.1f}", f"{elapsed:.1f}",
         )
     console.print(table)
-    console.print("[dim]TTFT includes prompt prefill; tok/s measures pure "
+    console.print("[dim]TTFT is the time to the first token, including "
+                  "prefill of the whole prompt (the prompt cache is off and "
+                  "one warm-up run is not timed); tok/s measures pure "
                   "generation after the first token.[/dim]")
+
+
+def _draft_reason(status) -> str:
+    """The reason sentence for a draft-source status code; any other status
+    is shown as it is."""
+    status = str(status)
+    if status.startswith("draft-") or status == "rewind-unsupported":
+        from ..inference.backends.llamacpp._draftmodel import draft_status_message
+        return draft_status_message(status)
+    return status
 
 
 # Prompts the MTP comparison generates from. Draft acceptance varies by the kind
@@ -369,7 +386,7 @@ def _run_spec_bench(model, label, arm, rounds, kinds=None):
                         console.print(
                             f"\n[yellow]{label} cannot run on "
                             f"{escape(model)}[/yellow]"
-                            + (f" ({escape(str(st))})" if st else "")
+                            + (f" ({escape(_draft_reason(st))})" if st else "")
                             + ".\nThe setting would make no difference to it.")
                     return
             else:
@@ -1777,8 +1794,8 @@ def rename(old_name, new_name):
     Unlike 'localm alias', OLD_NAME stops working wherever a name is typed or
     sent. Only the name changes: the file stays, and settings, jobs, pinned chats,
     Knowledge collections, adapters and media workflows keep pointing at this
-    model. A per-project .localcoder/config.toml 'model' setting is a name you
-    typed, so it must name the model as it is called now.
+    model. A per-project .localcoder/config.toml 'model' setting is a stored name,
+    so it follows the rename.
 
     If a localm server is serving this directory it performs the rename, so a
     model that is loaded right now keeps serving under its new name instead of
@@ -1877,9 +1894,9 @@ def ps_cmd():
     table.add_column("ID")
     table.add_column("Status")
     table.add_column("Surface")
-    table.add_column("Address")
+    table.add_column("Address", overflow="fold")
     table.add_column("PID", justify="right")
-    table.add_column("Directory")
+    table.add_column("Directory", overflow="fold")
     for r in rows:
         alive = r.get("alive")
         status = "[green]live[/green]" if alive else "[yellow]no answer[/yellow]"

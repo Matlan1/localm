@@ -11,8 +11,10 @@ from tests.test_owner_only_settings import _owner, _scoped, app_env  # noqa: F40
 
 
 def _write_registry(tmp_path, entries: dict) -> None:
+    import localm.config as cfg
     (tmp_path / ".localm" / "registry.json").write_text(json.dumps(entries),
                                                         encoding="utf-8")
+    cfg._loop_reads_invalidate()
 
 
 # ------------------------------------------------------------ net mode

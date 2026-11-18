@@ -40,10 +40,3 @@ export function isPrereleaseTag(tag) {
   const k = tagKey(tag);
   return k !== null && k[3] !== FINAL_RANK;
 }
-
-// True when *client*, a version with or without the leading "v", orders below app tag
-// *tag*. A value that is not a version is not older.
-export function clientOlderThan(client, tag) {
-  const c = "v" + String(client).replace(/^v/, "");
-  return tagAtMost(c, tag) && !tagAtMost(tag, c);
-}

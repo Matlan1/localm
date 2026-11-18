@@ -65,15 +65,15 @@ def test_security_md_lists_exactly_the_routes_that_take_no_bearer_key():
     section = _between(_collapsed("SECURITY.md"),
                        "The routes that take no bearer key are",
                        "*State-changing endpoints* below")
-    documented = set(re.findall(r"`(GET|POST) (/[^`\s]*)`", section))
+    documented = set(re.findall(r"`(GET|POST|HEAD) (/[^`\s]*)`", section))
     assert documented == _keyless_routes()
 
 
 def test_server_api_md_names_every_keyless_route_except_the_api_landing_root():
     doc = _collapsed("docs/server-api.md")
     section = _between(doc, "session cookie) except", "Most authenticated")
-    documented = set(re.findall(r"`(GET|POST) (/[^`\s]*)`", section))
-    assert documented == _keyless_routes() - {("GET", "/")}
+    documented = set(re.findall(r"`(GET|POST|HEAD) (/[^`\s]*)`", section))
+    assert documented == _keyless_routes() - {("GET", "/"), ("HEAD", "/")}
 
 
 # --------------------------------------------------------------------------- #

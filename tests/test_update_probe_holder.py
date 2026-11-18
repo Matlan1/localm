@@ -248,7 +248,8 @@ def test_stop_ends_a_daemon_windows_does_not_name_and_refuses_a_foreign_holder(t
     monkeypatch.setattr(install_manifest, "list_processes", lambda: _procs((10, 1, launcher), (40, 1, launcher)))
     monkeypatch.setattr(install_manifest, "command_line", {10: probe, 40: "x -m other"}.get)
     stopped = []
-    monkeypatch.setattr(install_manifest, "_stop", lambda pid, timeout=0: stopped.append(pid) or True)
+    monkeypatch.setattr(install_manifest, "_stop",
+                        lambda pid, timeout=0, start=None: stopped.append(pid) or True)
     monkeypatch.setattr(updater_runtime, "holders", lambda lib: [{"pid": None, "name": "an unidentified process"}])
     assert updater_runtime.stop_own_probe_daemons(tmp_path, root) == 1
     assert stopped == [10]
@@ -256,6 +257,49 @@ def test_stop_ends_a_daemon_windows_does_not_name_and_refuses_a_foreign_holder(t
     monkeypatch.setattr(updater_runtime, "holders", lambda lib: [{"pid": 40, "name": "other"}])
     assert updater_runtime.stop_own_probe_daemons(tmp_path, root) is None
     assert stopped == []
+
+
+def _daemon_beside_a_model_worker(tmp_path, monkeypatch):
+    """An install whose probe daemon (venv launcher 10, base interpreter 11 outside
+    the install) and model worker (launcher 20, base interpreter 21) both hold the
+    runtime, as a server with a model loaded does. Returns (root, stopped pids)."""
+    from localm import install_manifest
+    root = tmp_path / "inst"
+    launcher = str(root / ".venv" / "Scripts" / "python.exe")
+    base = str(tmp_path / "shared" / "python.exe")
+    probe = f"x -u -m {PROBE_MODULE}"
+    worker = "x -c from multiprocessing.spawn import spawn_main; spawn_main(parent_pid=5)"
+    monkeypatch.setattr(install_manifest, "list_processes", lambda: _procs(
+        (5, 1, launcher), (10, 5, launcher), (11, 10, base), (20, 5, launcher), (21, 20, base)))
+    monkeypatch.setattr(install_manifest, "command_line", {
+        5: "x -m localm gui", 10: probe, 11: probe, 20: worker, 21: worker}.get)
+    monkeypatch.setattr(updater_runtime, "holders",
+                        lambda lib: [{"pid": 11, "name": "python"}, {"pid": 21, "name": "python"}])
+    stopped = []
+    monkeypatch.setattr(install_manifest, "_stop",
+                        lambda pid, timeout=0, start=None: stopped.append((pid, start)) or True)
+    return root, stopped
+
+
+def test_the_daemon_is_stopped_while_a_model_worker_also_holds_the_runtime(tmp_path, monkeypatch):
+    root, stopped = _daemon_beside_a_model_worker(tmp_path, monkeypatch)
+    assert updater_runtime.stop_running_own_probe_daemons(root) == 2
+    assert stopped == [(11, 1002), (10, 1001)], "the base interpreter first, each with its start time"
+
+
+def test_the_holder_check_keeps_stopping_nothing_beside_a_model_worker(tmp_path, monkeypatch):
+    root, stopped = _daemon_beside_a_model_worker(tmp_path, monkeypatch)
+    assert updater_runtime.stop_own_probe_daemons(tmp_path, root) is None
+    assert stopped == []
+
+
+def test_stopping_running_daemons_with_no_process_list_stops_nothing(tmp_path, monkeypatch):
+    from localm import install_manifest
+    monkeypatch.setattr(install_manifest, "list_processes", lambda: None)
+    monkeypatch.setattr(install_manifest, "_stop", lambda *a, **k: pytest.fail("stopped"))
+    assert updater_runtime.stop_running_own_probe_daemons(tmp_path) is None
+    monkeypatch.setattr(install_manifest, "list_processes", lambda: [])
+    assert updater_runtime.stop_running_own_probe_daemons(tmp_path) == 0
 
 
 def test_stop_own_holders_ends_an_unnamed_own_daemon_before_counting_it_a_stranger(tmp_path, monkeypatch):
@@ -354,6 +398,42 @@ def test_probe_daemon_held_stops_the_daemon_and_spawns_none_until_it_ends(monkey
     assert _loader._PROBE_HOLDS == 0
     assert _loader.gpu_memory_isolated() is None
     assert spawned == [1], "after the hold a query starts a daemon again"
+
+
+_LAUNCHED_HOLDER = """
+import ctypes, os, sys
+ctypes.WinDLL(sys.argv[1])
+print('ready', os.getpid(), flush=True)
+sys.stdin.read()
+"""
+
+
+@win_only
+def test_stopping_the_daemon_frees_the_runtime_its_launchers_child_loaded(tmp_path, monkeypatch):
+    dll = tmp_path / "ggml-base.dll"
+    shutil.copy2(next(Path(sys.base_prefix, "DLLs").glob("libffi*.dll")), dll)
+    script = tmp_path / "holder.py"
+    script.write_text(_LAUNCHED_HOLDER, encoding="utf-8")
+    proc = subprocess.Popen([sys.executable, "-u", str(script), str(dll)],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, text=True,
+                            creationflags=subprocess.CREATE_NO_WINDOW)
+    try:
+        ready, child = proc.stdout.readline().split()
+        assert ready == "ready"
+        child = int(child)
+        monkeypatch.setattr(_loader, "_PROBE_PROC", proc)
+        _loader.stop_probe_daemon()
+        with open(dll, "r+b"):
+            pass
+        assert not install_manifest._alive(child)
+        assert _loader._PROBE_PROC is None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=10)
+        for stream in (proc.stdin, proc.stdout):
+            stream.close()
 
 
 def test_the_restart_runs_its_update_steps_with_the_daemon_held(monkeypatch):

@@ -223,19 +223,21 @@ _GUI_UV_RUN = '"%UVEXE%" run --no-project --isolated --python 3.12 python "insta
 
 @_needs_windows
 @pytest.mark.parametrize("fails", _OUTCOMES)
-@pytest.mark.parametrize("pick,uv_exe", [("1", Path(".uv") / "uv.exe"), ("2", None)])
-def test_setup_gui_bat_leaves_nothing_in_the_system_temp_folder(tmp_path, pick, uv_exe, fails):
-    _setup_gui_bat_installs_uv(tmp_path, "clone", pick, uv_exe, fails)
+def test_setup_gui_bat_leaves_nothing_in_the_system_temp_folder(tmp_path, fails):
+    _setup_gui_bat_installs_uv(tmp_path, "clone", fails)
 
 
 @_needs_windows
 @pytest.mark.parametrize("fails", _OUTCOMES)
 @pytest.mark.parametrize("folder", _AWKWARD_FOLDERS)
 def test_setup_gui_bat_installs_uv_from_an_awkward_folder(tmp_path, folder, fails):
-    _setup_gui_bat_installs_uv(tmp_path, folder, "1", Path(".uv") / "uv.exe", fails)
+    _setup_gui_bat_installs_uv(tmp_path, folder, fails)
 
 
-def _setup_gui_bat_installs_uv(tmp_path, clone_name, pick, uv_exe, fails):
+def _setup_gui_bat_installs_uv(tmp_path, clone_name, fails):
+    """setup-gui.bat asks nothing and always installs uv into .\\.uv; the
+    per-user install of the Shared choice runs from the window
+    (localm.uv_tool.bootstrap_uv with shared=True)."""
     clone, scratch, home, log = _layout(tmp_path, clone_name)
     _pinned_copy("setup-gui.bat", clone, tmp_path / "releases", _PS_STUB, bat=True)
     script = clone / "setup-gui.bat"
@@ -243,8 +245,9 @@ def _setup_gui_bat_installs_uv(tmp_path, clone_name, pick, uv_exe, fails):
     assert text.count(_GUI_UV_RUN) == 1, "the window launch line moved"
     script.write_bytes(text.replace(_GUI_UV_RUN, "set UVEXE& cmd /c exit 0")
                        .encode("utf-8"))
-    rc, out = _cmd(script, clone, _windows_env(scratch, home, log, fails), f"{pick}\nY\n\n\n")
-    installed = clone / uv_exe if uv_exe else home / ".local" / "bin" / "uv.exe"
+    rc, out = _cmd(script, clone,
+                   _windows_env(scratch, home, log, fails, LOCALM_SETUP_GUI_INPLACE="1"), "")
+    installed = clone / ".uv" / "uv.exe"
     if fails:
         assert rc == 1 and "uv still is not callable" in out, out
     else:

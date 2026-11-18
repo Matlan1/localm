@@ -68,10 +68,10 @@ def test_consolidation_surfaces_user_eviction(tmp_path, monkeypatch):
     def complete(prompt: str) -> str:
         if "durable" in prompt:
             return json.dumps({"facts": [
-                {"fact": "brand new distinct synthesized fact", "confidence": 0.9}]})
+                {"fact": "User has a brand new distinct synthesized fact", "confidence": 0.9}]})
         return json.dumps({"decision": "ADD", "confidence": 0.9})
 
-    res = run_consolidation(s, "User: a wholly new topic", complete, now=NOW)
+    res = run_consolidation(s, "User: I have a brand new distinct synthesized fact", complete, now=NOW)
     assert res.get("evicted_user", 0) >= 1
     assert "warning" in res and "evicted" in res["warning"]
 

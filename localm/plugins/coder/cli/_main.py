@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 import click
 
@@ -431,6 +431,8 @@ def main(
         # does not exit with it still in flight on a daemon thread.
         agent.reflect_in_background = False
 
+    agent.verify_off = bool(no_verify)
+
     if patch_mode:
         agent.patch_mode = True
 
@@ -559,11 +561,17 @@ def main(
         if patch_mode and agent.has_patch():
             patch_content = agent.flush_patch()
             if patch_mode == "-":
-                sys.stdout.write(patch_content)
+                raw = getattr(sys.stdout, "buffer", None)
+                if raw is None:
+                    sys.stdout.write(patch_content)
+                else:
+                    sys.stdout.flush()
+                    raw.write(patch_content.encode("utf-8"))
+                    raw.flush()
             else:
                 out = Path(patch_mode)
                 out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_text(patch_content, encoding="utf-8")
+                out.write_text(patch_content, encoding="utf-8", newline="")
                 print_info(f"Patch written to {out}")
 
         md_path = finish_agent(agent)
@@ -589,7 +597,8 @@ def _run_doctor(work_dir: Path, model, url, api_key, native_tools, port,
     backend = _build_backend(
         provider, url, model or "localm", api_key, native_tools, port, False,
         False, work_dir, False, probe_only=True,
-        machine_output=(output_format or "text").lower() in ("json", "jsonl"))
+        machine_output=(output_format or "text").lower() in ("json", "jsonl"),
+        check_registered=bool(model))
     checks = run_doctor(work_dir, backend, verify_cmd=verify_cmd)
     click.echo(render(checks, output_format))
     if not report_ok(checks):
@@ -724,12 +733,16 @@ def _detect_verify(work_dir: Path):
     quietly did not is exactly the kind of hidden problem that wastes their
     time."""
     try:
-        from ..verify import command_text, detect_verify_command
+        from ..verify import command_text, detect_verify_command, no_check_reason
         cmd = detect_verify_command(work_dir)
+        reason = None if cmd else no_check_reason(work_dir)
     except Exception as exc:                                   # noqa: BLE001
         print_warning(f"Could not detect a project check ({exc}); "
                       "no exit-code verification will run this session.")
         return None
+    if reason:
+        print_warning("This project has a pytest setup but no check can run. "
+                      + reason)
     if cmd is not None:
         print_info(f"Verification: `{command_text(cmd)}` must exit 0 before a "
                    "turn that changed files finishes (/verify off to disable).")
@@ -822,12 +835,12 @@ def _warn_if_url_leaves_machine(session_mode, provider, url) -> None:
 def _captures_child_output(stdin_tty: bool, stdout_tty: bool, platform: str,
                            machine_output: bool) -> bool:
     """True when an auto-started server's output must go to a log file rather
-    than this process's own stdout: the caller has no terminal on stdin, or (off
-    Windows, where the child otherwise inherits the stream) stdout is not a
-    terminal or carries machine-readable output."""
-    if not stdin_tty:
+    than this process's own stdout: the caller has no terminal on stdin, the
+    platform is Windows (the server runs with no console window at all), or
+    stdout is not a terminal or carries machine-readable output."""
+    if not stdin_tty or platform == "win32":
         return True
-    return platform != "win32" and (machine_output or not stdout_tty)
+    return machine_output or not stdout_tty
 
 
 def _unregistered_model_message(model: str, work_dir) -> Optional[str]:
@@ -977,7 +990,7 @@ def _serve_on_attached(base_url: str, token, model: str, *, machine_output: bool
 
 def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                    force_new, work_dir, ci, probe_only=False, machine_output=False,
-                   session_mode=None):
+                   session_mode=None, check_registered=True):
     """Build the LLM backend for the chosen provider / explicit URL / offline path.
     Returns backend. Split out of main; exits
     (2 under --ci, else 1) on a missing required option or a failed server start.
@@ -996,7 +1009,8 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
     try:
         return _build_backend_gated(
             provider, url, model, api_key, native_tools, port, no_server,
-            force_new, work_dir, ci, probe_only, machine_output, session_mode)
+            force_new, work_dir, ci, probe_only, machine_output, session_mode,
+            check_registered)
     except (OffMachineModelRefused, NetworkPolicyError) as e:
         print_error(str(e))
         sys.exit(2 if ci else 1)
@@ -1004,7 +1018,7 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
 
 def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                          no_server, force_new, work_dir, ci, probe_only,
-                         machine_output, session_mode):
+                         machine_output, session_mode, check_registered=True):
     # Live-attribute access so a test patching cli.make_localm_backend is honoured.
     make_localm_backend = _cli.make_localm_backend
 
@@ -1053,7 +1067,7 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                 "Run `localm list` to see registered models."
             )
             sys.exit(2 if ci else 1)
-        refusal = _unregistered_model_message(model, work_dir)
+        refusal = _unregistered_model_message(model, work_dir) if check_registered else None
         if refusal:
             print_error(refusal)
             sys.exit(2 if ci else 1)
@@ -1157,7 +1171,9 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                 # console window, so the child's output goes to a LOG FILE: a PIPE
                 # would deadlock a long-lived server once the OS buffer fills with
                 # its normal request logging, a file cannot. The tail is read back
-                # on an early exit. A TTY run keeps the visible console window.
+                # on an early exit. On Windows every run takes this path: a console
+                # window of the server's own cannot be hidden again under Windows
+                # Terminal.
                 headless = _captures_child_output(
                     sys.stdin.isatty(), sys.stdout.isatty(), sys.platform,
                     machine_output)
@@ -1176,8 +1192,6 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                             | subprocess.CREATE_NEW_PROCESS_GROUP)
                     else:
                         kwargs["start_new_session"] = True
-                elif sys.platform == "win32":
-                    kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
                 else:
                     kwargs["start_new_session"] = True
 
@@ -1286,4 +1300,4 @@ def console_main() -> None:
     (a separate ``pip install``) hits it."""
     from localm._venvguard import require_venv
     require_venv()
-    main()
+    cast(click.Command, main).main(windows_expand_args=False)

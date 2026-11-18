@@ -27,8 +27,9 @@ localm is a local-first, single-owner application. API access is gated by a
   scopes (the owner key implies every scope). The routes that take no bearer key
   are `GET /health` (a liveness probe that returns the status, model name, and
   load state), `GET /whoami` (the instance identity handshake), `GET /localm-ca.crt`
-  (the CA certificate, never the key), `GET /` on a `localm serve` API-only
-  instance (a redirect to the API docs), and the three session routes
+  (the CA certificate, never the key), `GET /` and `HEAD /` on a `localm serve`
+  API-only instance (a redirect to the API docs, and an empty 200 for the
+  heartbeat Ollama clients send), and the three session routes
   `GET /api/session`, `POST /api/session` and `POST /api/session/logout` -
   login exchanges a key for a cookie, so it cannot require one. Five more
   routes take no bearer key but carry a credential of their own:
@@ -543,9 +544,11 @@ update`, or the GUI "Update now" button). The client is signature-verifying:
   has a `uv.lock` and uv. Installs no lock covers use the package index over HTTPS
   without hash checking: a plugin dependency install with no `uv.lock` or no uv (it
   says so as it runs), the managed ComfyUI's packages (ComfyUI's own requirements and
-  PyTorch from the PyTorch index), the PyTorch step setup runs and an update repeats,
-  and the first install by `setup.bat` / `setup.sh`, which resolves from the
-  `pyproject.toml` minimum versions.
+  PyTorch from the PyTorch index), and the PyTorch step setup runs and an update
+  repeats. The first install by `setup.bat`, `setup.sh` and the graphical installer
+  (`installer/gui.py`) takes localm's own dependencies from the `uv.lock` of the
+  folder, the same way an update does; with no `uv.lock` there it installs the
+  newest versions `pyproject.toml` allows, and says so.
 - **Native runtime downloads.** The llama.cpp runtime archives of the release localm
   pins are checked against SHA-256 values compiled into localm; when the release
   listing reports a different digest for one of them, the download is refused. For a

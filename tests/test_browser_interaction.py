@@ -494,6 +494,27 @@ class TestLiveViewAttach:
         assert frames == ["jpeg"]
 
 
+class TestLiveViewRestart:
+    def test_watching_again_restarts_a_screencast_that_is_already_running(
+            self, looped):
+        sess = looped(_HungPage())
+        ctx = _FakeContext()
+        opened = ctx.sessions
+
+        async def recording(page):
+            cdp = _RecordingCDP()
+            opened.append(cdp)
+            return cdp
+        ctx.new_cdp_session = recording
+        sess._ctx = ctx
+        assert sess.enable_live_view(lambda data: None) is True
+        first = opened[0]
+        assert sess.enable_live_view(lambda data: None) is True
+        assert len(opened) == 2, "a second viewer reused the running screencast"
+        assert first.detached, "the old screencast was left attached"
+        assert sess._cdp is opened[1]
+
+
 class _Popup:
     def __init__(self, url):
         self.url = url

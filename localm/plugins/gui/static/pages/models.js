@@ -6,7 +6,7 @@
 import { clearRecentGuiErrors, dismissRecentGuiError, onRecentGuiErrorsChange, recentGuiErrors } from "../app/client-log.js";
 import { pickDirectory } from "../app/picker.js";
 import { $, GIB, authHeaders, cancelJob, confirmDanger, confirmDangerAsync, downloadRate, el, fmtBytes, fmtDuration, openModal, promptText, readSSE, renderMarkdown, showInlineError, streamJob, toast, setBusy, whileBusy } from "../app/helpers.js";
-import { t, tn } from "../app/i18n.js";
+import { onLanguageReload, t, tn } from "../app/i18n.js";
 import { onServerUnreachable } from "../app/init.js";
 import { emptyState, iconEl } from "../app/icons.js";
 import { refreshModels, showKeyGate, switchModel, toastLoadResult } from "../app/models-sidebar.js";
@@ -450,7 +450,7 @@ export async function refreshModelsPage() {
       // Expired or absent session. Show the in-page key gate rather than falling
       // through to the models=[] path, which would read as "No models yet". Not
       // gated on myGen.
-      showKeyGate(t("models.keyRequired"));
+      if (window.__localmLocked !== true) showKeyGate(t("models.keyRequired"));
       return;
     }
     if (!r.ok) {
@@ -1457,21 +1457,38 @@ export async function discoverCivitaiFiles(versionId, filesBox, btn) {
   }
 }
 
+// Only the newest search may write the results box: each search aborts the one
+// before it and takes a new generation number, and a reply checks it still holds
+// the latest number before touching the page.
+let _discSearchGen = 0;
+let _discSearchAbort = null;
+
+function _discBeginSearch() {
+  if (_discSearchAbort) _discSearchAbort.abort();
+  _discSearchAbort = new AbortController();
+  return { gen: ++_discSearchGen, signal: _discSearchAbort.signal };
+}
+
+function _discCancelSearch() {
+  _discBeginSearch();
+  _discSearchAbort = null;
+  const btn = $("disc-search");
+  if (btn) btn.disabled = false;
+}
+
 export async function discoverSearch() {
   if (discSource() === "civitai") return _discoverSearchCivitai();
   const box = $("disc-results");
   const formats = discFormats();
   const types = discTypes();
-  if (!formats.length) {
-    box.replaceChildren(el("div", "sub", t("models.disc.selectFormat")));
+  if (!formats.length || !types.length) {
+    _discCancelSearch();
+    box.replaceChildren(el("div", "sub", t(formats.length ? "models.disc.selectType" : "models.disc.selectFormat")));
+    $("disc-vram").textContent = "";
     hideHfHint();
     return;
   }
-  if (!types.length) {
-    box.replaceChildren(el("div", "sub", t("models.disc.selectType")));
-    hideHfHint();
-    return;
-  }
+  const { gen, signal } = _discBeginSearch();
   box.replaceChildren(el("div", "sub", t("models.disc.searchingHf")));
   $("disc-search").disabled = true;
   try {
@@ -1479,11 +1496,13 @@ export async function discoverSearch() {
     const r = await fetch("/api/discover/search?q=" + encodeURIComponent(q)
                           + "&formats=" + encodeURIComponent(formats.join(","))
                           + "&types=" + encodeURIComponent(types.join(",")),
-                          { headers: authHeaders() });
+                          { headers: authHeaders(), signal });
     const data = await r.json();
+    if (gen !== _discSearchGen) return;
     if (!r.ok) throw new Error(data.detail || r.statusText);
     // One GPU probe drives both the basis caption and the per-row split hint.
     const gpuInfo = await _gpuInfo();
+    if (gen !== _discSearchGen) return;
     $("disc-vram").textContent = data.vram.total
       ? vramBasisCaption(data.vram.total, gpuInfo)
       : t("models.disc.noGpuVram");
@@ -1503,9 +1522,10 @@ export async function discoverSearch() {
     }
     for (const m of data.results) box.appendChild(discRepoRow(m, gpuInfo.gpus));
   } catch (e) {
+    if (gen !== _discSearchGen) return;
     box.replaceChildren(el("div", "sub", t("models.disc.searchFailed", { message: e.message })));
   } finally {
-    $("disc-search").disabled = false;
+    if (gen === _discSearchGen) $("disc-search").disabled = false;
   }
 }
 
@@ -1513,10 +1533,13 @@ async function _discoverSearchCivitai() {
   const box = $("disc-results");
   const types = discCivitaiTypes();
   if (!types.length) {
+    _discCancelSearch();
     box.replaceChildren(el("div", "sub", t("models.disc.selectType")));
+    $("disc-vram").textContent = "";
     return;
   }
   hideHfHint();
+  const { gen, signal } = _discBeginSearch();
   box.replaceChildren(el("div", "sub", t("models.disc.searchingCivitai")));
   $("disc-search").disabled = true;
   try {
@@ -1526,8 +1549,9 @@ async function _discoverSearchCivitai() {
                           + "&source=civitai"
                           + "&types=" + encodeURIComponent(types.join(","))
                           + "&nsfw=" + (nsfw ? "true" : "false"),
-                          { headers: authHeaders() });
+                          { headers: authHeaders(), signal });
     const data = await r.json();
+    if (gen !== _discSearchGen) return;
     if (!r.ok) throw new Error(data.detail || r.statusText);
     $("disc-vram").textContent = "";
     box.replaceChildren();
@@ -1538,9 +1562,10 @@ async function _discoverSearchCivitai() {
     }
     for (const m of results) box.appendChild(discCivitaiRow(m));
   } catch (e) {
+    if (gen !== _discSearchGen) return;
     box.replaceChildren(el("div", "sub", t("models.disc.searchFailed", { message: e.message })));
   } finally {
-    $("disc-search").disabled = false;
+    if (gen === _discSearchGen) $("disc-search").disabled = false;
   }
 }
 
@@ -1670,6 +1695,7 @@ function applyDiscSource() {
   const q = $("disc-query");
   if (q) q.placeholder = t(DISC_SOURCE_PLACEHOLDER[source]);
   hideHfHint();
+  _discCancelSearch();
   const box = $("disc-results");
   if (box) box.replaceChildren();
   const vram = $("disc-vram");
@@ -3239,6 +3265,17 @@ if ($("upload-send")) {
 // started it, and what the user asked to do to it. "pause" keeps the
 // partially downloaded data so Resume continues from it; "cancel" deletes it.
 let activePull = null;
+
+// True for a spec that names a path on this machine (the server registers it in
+// place rather than downloading it).
+function specIsHostPath(spec) {
+  const s = String(spec || "").trim();
+  return /^([A-Za-z]:|[\\/]|~)/.test(s) || s.split(/[\\/]/).includes("..");
+}
+// The pull whose start request is still on its way (null when none). Pause or
+// Cancel clicked in that window is recorded here and applied to the job as soon
+// as its id is known.
+let startingPull = null;
 // The request of the last pull that was paused, so Resume can send it again.
 let pausedPull = null;
 
@@ -3317,18 +3354,22 @@ async function runPull(payload, start = () => postPull(payload)) {
   pct.textContent = t("models.pull.starting");
   if ($("pull-file")) { $("pull-file").hidden = true; $("pull-file").textContent = ""; }
   setPullButtons("running");
+  startingPull = { intent: null };
   const samples = [];   // rolling {t, downloaded} window, used when the server sends no rate
   let last = { downloaded: 0, total: 0, pct: null };
   try {
     const data = await start();
+    const early = startingPull ? startingPull.intent : null;
+    startingPull = null;
     if (!data) {
       prog.style.display = "none";
       log.style.display = "none";
       setPullButtons("idle");
       return;
     }
-    const mine = { id: data.job_id, payload, intent: null };
+    const mine = { id: data.job_id, payload, intent: early };
     activePull = mine;
+    if (early) cancelJob(data.job_id);
     const end = await streamJob(data.job_id, (line) => {
       log.textContent += line + "\n";
       log.scrollTop = log.scrollHeight;
@@ -3401,7 +3442,8 @@ async function runPull(payload, start = () => postPull(payload)) {
       bar.classList.remove("indeterminate");
       bar.style.width = "100%";
       pct.textContent = t("models.pull.done");
-      toast(t("models.pull.finishedToast"));
+      toast(t(specIsHostPath(payload.spec) ? "models.pull.registeredToast"
+                                            : "models.pull.finishedToast"));
       $("pull-spec").value = "";
       $("pull-name").value = "";
       if (sha256Input) sha256Input.value = "";
@@ -3458,6 +3500,7 @@ async function runPull(payload, start = () => postPull(payload)) {
     }
   } catch (e) {
     activePull = null;
+    startingPull = null;
     bar.classList.remove("indeterminate");
     bar.classList.add("failed");
     setPullButtons("idle");
@@ -3465,6 +3508,8 @@ async function runPull(payload, start = () => postPull(payload)) {
     toast(t("models.pull.failedException", { message: e.message }), true);
   } finally {
     $("pull-start").disabled = false;
+    $("pull-pause").disabled = false;
+    $("pull-cancel").disabled = false;
     loadInterrupted();
   }
 }
@@ -3517,7 +3562,14 @@ $("pull-start").onclick = async () => {
 };
 
 $("pull-pause").onclick = async () => {
-  if (!activePull) return;
+  if (!activePull) {
+    if (startingPull && !startingPull.intent) {
+      startingPull.intent = "pause";
+      $("pull-pause").disabled = true;
+      $("pull-cancel").disabled = true;
+    }
+    return;
+  }
   activePull.intent = "pause";
   $("pull-pause").disabled = true;
   await cancelJob(activePull.id);
@@ -3525,7 +3577,11 @@ $("pull-pause").onclick = async () => {
 };
 
 $("pull-cancel").onclick = async () => {
-  if (activePull) {
+  if (!activePull && startingPull) {
+    startingPull.intent = "cancel";
+    $("pull-pause").disabled = true;
+    $("pull-cancel").disabled = true;
+  } else if (activePull) {
     activePull.intent = "cancel";
     $("pull-cancel").disabled = true;
     await cancelJob(activePull.id);
@@ -4052,7 +4108,7 @@ if (unloadAllBtn) {
 // index.html, so it is redrawn when the interface language changes.
 // applyDiscSource() re-derives the search placeholder. The three Settings
 // lists redrawn alongside it are fetched the same way (onViewShown, dispatch.js).
-document.addEventListener("localm:language", () => {
+onLanguageReload(() => {
   refreshModelsPage();
   applyDiscSource();
   refreshInstancesCard();

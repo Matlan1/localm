@@ -20,7 +20,7 @@ from .tools.base import _partial_on_timeout, run_subprocess
 
 # A command is either a shell string (user-supplied: pipes, &&, redirects all
 # work) or an argv list (auto-detected: no shell quoting to get wrong, which
-# matters because the Python runner is sys.executable and that path can contain
+# matters because the Python runner is the project's interpreter and that path can contain
 # spaces).
 VerifyCommand = Union[str, list]
 
@@ -193,7 +193,7 @@ def _has_project_check(cwd: Path) -> bool:
         # that will be picked there.
         lock = "yarn" if (cwd / "yarn.lock").exists() else "npm"
         return _npm_has_test_script(cwd) and _runner_available(lock)
-    return _has_python_tests(cwd) and _pytest_importable()
+    return _has_python_tests(cwd) and _project_pytest_available(cwd)
 
 
 def _runner_available(name: str) -> bool:
@@ -205,28 +205,34 @@ def _runner_available(name: str) -> bool:
     return False
 
 
-def _pytest_importable() -> bool:
-    """True when pytest is importable HERE, in the running localm process.
+def _project_pytest_available(cwd: Path) -> bool:
+    """True when the PROJECT has a Python that can run pytest (see
+    :func:`localm.plugins.coder.pyenv.find_project_python`).
 
-    The detected python command runs ``sys.executable -m pytest``, so the
-    interpreter is always launchable - but with no pytest importable in it the
-    check exits 1 with "No module named pytest" on every run, which the model
-    cannot fix.
+    The detected command runs that interpreter, so it is the one asked: localm's
+    own environment says nothing about the project's packages."""
+    from .pyenv import find_project_python
+    found = find_project_python(cwd)
+    if found.python is None:
+        _log_no_oracle(found.reason)
+        return False
+    return True
 
-    Same interpreter, but NOT quite the same question: ``-m`` prepends the
-    project directory to sys.path, while this asks about the localm process's
-    own import state, so a project with a vendored pytest can be declined here
-    even though the command would have worked."""
-    import importlib.util
-    try:
-        found = importlib.util.find_spec("pytest") is not None
-    except Exception:                                          # noqa: BLE001
-        # A broken meta-path finder cannot confirm the runner, so the gate
-        # declines.
-        found = False
-    if not found:
-        _log_no_oracle("pytest is not importable by this interpreter")
-    return found
+
+def no_check_reason(cwd: Path) -> Optional[str]:
+    """Why a project that HAS a Python test setup gets no automatic check, or
+    None when that is not the reason (no setup, another language, or a check
+    was found).
+
+    Lets a "no check found" message say what to fix instead of implying the
+    test setup itself is missing."""
+    if (cwd / "Cargo.toml").is_file() or (cwd / "go.mod").is_file() \
+            or (cwd / "package.json").is_file():
+        return None
+    if not _has_python_tests(cwd):
+        return None
+    from .pyenv import find_project_python
+    return find_project_python(cwd).reason or None
 
 
 def _log_no_oracle(why: str) -> None:

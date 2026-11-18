@@ -84,6 +84,28 @@ class SafeConsole(Console):
     def size(self, new_size) -> None:
         self._width, self._height = new_size
 
+    def print(self, *objects, **kwargs) -> None:
+        widest = 0
+        if ("width" not in kwargs and not self.is_terminal
+                and not self._width_is_given()):
+            from rich.table import Table
+            unbounded = self.options.update_width(1 << 20)
+            widest = max((self.measure(o, options=unbounded).maximum
+                          for o in objects if isinstance(o, Table)), default=0)
+        if widest <= self.size.width:
+            super().print(*objects, **kwargs)
+            return
+        saved = self._width
+        self._width = widest
+        try:
+            super().print(*objects, **kwargs)
+        finally:
+            self._width = saved
+
+    def _width_is_given(self) -> bool:
+        return bool(self._given_width is not None or os.environ.get("COLUMNS")
+                    or self._width != self._width_at_init)
+
     def render(self, renderable: RenderableType,
                options: Optional[ConsoleOptions] = None) -> Iterable[Segment]:
         for segment in super().render(renderable, options):

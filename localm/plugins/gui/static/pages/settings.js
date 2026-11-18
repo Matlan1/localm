@@ -7,7 +7,7 @@ import { pickDirectory, pickFile } from "../app/picker.js";
 import { signOutSession } from "../app/init.js";
 import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, confirmDangerAsync, copyTextWithFeedback, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, refreshCsrf, reloadApp, safeAvatarImageSrc, SHELL_TOKEN, showInlineError, streamJob, toast, whileBusy } from "../app/helpers.js";
 import { chat, refreshCtxLimit } from "../app/chat.js";
-import { t, tn, tOr, tOrFirst } from "../app/i18n.js";
+import { onLanguageReload, t, tn, tOr, tOrFirst } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
 import { loginWithKey, modelCache } from "../app/models-sidebar.js";
 import { showView } from "../app/tabs.js";
@@ -1494,7 +1494,7 @@ export function buildSettingsNav() {
 
 // The nav labels are built from the catalog, so they are redrawn when the
 // interface language changes.
-document.addEventListener("localm:language", () => {
+onLanguageReload(() => {
   buildSettingsNav();
   // refreshKeysPanel only builds the scope checkboxes once (a real fetch cost,
   // not just a render one - see its own comment). Clear that memo here so the
@@ -1884,6 +1884,18 @@ export function discardSettingsDraft() {
   _draftDiscarded = true;
   try { sessionStorage.removeItem(SETTINGS_DRAFT_KEY); } catch { /* storage blocked: nothing kept */ }
 }
+
+/** Discard the unsaved Settings edits while the page stays: every drawn
+ *  control goes back to its saved value, the carried edits and the stored
+ *  draft are dropped, and later edits are kept for a reload again. */
+export function discardSettingsEdits() {
+  forEachChangedControl((id, ctrl) => ctrl.write(ctrl.shown));
+  _pendingEdits.clear();
+  _dirtySettings.clear();
+  _draftRestored = 0;
+  try { sessionStorage.removeItem(SETTINGS_DRAFT_KEY); } catch { /* storage blocked: nothing kept */ }
+}
+window.discardSettingsEdits = discardSettingsEdits;
 
 /** Move a draft stored by an earlier load of this tab into the carried edits,
  *  once per page load. Returns the number of edits read. */

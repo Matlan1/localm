@@ -137,6 +137,7 @@
 
     <!-- ============ CHAT ============ -->
     <section id="view-chat" class="view active">
+      <div id="chat-load-banner" role="status" aria-live="polite" hidden></div>
       <div id="chat-messages"></div>
       <div class="composer-wrap">
         <div id="params">
@@ -158,7 +159,7 @@
           <div class="full check-row"><label title="Recalls facts localm has learned about you and adds them to the prompt. Add facts with /remember, view/edit with /memory. Blocked in privacy mode." data-i18n-title="chat.memory.title" data-i18n="chat.memory"><input type="checkbox" id="p-memory" checked> <span class="lbl-ic" data-icon="memory"></span> Memory - remind the model what it knows about you</label></div>
           <div class="full check-row"><label title="Reads each finished reply aloud. Install the tts plugin for neural Kokoro voices; otherwise the browser's built-in offline voice is used. Every assistant message also has a speaker button." data-i18n-title="chat.speak.title" data-i18n="chat.speak"><input type="checkbox" id="p-speak"> <span class="lbl-ic" data-icon="speak"></span> Speak replies aloud</label></div>
           <div class="full" id="voice-row" style="display:none"><label title="Which voice reads replies aloud, remembered in this browser. Neural Kokoro voices with the tts plugin installed, otherwise your browser's offline voices." data-i18n-title="chat.voice.title" data-i18n="chat.voice"><span class="lbl-ic" data-icon="voice"></span> Voice <span class="sub" data-i18n="chat.voice.hint">(this browser)</span></label><select id="p-voice"></select></div>
-          <div class="full"><label data-i18n="chat.knowledge"><span class="lbl-ic" data-icon="book"></span> Knowledge - ground replies in an indexed collection (manage on the Knowledge page)</label><select id="p-kb"><option value="" data-i18n="chat.none">(none)</option></select></div>
+          <div class="full" id="p-kb-row" hidden><label data-i18n="chat.knowledge"><span class="lbl-ic" data-icon="book"></span> Knowledge - ground replies in an indexed collection (manage on the Knowledge page)</label><select id="p-kb"><option value="" data-i18n="chat.none">(none)</option></select></div>
           <!-- Sampling knobs whose blank state already means "use the tuned
                default", plus the grammar box. Folded away so Temperature and the
                system prompt are not buried among six numbers nobody sets.

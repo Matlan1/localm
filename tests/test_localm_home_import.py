@@ -52,6 +52,14 @@ def hash_calls(monkeypatch):
     return calls
 
 
+@pytest.fixture
+def size_gate_open(monkeypatch):
+    """Every file counts as having a same-size registered twin, so the hash the
+    recorded-digest logic falls back to is actually needed."""
+    import localm.model_manager.registry as registry
+    monkeypatch.setattr(registry, "find_by_size", lambda size, reg=None: ["decoy"])
+
+
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -84,6 +92,8 @@ def _write_registry(home, reg, after=(), offset=60):
     rf.write_text(json.dumps(reg), encoding="utf-8")
     newest = max([os.stat(p).st_mtime for p in after] or [os.stat(rf).st_mtime])
     os.utime(rf, (newest + offset, newest + offset))
+    import localm.config as cfg
+    cfg._loop_reads_invalidate()
 
 
 class TestReuse:
@@ -133,6 +143,7 @@ class TestReuse:
         assert load_registry()["alpha"]["sha256"] == _sha(_content("alpha"))
 
 
+@pytest.mark.usefixtures("size_gate_open")
 class TestFallsBackToHashing:
     def test_file_changed_after_registry_was_written_is_hashed(
             self, tmp_path, isolated_home, hash_calls):
@@ -283,6 +294,7 @@ class TestScopeOfReuse:
         assert hash_calls == []
         assert "sha256" not in load_registry()["alpha"]
 
+    @pytest.mark.usefixtures("size_gate_open")
     def test_plain_folder_without_a_registry_still_hashes(
             self, tmp_path, isolated_home, hash_calls):
         d = tmp_path / "drop"
@@ -291,6 +303,7 @@ class TestScopeOfReuse:
         assert add_local(str(d)) is True
         assert hash_calls == ["alpha.gguf"]
 
+    @pytest.mark.usefixtures("size_gate_open")
     def test_store_copy_still_verifies_by_hashing(self, tmp_path, isolated_home, hash_calls):
         home, _ = _other_home(tmp_path, "alpha")
         assert add_local(str(home), store="copy") is True

@@ -153,6 +153,11 @@ def test_thinking_inlet_applies_when_capacity_comfortable():
 #  role-word self-reference nudge (REC-D1-ROLEWORD) in regular chat           #
 # --------------------------------------------------------------------------- #
 
+@pytest.fixture(autouse=True)
+def _style_note_on(monkeypatch):
+    monkeypatch.setattr("localm.plugins.builtin.chat.plug._style_note_enabled", lambda: True)
+
+
 def test_role_word_inlet_inserts_system_when_absent():
     from localm.plugins.builtin.chat.plug import _role_word_inlet, _ROLE_WORD_INSTRUCTION
     msgs = [{"role": "user", "content": "hi"}]
@@ -162,14 +167,28 @@ def test_role_word_inlet_inserts_system_when_absent():
     assert msgs[1] == {"role": "user", "content": "hi"}
 
 
-def test_role_word_inlet_appends_to_existing_system():
-    from localm.plugins.builtin.chat.plug import _role_word_inlet, _ROLE_WORD_INSTRUCTION
-    msgs = [{"role": "system", "content": "You are a poet."},
-            {"role": "user", "content": "hi"}]
-    out = _role_word_inlet(msgs, _think_ctx("gemma3"))
-    assert out is msgs and len(msgs) == 2          # no new message inserted
-    assert msgs[0]["content"].startswith("You are a poet.")
-    assert _ROLE_WORD_INSTRUCTION in msgs[0]["content"]
+@pytest.fixture(autouse=True)
+def _style_note_on(monkeypatch):
+    monkeypatch.setattr("localm.plugins.builtin.chat.plug._style_note_enabled", lambda: True)
+
+
+def test_role_word_inlet_never_extends_a_system_prompt_the_user_wrote():
+    from localm.plugins.builtin.chat.plug import _role_word_inlet
+    for text in ("You are a poet.", "Answer in German only."):
+        msgs = [{"role": "system", "content": text}, {"role": "user", "content": "hi"}]
+        before = [dict(m) for m in msgs]
+        assert _role_word_inlet(msgs, _think_ctx("gemma3")) is None
+        assert msgs == before
+
+
+def test_role_word_inlet_leaves_a_compaction_summary_request_alone():
+    from localm.inference.compact import ROLLING_SUMMARY_INSTRUCTION, SUMMARY_INSTRUCTION
+    from localm.plugins.builtin.chat.plug import _role_word_inlet
+    for instruction in (SUMMARY_INSTRUCTION, ROLLING_SUMMARY_INSTRUCTION):
+        msgs = [{"role": "user", "content": instruction + "\n\nUSER: My favourite animal is the otter"}]
+        before = [dict(m) for m in msgs]
+        assert _role_word_inlet(msgs, _think_ctx("qwen2.5-0.5b")) is None
+        assert msgs == before
 
 
 def test_role_word_inlet_skips_when_already_instructed():
@@ -211,8 +230,8 @@ def test_thinking_and_role_word_inlets_compose_on_one_system_message():
         _thinking_inlet, _role_word_inlet, _THINK_INSTRUCTION, _ROLE_WORD_INSTRUCTION,
     )
     msgs = [{"role": "user", "content": "hi"}]
-    msgs = _thinking_inlet(msgs, _think_ctx("deepseek-r1-7b")) or msgs
     msgs = _role_word_inlet(msgs, _think_ctx("deepseek-r1-7b")) or msgs
+    msgs = _thinking_inlet(msgs, _think_ctx("deepseek-r1-7b")) or msgs
     assert len([m for m in msgs if m["role"] == "system"]) == 1
     assert _THINK_INSTRUCTION in msgs[0]["content"]
     assert _ROLE_WORD_INSTRUCTION in msgs[0]["content"]

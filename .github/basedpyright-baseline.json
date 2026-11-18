@@ -5020,14 +5020,6 @@
             {
                 "code": "reportAttributeAccessIssue",
                 "range": {
-                    "startColumn": 21,
-                    "endColumn": 32,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
                     "startColumn": 52,
                     "endColumn": 61,
                     "lineCount": 1
@@ -5182,14 +5174,6 @@
                 "range": {
                     "startColumn": 21,
                     "endColumn": 41,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
-                    "startColumn": 21,
-                    "endColumn": 32,
                     "lineCount": 1
                 }
             },
@@ -5486,14 +5470,6 @@
             {
                 "code": "reportAttributeAccessIssue",
                 "range": {
-                    "startColumn": 30,
-                    "endColumn": 50,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
                     "startColumn": 32,
                     "endColumn": 40,
                     "lineCount": 1
@@ -5520,14 +5496,6 @@
                 "range": {
                     "startColumn": 59,
                     "endColumn": 63,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
-                    "startColumn": 20,
-                    "endColumn": 40,
                     "lineCount": 1
                 }
             },
@@ -8055,14 +8023,6 @@
             }
         ],
         "./localm/rag/_store/search.py": [
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
-                    "startColumn": 44,
-                    "endColumn": 65,
-                    "lineCount": 1
-                }
-            },
             {
                 "code": "reportOptionalSubscript",
                 "range": {

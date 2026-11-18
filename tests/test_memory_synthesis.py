@@ -82,7 +82,9 @@ def test_synthesize_caps_additions(memhome):
              ("User drives an electric car", 0.9), ("User plays the violin", 0.9),
              ("User speaks French fluently", 0.9), ("User has two cats", 0.9),
              ("User runs marathons", 0.9), ("User collects vinyl records", 0.9)]
-    out = plug.synthesize_memory(_facts_stub(*facts, decision="ADD"), max_facts=5)
+    said = "\n".join("User: I confirm: " + t for t, _ in facts)
+    out = plug.synthesize_memory(_facts_stub(*facts, decision="ADD"), max_facts=5,
+                                 conversation=said)
     assert out["added"] == 5                           # capped at max_facts
 
 

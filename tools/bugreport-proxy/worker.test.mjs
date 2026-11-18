@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import worker from "./worker.js";
-import { clientOlderThan, tagAtMost, tagKey } from "./versionorder.js";
+import { tagAtMost, tagKey } from "./versionorder.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -1026,7 +1026,7 @@ test("update: a cached signature is fetched again after ten minutes", async () =
 // ------------------- prerelease order (dev < a < b < rc < final) -------------------
 
 function tagFunctions() {
-  return { tagKey, tagAtMost, clientOlderThan };
+  return { tagKey, tagAtMost };
 }
 
 const ORDERED_TAGS = ["v0.3.3", "v0.3.4-dev1", "v0.3.4-Dev2", "v0.3.4-dev9", "v0.3.4-DEV10",
@@ -1046,18 +1046,6 @@ test("tags order dev < a = alpha < b = beta < rc < final, any case, numbers as i
                         ["v0.3.4-dev1", "v0.3.4.DEV1"]]) {
     assert.ok(tagAtMost(s, l) && tagAtMost(l, s), `${s} ranks equal to ${l}`);
   }
-});
-
-test("a dev client is older than a ceiling of its own final release or later, never of an earlier one", () => {
-  const { clientOlderThan } = tagFunctions();
-  for (const c of ["0.3.3-dev1", "v0.3.3-Dev10", "0.3.3rc1", "0.3.2-dev1", "0.3.2"]) {
-    assert.equal(clientOlderThan(c, "v0.3.3"), true, c);
-  }
-  for (const c of ["0.3.3", "0.3.4-dev1", "v0.3.4-DEV2", "0.3.4", "unknown", "0.3.3-hotfix"]) {
-    assert.equal(clientOlderThan(c, "v0.3.3"), false, c);
-  }
-  assert.equal(clientOlderThan("0.3.2-dev3", "v0.3.2"), true);
-  assert.equal(clientOlderThan("0.3.2", "v0.3.2"), false);
 });
 
 // A fetch stub serving *list* as the release list and each entry by tag.
@@ -1114,21 +1102,16 @@ test("update/releases and update/release: a dev tag is listed and found only on 
   }
 });
 
-test("update: a dev client below a ceiling is held to that ceiling; at or above it, it is not", async () => {
+test("update: a client that names its version, a dev or older one included, gets the newest release", async () => {
   const list = [["v0.3.5-dev1", "2026-11-12T00:00:00Z", true], ["v0.3.4", "2026-11-11T00:00:00Z", false],
     ["v0.3.4-dev1", "2026-11-10T00:00:00Z", true], ["v0.3.3", "2026-11-01T00:00:00Z", false],
     ["v0.3.3-dev1", "2026-10-30T00:00:00Z", true], ["v0.3.2-dev1", "2026-10-20T00:00:00Z", true],
     ["v0.3.1", "2026-10-10T00:00:00Z", false]];
-  for (const client of ["0.3.3-dev1", "0.3.3-Dev2", "0.3.3a1", "0.3.2-dev1"]) {
-    for (const ch of ["", "&channel=prerelease"]) {
-      const out = await updateFor(list, `?client=${client}${ch}`);
-      assert.equal(out.client_ceiling, "v0.3.3", client + ch);
-      assert.equal(out.version, "v0.3.3", client + ch);
-    }
-  }
-  for (const client of ["0.3.4-dev1", "0.3.3"]) {
+  for (const client of ["0.3.3-dev1", "0.3.3-Dev2", "0.3.3a1", "0.3.2-dev1", "0.3.2", "0.3.4-dev1", "0.3.3"]) {
     const out = await updateFor(list, `?client=${client}`);
     assert.equal(out.client_ceiling, undefined, client);
+    assert.equal(out.legacy_ceiling, undefined, client);
+    assert.equal(out.newer_after, undefined, client);
     assert.equal(out.version, "v0.3.4", client);
     assert.equal((await updateFor(list, `?client=${client}&channel=prerelease`)).version, "v0.3.5-dev1");
   }
@@ -1144,19 +1127,19 @@ test("update: a client held at a ceiling is told a newer version follows, in the
   const list = [["v0.3.4", "2026-11-11T00:00:00Z", false], ["v0.3.3", "2026-11-01T00:00:00Z", false],
     ["v0.3.2", "2026-10-20T00:00:00Z", false]];
   const old = await updateFor(list, "?client=0.3.2");
-  assert.equal(old.version, "v0.3.3");
-  assert.equal(old.newer_after, "v0.3.4");
-  assert.match(old.notes, /^A newer version \(v0\.3\.4\) follows this one: after this update and a restart, update again to reach it\./);
+  assert.equal(old.version, "v0.3.4");
+  assert.equal(old.newer_after, undefined, "a client older than 0.3.3 is not held back");
+  assert.doesNotMatch(old.notes, /A newer version/);
   const legacy = await updateFor(list, "");
   assert.equal(legacy.version, "v0.3.2");
   assert.equal(legacy.newer_after, "v0.3.4");
-  assert.match(legacy.notes, /^A newer version \(v0\.3\.4\)/);
+  assert.match(legacy.notes, /^A newer version \(v0\.3\.4\) follows this one: after this update and a restart, update again to reach it\./);
   const current = await updateFor(list, "?client=0.3.3");
   assert.equal(current.version, "v0.3.4");
   assert.equal(current.newer_after, undefined, "a client not held back gets no such line");
   assert.doesNotMatch(current.notes, /A newer version/);
-  const atCeiling = await updateFor(list.slice(1), "?client=0.3.2");
-  assert.equal(atCeiling.version, "v0.3.3");
+  const atCeiling = await updateFor(list.slice(2), "");
+  assert.equal(atCeiling.version, "v0.3.2");
   assert.equal(atCeiling.newer_after, undefined, "nothing above the ceiling: no line");
   assert.doesNotMatch(atCeiling.notes, /A newer version/);
 });

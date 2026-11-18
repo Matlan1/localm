@@ -18,12 +18,19 @@ from ._core import console, err_console, main, _complete_model_name
 
 def _detached_stdio_kwargs() -> dict:
     """``subprocess.Popen`` keyword arguments for a server that outlives this
-    command on POSIX: its own session, and no stdin/stdout/stderr shared with
-    the caller, so a pipe the caller reads (``localm run ... | cat``) reaches
-    end-of-file when this command exits."""
+    command: its own session (POSIX) or process group with no console window
+    (Windows), and no stdin/stdout/stderr shared with the caller, so a pipe the
+    caller reads (``localm run ... | cat``) reaches end-of-file when this
+    command exits."""
     import subprocess
-    return {"start_new_session": True, "stdin": subprocess.DEVNULL,
-            "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    kwargs: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+                    "stderr": subprocess.DEVNULL}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = (subprocess.CREATE_NO_WINDOW
+                                   | subprocess.CREATE_NEW_PROCESS_GROUP)
+    else:
+        kwargs["start_new_session"] = True
+    return kwargs
 
 
 def _attach_fallback_note(no_server: bool, attach_error: Optional[BaseException],
@@ -583,10 +590,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         env = os.environ.copy()
         env["LOCALM_OWN_CONSOLE"] = "1"
         kwargs["env"] = env
-        if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
-        else:
-            kwargs.update(_detached_stdio_kwargs())
+        kwargs.update(_detached_stdio_kwargs())
 
         try:
             subprocess.Popen(cmd, **kwargs)
@@ -694,9 +698,8 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
     if not sys.stdin.isatty() and prompt is None:
         prompt = sys.stdin.read().strip()
 
-    from ..audit import make_audit_log, make_transcript
-    audit = make_audit_log(session_mode, label="chat")
-    transcript = make_transcript(session_mode, label="chat")
+    from ..audit import make_session_recording
+    audit, transcript = make_session_recording(session_mode, label="chat")
 
     if prompt is not None and router.in_process:
         # A single prompt is known before anything loads: when it routes, the
@@ -752,6 +755,9 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         audit.close()
 
 
+
+
+_INTERRUPTED_MARK = "\n\n[reply cut off: the user stopped it with Ctrl+C]"
 
 
 def _withdraw(messages: list, msg: dict) -> None:
@@ -872,10 +878,28 @@ class _ThinkPrinter:
         self._dim, self._reset = ("\033[2m", "\033[22m") if tty else ("", "")
         self._clean = strip_controls if tty else str
         self._think = ThinkSplitter()
+        self._head = ""
+        self._head_done = False
 
-    def _emit(self, content: str, reasoning: str) -> None:
+    def _answer(self, content: str, final: bool = False) -> str:
+        """*content* without a Qwen3-ASR transcript header. The reply's opening
+        is held back while it can still turn into ``language <name><asr_text>``."""
+        if self._head_done:
+            return content
+        from localm.textnorm import ASR_MARKER, strip_asr_header
+        self._head += content
+        head = self._head
+        if ASR_MARKER not in head and not final and len(head) < 64 and (
+                "language ".startswith(head) or head.startswith("language ")):
+            return ""
+        self._head_done = True
+        self._head = ""
+        return strip_asr_header(head)
+
+    def _emit(self, content: str, reasoning: str, final: bool = False) -> None:
         if reasoning:
             print(f"{self._dim}{self._clean(reasoning)}{self._reset}", end="", flush=True)
+        content = self._answer(content, final)
         if content:
             print(self._clean(content), end="", flush=True)
 
@@ -883,7 +907,7 @@ class _ThinkPrinter:
         self._emit(*self._think.feed(token))
 
     def flush(self) -> None:
-        self._emit(*self._think.flush())
+        self._emit(*self._think.flush(), final=True)
 
 
 
@@ -1179,6 +1203,7 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
             "[bold blue]Assistant[/bold blue]: ", end=""))
         if "on_status" not in interactive_opts:
             interactive_opts["on_status"] = status_lines.status
+        interrupted = False
         try:
             with native_console_paused():
                 for token in router.chat_stream(engine, messages, **interactive_opts):
@@ -1190,6 +1215,7 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
             printer.flush()
         except KeyboardInterrupt:
             printer.flush()
+            interrupted = True
             console.print("\n[dim](interrupted)[/dim]")
         except ImageDecodeUnavailable as e:
             # The model can read images but this environment cannot decode
@@ -1214,10 +1240,13 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
                 messages.pop()
             continue
 
-        response = "".join(parts) or "(interrupted)"
+        response = "".join(parts)
+        if interrupted and not parts:
+            _withdraw(messages, msg)
+            continue
         end = _time.monotonic()
         print()
-        if parts:
+        if parts and not interrupted:
             line = _perf_line(engine.count_tokens(response), t0, first_at, end)
             if line:
                 console.print(f"[dim]{line}[/dim]")
@@ -1232,6 +1261,9 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
             # keeps the reasoning in a collapsed block.
             from ..textnorm import strip_think
             visible = strip_think(response)
+            if interrupted:
+                visible = f"{visible}{_INTERRUPTED_MARK}"
+                response = f"{response}{_INTERRUPTED_MARK}"
             messages.append({"role": "assistant", "content": visible})
             if audit:
                 audit.llm(visible)
@@ -1468,7 +1500,7 @@ def _handle_command(
             "/image <path>           queue a local image for the next message\n"
             "/images                 list queued images\n"
             "/system <text>          set system prompt\n"
-            "/save [file]            save conversation to JSON\n"
+            "/save \\[file]            save conversation to JSON\n"
             "/compact                summarise older turns to free context\n"
             "/generate-image <prompt> generate an image (built in, or ComfyUI)\n"
             "/generate-music <tags>  generate music (built in, or ComfyUI)\n"

@@ -118,7 +118,7 @@ def test_run_autostart_gives_the_server_no_shared_stdio(monkeypatch):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="the Windows own-console server launch")
-def test_run_autostart_gives_the_server_its_own_console_on_windows(monkeypatch):
+def test_run_autostart_gives_the_server_no_console_window_on_windows(monkeypatch):
     from unittest.mock import MagicMock
 
     from click.testing import CliRunner
@@ -140,10 +140,11 @@ def test_run_autostart_gives_the_server_its_own_console_on_windows(monkeypatch):
     monkeypatch.setattr("time.sleep", lambda *a, **k: None)
     monkeypatch.setattr("localm.audit.effective_mode", lambda *a, **k: SessionMode.LOG)
     CliRunner().invoke(run, ["definitely-not-a-real-model-xyz", "-p", "hi"])
-    assert seen["creationflags"] == subprocess.CREATE_NEW_CONSOLE
+    assert seen["creationflags"] == (subprocess.CREATE_NO_WINDOW
+                                     | subprocess.CREATE_NEW_PROCESS_GROUP)
     assert seen["env"]["LOCALM_OWN_CONSOLE"] == "1"
     assert "start_new_session" not in seen
-    assert not {"stdin", "stdout", "stderr"} & set(seen)
+    assert seen["stdin"] is seen["stdout"] is seen["stderr"] is subprocess.DEVNULL
     assert os.environ["LOCALM_OWN_CONSOLE"] == "0"
 
 

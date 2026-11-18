@@ -762,6 +762,12 @@ def _run_rag(job: Job) -> str:
         # recorded as an error rather than a quiet success. The next tick re-walks the
         # same folders.
         raise RuntimeError(f"{e} The next scheduled run will pick this up.") from e
+    skipped = result["unavailable_roots"] + result["blocked_roots"]
+    if result["roots"] and len(skipped) >= len(result["roots"]):
+        why = "; ".join(f"{r['root']}: {r['reason']}" for r in skipped[:5])
+        raise RuntimeError(
+            f"nothing was synced: every indexed folder of '{name}' was "
+            f"skipped, so nothing under it was indexed or flagged ({why}).")
     return _format_rag_result(name, result, lines,
                               embedded=embed_fn is not None,
                               had_vectors=had_vectors)
@@ -1086,8 +1092,15 @@ def _run_coder(job: Job, *, engine=None) -> str:
         live.agent = agent
         if live.revoked is not None:
             agent.cancel(live.revoked)
+    import requests
     try:
-        out = (agent.run_task(job.prompt) or "").strip()
+        try:
+            out = (agent.run_task(job.prompt) or "").strip()
+        except requests.exceptions.ConnectionError as e:
+            raise RuntimeError(
+                "A coder job runs through a localm server and none answered. "
+                "Start one for this folder ('localm serve' or 'localm gui') "
+                "and run the job again.") from e
         notes = []
         if downgraded:
             notes.append(f"[jobs] This job opted into shell execution, but "

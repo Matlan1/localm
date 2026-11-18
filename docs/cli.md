@@ -82,7 +82,7 @@ localm gui --keep-diagnostics    # keep diagnostics (hang trace, debug log) even
 localm gui --project D:\path\to\project   # project root that keys this instance
 localm gui --new                 # start a fresh server instead of attaching to the running one
 localm gui --isolated            # private server invisible to discovery (implies --new)
-localm gui --api-mode            # API only, no Web GUI
+localm gui --api-mode            # API only, no Web GUI; "/" redirects to the API docs at /docs
 localm gui --mmproj mmproj.gguf --device cuda:0   # projector file, explicit device
 ```
 
@@ -115,7 +115,7 @@ The streaming usage block adds `ttft_ms` and `tokens_per_sec`. See [docs/server-
 ### Benchmark
 
 ```bash
-localm benchmark mymodel
+localm benchmark mymodel                           # TTFT is the full prefill of each prompt (prompt cache off, one untimed warm-up)
 localm benchmark mymodel --gen-tokens 256         # tokens per run (default 128)
 localm benchmark mymodel --prompts "64,512,2048"  # prompt sizes to test
 localm benchmark mymodel --ctx 8192               # context window
@@ -270,9 +270,9 @@ localm rename mymodel newname                # rename it outright (unlike alias,
 
 `add` takes a model file, a HuggingFace model directory, or a folder of models (every GGUF and safetensors model inside is registered). It also reads where other tools keep models: the Hugging Face hub cache, an Ollama model store, Jan's data folder, GPT4All's download folder (finished GGUF files only), and a `.llamafile` (its model is unpacked into `<data dir>/models`). `--type` takes the values listed under [Model type](#model-type) (default `auto`).
 
-`localm rename` changes the name you see and type, and nothing else: the file stays where it is, and settings, jobs, pinned chats, Knowledge collections, adapters and media workflows keep pointing at the same model, because each model has an ID that never changes. Only an empty name or one another model has is refused. The old name stops working where a name is typed or sent (`localm run`, the API). A `model` setting in a project's `.localcoder/config.toml` is a name you typed, so it has to name the model as it is called now; `localm coder` says so plainly when it does not. When a localm server is serving the current directory it performs the rename, so a loaded model keeps serving under its new name.
+`localm rename` changes the name you see and type, and nothing else: the file stays where it is, and settings, jobs, pinned chats, Knowledge collections, adapters and media workflows keep pointing at the same model, because each model has an ID that never changes. Only an empty name or one another model has is refused. The old name stops working where a name is typed or sent (`localm run`, the API). A `model` setting in a project's `.localcoder/config.toml` is a stored name, like a model in your settings, so it follows the rename and `localm coder` uses the model under its new name; a name that matches no model, now or before, is refused plainly. When a localm server is serving the current directory it performs the rename, so a loaded model keeps serving under its new name.
 
-Duplicate detection is two-tier: the resolved path first, then the file's SHA256 against digests already in the registry (large files hash off the main thread with a progress bar; `--fast` skips the hash and dedups on file size alone; `--no-hash` disables content-level dedup entirely). `--on-duplicate` picks the answer non-interactively instead of prompting (default `ask`). With no terminal to ask at, `ask` skips the file (exit 1), unless you gave a `--type` that differs from the type detected for the file or from a type it is already registered with: then the new name becomes an alias of the registered file with that type (a name already registered for the file just takes the type), and the same holds for `localm pull --type` with no terminal, such as a script.
+Duplicate detection is two-tier: the resolved path first, then the file's SHA256 against digests already in the registry. A file is read for its hash only when a registered file has the same size (the registered one is hashed then too, if it has no digest yet), so adding a folder of different models registers each at once without reading it; large files that are read hash off the main thread with a progress bar. `--fast` skips the hash and dedups on file size alone; `--no-hash` disables content-level dedup entirely. `--on-duplicate` picks the answer non-interactively instead of prompting (default `ask`). With no terminal to ask at, `ask` skips the file (exit 1; a registration the GUI starts from its Add button answers as a terminal's default does and adds the name as an alias), unless you gave a `--type` that differs from the type detected for the file or from a type it is already registered with: then the new name becomes an alias of the registered file with that type (a name already registered for the file just takes the type), and the same holds for `localm pull --type` with no terminal, such as a script.
 
 By default `add` (and `pull` with a local path) registers the file where it already is - nothing is copied or moved. Pass `--store copy` or `--store move` to bring it into `<data dir>/models` first and register it from there instead, so it's managed exactly like a pulled model:
 
@@ -895,9 +895,9 @@ value for a field instead of sharing the global `comfy_*` default. Any other
 plugin declares its settings as it loads, so listing or setting those needs a
 running localm (found the way `localm status` finds it, or set `LOCALM_URL`).
 
-The store names are `coder`, `browser`, `image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). On Linux with an NVIDIA GPU the store also offers the opt-in `exllama` (EXL2 and EXL3 models); `plugin setup --all` leaves it out, so install it by name. Plugins with heavy Python dependencies carry them in a pip extra, installed on the host by default (the `auto_install_plugin_deps` setting; `--no-deps` to skip, `--with-deps` to force, on `install`, `enable` and `setup`, or `localm plugin install-deps` later). Installing from the CLI changes configuration only: a running GUI server picks up the plugin's HTTP routes and tabs the next time the GUI reads the plugin list (reload the page), with no restart; stdio plugins like mcp take effect on the next `localm mcp`. See [docs/plugins.md](plugins.md).
+The store names are `coder`, `browser`, `image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). On Linux with an NVIDIA GPU the store also offers the opt-in `exllama` (EXL2 and EXL3 models); `plugin setup --all` leaves it out, so install it by name. Plugins with heavy Python dependencies carry them in a pip extra, installed on the host by default (the `auto_install_plugin_deps` setting; `--no-deps` to skip, `--with-deps` to force, on `install`, `enable` and `setup`, or `localm plugin install-deps` later). Installing from the CLI runs the plugin's install step too (installing `voice` downloads its Whisper speech model once, unless network access is off) and otherwise changes configuration only: a running GUI server picks up the plugin's HTTP routes and tabs the next time the GUI reads the plugin list (reload the page), with no restart; stdio plugins like mcp take effect on the next `localm mcp`. See [docs/plugins.md](plugins.md).
 
-Third-party plugins are folders containing a `plugin.toml` manifest and Python files. Install from a local path with `localm plugin install <path>` (the same command takes a store name or a directory); installation is a local directory copy, fully offline. See [docs/plugins.md](plugins.md) for the full authoring contract.
+Third-party plugins are folders containing a `plugin.toml` manifest and Python files. Install from a local path with `localm plugin install <path>` (the same command takes a store name or a directory); installation is a local directory copy, made offline; if the plugin defines an install step (`on_install`), that runs once afterwards, and what it does is up to the plugin. See [docs/plugins.md](plugins.md) for the full authoring contract.
 
 ---
 
@@ -925,12 +925,12 @@ localm coder doctor --model mymodel                       # check the model serv
 - `-m/--model` (or `LOCALCODER_MODEL`), `-u/--url` (or `LOCALCODER_URL`), `-k/--api-key` (default `localm`, or `LOCALM_API_KEY`; a `require_auth` server needs the real key), `-p/--port` for the auto-started server (first free in 8642-8741), `-c/--cwd`.
 - `--no-server` starts no server; `--new` starts a dedicated one instead of attaching to the one already running for the project. Attached to that server while it holds another model, `coder` switches it to `--model` and says so; if the server cannot load it, `coder` says why and its requests still name the model, so the server tries again on the first one.
 - `--max-turns` (default 40) and `--max-tokens` (default 2048) may also come from `.localcoder/config.toml`; `--temperature`, `--verbose`.
-- `-y/--yes` auto-approves destructive tool calls, `--interactive-confirm` (with `--yes` or `auto_approve`) still asks before every tool that runs code (`run_shell`, `run_shell_background`, `run_tests`, an untrusted MCP server's tools), `--dry-run` runs without executing destructive or code-running tools.
+- `-y/--yes` auto-approves destructive tool calls (a call the model wrote outside the `<tool_call>` format is denied in an unattended run, and the model is asked again with the format enforced), `--interactive-confirm` (with `--yes` or `auto_approve`) still asks before every tool that runs code (`run_shell`, `run_shell_background`, `run_tests`, an untrusted MCP server's tools), `--dry-run` runs without executing destructive or code-running tools.
 - `--allow-network` lets an unattended run (a TASK, nobody to confirm) use `fetch_url`, `web_search`, the browser tools and `git_push` without asking while `net_mode` is `ask`; without it they are denied, unless the `coder_unattended_network` setting is `allow` (`localm config coder_unattended_network allow`, or Settings > Plugins > Coder). It covers that run only. `net_mode` `off` still refuses them, and an interactive session still asks.
 - `--estimate` plans only and exits; `--patch-mode FILE` captures all file writes as a unified diff written to FILE (`-` for stdout); `--native-tools` uses the OpenAI-compatible tools API (automatic for `--online` and `--anthropic`).
 - `--mode privacy|log|full` (default `privacy`); `--output-format text|json|jsonl` for non-interactive runs; `-r/--resume [ID]` resumes the last saved session or a checkpoint.
 - `--output-format jsonl` writes each agent event (`tool_call`, `tool_result`, `token`, `turn`, `info`, ...) to stdout as one JSON object per line as it happens, then a closing `{"type": "final", "success", "response", "turns", "total_tokens", "denied"}` line; everything else the CLI prints goes to stderr, and so it does for `--output-format json`, whose stdout is exactly the one result document. `jsonl` needs a TASK.
-- `localm coder doctor` (also `/doctor` in a session) checks the model server is reachable and accepts the key, which tool-call protocol the session uses (native tools API or grammar-constrained XML), the context window against the repo map, the git state, whether the verify command resolves, the project config, and that each configured MCP server starts. It starts no server of its own; it attaches to the one running for the project or to `--url`/`--port`. Exit 1 when a check fails. `--output-format json|jsonl` for scripts.
+- `localm coder doctor` (also `/doctor` in a session) checks the model server is reachable and accepts the key, which tool-call protocol the session uses (native tools API, or XML calls the server holds to a grammar once a call opens), the context window against the repo map, the git state, whether the verify command resolves, the project config, and that each configured MCP server starts. It starts no server of its own; it attaches to the one running for the project or to `--url`/`--port`. Exit 1 when a check fails. `--output-format json|jsonl` for scripts.
 
 Every request the agent makes needs structured tool calls. When `--model`
 names a model whose chat template cannot format them and an installed model
@@ -979,7 +979,7 @@ tools, which only the terminal offers (see [gui.md](gui.md)).
 | `run_shell_background` | Start a shell command in the background, returning a job id | yes | no |
 | `check_shell_job` | Check a background shell job's state and output | no | no |
 | `kill_shell_job` | Stop a background job and its process tree; for a background sub-agent's job, the sub-agent runs no further tool call and ends after its current reply | yes | no |
-| `git_commit` | Stage and commit (without `files`, every change, new untracked files included) | yes | no |
+| `git_commit` | Stage and commit (without `files`, every change, new untracked files included; localm's own session files in `.localcoder` are never committed) | yes | no |
 | `git_create_branch` | Create a branch, optionally checking it out | yes | no |
 | `git_push` | Push the current branch | yes | no |
 | `spawn_agent` | Spawn a sub-agent for a sub-task and return its result | yes | no |
@@ -1080,7 +1080,9 @@ always-confirm setting holds back, a call the model wrote in a loose format and 
 that reaches localm's own data folder, and the project's verification check runs before the
 task finishes, detected when none is set; if the fix attempts run out the task is
 reported as not verified), or `n` or any text (the agent stays in plan mode and gets
-your feedback). `/plan off` leaves plan mode without a plan. The agent can also ask you
+your feedback). A plan written as an ordinary reply never reaches that prompt, so the
+agent is told twice to present it with `exit_plan_mode`, and the task then ends as not
+finished. `/plan off` leaves plan mode without a plan. The agent can also ask you
 a question with `ask_user`, offering numbered options or taking a typed answer. Plan
 mode and `ask_user` are terminal features: the GUI coder and one-shot tasks do not offer
 them.
@@ -1303,7 +1305,7 @@ localm stop --all                        # stop every running localm instance
 
 `--cuda-line cuda-12|cuda-13` (Linux, with `--backend cuda`) fetches the CUDA build and runtime libraries of that line on a machine with no NVIDIA GPU, which is how the `cuda` and `cuda13` Docker images are built (see [docs/docker.md](docker.md)). The driver check and the load test are skipped, the runtime is recorded as not load-tested, and `localm doctor` tests it on the machine it runs on. A failed fetch exits with an error; it never falls back to another backend.
 
-`localm run` (when no server is serving the directory) and `localm coder` start a background server that keeps running after the command exits (on Windows it starts in its own console window, which is hidden once the server is listening); `localm gui` and `localm serve` run in the foreground until Ctrl+C. `localm stop` ends any of them - it asks the server to shut down cleanly (model unloaded, same as the GUI's Settings page), and force-ends the process if it does not confirm within `--timeout` seconds (default 10).
+`localm run` (when no server is serving the directory) and `localm coder` start a background server that keeps running after the command exits (on Windows it starts with no console window); `localm gui` and `localm serve` run in the foreground until Ctrl+C. `localm stop` ends any of them - it asks the server to shut down cleanly (model unloaded, same as the GUI's Settings page), and force-ends the process if it does not confirm within `--timeout` seconds (default 10).
 
 `localm status` lists what that server is working on right now - a model pull, a RAG re-embed, a media generation - with each operation's id. `localm cancel <id>` stops one of them (a unique id prefix is enough); a pull's download is ended, and an in-process job stops at its next checkpoint. Scheduled jobs are a separate thing under their own ids - use `localm job` for those. A chat reply in progress is not listed either. A server started with `localm serve` reports its activity the same as one started with `localm gui`. When several servers serve the directory (`--new`), `status` names them all and commands attach to the one started first; `localm stop` without an id then lists them and stops none.
 

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Bundling a native dependency that upstream's Linux builds link but do not
-ship (libgomp.so.1).
+"""Native dependencies that upstream's builds link but do not ship: bundling
+libgomp.so.1 on Linux, offering the Microsoft Visual C++ Redistributable on
+Windows.
 """
 
 from __future__ import annotations
@@ -10,10 +11,14 @@ import sys
 import tarfile
 import tempfile
 from pathlib import Path
+from typing import Optional
 
-from localm import elf_deps
+import click
+from rich.markup import escape
+
+from localm import elf_deps, vc_runtime
 from localm.debuglog import logger
-from localm.setup_llama._common import console
+from localm.setup_llama._common import _net_allowed, console
 from localm.setup_llama.download import _sha256_file, ArtifactError
 import localm.setup_llama as _sl
 
@@ -100,16 +105,86 @@ def _extract_libgomp_from_deb(deb_path: Path, workdir: Path) -> Path:
     return extracted
 
 
-def _bundle_missing_native_deps(target: Path) -> None:
-    """After a Linux backend is extracted into *target*, provide any native
-    dependency the extracted ``.so`` files need but neither the archive nor
-    this runtime dir already supplies. Currently handles only
-    ``libgomp.so.1`` (see the comment above _LIBGOMP_SONAME); a silent no-op
-    for every other missing dependency and for Windows/macOS.
+# Whether this setup-llama run is unattended (--yes): the Visual C++
+# Redistributable is then never offered.
+_VC_UNATTENDED = {"on": False}
 
-    Never raises. A failure to bundle is logged as a warning, never silently
-    treated as success."""
-    if sys.platform in ("win32", "darwin"):
+
+def set_vc_unattended(on: bool) -> None:
+    """Record whether this setup-llama run is unattended (``--yes``). An
+    unattended run never offers the Visual C++ Redistributable, so it never
+    shows an administrator prompt."""
+    _VC_UNATTENDED["on"] = bool(on)
+
+
+def _vc_ask():
+    """The question callback :func:`localm.vc_runtime.ensure` gets: a yes/no
+    question (default yes) when a person can answer, else None."""
+    if _VC_UNATTENDED["on"] or not _sl._interactive():
+        return None
+
+    def ask(text: str) -> bool:
+        _sl._flush_stdin()
+        return _sl._confirm(text, default=True)
+    return ask
+
+
+def _vc_refusal(url: str) -> Optional[str]:
+    """None when Network access lets setup-llama download *url*, else the
+    refusal with its remedy. Reads the policy only."""
+    return None if _net_allowed() else vc_runtime.net_off_refusal()
+
+
+def _say_vc(msg: str) -> None:
+    console.print(f"[yellow]{escape(msg)}[/yellow]")
+
+
+def offer_vc_runtime(target: Path) -> bool:
+    """Windows: whether the Microsoft Visual C++ runtime the binaries in
+    *target* import is present, offering to install it when a person can answer
+    (:func:`localm.vc_runtime.ensure`). True off Windows. Never raises except
+    for ``click.Abort`` from the question; any other failure is logged and
+    printed with the remedy, and returns False."""
+    try:
+        return vc_runtime.ensure(target, download=lambda url, dest: _sl._download(url, dest),
+                                 refusal=_vc_refusal, ask=_vc_ask(), say=_say_vc)
+    except click.exceptions.Abort:
+        raise
+    except Exception as e:
+        logger.warning("Visual C++ Redistributable check failed for %s: %s", target, e)
+        names = vc_runtime.missing_from_system(target) or ["msvcp140.dll"]
+        _say_vc(vc_runtime.absent_message(names, f"the check failed: {e}"))
+        return False
+
+
+def vc_runtime_missing(target: Path) -> bool:
+    """Windows: whether the binaries in *target* import a Microsoft Visual C++
+    runtime DLL that the system folder lacks at the pinned version or newer.
+    False off Windows."""
+    return sys.platform == "win32" and bool(vc_runtime.missing_from_system(target))
+
+
+def vc_runtime_blocks_load(target: Path, error_text: str) -> bool:
+    """Windows: whether a failed load of the runtime in *target*, with
+    *error_text*, is down to the Microsoft Visual C++ runtime
+    (:func:localm.vc_runtime.blocks_load). False off Windows."""
+    return sys.platform == "win32" and vc_runtime.blocks_load(target, error_text)
+
+
+def _bundle_missing_native_deps(target: Path) -> None:
+    """After a backend is placed in *target*, provide any native dependency its
+    libraries need but neither the archive nor this runtime dir supplies: on
+    Windows, offer the Microsoft Visual C++ Redistributable
+    (:func:`offer_vc_runtime`); on Linux, ``libgomp.so.1`` (see the comment
+    above _LIBGOMP_SONAME). A no-op for every other missing dependency and on
+    macOS.
+
+    Never raises, except ``click.Abort`` from the Visual C++ question. A
+    failure is logged as a warning, never silently treated as success."""
+    if sys.platform == "win32":
+        _sl.offer_vc_runtime(target)
+        return
+    if sys.platform == "darwin":
         return
     try:
         so_files = [f for f in target.iterdir()

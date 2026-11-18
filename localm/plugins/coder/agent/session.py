@@ -17,6 +17,7 @@ from ..memory import cap_user_instructions, forget, remember
 from ..parser import strip_tool_calls
 from ..prompts import build_subagent_system_prompt, build_system_prompt
 from ..audit import SessionMode, unregister_coder_session_mode
+from ..tools.git import ensure_private_state_ignored
 
 # Upper bound on how long the CLI's SYNCHRONOUS close-time reflection (see
 # _maybe_store_episode) may hold the process open. An expired deadline is turned
@@ -481,6 +482,7 @@ class _SessionMixin:
 
         out_dir = self.cwd / ".localcoder" / "sessions"
         out_dir.mkdir(parents=True, exist_ok=True)
+        ensure_private_state_ignored(self.cwd)
         out_path = out_dir / f"{ts_label}_{self._checkpoint_id}.md"
 
         tokens_line = (

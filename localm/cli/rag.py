@@ -542,9 +542,11 @@ def rag_query(collection, text, k, embed, url, relevant_only, rerank, context):
     elif rerank and plan.fn is None:
         console.print("[yellow]Not reranking:[/yellow] no reranker model is "
                       "installed (see 'localm pull').")
-    hits = coll.query(text, k=k, embed_fn=embed_fn, relevant_only=relevant_only,
-                      rerank_fn=plan.fn, rerank_candidates=plan.candidates,
-                      rerank_min_score=plan.min_score, context=context)
+    from ..debuglog import native_console_paused
+    with native_console_paused():
+        hits = coll.query(text, k=k, embed_fn=embed_fn,
+                          relevant_only=relevant_only, **plan.query_kwargs(),
+                          context=context)
     if coll.rerank_degrade_reason:
         console.print(f"[yellow]Not reranked:[/yellow] "
                       f"{escape(coll.rerank_degrade_reason)}")

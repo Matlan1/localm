@@ -5,7 +5,7 @@ groups (localm/inference/routes/*.py) and, last, the plugin engine."""
 from __future__ import annotations
 
 from fastapi import FastAPI
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 
 from localm.inference.app_assembly.context import AppContext
 
@@ -18,6 +18,10 @@ def add_api_landing(app: FastAPI) -> None:
     @app.get("/", include_in_schema=False)
     async def _api_root() -> RedirectResponse:
         return RedirectResponse(url="/docs", status_code=307)
+
+    @app.head("/", include_in_schema=False)
+    async def _api_root_head() -> Response:
+        return Response(status_code=200)
 
 
 def mount_route_groups(app: FastAPI, ctx: AppContext) -> None:

@@ -493,6 +493,19 @@ def test_coder_full_key_gets_the_unrestricted_coder(tmp_path, monkeypatch):
 #  Scoped-key pairing QR (POST /api/pairing/qr {key})                #
 # ------------------------------------------------------------------ #
 
+def test_pairing_qr_render_does_not_mark_the_key_used(tmp_path, monkeypatch):
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    from localm import auth
+    scoped = auth.create_key("phone", ["chat"])
+    with TestClient(app) as client:
+        r = client.post("/api/pairing/qr",
+                        headers={"Authorization": "Bearer ownersecret"},
+                        json={"key": scoped["key"]})
+        assert r.status_code == 200
+    row = next(k for k in auth.list_keys() if k["id"] == scoped["id"])
+    assert row["last_used"] is None
+
+
 def test_pairing_qr_renders_for_a_scoped_key(tmp_path, monkeypatch):
     app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
     from localm import auth

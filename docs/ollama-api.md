@@ -11,7 +11,9 @@ localm serve <model> --port 11434     # Ollama's default port, for clients that 
 ```
 
 Point the client at `http://127.0.0.1:<port>` and use a model name from
-`GET /api/tags`.
+`GET /api/tags`. The `ollama` command-line tool checks that a server is there
+with `HEAD /` before every command: `localm serve` and `localm gui` both answer
+it with 200, and `HEAD` works on `/api/version`, `/api/tags` and `/api/ps` too.
 
 ## How it is mounted
 
@@ -130,7 +132,8 @@ served by another instance and the configured `embedding_model` count as registe
   `name`, `model`, `size` (the weights' size in bytes, 0 when unreadable),
   `modified_at` (the weights file's modification time, or
   `1970-01-01T00:00:00Z` when it cannot be read), `digest` (the recorded SHA-256, or
-  empty) and `details`: `parent_model` (empty), `format`, `family` (the model's
+  one derived from the model's registry ID, which stays the same across renames;
+  never empty) and `details`: `parent_model` (empty), `format`, `family` (the model's
   architecture when recorded, else empty), `families` (a list holding `family`,
   or null), `parameter_size` (the parameter count in the weights' file or
   folder name, such as `8B`, `8x7B` or `135M`, else empty) and `quantization_level` (the

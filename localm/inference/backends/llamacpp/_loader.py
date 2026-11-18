@@ -280,6 +280,39 @@ def _preload(path: Path) -> None:
         pass  # already loaded or not needed on this system
 
 
+def missing_dll_clause(binary_dir: Optional[Path], images: list) -> Optional[str]:
+    """Windows: after a library in *images* failed to load, a clause naming the
+    DLLs that neither the runtime folder, the ROCm folders, Python's own folder
+    nor the system folder holds, and that this process has not loaded (for
+    example "msvcp140.dll is missing (the Microsoft Visual C++ runtime; needed
+    by llama.dll)"). None elsewhere, or when every import is found."""
+    if sys.platform != "win32" or binary_dir is None:
+        return None
+    from localm import vc_runtime
+    return vc_runtime.missing_clause(images, [Path(binary_dir), *rocm_runtime_dirs()])
+
+
+def _vc_runtime_short(binary_dir: Optional[Path], error_text: str) -> bool:
+    """Windows: whether a failed load of the libraries in *binary_dir*, with
+    *error_text*, is down to the Microsoft Visual C++ runtime
+    (:func:localm.vc_runtime.blocks_load). False elsewhere, or when the check
+    fails (logged)."""
+    if sys.platform != "win32" or binary_dir is None:
+        return False
+    from localm import vc_runtime
+    try:
+        return vc_runtime.blocks_load(Path(binary_dir), error_text)
+    except Exception:
+        logger.warning("could not check the Visual C++ runtime for %s", binary_dir,
+                       exc_info=True)
+        return False
+
+
+def _vc_install_hint() -> str:
+    from localm import vc_runtime
+    return vc_runtime.install_hint()
+
+
 # ggml shared libraries that are NOT compute backends (do not register them).
 _GGML_NON_BACKENDS = {"ggml-base", "ggml"}
 
@@ -598,8 +631,17 @@ def load_lib() -> ctypes.CDLL:
         else:
             _loaded_lib = ctypes.CDLL(str(lib_path), mode=ctypes.RTLD_GLOBAL)
     except OSError as e:
+        clause = missing_dll_clause(binary_dir, [*ggml, lib_path])
+        if (clause and "Visual C++" in clause) or _vc_runtime_short(binary_dir, str(e)):
+            raise RuntimeError(
+                f"Failed to load {name} from {lib_path}: "
+                f"{clause + '. ' if clause else ''}{e}\n"
+                "Windows does not have the Microsoft Visual C++ runtime this build "
+                f"needs, or has an older version. {_vc_install_hint()}"
+            ) from e
         raise RuntimeError(
-            f"Failed to load {name} from {lib_path}: {e}\n"
+            f"Failed to load {name} from {lib_path}: "
+            f"{clause + '. ' if clause else ''}{e}\n"
             "This usually means the provisioned build does not match this "
             "machine - e.g. an AMD ROCm or NVIDIA CUDA build on a box without "
             "that GPU or its runtime. Re-provision a backend that fits:\n"
@@ -1325,11 +1367,33 @@ def probe_daemon_running() -> bool:
         return _PROBE_PROC is not None and _PROBE_PROC.poll() is None
 
 
+def _probe_descendants(proc) -> list:
+    """``(pid, start)`` of each running descendant of the process *proc*,
+    deepest first (``install_manifest.descendants``). On Windows a daemon started through a
+    venv launcher is that launcher, and the process that loads the runtime is
+    its child. Empty when processes cannot be listed. Never raises."""
+    try:
+        from localm import install_manifest
+        pid = proc.pid
+        procs = install_manifest.list_processes()
+        if not procs:
+            return []
+        by_pid = {p[0]: p for p in procs}
+        return [(d, by_pid[d][3]) for d in install_manifest.descendants(by_pid, pid)
+                if d != pid]
+    except Exception as e:
+        logger.debug("vram-probe: could not list the daemon's processes (%s)", e)
+        return []
+
+
 def stop_probe_daemon(wait: float = 5.0) -> None:
-    """Stop the probe daemon, if one is running, waiting up to *wait* seconds
-    for it to exit. The next query spawns a fresh one. Never raises."""
+    """Stop the probe daemon, if one is running, and its descendants
+    (:func:`_probe_descendants`), waiting up to *wait* seconds for each of them
+    to exit, so the runtime it loaded is free on return. The next query spawns a
+    fresh one. Never raises."""
     with _PROBE_LOCK:
         proc = _PROBE_PROC
+        children = _probe_descendants(proc) if proc is not None and proc.poll() is None else []
         _kill_and_clear_probe()
         if proc is not None:
             try:
@@ -1337,6 +1401,12 @@ def stop_probe_daemon(wait: float = 5.0) -> None:
             except Exception as e:
                 logger.debug("vram-probe: stopped daemon did not exit within "
                              "%.1fs (%s)", wait, type(e).__name__)
+            if children:
+                from localm import install_manifest
+                for pid, start in children:
+                    if not install_manifest._stop(pid, timeout=wait, start=start):
+                        logger.debug("vram-probe: process %s of the stopped daemon did "
+                                     "not exit within %.1fs", pid, wait)
 
 
 class probe_daemon_held:

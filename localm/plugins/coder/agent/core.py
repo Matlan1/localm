@@ -264,6 +264,9 @@ class Agent(
         # process execution at all (SAFE_RESTRICTED_TOOLS), and an oracle would
         # hand it straight back.
         self.verify_cmd     = None if restricted else verify_cmd
+        # True once the user turned verification off (--no-verify, /verify off),
+        # as opposed to it having no command because none was detected.
+        self.verify_off     = False
         self.verify_max_retries = verify_max_retries
         # /goal in cli/repl.py routes each plain-text message through
         # cli/goal.py's _run_goal_loop instead of a single chat() turn, using
@@ -403,6 +406,11 @@ class Agent(
         # removed when the identical call later runs. _loop re-arms it.
         self._denied_unconfirmed: list[tuple[str, str, str]] = []
         self._denied_lock = threading.Lock()
+        # Monotonic counters the loop compares across a step: calls the user
+        # refused at an approval prompt, and calls denied only because they were
+        # not written in the <tool_call> format.
+        self._user_declines = 0
+        self._lenient_denials = 0
         # Keys the user answered "a" (always) for at an interactive prompt this
         # session: a tool name, or (tool, exact command) for shell-executing
         # tools. See _ExecutionMixin._session_allow_key.

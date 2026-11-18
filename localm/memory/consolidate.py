@@ -219,6 +219,9 @@ def extract(complete: Complete, session_text: str, *,
         facts = _fact_list(raw)
     if facts is None:
         raise ConsolidationReplyError(_unreadable_reason(raw))
+    from localm.debuglog import logger
+    user_text = _user_turn_text(session_text)
+    user_stems = None if user_text is None else _first_person_stems(user_text)
     out: list[dict] = []
     for item in facts:
         text, confidence = _fact_item(item)
@@ -232,12 +235,63 @@ def extract(complete: Complete, session_text: str, *,
         conf = 0.0 if conf < 0 else 1.0 if conf > 1 else conf
         if conf < CONFIDENCE_FLOOR:
             continue
+        if user_stems is not None and not _is_grounded(text, user_stems):
+            logger.info("memory consolidation: dropped a candidate fact that "
+                        "the user's own words do not support")
+            continue
         if _is_dup(text, [c["text"] for c in out]):
             continue                              # collapse near-dup candidates
         out.append({"text": text, "confidence": conf})
         if len(out) >= max_candidates:
             break
     return out
+
+
+# A candidate fact must be about the user and share a content word with a
+# sentence in which the user speaks of themselves (first person); one that does
+# not is about the world, taken from a request or from the assistant's reply.
+_STEM_CHARS = 4
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
+
+
+def _user_turn_text(session_text: str) -> Optional[str]:
+    """The text of the ``User:`` turns of a ``User:`` / ``Assistant:`` transcript,
+    or None when the transcript carries no ``User:`` turn."""
+    lines: list[str] = []
+    in_user = False
+    seen = False
+    for line in session_text.splitlines():
+        if line.startswith("User: "):
+            in_user = seen = True
+            line = line[len("User: "):]
+        elif line.startswith("Assistant: "):
+            in_user = False
+        if in_user:
+            lines.append(line)
+    return "\n".join(lines) if seen else None
+
+
+def _first_person_stems(user_text: str) -> set:
+    """The first letters of every content word in the sentences of *user_text*
+    where the user speaks of themselves (store._is_self_referential)."""
+    from .store import _content_tokens, _is_self_referential
+    stems: set = set()
+    for sentence in _SENTENCE_SPLIT.split(user_text):
+        if _is_self_referential(sentence):
+            stems |= {w[:_STEM_CHARS] for w in _content_tokens(sentence) if len(w) > 1}
+    return stems
+
+
+def _is_grounded(fact: str, user_stems: set) -> bool:
+    """True when *fact* is written about the user (it says "user" or speaks in
+    the first person) and shares a content word, by its first letters, with
+    *user_stems*."""
+    from .store import _SELF_REF, _content_tokens, _tokenize
+    toks = set(_tokenize(fact))
+    if "user" not in toks and not (_SELF_REF & toks):
+        return False
+    words = _content_tokens(fact) - {"user"}
+    return any(w[:_STEM_CHARS] in user_stems for w in words)
 
 
 def _fact_item(item) -> tuple:

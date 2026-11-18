@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { addMessageRow, isWarnStatus, lsSetScoped, statusLabel } from "./chat.js";
-import { $, authHeaders, autoGrow, chooseAsync, confirmDanger, confirmDangerAsync, el, nearBottom, openModal, readSSE, renderMarkdown, toast } from "./helpers.js";
+import { $, authHeaders, autoGrow, chooseAsync, closeModal, confirmDanger, confirmDangerAsync, el, liveThinkText, nearBottom, openModal, readSSE, renderMarkdown, toast } from "./helpers.js";
 import { t, tn } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
 import { confirmLoadText, modelCache, refreshModels } from "./models-sidebar.js";
@@ -382,6 +382,7 @@ export function activateSession(id) {
   for (const [sid, s] of coder.sessions) {
     s.feedEl.classList.toggle("active", sid === id);
   }
+  rebalanceStreams();
   // The inline browser mirror only streams for the session on screen: a
   // session with several coder sessions open must not hold N live
   // screencasts running for the N-1 nobody is looking at.
@@ -460,8 +461,10 @@ export function registerSession(info, { replay }) {
     inlineBrowserAttempted: false,
     inlineBrowser: null,       // {mod, img, status, abort, jobId} once attached
   };
+  s.streamReplay = !!replay;
   coder.sessions.set(info.id, s);
-  streamSession(s, replay);
+  if (!_deferRebalance) rebalanceStreams();
+  if (coder.sessions.size > MAX_LIVE_STREAMS) ensureStreamTick();
   return s;
 }
 
@@ -585,7 +588,7 @@ function renderLiveBlock(s) {
   // imageScope: a coder session is its own conversation, so a "load images
   // from this site" answer given in one must not carry into another.
   renderMarkdown(s.liveBody,
-    s.liveReasoning ? `<think>\n${s.liveReasoning}\n</think>\n${s.liveText}` : s.liveText,
+    liveThinkText(s.liveReasoning, s.liveText),
     { imageScope: "coder:" + s.info.id });
   if (stick) s.feedEl.scrollTop = s.feedEl.scrollHeight;
 }
@@ -981,11 +984,22 @@ export function handleCoderEvent(s, ev) {
 }
 
 export async function streamSession(s, replay) {
-  while (coder.sessions.has(s.info.id) && !s.closed) {
+  const ctl = new AbortController();
+  s.streamCtl = ctl;
+  try {
+    await _streamSessionLoop(s, replay, ctl);
+  } finally {
+    if (s.streamCtl === ctl) s.streamCtl = null;
+  }
+}
+
+async function _streamSessionLoop(s, replay, ctl) {
+  const live = () => coder.sessions.has(s.info.id) && !s.closed && s.streamCtl === ctl;
+  while (live()) {
     try {
       const r = await fetch(
         `/api/coder/sessions/${s.info.id}/events${replay ? "?replay=true" : ""}`,
-        { headers: authHeaders() });
+        { headers: authHeaders(), signal: ctl.signal });
       if (r.status === 404) {
         stopInlineBrowserStream(s);
         s.closed = true;
@@ -997,12 +1011,105 @@ export async function streamSession(s, replay) {
       await readSSE(r, (payload) => {
         let ev;
         try { ev = JSON.parse(payload); } catch { return; }
-        if (coder.sessions.has(s.info.id)) handleCoderEvent(s, ev);
+        if (coder.sessions.has(s.info.id) && s.streamCtl === ctl) handleCoderEvent(s, ev);
       });
     } catch {
-      if (!coder.sessions.has(s.info.id) || s.closed) return;
+      if (!live()) return;
       await new Promise((res) => setTimeout(res, 1500));
     }
+  }
+}
+
+/* A browser allows 6 connections per host and the server speaks HTTP/1.1, so
+ * one open events stream per coder session starves every other request once
+ * several sessions are open. Up to MAX_LIVE_STREAMS sessions keep a stream;
+ * beyond that, the session on screen and the busy ones (or those waiting for
+ * an approval) hold the streams and the rest are parked, then re-read in full
+ * from the server (replay) when one of them is shown or becomes busy. */
+const MAX_LIVE_STREAMS = 3;
+let _deferRebalance = false;
+const STREAM_TICK_MS = 4000;
+let _streamTick = null;
+
+function _streamRank(s) {
+  if (s.info.id === coder.activeId) return 0;
+  if (s.busy || s.confirmCards.size > 0) return 1;
+  return 2;
+}
+
+function _closeStream(s) {
+  const ctl = s.streamCtl;
+  s.streamCtl = null;
+  if (ctl) ctl.abort();
+}
+
+function _resetSessionView(s) {
+  stopInlineBrowserStream(s);
+  s.feedEl.replaceChildren();
+  s.liveBody = null;
+  s.liveText = "";
+  s.liveReasoning = "";
+  s.pendingCards = [];
+  s.confirmCards.clear();
+  s.phaseKey = "";
+  s.inlineBrowser = null;
+  s.inlineBrowserAttempted = false;
+}
+
+export function rebalanceStreams() {
+  const all = [...coder.sessions.values()].filter((s) => !s.closed);
+  let keep;
+  if (all.length <= MAX_LIVE_STREAMS) {
+    keep = new Set(all);
+  } else {
+    keep = new Set(all.filter((s) => _streamRank(s) < 2)
+      .sort((a, b) => _streamRank(a) - _streamRank(b))
+      .slice(0, MAX_LIVE_STREAMS));
+  }
+  for (const s of all) {
+    if (keep.has(s)) {
+      if (s.streamCtl) continue;
+      let replay = s.streamReplay;
+      if (s.streamedOnce) {
+        _resetSessionView(s);
+        replay = true;
+      }
+      s.streamedOnce = true;
+      s.streamReplay = false;
+      streamSession(s, replay);
+    } else if (s.streamCtl) {
+      _closeStream(s);
+    }
+  }
+}
+
+async function _pollParkedSessions() {
+  const parked = [...coder.sessions.values()].filter((s) => !s.closed && !s.streamCtl);
+  if (parked.length) {
+    try {
+      const r = await fetch("/api/coder/sessions", { headers: authHeaders() });
+      if (r.ok) {
+        const data = await r.json();
+        for (const info of data.sessions || []) {
+          const s = coder.sessions.get(info.id);
+          if (s && !s.streamCtl) {
+            Object.assign(s.info, info);
+            s.busy = !!(info.busy || info.pending_confirm);
+          }
+        }
+      }
+    } catch { /* server unreachable; the next tick retries */ }
+  }
+  rebalanceStreams();
+  if (coder.sessions.size <= MAX_LIVE_STREAMS && _streamTick !== null) {
+    clearInterval(_streamTick);
+    _streamTick = null;
+  }
+}
+
+function ensureStreamTick() {
+  if (_streamTick === null && typeof setInterval === "function") {
+    _streamTick = setInterval(_pollParkedSessions, STREAM_TICK_MS);
   }
 }
 
@@ -1331,11 +1438,17 @@ export async function reattachSessions() {
     const r = await fetch("/api/coder/sessions", { headers: authHeaders() });
     if (!r.ok) return;
     const data = await r.json();
-    for (const info of data.sessions) {
-      if (!coder.sessions.has(info.id)) {
-        registerSession(info, { replay: true });
+    _deferRebalance = true;
+    try {
+      for (const info of data.sessions) {
+        if (!coder.sessions.has(info.id)) {
+          registerSession(info, { replay: true });
+        }
       }
+    } finally {
+      _deferRebalance = false;
     }
+    rebalanceStreams();
     if (!coder.activeId && data.sessions.length) {
       activateSession(data.sessions[data.sessions.length - 1].id);
       toast(t("coder.session.reattached"));
@@ -1475,6 +1588,8 @@ export async function closeCoderSession(s) {
 export function dropCoderSession(s) {
   stopInlineBrowserStream(s);
   s.closed = true;
+  _closeStream(s);
+  _closeModalOf(s);
   s.feedEl.remove();
   if (!coder.sessions.has(s.info.id)) return;
   coder.sessions.delete(s.info.id);
@@ -1483,6 +1598,33 @@ export function dropCoderSession(s) {
     coder.activeId = remaining[remaining.length - 1] || null;
   }
   activateSession(coder.activeId);
+}
+
+/** Mark the shared modal's content as belonging to session *s*. The marker is
+ *  a child of the modal body, so it survives a picker opened over the dialog
+ *  and is gone as soon as any other dialog replaces it. */
+function _bindModalToSession(body, s) {
+  const mark = el("span", "");
+  mark.hidden = true;
+  mark.dataset.coderSession = s.info.id;
+  _boundMarks.add(mark);
+  body.appendChild(mark);
+}
+const _boundMarks = new Set();
+
+/** Close the shared modal when it is a dialog opened for *s*: a dialog must
+ *  never outlive its session and act on whichever one is active next. */
+function _closeModalOf(s) {
+  let shown = false;
+  for (const m of [..._boundMarks]) {
+    if (m.dataset.coderSession !== s.info.id) continue;
+    // A dialog set aside under a picker is not on screen: marking it dead
+    // keeps the picker from putting it back.
+    m.dataset.dead = "1";
+    _boundMarks.delete(m);
+    if (m.isConnected && $("modal").style.display !== "none") shown = true;
+  }
+  if (shown) closeModal();
 }
 
 /** A session that ended somewhere else (another tab, the API, the server):
@@ -2242,8 +2384,7 @@ $("setup-history").onclick = openSessionHistory;
 /** POST a live settings change and refresh the cached session info.
  *  Only the keys PRESENT in *body* are touched server-side, so a caller
  *  changing one control cannot silently restate (and clobber) the others. */
-export async function postSessionSettings(body) {
-  const s = activeSession();
+export async function postSessionSettings(body, s = activeSession()) {
   if (!s) throw new Error(t("coder.session.none"));
   const r = await fetch(`/api/coder/sessions/${s.info.id}/settings`, {
     method: "POST", headers: authHeaders(), body: JSON.stringify(body),
@@ -2314,7 +2455,12 @@ function _renderModelBar(updated, model) {
 /** Switch the active session's model, updating bar and indicators. *pin*
  *  false makes it the session's preferred model rather than its pin. */
 export async function switchActiveSessionModel(model, pin = true) {
-  const s = activeSession();
+  return switchSessionModel(activeSession(), model, pin);
+}
+
+/** Switch *s*'s model (the session a dialog was opened for, which is not
+ *  necessarily the active one by the time the button is pressed). */
+export async function switchSessionModel(s, model, pin = true) {
   if (!s) { toast(t("coder.session.none"), true); return; }
   if (s.busy) {
     toast(t("coder.controls.busyError"), true);
@@ -2324,7 +2470,7 @@ export async function switchActiveSessionModel(model, pin = true) {
     const updated = await _applySessionModel(s, model, pin);
     if (!updated) return;
     if (pin) s.pendingModel = null;
-    _renderModelBar(updated, model);
+    if (s.info.id === coder.activeId) _renderModelBar(updated, model);
     toast(t("coder.controls.modelSwitched", { model: updated.model || model }));
   } catch (e) {
     toast(t("coder.controls.modelSwitchFailed") + e.message, true);
@@ -2377,6 +2523,7 @@ export function openSessionControls() {
   if (!s) { toast(t("coder.session.startFirst"), true); return; }
   openModal(t("coder.controls.modalTitle", { label: sessionLabel(s.info) }), (body) => {
     const info = s.info || {};
+    _bindModalToSession(body, s);
 
     body.appendChild(el("p", "sub", t("coder.controls.intro")));
 
@@ -2418,10 +2565,10 @@ export function openSessionControls() {
     const modelBtn = el("button", "btn-secondary", t("coder.controls.switchModelBtn"));
     modelBtn.onclick = async () => {
       const chosen = modelInput.value.trim();
-      if (!chosen || chosen === activeSession()?.info?.model) return;
+      if (!chosen || chosen === s.info.model) return;
       modelBtn.disabled = true;
       try {
-        await switchActiveSessionModel(chosen);
+        await switchSessionModel(s, chosen);
       } finally {
         modelBtn.disabled = false;
       }
@@ -2446,7 +2593,7 @@ export function openSessionControls() {
     appBox.onchange = async () => {
       appBox.disabled = true;
       try {
-        const d = await postSessionSettings({ auto_approve: appBox.checked });
+        const d = await postSessionSettings({ auto_approve: appBox.checked }, s);
         appBox.checked = !!d.auto_approve;
         toast(t(d.auto_approve ? "coder.controls.autoApproveOn" : "coder.controls.autoApproveRevoked"));
       } catch (e) {
@@ -2473,7 +2620,7 @@ export function openSessionControls() {
         // "" is sent as null, which CLEARS - the server distinguishes an absent
         // field (leave alone) from an explicit null (clear).
         const v = scopeIn.value.trim();
-        const d = await postSessionSettings({ scope: v || null });
+        const d = await postSessionSettings({ scope: v || null }, s);
         toast(d.scope ? t("coder.controls.scopeSet", { scope: d.scope }) : t("coder.controls.scopeCleared"));
       } catch (e) { toast(t("coder.controls.scopeSetFailed") + e.message, true); }
       finally { scopeBtn.disabled = false; }
@@ -2497,13 +2644,21 @@ export function openSessionControls() {
     vIn.placeholder = t("coder.controls.verifyOffPlaceholder");
     vIn.spellcheck = false;
     vIn.value = info.verify || "";
+    const vReason = el("div", "sub");
+    const showVerifyReason = (d) => {
+      const reason = d && !d.verify ? d.verify_reason : "";
+      vReason.textContent = reason ? t("coder.controls.verifyNoCheckReason", { reason }) : "";
+      vReason.hidden = !reason;
+    };
+    showVerifyReason(info);
     const vSet = el("button", "btn-secondary", t("coder.controls.setBtn"));
     vSet.onclick = async () => {
       vSet.disabled = true;
       try {
         const v = vIn.value.trim();
-        const d = await postSessionSettings({ verify: v || null });
+        const d = await postSessionSettings({ verify: v || null }, s);
         vIn.value = d.verify || "";
+        showVerifyReason(d);
         toast(d.verify ? t("coder.controls.verificationIs", { verify: d.verify }) : t("coder.controls.verificationOff"));
       } catch (e) { toast(t("coder.controls.verifySetFailed") + e.message, true); }
       finally { vSet.disabled = false; }
@@ -2513,8 +2668,9 @@ export function openSessionControls() {
     vAuto.onclick = async () => {
       vAuto.disabled = true;
       try {
-        const d = await postSessionSettings({ auto_verify: true });
+        const d = await postSessionSettings({ auto_verify: true }, s);
         vIn.value = d.verify || "";
+        showVerifyReason(d);
         // A re-detect that found nothing is SAID, not left looking like a set.
         toast(d.verify ? t("coder.controls.verificationIs", { verify: d.verify })
                        : t("coder.controls.noCheckFound"), !d.verify);
@@ -2530,6 +2686,7 @@ export function openSessionControls() {
     vRow.appendChild(vSet);
     vRow.appendChild(vAuto);
     vCard.appendChild(vRow);
+    vCard.appendChild(vReason);
     body.appendChild(vCard);
 
     /* --- working directory (the REPL's /cd) --- */
@@ -2557,7 +2714,7 @@ export function openSessionControls() {
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.detail || r.statusText);
         s.info = d;
-        $("coder-cwd").textContent = d.cwd;
+        if (s.info.id === coder.activeId) $("coder-cwd").textContent = d.cwd;
         renderSessionSelect();
         toast(t("coder.controls.cwdSetToast") + d.cwd);
       } catch (e) { toast(t("coder.controls.cwdSetFailed") + e.message, true); }
@@ -2590,8 +2747,7 @@ export function openSessionControls() {
  *  remembered about the user), and these scripts share ONE global lexical
  *  environment - so the shorter name silently shadowed it and the chat memory
  *  chip stopped opening anything. Two different memories, two different names. */
-export async function openCoderMemoryModal() {
-  const s = activeSession();
+export async function openCoderMemoryModal(s = activeSession()) {
   if (!s) { toast(t("coder.session.startFirst"), true); return; }
   let data;
   try {
@@ -2600,8 +2756,10 @@ export async function openCoderMemoryModal() {
     data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
   } catch (e) { toast(t("coder.memory.readFailed") + e.message, true); return; }
+  if (s.closed) return;
 
   openModal(t("coder.memory.modalTitle", { label: sessionLabel(s.info) }), (body) => {
+    _bindModalToSession(body, s);
     if (data.warning) body.appendChild(el("div", "modal-warn", data.warning));
     if (!data.exists) {
       body.appendChild(emptyState("book", t("coder.memory.emptyTitle"),
@@ -2633,7 +2791,7 @@ export async function openCoderMemoryModal() {
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.detail || r.statusText);
         toast(t("coder.memory.remembered"));
-        openCoderMemoryModal();
+        openCoderMemoryModal(s);
       } catch (e) { toast(t("coder.memory.addFailed") + e.message, true); }
       finally { addBtn.disabled = false; }
     };
@@ -2666,7 +2824,7 @@ export async function openCoderMemoryModal() {
         if (!d.had_file) toast(t("coder.memory.noFile"), true);
         else if (!d.removed) toast(t("coder.memory.noMatch", { pattern }), true);
         else toast(tn("coder.memory.removed", d.removed));
-        openCoderMemoryModal();
+        openCoderMemoryModal(s);
       } catch (e) { toast(t("coder.memory.forgetFailed") + e.message, true); }
       finally { dropBtn.disabled = false; }
     };
@@ -2680,8 +2838,7 @@ export async function openCoderMemoryModal() {
 /** Background work THIS session started (the REPL's /bg). An owner session can
  *  start background shell jobs and sub-agents and, until now, could enumerate
  *  them nowhere. */
-export async function openBackgroundModal() {
-  const s = activeSession();
+export async function openBackgroundModal(s = activeSession()) {
   if (!s) { toast(t("coder.session.startFirst"), true); return; }
   let data;
   try {
@@ -2690,8 +2847,10 @@ export async function openBackgroundModal() {
     data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
   } catch (e) { toast(t("coder.bg.readFailed") + e.message, true); return; }
+  if (s.closed) return;
 
   openModal(t("coder.bg.modalTitle", { label: sessionLabel(s.info) }), (body) => {
+    _bindModalToSession(body, s);
     const jobs = data.jobs || [];
     const running = jobs.filter((j) => j.state === "running");
     const done = jobs.filter((j) => j.state !== "running");
@@ -2743,15 +2902,15 @@ export async function openBackgroundModal() {
 
     const foot = el("div", "actions");
     const refresh = el("button", "btn-secondary", t("coder.bg.refreshBtn"));
-    refresh.onclick = () => openBackgroundModal();
+    refresh.onclick = () => openBackgroundModal(s);
     foot.appendChild(refresh);
     body.appendChild(foot);
   });
 }
 
 $("coder-controls").onclick = openSessionControls;
-$("coder-memory").onclick = openCoderMemoryModal;
-$("coder-bg").onclick = openBackgroundModal;
+$("coder-memory").onclick = () => openCoderMemoryModal();
+$("coder-bg").onclick = () => openBackgroundModal();
 const coderModelBtn = $("coder-model");
 if (coderModelBtn) coderModelBtn.onclick = openSessionControls;
 

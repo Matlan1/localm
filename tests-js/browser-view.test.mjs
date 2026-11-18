@@ -431,7 +431,9 @@ test("a refused destination is reported rather than shown as a blank page", asyn
   const status = c.view.querySelector(".browser-status").textContent;
   assert.match(status, /blocked by policy/,
     "a refusal left the status saying nothing about why nothing loaded");
-  assert.ok(toasts.length > 0, "a refusal was not surfaced to the user");
+  assert.equal(toasts.length, 0, "a refusal raised a toast over the buttons it came from");
+  assert.ok(c.view.querySelector(".browser-status").classList.contains("browser-status-error"),
+    "a refusal was not marked as an error on the status line");
 });
 
 // --------------------------------------------------------------------------- //

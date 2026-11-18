@@ -86,7 +86,7 @@ def register(app: FastAPI, ctx) -> None:
         # expired key (verify() returns None for both).
         from localm import auth
         # Off the event loop: verify() can take the keystore's cross-process lock.
-        if await run_in_threadpool(auth.verify, key.strip()) is None:
+        if await run_in_threadpool(auth.verify, key.strip(), record_use=False) is None:
             raise HTTPException(400, "Not a current localm key (mint one first).")
         loop = asyncio.get_running_loop()
         svg = await loop.run_in_executor(get_plugin_executor(), _pairing_qr_svg, key.strip())

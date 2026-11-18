@@ -9,7 +9,8 @@ that launcher, and one line on the console says so. The launcher file stays and 
 starting ``localm``; the next rebuild with the launcher free writes and records it again.
 
 On Windows, a rebuild of an existing install also stops that install's runtime probe
-daemon, so the update step that replaces the runtime right after this build finds it free.
+daemon, also while a model worker of that install holds the runtime, so the update step
+that replaces the runtime right after this build finds it free once the worker is unloaded.
 
 With no such launcher, or on any other platform, the scripts pass through unchanged and
 no file is touched. Any failure here also passes the scripts through unchanged:
@@ -80,8 +81,9 @@ def stop_own_probe_daemon(root) -> None:
     """On a rebuild of an existing install, leave :data:`REBUILD_MARKER` in its venv, so
     a probe daemon started from now on does not load the runtime
     (``updater_runtime.replacing_runtime_now``), and stop this install's own running
-    daemon, by its ``.venv`` Python and ``updater_runtime.stop_own_probe_daemons``
-    (:data:`STOP_TIMEOUT_S` at most). Never raises; a failure leaves the daemon running."""
+    daemons, by its ``.venv`` Python and ``updater_runtime.stop_running_own_probe_daemons``
+    (:data:`STOP_TIMEOUT_S` at most), whatever else holds the runtime. Never raises; a
+    failure leaves the daemon running."""
     root = Path(root)
     python = root / ".venv" / "Scripts" / "python.exe"
     site = root / ".venv" / "Lib" / "site-packages"
@@ -89,8 +91,8 @@ def stop_own_probe_daemon(root) -> None:
         if not python.exists() or not any(site.glob("localm-*.dist-info")):
             return
         (root / ".venv" / REBUILD_MARKER).write_bytes(b"")
-        code = ("from localm import updater, updater_runtime as u; r = updater.repo_root(); "
-                "u.stop_own_probe_daemons(u.runtime_lib(r), r)")
+        code = ("from localm import updater, updater_runtime as u; "
+                "u.stop_running_own_probe_daemons(updater.repo_root())")
         subprocess.run([str(python), "-c", code], cwd=str(root), stdin=subprocess.DEVNULL,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                        timeout=STOP_TIMEOUT_S, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))

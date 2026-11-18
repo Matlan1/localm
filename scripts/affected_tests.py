@@ -140,6 +140,8 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
     "tests/test_streaming_response_closes_body.py": (_LOCALM_PY, "reads every localm/*.py for StreamingResponse uses"),
     "tests/test_update_steps_run_in_the_new_version.py": (
         _LOCALM_PY, "scans every localm module for updater.apply calls"),
+    "tests/test_process_tree_guard.py": (
+        _LOCALM_PY, "scans every localm module that lists processes for a parent pid read"),
     "tests/test_amd_windows_torch_pin_one_source.py": (
         ("localm/*", "docs/*", "scripts/*", "installer/*", "docker/*", "README.md", "pyproject.toml",
          "uv.lock", "setup.bat", "setup.sh", "setup-gui.bat", "setup-gui.sh"),
@@ -159,6 +161,7 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
                                       "lists the vendored TTS runtime"),
     "tests/test_bump_vendored_js.py": ((_GUI_STATIC + "vendor/*",), "copies the vendored GUI libraries"),
     "tests/test_merge_policy.py": (("*",), "checks every merge-policy pattern against the tracked files"),
+    "tests/test_update_launchers.py": (("*",), "reads the git mode of every tracked file for the executable list"),
     "tests/test_native_stderr_redirect_scope.py": (_LOCALM_PY, "walks the AST of every localm .py for stderr redirects"),
     "tests/test_terminal_control_safety.py": (_LOCALM_PY, "walks the AST of every localm .py for rich Console imports"),
     "tests/test_model_name_gate.py": (_LOCALM_PY, "reads every localm .py for trust_remote_code=True"),
@@ -196,6 +199,9 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
     "tests/test_config_write.py": (("localm/plugins/*.py",), "scans every plugin module for direct config writes"),
     "tests/test_rag_store_live_lookups.py": (("localm/rag/_store/*.py",), "reads every module of the RAG store"),
     "tests/test_setup_llama_live_lookups.py": (("localm/setup_llama/*.py",), "reads every module of setup_llama"),
+    "tests/test_vc_runtime.py": (("localm/setup_llama/*.py", "localm/media/sdcpp/*.py",
+                                  "setup.bat", "installer/gui.py"),
+                                 "reads setup_llama, sdcpp, setup.bat and the GUI installer for the Visual C++ offer"),
     "tests/test_docs_reaudit_enumerations.py": (
         ("docs/*", "localm/inference/routes/*.py", "localm/inference/backends/llamacpp/*.py"),
         "compares the documented route and backend modules with the folders"),
@@ -281,6 +287,7 @@ _NOT_TREE_SCANNERS: dict[str, str] = {
     "tests/test_bugreport_stdin_interactive.py": "the report script lists home/logs, which is not tracked",
     "tests/test_report_issue_standalone.py": "the report script lists home/logs, which is not tracked",
     "tests/test_report_issue_url.py": "the report script lists home/logs, which is not tracked",
+    "tests/test_report_issue_blank_url.py": "the report script lists home/logs, which is not tracked",
     "tests/test_installer_gui_journal.py": "reads the install journal of a root in tmp_path",
     "tests/test_installer_gui.py": "loads scripts.report_issue to read one constant; it calls nothing that lists a folder",
     "tests/test_docker_image_files.py": "puts the checkout path into an environment mapping",

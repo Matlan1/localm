@@ -4,7 +4,7 @@
 
 // --- ES module imports ---
 import { $, authHeaders, confirmDanger, el, readSSE, toast, whileBusy } from "../app/helpers.js";
-import { t, tn, tOr } from "../app/i18n.js";
+import { onLanguageReload, t, tn, tOr } from "../app/i18n.js";
 import { emptyState, iconEl } from "../app/icons.js";
 import { refreshPluginCommands } from "../app/settings-perf.js";
 
@@ -220,7 +220,7 @@ export async function installRequirements(name, missing, btn = null) {
         if (!r.ok) {
           toast(`install ${dep}: ${d.detail || "failed"}`, true);
         } else {
-          toast(`${dep}: ${d.status || "installed"}`);
+          toast(`${dep}: ${d.status || "installed"}` + (d.note ? `. ${d.note}` : ""));
         }
       } catch (e) {
         toast(`install ${dep} failed: ${e.message}`, true);
@@ -326,7 +326,9 @@ export function pluginCatalogAction(action, name, btn = null, title = name) {
         toast(`${action} ${title}: ${msg}`, true);
         return;
       }
-      toast(`${title}: ${d.status || action}`);
+      // An install's note is the plugin's own on_install outcome (voice: the
+      // speech model download, or why it did not start).
+      toast(`${title}: ${d.status || action}` + (d.note ? `. ${d.note}` : ""));
     } catch (e) {
       toast(`${action} ${title} failed: ${e.message}`, true);
       return;
@@ -454,7 +456,8 @@ $("plugin-install").onclick = async () => {
       });
       const data = await r.json().catch(() => ({}));
       if (r.ok) {
-        toast(t("plugins.installedRestartHint", { name: data.name, version: data.version }));
+        toast(t("plugins.installedRestartHint", { name: data.name, version: data.version })
+              + (data.note ? `. ${data.note}` : ""));
         $("plugin-source").value = "";
         refreshPluginsPage();
       } else {
@@ -469,7 +472,7 @@ $("plugin-install").onclick = async () => {
 // The catalog and external tables are painted from fetched data, not marked
 // up in index.html, so both are re-fetched and redrawn when the interface
 // language changes.
-document.addEventListener("localm:language", () => {
+onLanguageReload(() => {
   renderCatalogPlugins();
   refreshPluginsPage();
 });

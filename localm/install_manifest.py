@@ -1000,27 +1000,47 @@ def _proc_processes() -> Optional[list]:
     return out
 
 
-def _ps_processes() -> Optional[list]:
-    """[(pid, ppid, exe or None, None)] from ps (macOS and other POSIX); None when
-    ps is not installed or does not answer."""
-    from localm import sysprog
-    ps = sysprog.find("ps")
-    if not ps:
+def _etime_seconds(text: str) -> Optional[int]:
+    """The ``etime`` column of ps (``[[dd-]hh:]mm:ss``) as seconds, or None."""
+    days, _, clock = text.strip().rpartition("-")
+    parts = clock.split(":")
+    if not 2 <= len(parts) <= 3 or not all(p.isdigit() for p in parts) or (
+            days and not days.isdigit()):
         return None
-    try:
-        res = subprocess.run([ps, "-axo", "pid=,ppid=,comm="],
-                             capture_output=True, text=True, timeout=15)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if res.returncode != 0:
-        return None
+    seconds = 0
+    for p in parts:
+        seconds = seconds * 60 + int(p)
+    return seconds + int(days or 0) * 86400
+
+
+def _ps_processes(lines: Optional[list] = None, now: Optional[float] = None) -> Optional[list]:
+    """[(pid, ppid, exe or None, start or None)] from ps (macOS and other
+    POSIX), start the epoch second the process started, from its elapsed time
+    (None when ps does not give one); None when ps is not installed or does not
+    answer. *lines* and *now* stand in for the output of ps and the clock."""
+    if lines is None:
+        from localm import sysprog
+        ps = sysprog.find("ps")
+        if not ps:
+            return None
+        try:
+            res = subprocess.run([ps, "-axo", "pid=,ppid=,etime=,comm="],
+                                 capture_output=True, text=True, timeout=15)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if res.returncode != 0:
+            return None
+        lines = res.stdout.splitlines()
+    now = int(time.time() if now is None else now)
     out = []
-    for line in res.stdout.splitlines():
-        parts = line.strip().split(None, 2)
+    for line in lines:
+        parts = line.strip().split(None, 3)
         if len(parts) < 2 or not parts[0].isdigit() or not parts[1].isdigit():
             continue
-        exe = parts[2] if len(parts) > 2 and os.path.isabs(parts[2]) else None
-        out.append((int(parts[0]), int(parts[1]), exe, None))
+        elapsed = _etime_seconds(parts[2]) if len(parts) > 2 else None
+        exe = parts[3] if len(parts) > 3 and os.path.isabs(parts[3]) else None
+        out.append((int(parts[0]), int(parts[1]), exe,
+                    None if elapsed is None else now - elapsed))
     return out
 
 
@@ -1088,13 +1108,60 @@ def _win_command_line(pid: int) -> Optional[str]:
         k32.CloseHandle(h)
 
 
+def process_parent(by_pid: dict, pid: int, *, proven: bool = True) -> Optional[int]:
+    """The running parent of *pid*, or None. *by_pid* maps each pid to its row
+    of :func:`list_processes`.
+
+    A parent pid is only a number: once the parent exits, the system can give
+    that number to an unrelated process, so the process now holding it is the
+    parent only when it started no later than *pid*. With *proven* (for a walk
+    DOWN to the processes to stop) both start times must be known and in that
+    order; a process whose start time cannot be read (Windows gives none for a
+    protected system process such as csrss.exe or winlogon.exe) is never
+    anyone's child. With ``proven=False`` (for a walk UP to the processes to
+    spare) only a parent that provably started later is refused."""
+    row = by_pid.get(pid)
+    if row is None:
+        return None
+    ppid = row[1]
+    if not ppid or ppid == pid or ppid not in by_pid:
+        return None
+    child_start, parent_start = row[3], by_pid[ppid][3]
+    if child_start is None or parent_start is None:
+        return None if proven else ppid
+    return ppid if parent_start <= child_start else None
+
+
+def descendants(by_pid: dict, top: int) -> list:
+    """*top* and every running descendant of it (:func:`process_parent`, proven
+    links only), deepest first. *by_pid* maps each pid to its row of
+    :func:`list_processes`."""
+    children: dict = {}
+    for pid in by_pid:
+        parent = process_parent(by_pid, pid)
+        if parent is not None:
+            children.setdefault(parent, []).append(pid)
+    order, stack = [], [(top, 0)]
+    seen = set()
+    while stack:
+        pid, depth = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        order.append((depth, pid))
+        stack.extend((c, depth + 1) for c in children.get(pid, ()))
+    return [pid for _d, pid in sorted(order, key=lambda x: -x[0])]
+
+
 def _ancestors(procs: list, pid: int) -> set:
-    parent = {p[0]: p[1] for p in procs}
+    """*pid* and its ancestors in *procs* (:func:`process_parent` with
+    ``proven=False``: a parent of unknown start time is kept)."""
+    by_pid = {p[0]: p for p in procs}
     out = set()
-    cur = pid
+    cur: Optional[int] = pid
     while cur and cur not in out:
         out.add(cur)
-        cur = parent.get(cur, 0)
+        cur = process_parent(by_pid, cur, proven=False) if cur in by_pid else None
     return out
 
 
@@ -1124,8 +1191,109 @@ def running_from(dirs: Iterable, *, procs: Optional[list] = None,
             if p[0] not in skip and any(_inside(x, d) for x in programs(p) for d in roots)]
 
 
-def _stop(pid: int, timeout: float = 8.0) -> bool:
-    """Terminate *pid* and wait for it to exit. True when it is gone."""
+def _same_start(start, now) -> bool:
+    """Whether the start time *now* read for a pid is the *start*
+    :func:`list_processes` gave for it (ps start times are whole seconds
+    derived from the elapsed time, so they may differ by one)."""
+    try:
+        now, start = int(now), int(start)
+    except (TypeError, ValueError):
+        return False
+    if sys.platform == "win32" or os.path.isdir("/proc"):
+        return now == start
+    return abs(now - start) <= 1
+
+
+def _proc_start(pid: int) -> Optional[int]:
+    """The start time of *pid* in the form :func:`list_processes` gives it on
+    Linux and other POSIX systems, or None when it cannot be read."""
+    if os.path.isdir("/proc"):
+        try:
+            with open(f"/proc/{pid}/stat", "rb") as fh:
+                raw = fh.read().decode("utf-8", "replace")
+            return int(raw[raw.rindex(")") + 2:].split()[19])
+        except (OSError, ValueError, IndexError):
+            return None
+    from localm import sysprog
+    ps = sysprog.find("ps")
+    if not ps:
+        return None
+    try:
+        res = subprocess.run([ps, "-o", "etime=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    elapsed = _etime_seconds(res.stdout) if res.returncode == 0 else None
+    return None if elapsed is None else int(time.time()) - elapsed
+
+
+def _signal_same(pid: int, start, sig) -> bool:
+    """POSIX: send *sig* to *pid* only while its process is still the one that
+    started at *start* (through a pidfd where the system has one, so a reused
+    pid is never signalled). True when it was sent."""
+    if sys.platform == "win32":
+        return False
+    import signal
+    fd = None
+    if hasattr(os, "pidfd_open"):
+        try:
+            fd = os.pidfd_open(pid)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            fd = None
+    try:
+        if not _same_start(start, _proc_start(pid)):
+            return False
+        if fd is not None:
+            signal.pidfd_send_signal(fd, sig)
+        else:
+            os.kill(pid, sig)
+        return True
+    except OSError:
+        return False
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _stop_pidfd(fd: int, pid: int, start, timeout: float) -> bool:
+    """:func:`_stop` through *fd*, a pidfd opened on *pid* (Linux): the start
+    time is read after the pidfd is opened, so a pidfd whose process still has
+    *start* is that process and every signal reaches it, never a reused pid."""
+    import select
+    import signal
+    now = _proc_start(pid)
+    if now is None or not _same_start(start, now):
+        return True if now is not None else not _alive(pid)
+
+    def exited(wait: float) -> bool:
+        poller = select.poll()
+        poller.register(fd, select.POLLIN)
+        return bool(poller.poll(max(0, int(wait * 1000))))
+
+    for sig, wait in ((signal.SIGTERM, timeout), (signal.SIGKILL, 2.0)):
+        try:
+            signal.pidfd_send_signal(fd, sig)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        if exited(wait):
+            return True
+    return False
+
+
+def _stop(pid: int, timeout: float = 8.0, *, start=None) -> bool:
+    """Terminate *pid* and wait for it to exit. True when it is gone.
+
+    With *start* (the start time :func:`list_processes` gave for *pid*), the
+    process is ended only while its start time still reads the same: a pid
+    whose process started at another time was reused by another program, which
+    is left alone, and the process that had it counts as gone. A start time
+    that cannot be read ends nothing (False)."""
+    if not isinstance(start, int) or isinstance(start, bool):
+        start = None
     if sys.platform == "win32":
         import ctypes
         from ctypes import wintypes
@@ -1135,16 +1303,44 @@ def _stop(pid: int, timeout: float = 8.0) -> bool:
         k32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
         k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
         k32.WaitForSingleObject.restype = wintypes.DWORD
+        k32.GetProcessTimes.restype = wintypes.BOOL
+        k32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
         k32.CloseHandle.argtypes = [wintypes.HANDLE]
-        h = k32.OpenProcess(0x0001 | 0x00100000, False, pid)  # TERMINATE | SYNCHRONIZE
+        # TERMINATE | SYNCHRONIZE | QUERY_LIMITED_INFORMATION
+        h = k32.OpenProcess(0x0001 | 0x00100000 | 0x1000, False, pid)
         if not h:
             return not _alive(pid)
         try:
+            if start is not None:
+                times = [wintypes.FILETIME() for _ in range(4)]
+                if not k32.GetProcessTimes(h, *[ctypes.byref(t) for t in times]):
+                    return False
+                now = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+                if not _same_start(start, now):
+                    return True
             k32.TerminateProcess(h, 1)
             return k32.WaitForSingleObject(h, int(timeout * 1000)) == 0
         finally:
             k32.CloseHandle(h)
+    if start is not None and hasattr(os, "pidfd_open"):
+        try:
+            fd = os.pidfd_open(pid)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            fd = None
+        if fd is not None:
+            try:
+                return _stop_pidfd(fd, pid, start, timeout)
+            finally:
+                os.close(fd)
     import signal
+    if start is not None:
+        now = _proc_start(pid)
+        if now is None:
+            return not _alive(pid)
+        if not _same_start(start, now):
+            return True
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -1948,9 +2144,15 @@ def _stop_all(report: dict, dirs: list, rounds: int = 3) -> bool:
     anything a stopped process started meanwhile. False when one survives."""
     pending = list(report["running"])
     for _ in range(rounds):
+        procs = list_processes()
+        if procs is not None:
+            pending = running_from(dirs, procs=procs) or []
+            if not pending:
+                return True
+        started = {p[0]: p[3] for p in procs or []}
         for pid, exe in pending:
             label = f"PID {pid}" + (f" {exe}" if exe else "")
-            if _stop(pid):
+            if _stop(pid, start=started.get(pid)):
                 if label not in report["stopped"]:
                     report["stopped"].append(label)
             else:

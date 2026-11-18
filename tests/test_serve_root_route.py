@@ -24,6 +24,12 @@ class TestApiLandingRoute(unittest.TestCase):
         # The redirect target exists (FastAPI serves /docs by default).
         self.assertEqual(client.get("/docs").status_code, 200)
 
+    def test_the_ollama_cli_heartbeat_gets_a_success_status(self):
+        app = create_app(_make_mock_engine(loaded=True), api_landing=True)
+        client = TestClient(app)
+        self.assertEqual(client.head("/", follow_redirects=False).status_code, 200)
+        self.assertEqual(client.head("/api/version", follow_redirects=False).status_code, 200)
+
     def test_root_is_404_without_api_landing(self):
         # Default construction (e.g. when mounted under the GUI) must NOT add
         # the redirect; the GUI's own "/" shell owns the root path.

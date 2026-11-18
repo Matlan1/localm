@@ -85,8 +85,8 @@ class _EngineWithBackend(Engine):
 
 # The built-in chat plugin's inlet (localm/plugins/builtin/chat/plug.py,
 # always registered) leaves a system message alone when it already contains
-# "third person" - its own documented skip condition, also pinned by
-# test_chat_pipeline.py::test_role_word_inlet_skips_when_already_instructed.
+# a system prompt with text - its own documented skip condition, also pinned by
+# test_chat_pipeline.py::test_role_word_inlet_never_extends_a_system_prompt_the_user_wrote.
 # Carrying this in every /v1/chat/completions request below keeps the
 # message list exactly as constructed, so the token counts stay exact.
 _SKIP_ROLE_NUDGE_SYSTEM = {"role": "system", "content": "Never refer to yourself in the third person."}

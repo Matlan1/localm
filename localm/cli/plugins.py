@@ -111,6 +111,15 @@ def _install_deps(mgr, name) -> bool:
     return False
 
 
+def _print_install_note(mgr, name) -> None:
+    """Print the note the plugin's on_install hook returned, if any (for
+    voice: the speech model was downloaded, or why it was not)."""
+    from rich.markup import escape
+    note = mgr.pop_install_note(name)
+    if note:
+        console.print(f"  {escape(note)}")
+
+
 def _resolve_with_deps(flag) -> bool:
     """The effective auto-install decision: an explicit --with-deps/--no-deps
     wins, else the configured default."""
@@ -159,6 +168,7 @@ def plugin_install_engine(target, force, with_deps, assume_yes):
             sys.exit(1)
         console.print(f"[green]Installed[/green] plugin "
                       f"[bold]{escape(spec.name)}[/bold] v{escape(spec.version)}")
+        _print_install_note(mgr, spec.name)
         console.print(f"[dim]Granted scope:[/dim] [bold]{escape(spec.scope)}[/bold] "
                       f"(every route/tool it registers is gated on this "
                       f"capability)")
@@ -171,9 +181,22 @@ def plugin_install_engine(target, force, with_deps, assume_yes):
                 f"({', '.join(escape(x) for x in spec.requires_extras)}); "
                 f"install per its own instructions.[/dim]")
         return
+    from localm.plugins.ids import _is_valid_plugin_name
+    if not _is_valid_plugin_name(target):
+        if not src.exists():
+            why = f"no such folder: {target}"
+        elif not src.is_dir():
+            why = f"not a folder: {target}"
+        else:
+            why = f"no plugin.toml in folder: {target}"
+        console.print(f"[red]{escape(why)}[/red] "
+                      "(give a first-party plugin name or a folder that "
+                      "contains plugin.toml)")
+        sys.exit(1)
     run_or_die(mgr.set_installed_state, target, True,
               missing_msg=f"No such plugin: {target}")
     console.print(f"[green]Installed[/green] plugin [bold]{escape(target)}[/bold]")
+    _print_install_note(mgr, target)
     _warn_not_runnable(target)
     _warn_missing_requires(mgr, target)
     if _resolve_with_deps(with_deps):
@@ -343,6 +366,7 @@ def plugin_setup(plugins_csv, install_all, install_defaults, with_deps=None,
             console.print(f"[yellow]Skipped {escape(name)}: {escape(str(e))}[/yellow]")
             continue
         console.print(f"[green]Installed[/green] [bold]{escape(name)}[/bold]")
+        _print_install_note(mgr, name)
         _warn_missing_requires(mgr, name)
 
     # Install pip extras for the chosen plugins. Interactively, ask once and

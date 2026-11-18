@@ -24,6 +24,7 @@ from ..display import (
     safe_markup,
 )
 from ..review_guard import classify_sensitive_changes, render_warning
+from ..tools.git import ensure_private_state_ignored
 from .goal import _run_goal_loop
 
 _AT_MENTION_RE = re.compile(
@@ -240,6 +241,12 @@ def _setup_readline(agent: Agent) -> None:
 
     if agent.mode != SessionMode.PRIVACY:
         hist = agent.cwd / ".localcoder" / "repl_history"
+        try:
+            ensure_private_state_ignored(agent.cwd)
+        except OSError as e:
+            print_warning(f"Input history is not saved: could not keep it out of "
+                          f"git ({e}).")
+            return
         try:
             hist.parent.mkdir(parents=True, exist_ok=True)
             if hist.is_file():
@@ -741,14 +748,14 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
         hooks = getattr(agent, "_tool_hooks", None)
         checks = run_doctor(
             agent.cwd, agent.backend, verify_cmd=agent.verify_cmd,
-            verify_off=agent.verify_cmd is None,
+            verify_off=agent.verify_off and agent.verify_cmd is None,
             project_map=agent._project_map,
             trusted_mcp_servers=(hooks.mcp_servers
                                  if hooks is not None and hooks.trusted else None))
         console.print(Text(format_text(checks)), soft_wrap=True)
 
     elif cmd == "verify":
-        from ..verify import command_text, detect_verify_command
+        from ..verify import command_text, detect_verify_command, no_check_reason
         if not arg:
             current = (command_text(agent.verify_cmd)
                        if agent.verify_cmd is not None else "(off)")
@@ -759,12 +766,18 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
                 "  /verify off        no exit-code check")
         elif arg == "off":
             agent.verify_cmd = None
+            agent.verify_off = True
             print_info("Verification off - turns finish without an exit-code "
                        "check. The model's own 'done' is the only gate again.")
         elif arg == "auto":
             detected = detect_verify_command(agent.cwd)
             agent.verify_cmd = detected
-            if detected is None:
+            agent.verify_off = False
+            reason = None if detected else no_check_reason(agent.cwd)
+            if reason:
+                print_warning("This project has a pytest setup but no check "
+                              "can run. " + reason)
+            elif detected is None:
                 print_warning(
                     "No obvious check found in this project (looked for a "
                     "verify key in .localcoder/config.toml, Cargo.toml, go.mod, "
@@ -774,11 +787,12 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
                 print_success(f"Verification: `{command_text(detected)}`")
         else:
             agent.verify_cmd = arg
+            agent.verify_off = False
             print_success(f"Verification: `{arg}` must exit 0 before a turn "
                           "that changed files finishes.")
 
     elif cmd == "goal":
-        from ..verify import command_text, detect_verify_command
+        from ..verify import command_text, detect_verify_command, no_check_reason
         if not arg:
             current = (command_text(agent.goal_cmd)
                        if agent.goal_cmd is not None else "(off)")
@@ -797,7 +811,11 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
         elif arg == "auto":
             detected = detect_verify_command(agent.cwd)
             agent.goal_cmd = detected
-            if detected is None:
+            reason = None if detected else no_check_reason(agent.cwd)
+            if reason:
+                print_warning("This project has a pytest setup but no check "
+                              "can run. " + reason)
+            elif detected is None:
                 print_warning(
                     "No obvious check found in this project (looked for a "
                     "verify key in .localcoder/config.toml, Cargo.toml, go.mod, "

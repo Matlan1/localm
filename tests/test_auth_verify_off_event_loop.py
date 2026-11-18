@@ -48,7 +48,7 @@ def _slow_verify(result):
     """A ``verify`` stand-in that takes BLOCK_S and records the thread it ran on."""
     calls = []
 
-    def fake(presented):
+    def fake(presented, **_kw):
         on_loop = True
         try:
             asyncio.get_running_loop()

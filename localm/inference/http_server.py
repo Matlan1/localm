@@ -118,6 +118,12 @@ _engines_lru: list[str] = []
 _evicting_names: set[str] = set()
 # Default/startup model name
 _default_model_name: str | None = None
+# Names this process has seen in the model registry (the startup model when it
+# was registered, and every model a load resolved through the registry). A name
+# in here that the registry no longer lists was removed, whether or not its
+# file is still on disk; a startup model that was never registered (a direct
+# path) is not in here and is kept while its file exists.
+_registered_seen: set[str] = set()
 # Active model name (most recently used/loaded)
 _active_model_name: str | None = None
 # The name _active_model_name held immediately before a full eviction
@@ -1050,6 +1056,8 @@ async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
                                                 on_status=on_status, reading=reading,
                                                 keep_others=keep_others)
                 if early is not None:
+                    if preempt and _switch_desired != name:
+                        return _superseded_result(name)
                     return early
 
             # *name* may itself be a victim another call detached and is still freeing.
@@ -1175,6 +1183,7 @@ def _switch_load_budget(name: str) -> switch_admission.LoadBudget | None:
     info = get_model_info(name)
     file_size = 0
     if info is not None:
+        _registered_seen.add(name)
         m_path, _ = info
         file_size = residency.model_footprint_bytes(m_path)
     elif registry:
@@ -1288,6 +1297,8 @@ async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
     if attempt is None:
         attempt = switch_admission.EvictionAttempt(started=time.monotonic())
     while True:
+        if preempt and _switch_desired != budget.name:
+            return _superseded_result(budget.name)
         probe = await _switch_probe_vram(loop, budget, reading=reading)
         decision = switch_admission.decide_admission(
             probe, budget, _eviction_order(), _engines)
@@ -1339,6 +1350,8 @@ async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
             if ask is not None:
                 return ask
 
+        if preempt and _switch_desired != budget.name:
+            return _superseded_result(budget.name)
         victim_engine = _engines.get(victim)
         if victim_engine is None or getattr(victim_engine, "unloading", False) is True:
             continue
@@ -1355,6 +1368,12 @@ async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
         attempt.release_wait_extended = attempt.release_wait_extended or release.extended
         if evictions is not None:
             evictions.append(release)
+
+
+def _superseded_result(name: str) -> dict:
+    """The ``superseded`` result for a switch to *name* that a later selection
+    (``_switch_desired``) replaced."""
+    return {"status": "superseded", "model": name, "by": _switch_desired}
 
 
 def _discover_module():
@@ -2821,6 +2840,42 @@ def _resolve_unnamed_model_name() -> str | None:
     return _active_model_name or _last_active_model_name or _default_model_name
 
 
+def load_registry_checked() -> tuple[dict, bool]:
+    """``(registry, read_ok)``: the registry and whether an empty one is a
+    genuine empty file rather than an unreadable one. Blocking file IO; never
+    call it on the event loop thread."""
+    from localm.config import REGISTRY_FILE, load_registry
+    from localm.storekit import read_json_checked
+    registry = load_registry()
+    if registry:
+        return registry, True
+    return registry, read_json_checked(REGISTRY_FILE, {})[1]
+
+
+def _holds_registered_name() -> bool:
+    """Whether any model name this process holds (startup, active, last-active)
+    was seen registered, so an empty registry could mean it was removed."""
+    return any(n in _registered_seen for n in (
+        _default_model_name, _active_model_name, _last_active_model_name) if n)
+
+
+def prune_removed_models(registry: dict, read_ok: bool = False) -> bool:
+    """Forget every model name this process still holds (the startup, active
+    and last-active names) that *registry* no longer lists
+    (:func:`_forget_removed_model`). An empty *registry* drops only a name this
+    process saw registered, and only when *read_ok* says the empty registry was
+    read successfully (:func:`load_registry_checked`). Never reads a file.
+    Returns whether anything was dropped."""
+    if not registry and not read_ok:
+        return False
+    dropped = False
+    for held in {_default_model_name, _active_model_name, _last_active_model_name}:
+        if (held and held not in registry and (registry or held in _registered_seen)
+                and _forget_removed_model(held)):
+            dropped = True
+    return dropped
+
+
 def _model_is_pinned(model_name: str | None) -> bool:
     """Whether the request named a model EXPLICITLY.
 
@@ -2903,19 +2958,27 @@ def plan_capability_route(model_name: str | None, messages: list,
 
 
 def _forget_removed_model(name: str) -> bool:
-    """Drop this process's state for *name* when it left the registry and its
-    model file is gone (``localm rm`` ran in another process). A model that is
-    loaded, whose file still exists, or whose path is not an absolute file path
-    (a hub repo id) is kept. Returns whether anything was
-    dropped. Synchronous and in-memory only, like :func:`rekey_loaded_model`."""
+    """Drop this process's state for *name* when it left the registry
+    (``localm rm`` ran in another process). A model that is loaded, whose path
+    is not an absolute file path (a hub repo id), or that this process never saw
+    registered and whose file still exists (a startup model given by path) is
+    kept. Returns whether anything was dropped. Synchronous and in-memory only,
+    like :func:`rekey_loaded_model`."""
     global _active_model_name, _default_model_name, _last_active_model_name, _engine, _inference_sem
     from pathlib import Path
     engine = _engines.get(name)
     if engine is not None and engine.loaded:
         return False
-    path = getattr(engine, "model_path", None)
-    if not path or not Path(str(path)).is_absolute() or Path(str(path)).exists():
-        return False
+    if engine is None:
+        if name not in _registered_seen:
+            return False
+    else:
+        path = getattr(engine, "model_path", None)
+        if not path or not Path(str(path)).is_absolute():
+            return False
+        if name not in _registered_seen and Path(str(path)).exists():
+            return False
+    _registered_seen.discard(name)
     _engines.pop(name, None)
     _routing_loaded.discard(name)
     if name in _engines_lru:
@@ -2979,8 +3042,15 @@ async def get_engine(model_name: str | None, *, load: bool = True,
         name = _resolve_unnamed_model_name()
 
     from localm.config import load_registry
+    from localm.executor import get_plugin_executor
     registry = load_registry()
-    
+    read_ok = bool(registry)
+    if not registry and _holds_registered_name():
+        registry, read_ok = await asyncio.get_running_loop().run_in_executor(
+            get_plugin_executor(), load_registry_checked)
+    if prune_removed_models(registry, read_ok) and (not (model_name or "").strip() or (model_name or "").strip() == "localm"):
+        name = _resolve_unnamed_model_name()
+
     # If no registry is populated, route all requests to the active/loaded engine (classic single-model mode)
     if not registry:
         active = _active_model_name or (_engine.display_name if _engine else None)
@@ -3059,7 +3129,7 @@ async def get_engine(model_name: str | None, *, load: bool = True,
 
 
 def _add_vram_fields(result: dict, *, before, released, after, before_fresh: bool,
-                     before_scope=None) -> None:
+                     before_scope=None, before_status: str | None = None) -> None:
     """Add vram_freed/vram_before_bytes/vram_after_bytes to *result* when
     measurable (unchanged from before), plus an honest flag when the reading
     cannot be presented as current fact, rather than asserting a wrong
@@ -3073,8 +3143,10 @@ def _add_vram_fields(result: dict, *, before, released, after, before_fresh: boo
 
     THREE independent ways this reading can be wrong, and they are not the same bug:
 
-    - NOT FRESH (``before_fresh`` false): the probe timed out or was busy, so the
-      'before' value is a stale cached one (see _vram_free_reading).
+    - NOT FRESH (``before_fresh`` false): the probe timed out, was busy or was
+      inconclusive, so the 'before' value is a stale cached one (see
+      _vram_free_reading). The note names which when ``before_status`` (the
+      reading's ``discover.GPU_PROBE_*`` status) says.
     - AFTER UNVERIFIABLE (``released is None``): wait_for_vram_release() could not
       verify the outcome (the 'after' reading went unmeasurable), so ``vram_freed``
       is null rather than a false "VRAM did not drop", a claim a reading that
@@ -3091,13 +3163,21 @@ def _add_vram_fields(result: dict, *, before, released, after, before_fresh: boo
     points at the right one."""
     if before is None:
         return
-    from localm.discover import FREE_SCOPE_PROCESS
+    from localm.discover import (FREE_SCOPE_PROCESS, GPU_PROBE_BUSY,
+                                 GPU_PROBE_INCONCLUSIVE, GPU_PROBE_TIMEOUT)
     result.update(vram_freed=released, vram_before_bytes=before, vram_after_bytes=after)
     reasons = []
     if not before_fresh:
+        notes: dict[str | None, str] = {
+            GPU_PROBE_TIMEOUT: "the GPU probe timed out",
+            GPU_PROBE_BUSY: "another GPU probe was still running (probe status busy)",
+            GPU_PROBE_INCONCLUSIVE: ("the GPU probe could not ask every GPU source "
+                                     "(probe status inconclusive)"),
+        }
+        what = notes.get(before_status, "the GPU probe timed out or was busy")
         reasons.append(
-            "the GPU probe timed out or was busy when this reading was taken, so "
-            "it may reflect a stale cached value rather than the current state")
+            f"{what} when this reading was taken, so it may reflect a stale "
+            "cached value rather than the current state")
     if released is None:
         reasons.append(
             "the free-VRAM reading went unmeasurable after the unload, so whether "
@@ -3282,7 +3362,7 @@ async def unload_all_models(*, force: bool = False, media: bool = False) -> dict
     global _active_model_name, _last_active_model_name, _engine, _inference_sem
     loop = asyncio.get_running_loop()
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
-                             wait_for_vram_release)
+                             free_reading_status, wait_for_vram_release)
     from localm.inference import embedder as _embedder_mod
 
     _free = _live_free_vram_bytes
@@ -3355,7 +3435,8 @@ async def unload_all_models(*, force: bool = False, media: bool = False) -> dict
     released_anything = bool(unloaded_models) or embedder_was_loaded or media_stopped
     freed_vram = (embedder_was_loaded or media_stopped
                   or any(n not in cpu_only_names for n in unloaded_models))
-    before, before_fresh, before_scope = reading[0] if reading else (None, True, None)
+    before_reading = reading[0] if reading else (None, True, None)
+    before, before_fresh, before_scope = before_reading
     if before is not None and freed_vram:
         released, after = await loop.run_in_executor(
             None, lambda: wait_for_vram_release(_free, before_bytes=before))
@@ -3384,7 +3465,8 @@ async def unload_all_models(*, force: bool = False, media: bool = False) -> dict
     if media_left_running:
         result["media_left_running"] = media_left_running
     _add_vram_fields(result, before=before, released=released, after=after,
-                     before_fresh=before_fresh, before_scope=before_scope)
+                     before_fresh=before_fresh, before_scope=before_scope,
+                     before_status=free_reading_status(before_reading))
     return result
 
 
@@ -3562,12 +3644,12 @@ async def _unload_embedder_if_matches(name: str, loop, *,
         return {"status": "in_use", "model": name, "vram_freed": 0}
 
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
-                             wait_for_vram_release)
+                             free_reading_status, wait_for_vram_release)
 
     _free = _live_free_vram_bytes
 
-    before, before_fresh, before_scope = await loop.run_in_executor(
-        None, _vram_free_reading)
+    before_reading = await loop.run_in_executor(None, _vram_free_reading)
+    before, before_fresh, before_scope = before_reading
     cleared = await loop.run_in_executor(
         None, functools.partial(_embedder_mod.reset_embedder, force=force))
     if not cleared:
@@ -3579,7 +3661,8 @@ async def _unload_embedder_if_matches(name: str, loop, *,
         released, after = 0, before
     result = {"status": "unloaded", "model": name, "was_active": False}
     _add_vram_fields(result, before=before, released=released, after=after,
-                     before_fresh=before_fresh, before_scope=before_scope)
+                     before_fresh=before_fresh, before_scope=before_scope,
+                     before_status=free_reading_status(before_reading))
     return result
 
 
@@ -3616,12 +3699,12 @@ async def _unload_reranker_if_matches(name: str, loop, *,
         return {"status": "in_use", "model": name, "vram_freed": 0}
 
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
-                             wait_for_vram_release)
+                             free_reading_status, wait_for_vram_release)
 
     _free = _live_free_vram_bytes
 
-    before, before_fresh, before_scope = await loop.run_in_executor(
-        None, _vram_free_reading)
+    before_reading = await loop.run_in_executor(None, _vram_free_reading)
+    before, before_fresh, before_scope = before_reading
     cleared = await loop.run_in_executor(
         None, functools.partial(_reranker_mod.reset_reranker, force=force))
     if not cleared:
@@ -3633,7 +3716,8 @@ async def _unload_reranker_if_matches(name: str, loop, *,
         released, after = 0, before
     result = {"status": "unloaded", "model": name, "was_active": False}
     _add_vram_fields(result, before=before, released=released, after=after,
-                     before_fresh=before_fresh, before_scope=before_scope)
+                     before_fresh=before_fresh, before_scope=before_scope,
+                     before_status=free_reading_status(before_reading))
     return result
 
 
@@ -3665,12 +3749,12 @@ async def _unload_speech_if_matches(name: str, loop, *,
         return {"status": "in_use", "model": name, "vram_freed": 0}
 
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
-                             wait_for_vram_release)
+                             free_reading_status, wait_for_vram_release)
 
     _free = _live_free_vram_bytes
 
-    before, before_fresh, before_scope = await loop.run_in_executor(
-        None, _vram_free_reading)
+    before_reading = await loop.run_in_executor(None, _vram_free_reading)
+    before, before_fresh, before_scope = before_reading
     cleared = await loop.run_in_executor(
         None, functools.partial(_speech_mod.reset_speech, force=force))
     if not cleared:
@@ -3682,7 +3766,8 @@ async def _unload_speech_if_matches(name: str, loop, *,
         released, after = 0, before
     result = {"status": "unloaded", "model": name, "was_active": False}
     _add_vram_fields(result, before=before, released=released, after=after,
-                     before_fresh=before_fresh, before_scope=before_scope)
+                     before_fresh=before_fresh, before_scope=before_scope,
+                     before_status=free_reading_status(before_reading))
     return result
 
 
@@ -3715,7 +3800,7 @@ async def unload_one_model(name: str, *, force: bool = False) -> dict:
     global _active_model_name, _last_active_model_name, _engine, _inference_sem
     loop = asyncio.get_running_loop()
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
-                             wait_for_vram_release)
+                             free_reading_status, wait_for_vram_release)
 
     engine = _engines.get(name)
     if engine is None or not engine.loaded:
@@ -3749,10 +3834,11 @@ async def unload_one_model(name: str, *, force: bool = False) -> dict:
     try:
         async with exclusively(sem):
             if _holds_no_vram(engine):
-                before, before_fresh, before_scope = None, True, None
+                before_reading = (None, True, None)
             else:
-                before, before_fresh, before_scope = await loop.run_in_executor(
+                before_reading = await loop.run_in_executor(
                     None, _vram_free_reading)
+            before, before_fresh, before_scope = before_reading
             await loop.run_in_executor(None, engine.unload)
             if name in _engines_lru:
                 _engines_lru.remove(name)
@@ -3779,7 +3865,8 @@ async def unload_one_model(name: str, *, force: bool = False) -> dict:
 
     result = {"status": "unloaded", "model": name, "was_active": was_active}
     _add_vram_fields(result, before=before, released=released, after=after,
-                     before_fresh=before_fresh, before_scope=before_scope)
+                     before_fresh=before_fresh, before_scope=before_scope,
+                     before_status=free_reading_status(before_reading))
     return result
 
 
@@ -3861,6 +3948,9 @@ def rekey_loaded_model(old_name: str, new_name: str) -> bool:
     ``_resolve_unnamed_model_name`` falls back to it after a full eviction,
     so an unnamed request would resolve to a name that no longer exists."""
     global _active_model_name, _default_model_name, _last_active_model_name
+    if old_name in _registered_seen:
+        _registered_seen.discard(old_name)
+        _registered_seen.add(new_name)
     if _default_model_name == old_name:
         _default_model_name = new_name
     if _last_active_model_name == old_name:
@@ -5009,6 +5099,9 @@ LAST_KEY_NETWORK_DETAIL = (
     "restart the server bound to 127.0.0.1 first.")
 
 
+CONFIG_UNREADABLE_HEADER = "X-Localm-Config-Unreadable"
+
+
 def _enforce_request(request: Request, scope: Optional[str]) -> None:
     """Shared auth core (request-aware). Open/dev mode when no key is configured
     anywhere (unless LOCALM_REQUIRE_AUTH forces fail-closed). Otherwise a valid
@@ -5016,9 +5109,19 @@ def _enforce_request(request: Request, scope: Optional[str]) -> None:
     *scope* (None = 'any valid key') must be granted (the owner key implies every
     scope). Cookie-sourced auth on an unsafe method additionally requires a valid
     CSRF token (an HMAC derived from the session)."""
-    from localm.auth import any_key_configured, require_auth_enabled
+    from localm.auth import (any_key_configured, config_unreadable_detail,
+                             ct_equal, require_auth_state)
     if not any_key_configured():
-        if require_auth_enabled():
+        required, unreadable = require_auth_state()
+        if required:
+            if unreadable:
+                inst_token = getattr(request.app.state, "instance_token", None)
+                if (request.url.path == "/v1/server/shutdown" and inst_token
+                        and ct_equal(_bearer_token(request), inst_token)):
+                    return
+                raise HTTPException(
+                    status_code=401, detail=config_unreadable_detail(),
+                    headers={CONFIG_UNREADABLE_HEADER: "1"})
             raise HTTPException(
                 status_code=401,
                 detail="Auth required but no API key configured "
@@ -6209,6 +6312,7 @@ def _init_engine_state(engine: Optional[Engine]) -> None:
 
     _engines.clear()
     _engines_lru.clear()
+    _registered_seen.clear()
     _inference_sems.clear()
     _embedder_sem = None
     _last_activity_per_model.clear()
@@ -6220,6 +6324,9 @@ def _init_engine_state(engine: Optional[Engine]) -> None:
     _last_active_model_name = None
 
     if engine is not None:
+        from localm.config import load_registry
+        if engine.display_name in load_registry():
+            _registered_seen.add(engine.display_name)
         _engines[engine.display_name] = engine
         _engines_lru.append(engine.display_name)
         _default_model_name = engine.display_name

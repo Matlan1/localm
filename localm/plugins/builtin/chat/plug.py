@@ -177,6 +177,28 @@ def _conv_meta(p: Path) -> dict:
     return dict(meta)
 
 
+def _message_text(m) -> str:
+    content = m.get("content") if isinstance(m, dict) else None
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(p.get("text") or "" for p in content
+                       if isinstance(p, dict) and p.get("type") == "text")
+    return ""
+
+
+def _content_snippet(data: dict, term: str) -> str | None:
+    """Short excerpt around the first message match of *term* (lowercase), or None."""
+    for m in data.get("messages") or []:
+        text = _message_text(m)
+        idx = text.lower().find(term)
+        if idx != -1:
+            start = max(0, idx - 18)
+            return (("\u2026" if start > 0 else "")
+                    + " ".join(text[start:idx + 50].split()))
+    return None
+
+
 _UNREADABLE_LOGGED: set = set()
 
 
@@ -198,7 +220,7 @@ def _log_unreadable(p: Path, err: Exception) -> None:
 
 @_router.get("/api/conversations")
 async def conversations_list(request: Request, meta: bool = False,
-                             limit: int = 0, offset: int = 0):
+                             limit: int = 0, offset: int = 0, q: str = ""):
     """List conversations newest-first.
 
     Pass ``meta=true`` for a lightweight index (id, title, updated_at, pinned,
@@ -210,9 +232,15 @@ async def conversations_list(request: Request, meta: bool = False,
     A chat file that cannot be read or parsed is left out of ``conversations``
     and ``total`` and its id is listed in ``unreadable``; a warning naming the
     id is logged once per file version.
+
+    ``q`` (with ``meta=true``) keeps only the conversations whose title or
+    message text contains it, case-insensitively, and adds a ``snippet`` to the
+    rows that match by content: the sidebar search must find chats whose bodies
+    the browser has not loaded.
     """
     if not _persist_enabled():
         return {"enabled": False, "conversations": []}
+    term = q.strip().lower() if meta else ""
     chats_dir = _chats_root(_principal_dir(request))
     rows = []
     unreadable: list[str] = []
@@ -220,7 +248,14 @@ async def conversations_list(request: Request, meta: bool = False,
         for p in chats_dir.glob("*.json"):
             try:
                 if meta:
-                    rows.append(_conv_meta(p))
+                    row = _conv_meta(p)
+                    if term and term not in str(row["title"]).lower():
+                        data = json.loads(p.read_text(encoding="utf-8"))
+                        snippet = _content_snippet(data, term)
+                        if snippet is None:
+                            continue
+                        row["snippet"] = snippet
+                    rows.append(row)
                 else:
                     data = json.loads(p.read_text(encoding="utf-8"))
                     data["id"] = p.stem
@@ -509,9 +544,9 @@ def _own_chat_surface(ctx) -> bool:
 
 
 def _style_note_enabled() -> bool:
-    """The ``chat_style_note`` setting (default on)."""
+    """The ``chat_style_note`` setting (default off)."""
     from localm.config import load_config
-    return bool(load_config().get("chat_style_note", True))
+    return bool(load_config().get("chat_style_note", False))
 
 
 def _nudge_fits_capacity(instruction: str, ctx) -> bool:
@@ -580,15 +615,31 @@ _ROLE_WORD_INSTRUCTION = (
 )
 
 
+def _has_text(content) -> bool:
+    return isinstance(content, str) and bool(content.strip())
+
+
+def _is_summary_request(messages) -> bool:
+    """True for a compaction-summary request: the client's own "Summarise the
+    following conversation" prompt, which must reach the model unchanged."""
+    from localm.inference.compact import SUMMARY_INSTRUCTION
+    stem = SUMMARY_INSTRUCTION.split(" in under", 1)[0]
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            c = m.get("content")
+            return isinstance(c, str) and c.lstrip().startswith(stem)
+    return False
+
+
 def _role_word_inlet(messages, ctx):
     """Steer the model to speak of itself in the first person rather than a
     bare third-person role word ("Model", "the assistant") or an incorrect
     pronoun for itself.
 
     Applies only on localm's own chat surface (see _own_chat_surface) while the
-    ``chat_style_note`` setting is on. Skips when a system message already
-    mentions third-person self-reference,
-    and when the model's known context capacity is too small to absorb the
+    ``chat_style_note`` setting is on. Skips when any system message with text
+    exists (a user or persona prompt is never extended), for a compaction
+    summary request, and when the model's known context capacity is too small to absorb the
     instruction (see _nudge_fits_capacity). Appends the instruction to the
     first system message, or inserts one when none exists. Exceptions raised
     here are isolated by the chat pipeline."""
@@ -596,14 +647,10 @@ def _role_word_inlet(messages, ctx):
         return None
     if not _nudge_fits_capacity(_ROLE_WORD_INSTRUCTION, ctx):
         return None
-    for m in messages:
-        if m.get("role") == "system" and isinstance(m.get("content"), str) \
-                and "third person" in m["content"].lower():
-            return None                          # already instructed; don't double up
-    for m in messages:
-        if m.get("role") == "system" and isinstance(m.get("content"), str):
-            m["content"] = m["content"].rstrip() + "\n\n" + _ROLE_WORD_INSTRUCTION
-            return messages
+    if any(m.get("role") == "system" and _has_text(m.get("content")) for m in messages):
+        return None
+    if _is_summary_request(messages):
+        return None
     messages.insert(0, {"role": "system", "content": _ROLE_WORD_INSTRUCTION})
     return messages
 
@@ -625,8 +672,8 @@ def rename_notes(old_name: str, new_name: str) -> list[str]:
 def register(host) -> None:
     from localm.model_manager import register_rename_hook
     host.mount_router(_router)
-    host.register_chat_hook("inlet", _thinking_inlet)
     host.register_chat_hook("inlet", _role_word_inlet)
+    host.register_chat_hook("inlet", _thinking_inlet)
     register_rename_hook("saved chats", rename_notes)
 
 

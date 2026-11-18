@@ -21,6 +21,7 @@ set LOCALM_SETUP=1
 title LocaLM setup
 set "HBSEQ=0"
 set "RUNTIME_OK=1"
+set "VCMISSING="
 
 rem ---- command-line options ---------------------------------------------------
 rem    uninstall  (or --uninstall / --rollback)  remove LocaLM from this folder
@@ -337,6 +338,13 @@ rem  re-run never ejects with a misleading "could not create" error (uv refuses
 rem  to clobber an existing environment and returns non-zero). Python 3.12 is
 rem  required by the AMD ROCm torch wheels; we standardise on it for all flavours.
 set "PYVER=3.12"
+rem  Portable: uv's scratch files (the lock files its source builds leave) go to
+rem  .cache\tmp in this folder. Set only now, after uv is installed: the uv
+rem  installer step above needs the system temp folder when this folder's path
+rem  contains [ or ].
+if "%CONTAINED%"=="1" if not exist ".cache\tmp" mkdir ".cache\tmp" >nul 2>nul
+if "%CONTAINED%"=="1" set "TEMP=!CD!\.cache\tmp"
+if "%CONTAINED%"=="1" set "TMP=!CD!\.cache\tmp"
 rem  1 = verify against the platform's NATIVE certificate store (the Windows ROOT
 rem  store) - the same trust a browser, or an IT-provisioned corporate/security-
 rem  product proxy's injected root, already has, so a managed machine behind one
@@ -362,7 +370,7 @@ if not exist ".venv" call :jr begin venv & goto venv_create
 echo.
 set "REPLACEVENV="
 set "VENVKIND=Foreign"
-if "%OURS%"=="1" set "VENVKIND=LocalM"
+if "%OURS%"=="1" set "VENVKIND=LocaLM"
 call :flush
 rem SETUP-Q: replace-venv
 set /p "REPLACEVENV=  !VENVKIND! .venv found. Replace it? [y/N]: "
@@ -640,14 +648,22 @@ rem  line is overwritten by the redraw that follows it. Reported live as garbled
 rem  progress bars during the torch install. The heartbeat is ONLY correct where
 rem  uv's output is CAPTURED and the console would otherwise be silent - the ONE
 rem  such site is :venv_retry above. Do not copy it back here.
-uv pip install -p .venv -e ".[%EXTRAS%]"
+rem  The packages come from the uv.lock in this folder (exact versions, each file
+rem  checked against its sha256); localm.setup_spec install-args says how.
+set "INSARGS="
+.venv\Scripts\python -m localm.setup_spec install-args %EXTRAS% > "%STMP%\localm_install.txt"
+if not errorlevel 1 if exist "%STMP%\localm_install.txt" for /f "usebackq delims=" %%a in ("%STMP%\localm_install.txt") do set "INSARGS=%%a"
+del "%STMP%\localm_install.txt" 2>nul
+if not defined INSARGS echo  [^^!] Installing the newest versions the project allows instead of the locked set.
+if defined INSARGS uv %INSARGS%
+if not defined INSARGS uv pip install -p .venv -e ".[%EXTRAS%]"
 if not errorlevel 1 goto install_ok
 echo  [^^!] Install failed - see the error above.
 echo      If it says a file is in use or access is denied, a LocaLM program is still
 echo      running from this folder. Close it, run setup.bat again and pick [1] Install
 echo      again / repair. Until then this folder is partly updated. Your chats,
 echo      settings and models are untouched.
-call :offer_report "localm install failed during setup" "uv pip install -e .[%EXTRAS%] failed - see the error output above."
+call :offer_report "localm install failed during setup" "installing localm and its packages failed - see the error output above."
 pause
 exit /b 1
 :extras_failed
@@ -787,6 +803,10 @@ set "SLB="
 if exist "%STMP%\localm_hint.txt" for /f "usebackq delims=" %%a in ("%STMP%\localm_hint.txt") do set "SLB=%%a"
 del "%STMP%\localm_hint.txt" 2>nul
 if not defined SLB set "SLB=backend"
+rem  setup-llama exit 3 is localm.setup_spec.VC_RUNTIME_ABSENT_EXIT: the runtime is
+rem  in place but Windows lacks the Visual C++ Redistributable, and setup-llama
+rem  printed the remedy. Setup goes on with RUNTIME_OK=0 and VCMISSING=1 and no
+rem  report offer.
 echo.
 if /i "%BACKEND%"=="own" (
     set "LLAMABUILD="
@@ -795,7 +815,11 @@ if /i "%BACKEND%"=="own" (
     set /p "LLAMABUILD=  Path to your llama.cpp build dir with llama.dll (blank = skip): "
     if not "!LLAMABUILD!"=="" (
         .venv\Scripts\localm setup-llama --from "!LLAMABUILD!" --force
-        if errorlevel 1 (
+        if "!errorlevel!"=="3" (
+            set "RUNTIME_OK=0"
+            set "VCMISSING=1"
+            set "PFHINT=.venv\Scripts\localm setup-llama"
+        ) else if errorlevel 1 (
             set "PFHINT=.venv\Scripts\localm setup-llama --from "!LLAMABUILD!" --force"
             set "PFDETAIL=Provisioning the native llama.cpp runtime with --from failed during setup."
             call :provision_failed || exit /b 1
@@ -807,7 +831,11 @@ if /i "%BACKEND%"=="own" (
     )
 ) else (
     .venv\Scripts\localm setup-llama --backend %BACKEND% %SLFORCE%
-    if errorlevel 1 (
+    if "!errorlevel!"=="3" (
+        set "RUNTIME_OK=0"
+        set "VCMISSING=1"
+        set "PFHINT=.venv\Scripts\localm setup-llama"
+    ) else if errorlevel 1 (
         set "PFHINT=.venv\Scripts\localm setup-llama --backend %BACKEND% --force"
         set "PFDETAIL=Provisioning the native llama.cpp runtime (--backend %BACKEND%) failed during setup."
         call :provision_failed || exit /b 1
@@ -955,8 +983,11 @@ rem ---- done ------------------------------------------------------------------
 echo.
 echo  Done. Setup complete.
 if "%RUNTIME_OK%"=="0" echo.
-if "%RUNTIME_OK%"=="0" echo  [^^!] No model can load yet - the native llama.cpp runtime did not finish
-if "%RUNTIME_OK%"=="0" echo      provisioning. Finish it any time with:
+if "%RUNTIME_OK%"=="0" if defined VCMISSING echo  [^^!] No model can load yet - Windows lacks the Microsoft Visual C++ Redistributable.
+if "%RUNTIME_OK%"=="0" if defined VCMISSING echo      Install it from https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist
+if "%RUNTIME_OK%"=="0" if defined VCMISSING echo      or run this, which offers to install it:
+if "%RUNTIME_OK%"=="0" if not defined VCMISSING echo  [^^!] No model can load yet - the native llama.cpp runtime did not finish
+if "%RUNTIME_OK%"=="0" if not defined VCMISSING echo      provisioning. Finish it any time with:
 if "%RUNTIME_OK%"=="0" echo        !PFHINT!
 rem  The backend setup-llama recorded as installed, when it differs from the pick.
 set "INSTALLEDBK="

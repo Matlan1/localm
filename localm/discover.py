@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ctypes
 import inspect
+import os
 import re
 import threading
 import time
@@ -47,7 +48,10 @@ _FORMAT_FILTER = {"gguf": "gguf", "hf": "transformers"}
 # per-repo fetch to classify a result), and both `pipeline_tag=` and repeated
 # `filter=` (ANDed) work as query params.
 #
-# The "hf" (non-gguf / safetensors) side of the format axis narrows PER TYPE
+# The HF query narrows each (type, format) pair as far as HF's own filters allow;
+# hf_search then keeps only rows whose detected type is one the caller ticked
+# (_keep_requested_types), so a ticked type chip is never answered with another
+# type. The "hf" (non-gguf / safetensors) side of the format axis narrows PER TYPE
 # where HF exposes a reliable signal:
 _HF_TYPE_FILTER = {
     "llm": {"filter": "transformers"},
@@ -62,8 +66,9 @@ _HF_TYPE_FILTER = {
 # exactly the repos users search for. But the FORMAT axis is still reliable for
 # them: filter=safetensors returns the canonical diffusers VAEs/encoders, and
 # filter=gguf the GGUF ones (both verified live). So these types narrow by format
-# only; their type comes from the result badge (classify_hf_metadata) and, at
-# pull time, from the checkbox the user searched under.
+# only at the query; their type comes from the result badge (classify_hf_metadata,
+# plus _refine_unknown_type's repo-name hint) and the row filter, and at pull
+# time from the checkbox the user searched under.
 _HF_TYPE_FILTER_DEFAULT = {"filter": "safetensors"}
 _ALL_SEARCHABLE_TYPES = frozenset(
     {"llm", "embedding", "diffusion-unet", "lora", "vae", "text-encoder", "unknown"})
@@ -345,7 +350,7 @@ def _rows_from_items(data: object, limit: int, *, fmt: Optional[str],
 
     ``classify``: attach a ``detected_type`` (localm.model_manager.registry
     MODEL_TYPES value, or "unknown") from the item's pipeline_tag/library_name/
-    tags fields for DISPLAY ONLY - never a filter on results. Also attaches
+    tags fields: the row badge, and what hf_search filters a type-scoped search on. Also attaches
     ``architecture`` (the raw gguf.architecture/config.model_type string),
     ``moe`` ("confirmed"/"likely"/None, see _moe_signal), and ``param_count``
     (see _param_count) - all display-only, all omitted entirely when False, so
@@ -395,6 +400,40 @@ def _rows_from_items(data: object, limit: int, *, fmt: Optional[str],
                 row_fmt, gguf_meta, item.get("safetensors"))
         out.append(row)
     return out
+
+
+# Over-fetch factor for a type-scoped query: the row filter below drops rows of
+# other types, so each HF query asks for more than the caller's limit.
+_TYPED_FETCH_FACTOR = 5
+_HF_FETCH_CAP = 100
+
+_VAE_NAME_RE = re.compile(r"(?i)(?<![a-z0-9])vae(?![a-z0-9])")
+_ENCODER_NAME_RE = re.compile(
+    r"(?i)text[_-]?encoders?|(?<![a-z0-9])clip(?![a-z0-9])")
+
+
+def _refine_unknown_type(repo_id: str) -> str:
+    """Type hinted by a repo NAME, for a repo whose metadata carries no type
+    signal (the canonical VAE and text-encoder repos have none). Only ever used
+    on rows classify_hf_metadata left as 'unknown'."""
+    name = repo_id.split("/", 1)[-1]
+    if _VAE_NAME_RE.search(name):
+        return "vae"
+    if _ENCODER_NAME_RE.search(name):
+        return "text-encoder"
+    return "unknown"
+
+
+def _keep_requested_types(rows: list[dict], wanted: frozenset) -> list[dict]:
+    """Rows whose detected type is one of *wanted*. A row classified 'unknown'
+    by its metadata is first re-typed from its repo name."""
+    kept = []
+    for row in rows:
+        if row.get("detected_type") == "unknown":
+            row["detected_type"] = _refine_unknown_type(row["id"])
+        if row.get("detected_type") in wanted:
+            kept.append(row)
+    return kept
 
 
 def _type_fmt_filter(model_type: Optional[str], fmt: str) -> dict:
@@ -557,9 +596,16 @@ def hf_search(query: str = "", limit: int = 20, formats: Sequence[str] = ("gguf"
     # appeared in and unions its formats there.
     seen: dict[str, dict] = {}
     per_query: list[list[dict]] = []
+    narrow_to = (frozenset(types) if types is not None
+                 and set(types) != _ALL_SEARCHABLE_TYPES else None)
+    fetch_limit = (min(_HF_FETCH_CAP, limit * _TYPED_FETCH_FACTOR)
+                   if narrow_to is not None else limit)
     for mt, fmt in query_specs:
         lst: list[dict] = []
-        for item in _run_query(query, limit, fmt, mt, classify, token=token):
+        rows = _run_query(query, fetch_limit, fmt, mt, classify, token=token)
+        if narrow_to is not None:
+            rows = _keep_requested_types(rows, narrow_to)
+        for item in rows:
             existing = seen.get(item["id"])
             if existing:
                 for f in item["formats"]:
@@ -726,6 +772,12 @@ def _quant_of(name: str) -> str:
 # confirm a native free has landed before re-checking; a stale value there would
 # defeat that guard and over-evict. The last-known-good value is kept ONLY as
 # the wedge fallback, never to short-circuit a live probe.
+#
+# What IS kept is the device LIST the out-of-process torch probe answered with
+# (names, totals, PCI buses, index space): a round re-reads every device's free
+# VRAM from the device-global sources that never import torch
+# (:func:`fresh_device_readings`) instead of starting that child again. See
+# _kept_torch_gpus.
 _GPU_PROBE_DEADLINE = 15.0    # seconds a probe may block its caller; must exceed
                               # a legitimate COLD driver init (see above)
 # Alias, kept for the call sites that opt into it by name (doctor,
@@ -779,8 +831,8 @@ def last_known_gpus() -> list:
 
     ``list_gpus`` has no TTL cache - every call re-probes so a live ``free`` is
     never stale - which makes it the wrong thing to call for a second,
-    incidental use right after something else has already probed. A probe spawns
-    a torch-importing subprocess and costs seconds.
+    incidental use right after something else has already probed. A probe can
+    spawn a torch-importing subprocess, which costs seconds.
 
     This is for exactly that case: a caller that has JUST driven a probe (e.g. via
     :func:`vram_capacity`) and wants the per-device detail behind the number it
@@ -818,8 +870,15 @@ def _reset_gpu_probe_cache() -> None:
     global _isolated_torch_unanswered, _torch_round_unanswered
     global _isolated_torch_retry_wait, _isolated_torch_retry_at
     global _isolated_torch_timeouts
+    global _kept_torch_topology, _kept_torch_env, _kept_torch_at
+    global _kept_torch_reuse_logged, _gpu_reenumeration_requested
     _LLAMA_SLOTS_CACHE.clear()
     with _gpu_probe_lock:
+        _kept_torch_topology = None
+        _kept_torch_env = None
+        _kept_torch_at = 0.0
+        _kept_torch_reuse_logged = False
+        _gpu_reenumeration_requested = False
         _TORCH_INDEX_OF_BUS.clear()
         _isolated_torch_timeouts = 0
         _torch_round_unanswered = False
@@ -1035,6 +1094,9 @@ def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> 
                 # nothing has succeeded yet. This instant answer is what keeps the
                 # event loop responsive on a permanent wedge.
                 served = list(_gpu_last_good) if _gpu_last_good is not None else []
+                logger.debug("list_gpus: another GPU probe is still running; "
+                             "answering busy with the last reading (%d device(s)) "
+                             "instead of starting a second one", len(served))
                 return served, GPU_PROBE_BUSY
         else:
             _gpu_probe_inflight = True
@@ -1822,9 +1884,11 @@ def _ask_torch_probe_child(timeout: float) -> Optional[list]:
     ``_loader._spawn_probe_daemon``). Started with no console window on Windows.
 
     Spawns nothing and returns ``None`` while :class:`torch_probes_held` is
-    active."""
+    active. How long the child took is logged at debug level, whatever it
+    answered."""
     import subprocess
     from localm._mp_spawn import interpreter_for_localm_children
+    started = time.monotonic()
     try:
         with _gpu_probe_lock:
             if _torch_probe_holds > 0:
@@ -1839,11 +1903,24 @@ def _ask_torch_probe_child(timeout: float) -> Optional[list]:
         logger.debug("list_gpus: could not spawn the out-of-process torch probe "
                      "(%s); falling through to nvidia-smi", type(e).__name__)
         return None
+    outcome = "raised"
     try:
-        return _read_torch_probe(proc, timeout)
+        devices = _read_torch_probe(proc, timeout)
+        outcome = ("an unusable reply" if devices is None
+                   else f"{len(devices)} device(s)")
+        return devices
+    except _IsolatedTorchWedged:
+        outcome = "no answer in time"
+        raise
+    except _TorchProbeChildDied:
+        outcome = "nothing printed"
+        raise
     finally:
         with _gpu_probe_lock:
             _torch_probe_procs.discard(proc)
+        logger.debug("list_gpus: torch probe child (pid %s, rc=%s) took %.2fs: %s",
+                     getattr(proc, "pid", None), getattr(proc, "returncode", None),
+                     time.monotonic() - started, outcome)
 
 
 def _read_torch_probe(proc, timeout: float) -> list | None:
@@ -1981,7 +2058,10 @@ def _torch_gpus_isolated_once() -> list:
     a round whose child could not answer. Any answer from the child clears the
     wait; while latched, a ``[]`` from a child that exited non-zero is not an
     answer. After ``_ISOLATED_TORCH_TIMEOUTS_MAX`` timeouts in a row the child is
-    not spawned again in this process."""
+    not spawned again in this process.
+
+    An answer from a child that exited 0 becomes the kept device list
+    (:func:`_kept_torch_gpus`); an empty answer drops it."""
     global _isolated_torch_unavailable, _isolated_torch_timeouts
     global _isolated_torch_unanswered
     global _isolated_torch_retry_wait, _isolated_torch_retry_at
@@ -2017,6 +2097,8 @@ def _torch_gpus_isolated_once() -> list:
                     _isolated_torch_timeouts = 0
                     _isolated_torch_retry_wait = 0.0
                     _isolated_torch_retry_at = 0.0
+                    if not _torch_round_unanswered:
+                        _keep_torch_topology(devices)
     except _IsolatedTorchWedged:
         with _gpu_probe_lock:
             _isolated_torch_unavailable = True
@@ -2137,7 +2219,11 @@ def _torch_gpus_resident_bounded(timeout: float = _TORCH_RESIDENT_READ_TIMEOUT) 
 
 def _list_gpus_probe() -> list:
     """The actual (blocking) GPU driver probe. Call :func:`list_gpus`, not this -
-    this one has no timeout and can wedge on a busy/broken driver."""
+    this one has no timeout and can wedge on a busy/broken driver.
+
+    With torch not resident, a kept torch device list (:func:`_kept_torch_gpus`)
+    answers instead of the torch probe child, and again when that child could
+    not answer."""
     # Whether torch was actually asked this round, as opposed to being
     # skipped outright because it is known-doomed. Read by the AMD/Windows
     # fallback at the end of this function.
@@ -2149,8 +2235,22 @@ def _list_gpus_probe() -> list:
     skipped_for_sycl = not torch_asked and _torch_gpu_probe_doomed_reason() == "sycl"
     if torch_asked:
         try:
-            out = _torch_gpus_resident_bounded() if _torch_is_resident() \
-                else _torch_gpus_isolated_once()
+            if _torch_is_resident():
+                out = _torch_gpus_resident_bounded()
+            else:
+                kept = _kept_torch_gpus()
+                if kept is not None:
+                    return kept
+                try:
+                    out = _torch_gpus_isolated_once()
+                except Exception as e:
+                    logger.debug("list_gpus: torch enumeration failed (%s: %s)",
+                                 type(e).__name__, e)
+                    out = []
+                if not out:
+                    kept = _kept_torch_gpus(torch_was_asked=True)
+                    if kept is not None:
+                        return kept
             if out:
                 _apply_device_global_free(out)
                 _note_torch_numbering(out)
@@ -2168,7 +2268,8 @@ def _list_gpus_probe() -> list:
         proc = subprocess.Popen(
             [smi, "--query-gpu=index,name,memory.total,memory.free,pci.bus_id",
              "--format=csv,noheader,nounits"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         try:
             nvidia_smi_out, _ = proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:
@@ -2298,6 +2399,184 @@ def _nvidia_smi_numbering(out: list, torch_asked: bool) -> list:
     if _isolated_torch_unavailable or _isolated_torch_unanswered or _torch_round_unanswered:
         return [dict(d, numbering=GPU_NUMBERING_NVIDIA_SMI) for d in out]
     return out
+
+
+# The device list of the last out-of-process torch probe child that answered with
+# exit 0 and at least one device, with the device-visibility environment it was
+# read under and when (monotonic). None until such an answer, and again after a
+# child answered with no device. Guarded by _gpu_probe_lock.
+_kept_torch_topology: list | None = None
+_kept_torch_env: tuple | None = None
+_kept_torch_at = 0.0
+# Whether the use of the current kept list has been logged. Guarded by
+# _gpu_probe_lock.
+_kept_torch_reuse_logged = False
+# Set by request_gpu_reenumeration(): the next probe round that would answer
+# from the kept list asks the torch probe child instead. Guarded by
+# _gpu_probe_lock.
+_gpu_reenumeration_requested = False
+
+# The environment variables that select and order the devices the torch probe
+# child sees (it inherits this process's environment).
+_DEVICE_VISIBILITY_VARS = ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES",
+                           "ROCR_VISIBLE_DEVICES")
+
+
+def _device_visibility_env() -> tuple:
+    """The current values of :data:`_DEVICE_VISIBILITY_VARS`."""
+    return tuple(os.environ.get(name) for name in _DEVICE_VISIBILITY_VARS)
+
+
+def _keep_torch_topology(devices: list) -> None:
+    """Keep *devices*, the answer of a torch probe child that exited 0, as the
+    device list later rounds re-read free VRAM for (:func:`_kept_torch_gpus`).
+    An empty *devices* drops the kept list. The caller holds _gpu_probe_lock."""
+    global _kept_torch_topology, _kept_torch_env, _kept_torch_at
+    global _kept_torch_reuse_logged
+    _kept_torch_topology = [dict(d) for d in devices] if devices else None
+    _kept_torch_env = _device_visibility_env()
+    _kept_torch_at = time.monotonic()
+    _kept_torch_reuse_logged = False
+
+
+def request_gpu_reenumeration() -> None:
+    """Make the next :func:`list_gpus` round that would answer from the kept
+    torch device list (:func:`_kept_torch_gpus`) ask the out-of-process torch
+    probe instead, so a device added or removed since is seen. When that child
+    cannot answer, the round still answers from the kept list. For a caller that
+    re-enumerates on a schedule (the stats meter's topology interval)."""
+    global _gpu_reenumeration_requested
+    with _gpu_probe_lock:
+        _gpu_reenumeration_requested = True
+
+
+def _kept_torch_gpus(*, torch_was_asked: bool = False) -> list | None:
+    """The kept torch device list with every device's free VRAM re-read now from
+    the device-global sources (:func:`fresh_device_readings`), or None when this
+    probe round must ask the torch probe child: nothing is kept, the
+    device-visibility environment changed since it was read, a free reading
+    cannot be re-read for every device, or (unless *torch_was_asked*, a round
+    whose child could not answer) a re-enumeration was requested
+    (:func:`request_gpu_reenumeration`; the request is then used up).
+
+    Only the free VRAM changes between rounds; the names, totals, PCI buses and
+    index space are those torch reported. Its entries are the torch entries
+    with ``free`` and ``free_scope`` (:data:`FREE_SCOPE_DEVICE`) replaced, so a
+    caller cannot tell them from a fresh torch answer."""
+    global _gpu_reenumeration_requested, _kept_torch_reuse_logged
+    with _gpu_probe_lock:
+        kept = _kept_torch_topology
+        if kept is None or _kept_torch_env != _device_visibility_env():
+            return None
+        if _gpu_reenumeration_requested and not torch_was_asked:
+            _gpu_reenumeration_requested = False
+            logger.debug("list_gpus: re-enumeration requested; asking the torch "
+                         "probe child again")
+            return None
+        age = time.monotonic() - _kept_torch_at
+        first_use = not _kept_torch_reuse_logged
+    fresh = fresh_device_readings(kept)
+    if fresh is None:
+        logger.debug("list_gpus: free VRAM of the kept device list cannot be "
+                     "re-read for every device; asking the torch probe child")
+        return None
+    if torch_was_asked:
+        logger.debug("list_gpus: the torch probe child did not answer; using the "
+                     "device list it gave %.0fs ago with free VRAM re-read now",
+                     age)
+    elif first_use:
+        with _gpu_probe_lock:
+            _kept_torch_reuse_logged = True
+        logger.debug("list_gpus: using the device list the torch probe child gave "
+                     "%.0fs ago (%d device(s)) with free VRAM re-read from the "
+                     "device-global sources; not starting the child again until a "
+                     "re-enumeration is requested", age, len(fresh))
+    return fresh
+
+
+def nvidia_smi_used_by_bus() -> dict[int, tuple[int, int]]:
+    """``{pci_bus_number: (total_bytes, used_bytes)}`` for every board nvidia-smi
+    lists, or ``{}`` when nvidia-smi is absent, fails or times out. Whole-board
+    figures, counting every process. Never raises."""
+    import subprocess
+
+    from localm import sysprog
+    smi = sysprog.find("nvidia-smi")
+    if not smi:
+        return {}
+    try:
+        proc = subprocess.Popen(
+            [smi, "--query-gpu=pci.bus_id,memory.total,memory.free",
+             "--format=csv,noheader,nounits"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        try:
+            out, _ = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.communicate(timeout=_ISOLATED_TORCH_DRAIN_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                pass
+            logger.debug("nvidia-smi used VRAM: no answer within 5s")
+            return {}
+        if proc.returncode != 0:
+            logger.debug("nvidia-smi used VRAM: exited with %s", proc.returncode)
+            return {}
+        boards: dict[int, tuple[int, int]] = {}
+        for line in out.strip().splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 3:
+                continue
+            bus = _pci_bus_number(parts[0])
+            try:
+                total = int(parts[1]) * 1024 ** 2
+                free = int(parts[2]) * 1024 ** 2
+            except ValueError:
+                continue
+            if bus is not None:
+                boards[bus] = (total, max(0, total - free))
+        return boards
+    except Exception as e:
+        logger.debug("nvidia-smi used VRAM: query failed: %s", e)
+        return {}
+
+
+def fresh_device_readings(devices: list, *, nvidia_smi=None) -> list | None:
+    """Copies of *devices* (a list_gpus() reading) with each device's ``free`` and
+    ``free_scope`` re-read from sources that never import torch, or None when any
+    device that reports ``free`` has no such source, or none reports ``free``.
+
+    Sources, in order: the Windows ADL/PDH device-global reading
+    (:func:`localm.gpu_usage.device_global_used_bytes`), then nvidia-smi matched
+    on the device's ``pci_bus_id`` (*nvidia_smi*, default
+    :func:`nvidia_smi_used_by_bus`). The re-read ``free`` is device-global and
+    tagged ``FREE_SCOPE_DEVICE``. A device without ``free`` is returned as it was."""
+    from localm import gpu_usage
+    fresh = [dict(d) for d in devices]
+    wanted = [d for d in fresh if d.get("free") is not None]
+    if not wanted:
+        return None
+    try:
+        used = dict(gpu_usage.device_global_used_bytes(fresh))
+    except Exception as e:
+        logger.debug("device-global used VRAM reading unavailable: %s", e)
+        used = {}
+    if any(d["index"] not in used for d in wanted):
+        boards = (nvidia_smi or nvidia_smi_used_by_bus)()
+        for d in wanted:
+            bus = d.get("pci_bus_id")
+            if (d["index"] not in used and isinstance(bus, int)
+                    and not isinstance(bus, bool) and bus in boards):
+                used[d["index"]] = boards[bus][1]
+    for d in wanted:
+        u = used.get(d["index"])
+        if u is None:
+            return None
+        total = int(d["total"])
+        d["free"] = max(0, min(total, total - int(u)))
+        d["free_scope"] = FREE_SCOPE_DEVICE
+    return fresh
 
 # Probe budget below which a COLD (not-yet-opened) device-global source is skipped
 # rather than risk overrunning the probe deadline. The cold open costs about
@@ -4904,7 +5183,12 @@ def vram_capacity_joined() -> tuple:
 
 def _takes_kwarg(fn, name: str) -> bool:
     """Whether callable *fn* accepts keyword argument *name* (by name or
-    through ``**kwargs``); False when its signature cannot be read."""
+    through ``**kwargs``); False when its signature cannot be read. A mock
+    patched in with a callable ``side_effect`` is judged by that callable,
+    which is what receives the arguments."""
+    side_effect = getattr(fn, "side_effect", None)
+    if callable(side_effect) and not inspect.isclass(side_effect):
+        fn = side_effect
     try:
         params = inspect.signature(fn).parameters
     except (TypeError, ValueError):

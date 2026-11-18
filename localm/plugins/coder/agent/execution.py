@@ -146,6 +146,7 @@ class _ExecutionMixin:
         # Set by Agent (core.py), which this class is mixed into.
         cwd: Path
         restricted: bool
+        _undo_stack: list
         @property
         def stop_pending(self) -> bool: ...
         @property
@@ -155,6 +156,8 @@ class _ExecutionMixin:
         confirm_handler: Any
         _project_map: Any
         patch_mode: bool
+        _user_declines: int
+        _lenient_denials: int
         _patch_overlay: PatchOverlay
         _patch_chunks: list[str]
 
@@ -697,7 +700,9 @@ class _ExecutionMixin:
         if self.dry_run and (tool_def.destructive
                              or getattr(tool_def, "executes_project_code", False) is True):
             result = ToolResult.success(
-                f"[dry-run] {call.name} - skipped",
+                f"[dry-run] {call.name} - skipped. This session is a dry run: "
+                "destructive and code-running calls are shown, never executed. "
+                "Do not repeat it; say what you would have done.",
                 summary=f"[dry-run] {call.name}",
             )
             if interactive:
@@ -833,6 +838,14 @@ class _ExecutionMixin:
                 print_info(f"  ({note})")
             self._emit("info", text=note)
             self._audit.notice("data_guard_confirm", note)
+        if needs_confirm and lenient_call and gated and can_ask:
+            note = (f"{call.name} was not written in the <tool_call> format, so "
+                    "it is asked about as an exact approval"
+                    + (", even with auto-approve on" if lenient_only else "")
+                    + " and cannot be always-allowed.")
+            if interactive:
+                print_info(f"  ({note})")
+            self._emit("info", text=note)
         if needs_confirm:
             if self.confirm_handler is not None or interactive:
                 # The terminal prompt (this agent's, or an interactive parent's
@@ -885,6 +898,7 @@ class _ExecutionMixin:
                         '<tool_call>\n{"name": "' + call.name + '", "args": '
                         "{...}}\n</tool_call>\nand it will run.")
                     reason = "lenient"
+                    self._lenient_denials += 1
                 else:
                     result = ToolResult.error(
                         f"{call.name} requires confirmation, but this run is "
@@ -899,7 +913,10 @@ class _ExecutionMixin:
                 return result
             if not approved:
                 reject_reason = consume_reject_reason()
-                if consume_unanswered():
+                unanswered = consume_unanswered()
+                if not unanswered:
+                    self._user_declines += 1
+                if unanswered:
                     err_msg = (
                         f"{call.name} was not run: nobody answered the approval "
                         "request before it timed out. The user did not refuse "
@@ -922,6 +939,7 @@ class _ExecutionMixin:
         # edit_files targets several files in one call and needs one undo entry
         # per file.
         snapshots: dict[str, bytes | None] = {}
+        undo_call_id = 0
         if call.name in _UNDOABLE_TOOLS:
             # One id per CALL: a multi-file call pushes several entries and undo()
             # reverts them together (see persistence.undo), so /undo never leaves a
@@ -1019,6 +1037,9 @@ class _ExecutionMixin:
             result = ToolResult.error(f"Tool error: {e}")
         duration_s = time.monotonic() - t_start
 
+        if snapshots and not result.ok:
+            self._drop_unchanged_undo_entries(undo_call_id)
+
         result = self._run_post_tool_hooks(call, result, interactive)
         result = self._track_tool_failure(call, result)
         if result.ok and self._denied_unconfirmed:
@@ -1045,6 +1066,23 @@ class _ExecutionMixin:
         self._post_tool_success(call, result, snapshots)
 
         return result
+
+    def _drop_unchanged_undo_entries(self, call_id: int) -> None:
+        """After a failed call, remove its undo entries whose file still holds the
+        snapshotted content, so /undo never "undoes" an edit that did not happen.
+        An entry whose file did change (a multi-file call that failed part way)
+        stays."""
+        def unchanged(entry: dict) -> bool:
+            if entry.get("call_id") != call_id:
+                return False
+            path = entry["path"]
+            try:
+                now = path.read_bytes() if path.is_file() else None
+            except Exception:
+                return False
+            return now == entry["old_content"]
+
+        self._undo_stack[:] = [e for e in self._undo_stack if not unchanged(e)]
 
     def _cancel_check(self) -> bool:
         """True once this run should stop (see ``stop_pending``), so a running
@@ -1136,6 +1174,25 @@ class _ExecutionMixin:
         if not any(hooks.applies(event, call.name) for call in calls for event in (PRE, POST)):
             return False
         return self._hook_run_gate() == "confirm"
+
+    def _may_need_terminal_confirm(self, calls, interactive: bool) -> bool:
+        """Whether a call in *calls* may be asked about at this session's own
+        terminal: it is interactive with no confirm handler, and a call is gated
+        (ask-by-default or code-running tool), reaches the network, or touches
+        localm's own data. Such calls run one at a time with *interactive*
+        passed on, so the prompt is shown instead of the call being denied as
+        unconfirmable."""
+        if not interactive or self.confirm_handler is not None:
+            return False
+        registry = _agent.TOOL_REGISTRY
+        for call in calls:
+            td = registry.get(call.name)
+            if td is None or td.destructive or td.ask_by_default \
+                    or getattr(td, "executes_project_code", False) is True \
+                    or call.name in _NETWORK_TOOLS \
+                    or self._data_guard_verdict(call) is not None:
+                return True
+        return False
 
     def _hook_permit(self, interactive: bool):
         """A callback deciding, per hook run, whether it may run: None to run
@@ -1472,7 +1529,7 @@ class _ExecutionMixin:
         self._patch_overlay.clear()
         if output_path is not None:
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_text(content, encoding="utf-8")
+            output_path.write_text(content, encoding="utf-8", newline="")
         return content
 
     def _confirm_agent_label(self) -> Optional[str]:

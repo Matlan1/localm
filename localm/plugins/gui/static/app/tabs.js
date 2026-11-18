@@ -15,11 +15,25 @@ export let VIEWS = [...CORE_VIEWS];
 // Toggle the .active class on the view sections and nav buttons, without
 // running onViewShown.
 export function _applyActiveClasses(name) {
-  for (const v of VIEWS) {
-    const view = $("view-" + v), nav = $("nav-" + v);
-    if (view) view.classList.toggle("active", v === name);
+  // Every page section, not only those in VIEWS: at boot a plugin page is
+  // restored before renderNav() has added its tab to VIEWS.
+  for (const view of document.querySelectorAll(".view")) {
+    view.classList.toggle("active", view.id === "view-" + name);
+  }
+  for (const v of new Set([...VIEWS, name])) {
+    const nav = $("nav-" + v);
     if (nav) nav.classList.toggle("active", v === name);
   }
+  _openGroupOf($("nav-" + name));
+}
+
+// A page opened from the palette, a link or a reload shows its own nav button
+// even when its group (Studio, Agent) was collapsed.
+function _openGroupOf(nav) {
+  const kids = nav && nav.closest(".nav-children");
+  if (!kids || kids.style.display !== "none") return;
+  kids.style.display = "block";
+  if (kids.previousElementSibling) kids.previousElementSibling.classList.add("open");
 }
 
 /** Whether the Settings view is the active one. */
@@ -44,7 +58,9 @@ export function showView(name) {
     confirmDangerAsync(t("nav.leaveSettings.title"), t("settings.unsavedConfirm"),
       t("nav.leaveSettings.leave")).then((leave) => {
       _leaveAsked = false;
-      if (leave) _showViewNow(name);
+      if (!leave) return;
+      if (window.discardSettingsEdits) window.discardSettingsEdits();
+      _showViewNow(name);
     });
     return;
   }

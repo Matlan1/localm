@@ -8,6 +8,8 @@ three _call_llm dispatch branches: event-sink, interactive terminal, and silent
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 def _make_agent(tmp_path: Path, on_event=None) -> object:
     from localm.plugins.coder.agent import Agent
@@ -120,9 +122,9 @@ class TestCallLLMInteractive:
 
     def test_interrupted_stream_still_records_partial_text(self, tmp_path):
         """A KeyboardInterrupt mid-stream (Ctrl-C at the terminal) must still
-        record and return whatever text streamed before the interrupt, not
-        lose it: _stream_and_record wraps the whole consume+record sequence in
-        a try/except for exactly that."""
+        record whatever text streamed before the interrupt, and must reach the
+        run loop (checkpoint, /resume hint) instead of ending the turn as a
+        clean reply."""
         agent = _make_agent(tmp_path)
 
         def fake_chat_stream(messages, on_reasoning=None, **kw):
@@ -134,13 +136,13 @@ class TestCallLLMInteractive:
         with patch("localm.plugins.coder.agent.context.print_reasoning_token"), \
              patch("localm.plugins.coder.agent.context.print_streaming_token"), \
              patch("localm.plugins.coder.agent.context.print_streaming_done") as mock_done, \
-             patch("localm.plugins.coder.agent.context.print_info") as mock_info:
-            result = agent._call_llm([{"role": "user", "content": "hi"}], interactive=True)
+             patch("localm.plugins.coder.agent.context.print_info"):
+            with pytest.raises(KeyboardInterrupt):
+                agent._call_llm([{"role": "user", "content": "hi"}], interactive=True)
 
-        assert result == "partial "
         mock_done.assert_called_once()
-        mock_info.assert_called_once_with("(interrupted)")
         agent._audit.llm.assert_called_once()
+        assert agent._audit.llm.call_args.args[0] == "partial "
 
     def test_event_sink_and_interactive_share_one_streaming_implementation(self, tmp_path):
         """Both branches must call the SAME _stream_and_record method. When the

@@ -7,6 +7,8 @@ hung reporting only "timed out". The helper lives in tools/base.py."""
 
 import subprocess
 
+import pytest
+
 from tests.plugins.coder.launch_stub import patch_launch
 from localm.plugins.coder.tools import (
     tool_git_status,
@@ -93,6 +95,11 @@ class TestRunShellTimeout:
 
 
 class TestRunTestsTimeout:
+    @pytest.fixture(autouse=True)
+    def _no_path_probe(self, monkeypatch):
+        monkeypatch.setattr(
+            "localm.plugins.coder.pyenv._path_interpreters", lambda cwd: [])
+
     def test_partial_output_included(self, tmp_path):
         exc = _timeout_exc(output="3 passed, 2 failed so far")
         with patch_launch(side_effect=exc):

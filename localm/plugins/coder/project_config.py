@@ -31,6 +31,10 @@ auto_allow_read_only_shell = true         # run provably read-only shell command
 the user's own coder mode take effect only once the project is trusted
 (hook_trust.py).
 
+``model_refs`` is an optional ``{name as written: model id}`` table (the shape
+config.json uses) that lets ``model`` follow a rename; a name with no entry still
+resolves through the model's former names (``localm.model_ids``).
+
 Tables read by their own loaders rather than by load_project_config:
 ``[mcp.servers.*]`` (mcp.py) and ``[[hooks.pre_tool_use]]`` /
 ``[[hooks.post_tool_use]]`` (hooks.py).
@@ -141,7 +145,7 @@ def load_project_config(cwd: Path, *, trusted: bool | None = None) -> dict[str, 
     _KNOWN = {"model", "max_turns", "auto_approve", "always_confirm",
               "memory_file", "max_tokens", "temperature", "mode",
               "seed", "verify", "diagnostics", "auto_allow_read_only_shell",
-              "compaction_flush"}
+              "compaction_flush", "model_refs"}
     cfg = {k: v for k, v in raw.items() if k in _KNOWN}
     gated = [k for k in ("auto_approve", "verify", "model", "memory_file") if k in cfg]
     widening = "mode" in cfg and mode_widens(cfg["mode"])

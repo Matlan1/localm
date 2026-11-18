@@ -207,35 +207,65 @@ def register(host) -> None:
     host.mount_router(_transcriptions.router)
 
 
-def on_install() -> None:
+def on_install() -> str:
     """Prefetch the configured Whisper model when the plugin is installed, so a
-    first click on the mic does not stall on a surprise download.
+    first click on the mic does not stall on a surprise download. Every install
+    path runs this hook: the Plugins page, ``localm plugin install`` and
+    ``plugin setup`` (setup's plugin step), and the MCP install_plugin tool.
 
     Installing the plugin is itself an explicit user action, so the prefetch
     passes ``allow_download=True`` for this one download and nothing is
-    persisted. net_mode=off still refuses, and the install succeeds either way,
-    with /api/voice/status carrying the honest reason until the model is
-    fetched.
+    persisted. net_mode=off still refuses unless net_allow_model_downloads
+    exempts explicit downloads: nothing is downloaded and the returned note
+    says why. The install succeeds either way, with /api/voice/status carrying
+    the honest reason until the model is fetched.
 
-    Runs on a background thread: the install route invokes this hook on the
-    server's event loop, and the pip extras may still be installing. The
-    prefetch needs only huggingface_hub (a core dependency), not
-    faster-whisper."""
+    The model name is read once here and passed on, so the check and the
+    download are about the same model. On the server's event loop (a live
+    install) the download runs on a background thread, and the pip extras may
+    still be installing; the prefetch needs only huggingface_hub (a core
+    dependency), not faster-whisper. With no running event loop (the CLI,
+    setup, the MCP tool) it runs inline, because that process may exit as soon
+    as this hook returns, which ends a daemon thread mid-download.
+
+    Returns a one-line note for the person installing."""
+    import asyncio
     import threading
 
-    def _run() -> None:
-        try:
-            from localm.voice import prefetch_stt_model
-            prefetch_stt_model(allow_download=True)   # logs its own outcome
-        except Exception as e:
-            # The engine's hook wrapper cannot see this thread, so the failure is
-            # logged here.
-            from localm.debuglog import logger
-            logger.warning("voice: Whisper model prefetch failed: %s", e)
+    from localm.debuglog import logger
+    from localm.netpolicy import downloads_allowed_when_off, network_mode
+    from localm.voice import (PREFETCH_THREAD_NAME, prefetch_stt_model,
+                              stt_model_cached)
+    cached, name = stt_model_cached()
+    if cached:
+        return f"The Whisper '{name}' speech model is already downloaded."
+    if network_mode() == "off" and not downloads_allowed_when_off():
+        from localm.config import net_off_download_refusal
+        note = net_off_download_refusal(
+            f"the Whisper '{name}' speech model was not downloaded")
+        logger.info("voice: %s", note)
+        return note
 
-    from localm.voice import PREFETCH_THREAD_NAME
-    threading.Thread(target=_run, name=PREFETCH_THREAD_NAME,
+    def _prefetch() -> str:
+        try:
+            ok, reason = prefetch_stt_model(allow_download=True, name=name)
+        except Exception as e:
+            reason = f"Whisper model '{name}' prefetch failed: {e}"
+            logger.warning("voice: %s", reason)
+            return reason
+        if ok:
+            return (f"Downloaded the Whisper '{name}' speech model; speech-to-text "
+                    "now runs fully offline.")
+        return reason                              # prefetch logged it
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return _prefetch()
+    threading.Thread(target=_prefetch, name=PREFETCH_THREAD_NAME,
                      daemon=True).start()
+    return (f"Downloading the Whisper '{name}' speech model in the background "
+            "(one time).")
 
 
 def unregister() -> None:

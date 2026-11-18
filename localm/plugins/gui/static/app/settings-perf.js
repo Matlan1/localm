@@ -8,9 +8,9 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
 import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, elideAudioForWire, elideImagesForWire, isToolEvent, latestTurnHasAudio, latestTurnIsAudioOnly, lsSetScoped, markNotSent, markRefusedBy, maybeCompactConversation, memorySavedText, modelCannotHearAudio, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, persistChatParams, pinnedModelName, refreshWebPolicy, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, resolvePinnedModel, saveConversations, scopedKeyPrivate, setConversationPin, showPinnedGone, syncPinModelToggle, updateStatusIndicator, wireHasImageAndAudio, wireParts } from "./chat.js";
-import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, localizeServerNotes, autoGrow, confirmDanger, confirmDangerAsync, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setCanvasNavigationAllowed, setPreviewAllowed, splitThink, streamJob, stripAsrPrefix, stripThink, toast } from "./helpers.js";
-import { t, tn } from "./i18n.js";
-import { isPeerSelected, modelCache, modelSelect, refreshModels, reloadModel, toastLoadResult } from "./models-sidebar.js";
+import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, localizeServerNotes, autoGrow, confirmDanger, confirmDangerAsync, el, liveThinkText, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setCanvasNavigationAllowed, setPreviewAllowed, splitThink, streamJob, stripAsrPrefix, stripThink, toast } from "./helpers.js";
+import { onLanguageReload, t, tn } from "./i18n.js";
+import { announcedLoadingModel, isPeerSelected, modelCache, modelSelect, refreshModels, reloadModel, toastLoadResult, waitForModelLoad } from "./models-sidebar.js";
 import { pickPath, saveTextFs } from "./picker.js";
 import { execChatCommand, handleSlashSubmit } from "./slash.js";
 import { CORE_VIEWS, VIEWS, _applyActiveClasses, closeNav, showView } from "./tabs.js";
@@ -1986,7 +1986,11 @@ export async function refreshPluginCommands() {
     }
     pluginCommands.map = map;
     pluginCommands.suggest = data.suggest_plugins !== false;
+    const activeKey = (list) => list.filter((p) => p && p.active)
+      .map((p) => p.name).sort().join(",");
+    const activeChanged = _capsAnswered && activeKey(pluginState) !== activeKey(data.plugins || []);
     pluginState = data.plugins || [];
+    _capsAnswered = true;
     caps.fsAccess = data.fs_access || "none";
     caps.fsSave = data.fs_save === true;
     caps.networkBind = data.network_bind === true;
@@ -2021,6 +2025,7 @@ export async function refreshPluginCommands() {
     if (isSec) isSec.hidden = !data.issues_available;
     await loadClientPlugins(pluginState);
     renderNav();
+    if (activeChanged) window.dispatchEvent(new CustomEvent("localm:plugins-changed"));
   } catch { /* server unreachable; fall back to plain unknown-command */ }
   finally { _markCapsReady(); }   // see capsReady: must settle on EVERY exit path
 }
@@ -2052,6 +2057,13 @@ export function pluginSuggestion(cmd) {
 /* ---- dynamic nav rail (tabs follow the active plugins) ---- */
 // The most recent /api/plugins entries, refreshed alongside the command cache.
 export let pluginState = [];
+let _capsAnswered = false;
+
+/** False only when /api/capabilities has answered and does not list plugin *name*
+ *  as active for this key; true before it answers, so an unknown is read. */
+export function pluginReadable(name) {
+  return !_capsAnswered || pluginState.some((p) => p && p.name === name && p.active === true);
+}
 
 // Each plugin's manifest icon name -> a shared SVG icon name (see app/icons.js).
 // Kernel nav buttons carry their own data-icon in index.html; "studio" is the
@@ -2723,6 +2735,8 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   }
   const signal = chat.abort.signal;
   if (signal.aborted) return { stopped: true, liveRow: null };
+  const held = await holdForModelLoad(conv, signal);
+  if (held) return held;
   // Per-send web state: `seen` holds the keys of calls already issued, `found`
   // the sources and pages already returned, `lookups` the calls run, `stale`
   // the consecutive lookups that added nothing new, `formatRepairs` the
@@ -2861,7 +2875,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // selected model is only the preferred one: the server answers with an
   // installed model that has what this request needs when it lacks it.
   const pinnedModel = pinnedModelName(conv);
-  const modelName = pinnedModel || modelSelect.value || modelCache.active;
+  const modelName = pinnedModel || modelSelect.value || modelCache.active || modelCache.resumable || "";
   const body = { model: modelName, messages, stream: true, pin_model: !!pinnedModel };
   if (contextRouting && contextRouting.minContext) body.min_context = contextRouting.minContext;
   for (const k of ["temperature", "top_p", "top_k", "repeat_penalty",
@@ -2892,7 +2906,8 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     m.content.some((p) => p.type === "input_audio"));
 
   const box = $("chat-messages");
-  const { body: liveBody, row: liveRow } = addMessageRow(box, "assistant", "");
+  const { body: liveBody, row: liveRow } = addMessageRow(box, "assistant", "",
+    { model: modelCache.active || modelCache.resumable || "" });
   mountStatusIndicator(liveBody, sentImage ? t("chat.status.encodingImage")
     : sentAudio ? t("chat.status.encodingAudio") : t("chat.status.processing"));
   chat.stick = true;   // R31: a fresh send re-arms autoscroll (follow the reply)
@@ -2972,8 +2987,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       // Rebuild <think> from the reasoning stream so splitThink renders the
       // collapsible block exactly as before. Back-compat: an older server that
       // still inlines <think> in content also renders (reasoning stays empty).
-      renderMarkdown(liveBody,
-        reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full);
+      renderMarkdown(liveBody, liveThinkText(reasoning, full));
       // R31: follow the stream ONLY while the user is at the bottom. chat.stick
       // is latched by the scroll listener, so scrolling up reliably pauses
       // autoscroll (recomputing nearBottom per token fought the user instead).
@@ -3632,11 +3646,19 @@ export async function retrieveKnowledge(conv, query, opts = {}) {
 
 /** Populate the params-drawer knowledge selector. pages.js calls this after
  *  collections change on the Knowledge page. */
+export function clearKbSelect() {
+  const sel = $("p-kb");
+  if (!sel) return;
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = t("chat.none");
+  sel.replaceChildren(none);
+}
+
 export async function refreshKbSelect() {
   try {
     const r = await fetch("/api/rag/collections", { headers: authHeaders() });
-    if (!r.ok) return;
-    const data = await r.json();
+    const data = r.ok ? await r.json() : { collections: [] };
     const sel = $("p-kb");
     const current = sel.value;
     sel.replaceChildren();
@@ -3711,6 +3733,8 @@ export async function runChatTurn(work) {
   if (sendBtn) {
     sendBtn.classList.add("stop");
     sendBtn.replaceChildren(iconEl("stop", "ic"));
+    sendBtn.dataset.i18nTitle = "chat.stop";
+    sendBtn.title = t("chat.stop");
   }
   document.querySelectorAll(".message-actions button").forEach((b) => (b.disabled = true));
   let stopped = false;
@@ -3733,6 +3757,8 @@ export async function runChatTurn(work) {
     if (sendBtn) {
       sendBtn.classList.remove("stop");
       sendBtn.replaceChildren(iconEl("send", "ic"));
+      sendBtn.dataset.i18nTitle = "chat.send";
+      sendBtn.title = t("chat.send");
     }
     document.querySelectorAll(".message-actions button").forEach((b) => (b.disabled = false));
     if (!stopped) processChatQueue();
@@ -3796,9 +3822,41 @@ export async function dispatchChatTurn(conv, text, attachments = [], docs = [], 
   });
 }
 
+/** Holds a chat turn while a model load is announced, under a "waiting for
+ *  <model>" line, so it is sent to the model that load makes active and never
+ *  to the one it replaces. Returns null when the turn goes on, else the turn's
+ *  result: stopped (Stop pressed, the held line removed) or a failure line kept
+ *  on screen when the load failed. */
+async function holdForModelLoad(conv, signal) {
+  const loading = announcedLoadingModel();
+  if (!loading) return null;
+  const pinned = pinnedModelName(conv);
+  if (pinned && pinned !== loading) return null;
+  const box = $("chat-messages");
+  const { body, row } = addMessageRow(box, "assistant", "", { model: loading });
+  mountStatusIndicator(body, t("chat.status.waitingForModel", { model: loading }));
+  chat.stick = true;
+  if (box) box.scrollTop = box.scrollHeight;
+  const res = await waitForModelLoad(signal);
+  removeStatusIndicator(body);
+  if (res.aborted) {
+    row.remove();
+    return { stopped: true, liveRow: null };
+  }
+  if (res.failed) {
+    const name = res.failedModel || loading;
+    renderMarkdown(body, "*[" + t("chat.modelLoadFailed", { model: name }) + "]*");
+    toast(t("chat.modelLoadFailed", { model: name }), true);
+    return { stopped: true, liveRow: row };
+  }
+  row.remove();
+  return null;
+}
+
 /** True, after a toast, when no chat model is loaded or resumable. */
 export function refuseWithoutModel() {
   if (modelCache.active || modelCache.resumable) return false;
+  if (announcedLoadingModel()) return false;
   if (modelCache.loading) {
     toast(t("chat.stillLoading", { model: modelCache.loading }), true);
     return true;
@@ -3885,7 +3943,7 @@ export async function sendChat() {
  *  render as "You:" here either (NEW-WEBSEARCH-UX-EXPORT-ATTRIBUTES-TOOL-
  *  RESULTS-TO-USER). */
 function exportLabel(m) {
-  return noteLabel(m) || (m.role === "user" ? "You" : (modelCache.active || "Model"));
+  return noteLabel(m) || (m.role === "user" ? "You" : (m.model || modelCache.active || "Model"));
 }
 
 /** Every real message that a compaction archived, oldest first, walking
@@ -4004,6 +4062,7 @@ $("chat-send").onclick = () => {
 export function composerEnterToSend(e, send) {
   if (e.key !== "Enter" || e.isComposing) return;
   if (e.shiftKey) return;   // newline - the textarea's default behaviour
+  if (e.defaultPrevented) return;   // another handler (the slash menu) already used this Enter
   const menu = e.target.closest(".composer-wrap")?.querySelector(".slash-menu");
   if (menu && menu.style.display !== "none") return;
   e.preventDefault();
@@ -4064,7 +4123,7 @@ if ($("mtb-new")) {
 
 // The Persona and Knowledge dropdowns replace their own "(none)" option, so
 // they are rebuilt when the interface language changes.
-document.addEventListener("localm:language", () => {
-  refreshPersonas();
-  refreshKbSelect();
+onLanguageReload(() => {
+  if (pluginReadable("chat")) refreshPersonas();
+  if (pluginReadable("rag")) refreshKbSelect();
 });

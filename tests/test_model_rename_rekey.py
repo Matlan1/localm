@@ -196,6 +196,8 @@ def _make_model_file(models_home, filename="m.gguf", data=b"GGUF" + b"\0" * 64):
 
 def _register(models_home, entries):
     (models_home / "registry.json").write_text(json.dumps(entries), encoding="utf-8")
+    import localm.config as _cfg
+    _cfg._loop_reads_invalidate()
 
 
 @pytest.fixture

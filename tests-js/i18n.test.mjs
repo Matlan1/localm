@@ -389,7 +389,8 @@ test("text painted by JS is redrawn when the language changes", async () => {
 });
 
 async function toGerman(window) {
-  runScript(window, 'window.__p = applyLanguage("de");');
+  await settle(60);
+  runScript(window, 'setLanguageReloadOpen(true); window.__p = applyLanguage("de");');
   await window.__p;
 }
 
@@ -506,7 +507,8 @@ test("the model box is refreshed when the language changes", async () => {
   const { window, calls } = await loadIn(null);
   const models = () => calls.filter((c) => c.u.includes("/api/models")).length;
   const before = models();
-  runScript(window, 'window.__p = applyLanguage("de");');
+  await settle(60);
+  runScript(window, 'setLanguageReloadOpen(true); window.__p = applyLanguage("de");');
   await window.__p;
   await settle(30);
   assert.ok(models() > before,
@@ -530,6 +532,7 @@ test("the persona and knowledge dropdowns rebuild their (none) option in German"
     const { window } = loadApp({ fetchImpl });
     runScript(window, "window.__p = refreshPersonas();");
     await window.__p;
+    runScript(window, "setLanguageReloadOpen(true);");
     const opt = () => window.document.getElementById("p-persona").options[0].textContent;
     assert.equal(opt(), "(none)", "the rebuilt option starts in English");
     runScript(window, 'window.__q = applyLanguage("de");');
@@ -545,7 +548,8 @@ test("the settings nav redraws its labels when the language changes", async () =
     Array.from(window.document.querySelectorAll("#settings-nav .settings-nav-link"))
       .map((b) => b.textContent.trim());
   assert.ok(labels().includes("Security"), `expected the English nav, got ${labels()}`);
-  runScript(window, 'window.__p = applyLanguage("de");');
+  await settle(60);
+  runScript(window, 'setLanguageReloadOpen(true); window.__p = applyLanguage("de");');
   await window.__p;
   assert.ok(labels().includes("Sicherheit"),
     `the nav must redraw in German, got ${labels()}`);
@@ -592,7 +596,8 @@ test("the plugins page redraws its status pills and table headers when the langu
     assert.equal(pill() && pill().textContent, "protected", "starts in English");
     assert.equal(descHeader() && descHeader().textContent, "Description");
 
-    runScript(window, 'window.__p = applyLanguage("de");');
+    await settle(60);
+  runScript(window, 'setLanguageReloadOpen(true); window.__p = applyLanguage("de");');
     await window.__p;
     await settled();
     assert.equal(pill() && pill().textContent, "geschützt",
@@ -667,7 +672,8 @@ test("the models page redraws the discovery search placeholder when the language
     assert.equal(placeholder(), "search HuggingFace - empty shows the most downloaded",
       "starts in English");
 
-    runScript(window, 'window.__p = applyLanguage("de");');
+    await settle(60);
+  runScript(window, 'setLanguageReloadOpen(true); window.__p = applyLanguage("de");');
     await window.__p;
 
     assert.equal(placeholder(),

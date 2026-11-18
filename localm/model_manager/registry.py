@@ -116,6 +116,14 @@ def can_prompt() -> bool:
     return stdin_is_interactive()
 
 
+def _runs_as_gui_job() -> bool:
+    """True when this process is a command the GUI runs for a click on Add: it
+    has no terminal to ask at, but a person asked for the model by name, so a
+    duplicate question takes the answer a terminal's prompt offers by default
+    (alias) instead of the script answer (skip)."""
+    return os.environ.get("LOCALM_PROGRESS_JSON") == "1"
+
+
 def is_auto_chat_eligible(entry: dict) -> bool:
     """True when a registry *entry* may be auto-selected as the default chat model.
 
@@ -810,7 +818,7 @@ def get_model_path(name: str) -> Optional[Path]:
 
 
 
-def unregistered_model_error(name) -> Optional[str]:
+def unregistered_model_error(name, *, from_cli: bool = False) -> Optional[str]:
     """None when an UNTRUSTED caller may use *name* as a model name, else a
     ready-to-show message explaining the refusal.
 
@@ -835,12 +843,22 @@ def unregistered_model_error(name) -> Optional[str]:
     Callers raise their own exception type from the returned string (HTTP 400 in
     the jobs routes, ValueError in the MCP server, RuntimeError in the runner) so
     this module stays free of any transport dependency.
+
+    ``from_cli`` is for a command whose person typed *name* on the command line
+    but whose job still runs later without them (``localm job add``): the
+    closing sentence then tells them to register the path first instead of
+    saying a command-line run may name one.
     """
     if not name:
         return None
     reg = _mm.load_registry()
     if not reg or name in reg:
         return None
+    if from_cli:
+        return (f"Model {name!r} is not registered, and a scheduled job names a "
+                "registered model, not a file path. Register the file once "
+                "with 'localm add <path>', then use its name ('localm list' "
+                "shows the registered names).")
     # Does NOT list the registered models. This message is returned to callers
     # holding only `jobs` or an MCP scope, while ENUMERATING models requires
     # `models:read` (see inference/routes/models.py), so listing them here would
@@ -1050,7 +1068,9 @@ def _pick_mmproj_candidate(model_name: str, names: list[str], *,
 
     A model file whose name contains "mmproj", or whose leading name token
     (:func:`_name_token`) is empty, never pairs. Among candidates containing
-    that token, the only one is picked, and two or more give None. Otherwise a
+    that token, the only one is picked, and with two or more the only one
+    whose :func:`_name_residue` is longer than the token and occurs in the
+    model's own, else None. Otherwise a
     lone candidate is picked when its model name (:func:`_name_identity`) occurs
     in *model_name*, and refused when that name occurs in one of *others* whose
     width does not rule it out (:func:`_may_use`). A lone candidate still
@@ -1068,7 +1088,13 @@ def _pick_mmproj_candidate(model_name: str, names: list[str], *,
     matches = [n for n in names if token in n.lower()]
     if matches:
         if len(matches) != 1:
-            return None
+            own = _name_residue(model_name)
+            named = [n for n in matches
+                     if len(res := _name_residue(n.lower().replace("mmproj", " "))) > len(token)
+                     and res in own]
+            if len(named) != 1:
+                return None
+            matches = named
         key = _model_key(matches[0])
         # A projector named exactly for another model in the folder is that model's.
         if key and key != _model_key(model_name) and any(
@@ -1918,20 +1944,26 @@ def list_models(type_filter: Optional[str] = None) -> None:
     from rich.markup import escape
 
     reg = _mm.load_registry()
+    registered = len(reg)
     if type_filter:
         reg = models_of_type(type_filter, reg)
+    if not reg and registered:
+        console.print(f"[dim]No [bold]{escape(type_filter or '')}[/bold] models. "
+                      f"{registered} model(s) of other types are registered: run "
+                      "[bold]localm list[/bold] to see them.[/dim]")
+        return
     if not reg:
         console.print("[dim]No models yet. Use [bold]localm pull <name>[/bold] to download one.[/dim]")
         console.print("[dim]Run [bold]localm models[/bold] to see what's available.[/dim]")
         return
 
     table = Table(header_style="bold cyan", show_lines=False, expand=False)
-    table.add_column("Name", style="bold white")
+    table.add_column("Name", style="bold white", overflow="fold")
     table.add_column("Format", style="cyan")
     table.add_column("Role", style="magenta")
     table.add_column("Size", justify="right", style="green")
     table.add_column("Source", style="dim")
-    table.add_column("Path", style="dim")
+    table.add_column("Path", style="dim", overflow="fold")
 
     for name, info in sorted(reg.items()):
         epath = _entry_path(info)
@@ -2144,6 +2176,10 @@ def _prompt_predownload_dup(dup_names: list[str], model_name: str) -> str:
         f"{names}[/yellow] [dim](sha256 match via HF metadata)[/dim]"
     )
     if not can_prompt():
+        if _runs_as_gui_job():
+            console.print(f"[dim]Nothing is downloaded: adding it as "
+                          f"'{escape(model_name)}'.[/dim]")
+            return "alias"
         console.print("[dim]Non-interactive session - skipping download. "
                       "Use --redownload to force.[/dim]")
         return "skip"
@@ -2532,6 +2568,9 @@ def _prompt_duplicate_action(existing_names: list[str], reason: str) -> str:
         f"[dim]({reason})[/dim]"
     )
     if not can_prompt():
+        if _runs_as_gui_job():
+            console.print("[dim]Adding it under the new name.[/dim]")
+            return "alias"
         console.print("[dim]Non-interactive session - skipping. "
                       "Use 'localm alias' to add a name for it.[/dim]")
         return "skip"
@@ -5012,8 +5051,11 @@ def _digest_for_add(gguf: Path, reg: dict, no_hash: bool,
                     ) -> "tuple[Optional[str], Optional[int]]":
     """``(sha256, size)`` to register *gguf* with: neither under *no_hash*; only
     the size under *fast* (dedup on size alone); otherwise the hash, computed only
-    when it can change the outcome (an unknown path or a registered alias with no
-    digest).
+    when it can change the outcome: a path already registered needs none, and a
+    file whose size no registered file has cannot be a copy of one, so it is
+    registered without being read. When a registered file has the same size, the
+    two are compared by hash (:func:`_backfill_same_size_digests` hashes the
+    registered one when it has none).
 
     *recorded* holds the sha256 digests another localm install stored. When it
     holds a usable digest for *gguf* (``RecordedDigests.lookup``), that digest is
@@ -5026,9 +5068,7 @@ def _digest_for_add(gguf: Path, reg: dict, no_hash: bool,
             return None, gguf.stat().st_size
         except OSError:
             return None, None
-    already_known = find_aliases_by_path(gguf, reg)
-    needs_backfill = any(not reg[n].get("sha256") for n in already_known)
-    if already_known and not needs_backfill:
+    if find_aliases_by_path(gguf, reg):
         return None, None
     stored = recorded.lookup(gguf) if recorded is not None else None
     if stored is not None:
@@ -5036,7 +5076,41 @@ def _digest_for_add(gguf: Path, reg: dict, no_hash: bool,
             f"Using the hash recorded by the other install for {gguf.name}"
             + (f" ({label})" if label else ""))
         return stored, None
+    try:
+        size = gguf.stat().st_size
+    except OSError:
+        return None, None
+    twins = find_by_size(size, reg)
+    if not twins:
+        return None, None
+    _backfill_same_size_digests(twins, reg, label, gguf.name)
     return _mm._hash_with_progress(gguf, label=label), None
+
+
+def _backfill_same_size_digests(names: list[str], reg: dict,
+                                label: Optional[str], against: str) -> None:
+    """Hash the file of each registered entry in *names* that records no sha256
+    and store the digest on every entry that names that file, so a content
+    comparison with the file *against* can match."""
+    by_path: dict = {}
+    for n in names:
+        entry = reg.get(n)
+        path = _entry_path(entry) if isinstance(entry, dict) else None
+        if isinstance(entry, dict) and path is not None and not entry.get("sha256"):
+            by_path.setdefault(str(Path(path).resolve()), []).append((n, Path(path)))
+    for owners in by_path.values():
+        file = owners[0][1]
+        digest = _mm._hash_with_progress(
+            file, purpose=f"to compare with {against}", label=label)
+        if not digest:
+            continue
+
+        def _store(r: dict, owners=owners, digest=digest) -> None:
+            for n, _file in owners:
+                e = r.get(n)
+                if isinstance(e, dict) and not e.get("sha256"):
+                    e["sha256"] = digest.lower()
+        _mm.update_registry(_store)
 
 
 def _add_local_gguf_dir(
@@ -6024,7 +6098,8 @@ def add_local(
     # agree on the exact same name.
     hub_repo = hub_snapshot_repo_id(p) if p.is_dir() else None
     model_name = _sanitize_name(name) if name else (
-        split_base or (_sanitize_name(hub_repo) if hub_repo else p.stem))
+        split_base or (_sanitize_name(hub_repo) if hub_repo
+                       else p.name if p.is_dir() else p.stem))
     kind = "hf" if is_hf else "local"
 
     # Bring an external file/dir into managed storage BEFORE registering, so the
@@ -6073,16 +6148,7 @@ def add_local(
         except OSError:
             size = None
     else:
-        # Hash when it can change the outcome: unknown path (content-tier
-        # check) or known path missing its digest (lazy backfill)
-        reg = _mm.load_registry()
-        already_known = find_aliases_by_path(p, reg)
-        needs_backfill = any(
-            not reg[n].get("sha256") for n in already_known
-        )
-        digest = None
-        if not already_known or needs_backfill:
-            digest = _mm._hash_with_progress(p)
+        digest, size = _digest_for_add(p, _mm.load_registry(), False, False)
 
     # Resolve an unspecified type deterministically (GGUF -> llm, HF config.json ->
     # architectures, else 'unknown') instead of silently defaulting to 'llm'.

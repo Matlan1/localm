@@ -11,7 +11,7 @@ import { restoreRecentGuiErrors, setRecentGuiErrorStore } from "./client-log.js"
 import { t, tn, tOr } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
-import { openMemoryModal, processChatQueue, renderQueuedIndicator, runCompletion, speak, setWebAskSession, toolEventPrompt } from "./settings-perf.js";
+import { openMemoryModal, pluginState, processChatQueue, renderQueuedIndicator, runCompletion, speak, setWebAskSession, toolEventPrompt } from "./settings-perf.js";
 import { showView } from "./tabs.js";
 import { applyCoderRailSide } from "./coder.js";
 
@@ -1015,12 +1015,14 @@ export const _convPushTimers = new Map();
 let _convPushWarned = false;   // one warning per breakage, re-armed on success
 const _convTooLargeWarned = new Set();   // conversation ids already toasted for a 413
 
-/** Debounced upsert of one conversation to the server store. */
-export function pushConversation(conv) {
+/** Debounced upsert of one conversation to the server store. An edit stamps
+ *  updated_at; a sync of an unchanged copy (keepStamp) leaves the stamp alone,
+ *  so a reload does not reorder the list. */
+export function pushConversation(conv, { keepStamp = false } = {}) {
   if (!chat.persist || conv.deleted) return;
   // Brand-new conversations with nothing in them yet aren't worth a file.
   if (!conv.messages.length && conv.title === "New chat") return;
-  conv.updated_at = Date.now();
+  if (!keepStamp || !conv.updated_at) conv.updated_at = Date.now();
   clearTimeout(_convPushTimers.get(conv.id));
   _convPushTimers.set(conv.id, setTimeout(async () => {
     _convPushTimers.delete(conv.id);
@@ -1211,15 +1213,18 @@ export async function initServerConversations() {
         // offline boot, must still work) - but only a CONFIRMED match
         // (chat.instanceMatch) may write it into the backend's own store.
         if (chat.instanceState !== "mismatched") byId.set(local.id, local);
-        if (chat.instanceMatch) pushConversation(local);
+        if (chat.instanceMatch) pushConversation(local, { keepStamp: true });
         continue;
       }
       // Keep the local FULL copy unless the server has a strictly newer version
       // (>= keeps it on a tie, so an already-cached conversation is not demoted to
       // an index-only placeholder that would need a needless re-fetch / break offline).
-      if ((local.updated_at || 0) >= (remote.updated_at || 0)) {
+      // Only a strictly newer local copy is uploaded, with its own stamp.
+      const localAt = local.updated_at || 0;
+      const remoteAt = remote.updated_at || 0;
+      if (localAt >= remoteAt) {
         byId.set(local.id, local);
-        pushConversation(local);
+        if (localAt > remoteAt) pushConversation(local, { keepStamp: true });
       }
     }
     chat.conversations = [...byId.values()]
@@ -1266,6 +1271,17 @@ export function pinnedModelName(conv) {
   return row.name;
 }
 
+/** Shows the drawer's Knowledge selector only while the rag plugin is active,
+ *  since without it there is no Knowledge page to manage collections on. */
+function syncKnowledgeRow() {
+  const row = $("p-kb-row");
+  if (row) row.hidden = !pluginState.some((p) => p && p.name === "rag" && p.active === true);
+}
+const _paramsDrawer = document.getElementById("params");
+if (_paramsDrawer && typeof MutationObserver === "function") {
+  new MutationObserver(syncKnowledgeRow).observe(_paramsDrawer, { attributes: true, attributeFilter: ["class"] });
+}
+
 /** Reflects *conv*'s pinned model in the drawer's pin checkbox and its label:
  *  checked and naming the pinned model when there is one, otherwise unchecked
  *  and naming the model selected in the sidebar. */
@@ -1275,7 +1291,8 @@ export function syncPinModelToggle(conv) {
   if (!box) return;
   const pinned = pinnedModelName(conv);
   box.checked = !!pinned;
-  if (label) label.textContent = pinned || modelSelect.value || modelCache.active || "";
+  if (label) label.textContent = pinned || modelSelect.value || modelCache.active || t("chat.pinModel.none");
+  syncKnowledgeRow();
   const note = $("pin-mismatch");
   if (note) {
     const active = modelCache.active;
@@ -1689,6 +1706,8 @@ export function latestTurnIsAudioOnly(conv) {
 
 export const convUI = {
   search: "",
+  remoteHits: new Map(),   // id -> snippet: server-side content matches for remoteTerm
+  remoteTerm: "",
   collapsed: new Set(readStoredJSON("localm.convCollapsed", [])),
 };
 
@@ -1796,8 +1815,9 @@ export function buildConvItem(conv, snippet) {
   item.appendChild(del);
 
   item.onclick = async () => {
+    const alreadyActive = chat.activeId === conv.id;
     chat.activeId = conv.id;
-    renderConvList();
+    if (!alreadyActive) renderConvList();
     if (conv._meta) await hydrateConversation(conv);   // R40: load the body on open
     renderChat();
     showView("chat");
@@ -1819,7 +1839,8 @@ export function renderConvList() {
     } else if ((conv.title || "").toLowerCase().includes(term)) {
       visible.push({ conv, snippet: null });
     } else {
-      const snippet = searchSnippet(conv, term);
+      const snippet = searchSnippet(conv, term) ??
+        (conv._meta && convUI.remoteTerm === term ? convUI.remoteHits.get(conv.id) ?? null : null);
       if (snippet !== null) visible.push({ conv, snippet });
     }
   }
@@ -1874,9 +1895,31 @@ export function renderConvList() {
   }
 }
 
+let _remoteSearchTimer = 0;
+
+/** Ask the server which chats mention the term in their messages: the browser
+ *  holds only index rows for chats it has not opened. */
+export async function searchRemoteConversations(term) {
+  if (!chat.persist || !term) return;
+  try {
+    const r = await fetch("/api/conversations?meta=true&limit=200&offset=0&q=" +
+                          encodeURIComponent(term), { headers: authHeaders() });
+    if (!r.ok) return;
+    const data = await r.json();
+    if (convUI.search.trim().toLowerCase() !== term) return;   // the term moved on
+    convUI.remoteHits = new Map((data.conversations || [])
+      .filter((c) => c.snippet).map((c) => [c.id, c.snippet]));
+    convUI.remoteTerm = term;
+    renderConvList();
+  } catch { /* offline: the local search still answers */ }
+}
+
 $("conv-search").addEventListener("input", (e) => {
   convUI.search = e.target.value;
   renderConvList();
+  clearTimeout(_remoteSearchTimer);
+  const term = convUI.search.trim().toLowerCase();
+  if (term) _remoteSearchTimer = setTimeout(() => searchRemoteConversations(term), 250);
 });
 
 // A sensible download name for a chat image (VIS-2): from the data: URI's mime,
@@ -1895,11 +1938,21 @@ export function imageFilename(url) {
 // Copy an image (by its resolved src) to the clipboard. Returns true on success.
 // Not every browser/context can write an image to the clipboard, so the caller
 // surfaces a fallback instead of silently failing (RULE 5).
+export function dataUrlToBlob(src) {
+  const m = /^data:([^;,]*)(?:;[^;,]*)*?(;base64)?,(.*)$/s.exec(src);
+  if (!m) return null;
+  const raw = m[2] ? atob(m[3]) : decodeURIComponent(m[3]);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  return new Blob([bytes], { type: m[1] || "application/octet-stream" });
+}
+
 export async function copyImageSrc(src) {
   try {
     if (!window.ClipboardItem || !navigator.clipboard || !navigator.clipboard.write)
       return false;
-    const blob = await (await fetch(src)).blob();
+    const blob = src.startsWith("data:") ? dataUrlToBlob(src) : await (await fetch(src)).blob();
+    if (!blob) return false;
     await navigator.clipboard.write([new window.ClipboardItem({ [blob.type]: blob })]);
     return true;
   } catch { return false; }
@@ -2580,8 +2633,11 @@ export function updateUsageDisplay(usage) {
     return;
   }
   const bits = [`${usage.total_tokens} tok`];
-  if (usage.ttft_ms != null) bits.push(`TTFT ${Math.round(usage.ttft_ms)} ms`);
-  if (usage.tokens_per_sec != null) bits.push(`${usage.tokens_per_sec} tok/s`);
+  if (usage.ttft_ms != null) bits.push(t("chat.usage.firstToken", { ms: Math.round(usage.ttft_ms) }));
+  if (usage.tokens_per_sec != null) {
+    const rate = Number(usage.tokens_per_sec);
+    bits.push(`${rate >= 10 ? Math.round(rate) : Math.round(rate * 10) / 10} tok/s`);
+  }
   const mtp = mtpUsageText(usage.mtp);
   if (mtp.text) bits.push(mtp.text);
   const spec = speculationUsageText(usage.speculation);
@@ -2596,6 +2652,17 @@ export function updateUsageDisplay(usage) {
   } else if (gaugeContainer) {
     gaugeContainer.classList.remove("visible");
   }
+}
+
+const liveRows = new Set();
+
+/** Keeps *row*, an unsaved status bubble of *conv* (a running media
+ *  generation), on screen across re-renders of the chat. Returns the function
+ *  that stops keeping it. */
+export function trackLiveRow(conv, row) {
+  const entry = { conv, row };
+  liveRows.add(entry);
+  return () => { liveRows.delete(entry); };
 }
 
 export function renderChat() {
@@ -2691,6 +2758,7 @@ export function renderChat() {
       final: true,
     });
   });
+  for (const entry of liveRows) if (entry.conv === conv) box.appendChild(entry.row);
   // R31: only re-pin to the bottom when the user has not scrolled up. This tail
   // runs on every re-render (incl mid-stream web/finalize), so an unconditional
   // scroll here used to yank a reader back down while a reply was still streaming.

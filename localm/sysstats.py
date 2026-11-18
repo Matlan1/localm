@@ -357,9 +357,11 @@ _VRAM_REFRESH_INTERVAL_S = 10.0   # much longer than _GPU_UTIL_REFRESH_INTERVAL_
                                   # hardware, not of a ~2.5s UI poll.
 
 # A refresh asks list_gpus() (which starts a torch child process when torch is not
-# imported here) only when it must:
+# imported here and no device list is kept) only when it must:
 #   * _VRAM_TOPOLOGY_INTERVAL_S: the device list is re-read this often while a
-#     torch-free source re-reads every device's used VRAM on each refresh.
+#     torch-free source re-reads every device's used VRAM on each refresh. The
+#     re-read asks list_gpus() to enumerate again (request_gpu_reenumeration);
+#     list_gpus() otherwise answers from the device list it keeps.
 #   * _VRAM_UNCOVERED_INTERVAL_S: used VRAM is re-read this often while no
 #     torch-free source covers a device that reports free VRAM.
 # Torch already imported in this process, or no completed reading yet, asks every
@@ -507,8 +509,8 @@ def _shape_vram(info: dict, status, devices: list | None = None) -> dict:
     # overstates free, so those devices report total only.
     try:
         # last_known_gpus(), not list_gpus(): vram_capacity() above has just driven
-        # a probe, and list_gpus has no TTL cache, so calling it here would spawn a
-        # second torch subprocess for data already produced.
+        # a probe, and list_gpus has no TTL cache, so calling it here would probe
+        # again (and can spawn a torch subprocess) for data already produced.
         #
         # Source order matters. last_known_gpus() comes from list_gpus(), which
         # enumerates only via torch.cuda or nvidia-smi and never calls the Vulkan
@@ -563,90 +565,17 @@ def _shape_vram(info: dict, status, devices: list | None = None) -> dict:
 
 
 def _nvidia_smi_used_by_bus() -> dict[int, tuple[int, int]]:
-    """``{pci_bus_number: (total_bytes, used_bytes)}`` for every board nvidia-smi
-    lists, or ``{}`` when nvidia-smi is absent, fails or times out. Whole-board
-    figures, counting every process. Never raises."""
-    import subprocess
-    from localm import sysprog
-    from localm.debuglog import logger
-    from localm.discover import _ISOLATED_TORCH_DRAIN_TIMEOUT, _pci_bus_number
-    smi = sysprog.find("nvidia-smi")
-    if not smi:
-        return {}
-    try:
-        proc = subprocess.Popen(
-            [smi, "--query-gpu=pci.bus_id,memory.total,memory.free",
-             "--format=csv,noheader,nounits"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        try:
-            out, _ = proc.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            try:
-                proc.communicate(timeout=_ISOLATED_TORCH_DRAIN_TIMEOUT)
-            except subprocess.TimeoutExpired:
-                pass
-            logger.debug("_vram: nvidia-smi did not answer within 5s")
-            return {}
-        if proc.returncode != 0:
-            logger.debug("_vram: nvidia-smi exited with %s", proc.returncode)
-            return {}
-        boards: dict[int, tuple[int, int]] = {}
-        for line in out.strip().splitlines():
-            parts = [p.strip() for p in line.split(",")]
-            if len(parts) < 3:
-                continue
-            bus = _pci_bus_number(parts[0])
-            try:
-                total = int(parts[1]) * 1024 ** 2
-                free = int(parts[2]) * 1024 ** 2
-            except ValueError:
-                continue
-            if bus is not None:
-                boards[bus] = (total, max(0, total - free))
-        return boards
-    except Exception as e:
-        logger.debug("_vram: nvidia-smi query failed: %s", e)
-        return {}
+    """:func:`localm.discover.nvidia_smi_used_by_bus`: every board nvidia-smi
+    lists, by PCI bus, as ``(total_bytes, used_bytes)``."""
+    from localm.discover import nvidia_smi_used_by_bus
+    return nvidia_smi_used_by_bus()
 
 
 def _fresh_device_readings(devices: list) -> list | None:
-    """Copies of *devices* (a list_gpus() reading) with each device's ``free`` and
-    ``free_scope`` re-read from sources that never import torch, or None when any
-    device that reports ``free`` has no such source.
-
-    Sources, in order: the Windows ADL/PDH device-global reading
-    (:func:`localm.gpu_usage.device_global_used_bytes`), then nvidia-smi matched
-    on the device's ``pci_bus_id``. The re-read ``free`` is device-global and
-    tagged ``FREE_SCOPE_DEVICE``. A device without ``free`` is returned as it was."""
-    from localm import gpu_usage
-    from localm.debuglog import logger
-    from localm.discover import FREE_SCOPE_DEVICE
-    fresh = [dict(d) for d in devices]
-    wanted = [d for d in fresh if d.get("free") is not None]
-    if not wanted:
-        return None
-    try:
-        used = dict(gpu_usage.device_global_used_bytes(fresh))
-    except Exception as e:
-        logger.debug("_vram: device-global used reading unavailable: %s", e)
-        used = {}
-    if any(d["index"] not in used for d in wanted):
-        boards = _nvidia_smi_used_by_bus()
-        for d in wanted:
-            bus = d.get("pci_bus_id")
-            if (d["index"] not in used and isinstance(bus, int)
-                    and not isinstance(bus, bool) and bus in boards):
-                used[d["index"]] = boards[bus][1]
-    for d in wanted:
-        u = used.get(d["index"])
-        if u is None:
-            return None
-        total = int(d["total"])
-        d["free"] = max(0, min(total, total - int(u)))
-        d["free_scope"] = FREE_SCOPE_DEVICE
-    return fresh
+    """:func:`localm.discover.fresh_device_readings` of *devices*, with
+    nvidia-smi read through :func:`_nvidia_smi_used_by_bus`."""
+    from localm.discover import fresh_device_readings
+    return fresh_device_readings(devices, nvidia_smi=_nvidia_smi_used_by_bus)
 
 
 def _cheap_vram(fresh: list) -> dict:
@@ -671,7 +600,9 @@ def _refresh_vram() -> tuple[dict | None, str | None]:
     when the last one is older than the interval that applies:
     :data:`_VRAM_TOPOLOGY_INTERVAL_S` while :func:`_fresh_device_readings`
     re-reads every device (or there is no device),
-    :data:`_VRAM_UNCOVERED_INTERVAL_S` while it cannot. Otherwise ``full_status``
+    :data:`_VRAM_UNCOVERED_INTERVAL_S` while it cannot. At the topology interval
+    the list_gpus() reading enumerates the devices again
+    (``discover.request_gpu_reenumeration``). Otherwise ``full_status``
     is None and the reading is :func:`_cheap_vram` of the re-read devices (for
     no device: the rest of ``vram_capacity`` that needs no torch, i.e. the
     Windows registry total with its ADL/PDH figure and the native runtime's
@@ -703,6 +634,8 @@ def _refresh_vram() -> tuple[dict | None, str | None]:
     limit = (_VRAM_UNCOVERED_INTERVAL_S if fresh is None
              else _VRAM_TOPOLOGY_INTERVAL_S)
     if age >= limit:
+        if fresh is not None:
+            discover.request_gpu_reenumeration()
         return _full()
     if fresh is None:
         if forced:

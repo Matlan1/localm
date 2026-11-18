@@ -144,7 +144,8 @@ from localm.setup_llama.cuda import (
 from localm.setup_llama.native_deps import (
     _LIBGOMP_SONAME, _LIBGOMP_DEB_URL, _LIBGOMP_DEB_SHA256, _LIBGOMP_DEB_MIN_BYTES,
     _LIBGOMP_LICENSE_NOTICE, _read_ar_archive, _extract_libgomp_from_deb,
-    _bundle_missing_native_deps,
+    _bundle_missing_native_deps, offer_vc_runtime, set_vc_unattended, vc_runtime_blocks_load,
+    vc_runtime_missing,
 )
 from localm.setup_llama.load_probe import (
     _EXC_HEADER_RE, _informative_error_line, _KNOWN_SHARED_LIB_PACKAGES, _MISSING_SO_RE,
@@ -181,6 +182,7 @@ __all__ = [
     "ArtifactError", "_ASSET_MATCH", "_auto_backend", "_BACKEND_MARKER", "BACKENDS",
     "_BLACKWELL_MIN_CAP", "_BLAS_DIRS_REQUIRING_KERNELS", "blas_kernel_problems",
     "_BLAS_LIBRARY_DIRS", "_bundle_missing_native_deps", "check_runtime_update",
+    "offer_vc_runtime", "set_vc_unattended", "vc_runtime_blocks_load", "vc_runtime_missing",
     "KERNEL_PACKS_MARKER", "kernel_packs_missing",
     "_clear_target", "_clear_target_or_refuse", "_clearable_files", "console",
     "_replace_target", "_staging_path", "keep_previous_runtime", "_backup_path",
