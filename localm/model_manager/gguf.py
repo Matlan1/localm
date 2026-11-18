@@ -321,6 +321,10 @@ _HASH_PROGRESS_MIN_BYTES = 512 * 1024 * 1024
 
 _IMPORT_HASH_EMIT_INTERVAL_S = 0.7
 
+# A hashing speed is reported only once the hash has run this long: the first
+# chunk read divided by the few microseconds since the start is not a speed.
+_IMPORT_HASH_MIN_RATE_WINDOW_S = 1.0
+
 
 def _hash_reporting(path: Path, size: int, text: str) -> str:
     """SHA256 *path* for a folder import, streaming byte progress for *text* on
@@ -334,8 +338,10 @@ def _hash_reporting(path: Path, size: int, text: str) -> str:
         if now - last < _IMPORT_HASH_EMIT_INTERVAL_S:
             return
         last = now
+        elapsed = now - start
         _mm._emit_progress(done, total, phase="import", detail=text,
-                           rate=done / max(now - start, 1e-6), zero_is_unknown=True)
+                           rate=done / elapsed if elapsed >= _IMPORT_HASH_MIN_RATE_WINDOW_S else None,
+                           zero_is_unknown=True)
 
     digest = _mm._sha256_file(path, progress=_report)
     _mm._emit_progress(size, size, phase="import", detail=text)
@@ -2598,7 +2604,7 @@ MEDIA_KIND_TYPES = {
     "clip_h": "text-encoder", "t5xxl": "text-encoder", "umt5": "text-encoder",
     "byt5": "text-encoder", "clip_vision": "text-encoder",
     "controlnet": "controlnet", "textual_inversion": "textual-inversion",
-    "upscaler": "upscaler",
+    "upscaler": "upscaler", "music": "diffusion-unet",
 }
 
 

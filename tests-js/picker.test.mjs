@@ -802,3 +802,60 @@ test("keys typed in the new folder name stay out of the listing's key handler", 
   assert.equal(win.__done, false, "Enter does not also pick the current folder");
   assert.deepEqual(mkdirCalls, [{ path: "/root", name: "Fresh" }]);
 });
+
+test("Escape in a filled filter clears it and keeps the dialog open", async () => {
+  const { window: win } = loadApp({ fetchImpl });
+  start(win, `{ mode: "dir", startPath: "/root" }`);
+  await ticks();
+  const filter = body(win).querySelector(".picker-filter input");
+  filter.focus();
+  filter.value = "apple";
+  filter.dispatchEvent(new win.Event("input"));
+  await ticks(1);
+  keydown(win, filter, "Escape");
+  await ticks(2);
+  assert.equal(filter.value, "", "filter text cleared");
+  assert.equal(win.document.getElementById("modal").style.display, "flex", "dialog still open");
+  assert.equal(win.__done, false, "picker not resolved");
+  assert.ok(rowNamed(win, "photo.png"), "all rows back");
+  keydown(win, filter, "Escape");
+  await ticks(2);
+  assert.equal(win.__done, true, "a second Escape with an empty filter cancels");
+  assert.equal(win.__res, null);
+});
+
+test("Enter in the filter opens the folder and drops the filter text", async () => {
+  const { window: win } = loadApp({ fetchImpl });
+  start(win, `{ mode: "dir", startPath: "/root" }`);
+  await ticks();
+  const filter = body(win).querySelector(".picker-filter input");
+  filter.value = "sub";
+  filter.dispatchEvent(new win.Event("input"));
+  await ticks(1);
+  keydown(win, filter, "Enter");
+  await ticks();
+  assert.equal(filter.value, "", "filter text cleared on entering the folder");
+  assert.ok(rowNamed(win, "note.txt"), "files of the opened folder are shown");
+  assert.equal(body(win).querySelector(".picker-empty"), null);
+});
+
+test("folder rows are not styled as unselectable in dir and file modes", async () => {
+  for (const mode of ["dir", "file"]) {
+    const { window: win } = loadApp({ fetchImpl });
+    start(win, `{ mode: "${mode}", startPath: "/root" }`);
+    await ticks();
+    assert.ok(!rowNamed(win, "sub").classList.contains("unselectable"), mode + " folder row looks live");
+  }
+  const { window: win } = loadApp({ fetchImpl });
+  start(win, `{ mode: "multi", startPath: "/root", exts: [".md"] }`);
+  await ticks();
+  assert.ok(rowNamed(win, "photo.png").classList.contains("unselectable"), "unsupported file stays dim");
+});
+
+test("style.css lets the picker body fill the dialog", () => {
+  const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..",
+    "localm", "plugins", "gui", "static", "style.css"), "utf-8");
+  const m = /\.picker-modal \.modal-body \{([^}]*)\}/.exec(css);
+  assert.ok(m, "rule found");
+  assert.match(m[1], /flex:\s*1 1 auto/);
+});

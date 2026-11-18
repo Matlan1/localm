@@ -197,3 +197,50 @@ test("pull panel: Cancel does not claim a deletion when the discard request fail
   assert.doesNotMatch(text, /partial download deleted/);
   assert.match(text, /could not be deleted/);
 });
+
+// The pull request answers late: Cancel and Pause clicked before it does still
+// reach the job once its id is known.
+async function clickDuringStart(button) {
+  const calls = [];
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const inner = makeFetch(calls);
+  const fetchImpl = async (url, opts = {}) => {
+    if (url === "/api/models/pull") {
+      await gate;
+    }
+    return inner(url, opts);
+  };
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  runScript(win, WAITING_STREAM);
+  const $ = (id) => win.document.getElementById(id);
+  $("pull-spec").value = "owner/repo:m.gguf";
+  $("pull-start").click();
+  await settle();
+  $(button).click();
+  await settle();
+  assert.ok(!calls.some((c) => String(c.url).endsWith("/cancel")),
+    "no job exists yet to cancel");
+  release();
+  await settle();
+  return { calls, win, $ };
+}
+
+test("pull panel: Cancel clicked while the request is still starting stops the job and discards the data", async () => {
+  const { calls, win, $ } = await clickDuringStart("pull-cancel");
+  assert.ok(calls.some((c) => c.url === "/api/jobs/j1/cancel"), "the job was cancelled");
+  win.__finishJob("cancelled");
+  await settle();
+  assert.ok(calls.some((c) => c.url === "/api/models/pull/discard"), "the partial data was discarded");
+  assert.equal($("pull-cancel").hidden, true);
+  assert.equal($("pull-resume").hidden, true);
+});
+
+test("pull panel: Pause clicked while the request is still starting stops the job and offers Resume", async () => {
+  const { calls, win, $ } = await clickDuringStart("pull-pause");
+  assert.ok(calls.some((c) => c.url === "/api/jobs/j1/cancel"), "the job was stopped");
+  win.__finishJob("cancelled");
+  await settle();
+  assert.ok(!calls.some((c) => c.url === "/api/models/pull/discard"), "pausing keeps the data");
+  assert.equal($("pull-resume").hidden, false);
+});

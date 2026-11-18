@@ -167,12 +167,14 @@ class TestAddLocalDedup:
         mm.add_local(str(f), "m", on_duplicate="register")
         assert store == before
 
-    def test_noop_backfills_digest(self, fake_registry, tmp_path):
+    def test_noop_does_not_read_the_file_for_a_digest(self, fake_registry, tmp_path, monkeypatch):
         store, _ = fake_registry
         f = _file(tmp_path, "m.gguf")
         store["m"] = {"path": str(f.resolve()), "source": "local"}  # no digest
+        monkeypatch.setattr(mm, "_sha256_file",
+                            lambda *a, **k: pytest.fail("a registered path is not read"))
         mm.add_local(str(f), "m", on_duplicate="register")
-        assert store["m"].get("sha256") == mm._sha256_file(f)
+        assert "sha256" not in store["m"]
 
     def test_same_path_new_name_alias(self, fake_registry, tmp_path):
         store, _ = fake_registry
@@ -197,8 +199,8 @@ class TestAddLocalDedup:
         f2 = tmp_path / "sub" / "b.gguf"
         f2.write_bytes(b"identical-bytes")
         mm.add_local(str(f1), "orig", on_duplicate="register")
-        assert store["orig"]["sha256"]
         mm.add_local(str(f2), "dupe", on_duplicate="alias")
+        assert store["orig"]["sha256"]
         # Alias points at the ORIGINAL file, no new path entry
         assert store["dupe"]["path"] == store["orig"]["path"]
 

@@ -1522,6 +1522,34 @@ def resolve_hf_revision(repo_id: str, ref: str) -> HfRevision:
     return HfRevision(ref, commit)
 
 
+def _gated_sentence(repo_id: str) -> str:
+    """The sentence saying *repo_id* is a gated Hugging Face repo this pull cannot
+    read."""
+    how = ("accept its terms on huggingface.co with the account the saved "
+           "Hugging Face token belongs to" if _hf_token()
+           else "accept its terms on huggingface.co and set a Hugging Face token")
+    return f"{repo_id} is gated: {how} to pull it"
+
+
+def _is_gated_error(exc: BaseException) -> bool:
+    from huggingface_hub.errors import GatedRepoError
+    return isinstance(exc, GatedRepoError)
+
+
+def _gated_refusal(repo_id: str) -> Optional[str]:
+    """:func:`_gated_sentence` when *repo_id* is gated and this pull cannot read
+    it, else None (also when Hugging Face cannot be asked: the pull then goes on
+    and reports whatever it meets). Asked before a pull writes anything, so a
+    refusal leaves no partial folder and no download record."""
+    try:
+        _hf_api().auth_check(repo_id)
+    except Exception as e:
+        if _is_gated_error(e):
+            return _gated_sentence(repo_id)
+        logger.debug("could not check access to %s: %s", repo_id, e)
+    return None
+
+
 def _rev_commit(revision: "Optional[HfRevision]") -> Optional[str]:
     """The commit a revision pull is pinned to, or None for a pull of the default branch."""
     return revision.commit if revision is not None else None
@@ -2692,6 +2720,10 @@ def _pull_gguf_file(
                 if Path(local) != final:
                     shutil.move(local, final)
             except Exception as e:
+                if _is_gated_error(e):
+                    console.print(f"[red]Cannot pull:[/red] "
+                                  f"{escape(_gated_sentence(repo_id))}.")
+                    return False
                 console.print(f"[red]Download failed[/red] ({escape(part)}): "
                               f"{escape(str(e))}")
                 # WITHOUT _prog.ok(): this return unwinds the context manager
@@ -3396,6 +3428,11 @@ def _pull_hf_snapshot_locked(
     try:
         info = _hf_api().model_info(repo_id, files_metadata=True, **_revision_kwargs(commit))
         repo_siblings = info.siblings
+        if getattr(info, "gated", None) in ("auto", "manual"):
+            gated = _gated_refusal(repo_id)
+            if gated is not None:
+                console.print(f"[red]Cannot pull:[/red] {escape(gated)}.")
+                return False
         total_size = sum(getattr(s, "size", None) or 0 for s in repo_siblings)
         info_sha = getattr(info, "sha", None)
         commit = _valid_commit(info_sha) or commit
@@ -3612,6 +3649,9 @@ def _pull_hf_snapshot_locked(
             )
             _prog.ok()
     except Exception as e:
+        if _is_gated_error(e):
+            console.print(f"[red]Cannot pull:[/red] {escape(_gated_sentence(repo_id))}.")
+            return False
         console.print(f"[red]Download failed:[/red] {escape(str(e))}")
         if damaged:
             console.print("The damaged files were deleted; pull again to fetch them.")

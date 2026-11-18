@@ -73,9 +73,9 @@ class TestFolderStoreWithConflict:
             self, home, tmp_path, printed):
         folder = self._conflicted(home, tmp_path)
         assert mm.add_local(str(folder), store="copy") is True
-        assert any("Hashing beta.gguf for duplicate detection (1 of 2" in line
-                   for line in printed), printed
         assert any("Hashing gamma.gguf for duplicate detection (2 of 2" in line
+                   for line in printed), printed
+        assert any("Hashing beta.gguf to compare with gamma.gguf (2 of 2" in line
                    for line in printed), printed
         assert not any("of 3" in line for line in printed), printed
         done = printed[-1]
