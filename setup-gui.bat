@@ -197,6 +197,8 @@ rem ---- Shared: drop what this run put in the folder, reopen on the per-user uv
 if defined LOCALM_GUI_REPOINTED goto window_failed
 set "LOCALM_GUI_REPOINTED=1"
 set "LOCALM_GUI_STORE=shared"
+set "LOCALM_SPLASH_TEXT=Opening the LocaLM setup window on the shared uv. The first time, uv downloads Python 3.12 (about 30 MB) to its per-user location."
+call :splash_start
 set "UV_PYTHON_INSTALL_DIR="
 set "UV_CACHE_DIR="
 call :find_shared_uv
@@ -216,8 +218,7 @@ set "LOCALM_MSG1=[!] Could not remove%LEFTOVER% from this folder."
 set "LOCALM_MSG2=Setup put them there to open its window; the Shared choice does not use them. Close any LocaLM window and delete them by hand."
 call :notify Warning
 :shared_reopen
-set "LOCALM_SPLASH_TEXT=Opening the LocaLM setup window on the shared uv. The first time, uv downloads Python 3.12 (about 30 MB) to its per-user location."
-call :splash_start
+if not defined LOCALM_GUI_SPLASH call :splash_start
 goto open_window
 
 :finish_uninstall
