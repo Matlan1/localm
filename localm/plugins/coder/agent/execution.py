@@ -155,6 +155,8 @@ class _ExecutionMixin:
         confirm_handler: Any
         _project_map: Any
         patch_mode: bool
+        _user_declines: int
+        _lenient_denials: int
         _patch_overlay: PatchOverlay
         _patch_chunks: list[str]
 
@@ -697,7 +699,9 @@ class _ExecutionMixin:
         if self.dry_run and (tool_def.destructive
                              or getattr(tool_def, "executes_project_code", False) is True):
             result = ToolResult.success(
-                f"[dry-run] {call.name} - skipped",
+                f"[dry-run] {call.name} - skipped. This session is a dry run: "
+                "destructive and code-running calls are shown, never executed. "
+                "Do not repeat it; say what you would have done.",
                 summary=f"[dry-run] {call.name}",
             )
             if interactive:
@@ -833,6 +837,14 @@ class _ExecutionMixin:
                 print_info(f"  ({note})")
             self._emit("info", text=note)
             self._audit.notice("data_guard_confirm", note)
+        if needs_confirm and lenient_call and gated and can_ask:
+            note = (f"{call.name} was not written in the <tool_call> format, so "
+                    "it is asked about as an exact approval"
+                    + (", even with auto-approve on" if lenient_only else "")
+                    + " and cannot be always-allowed.")
+            if interactive:
+                print_info(f"  ({note})")
+            self._emit("info", text=note)
         if needs_confirm:
             if self.confirm_handler is not None or interactive:
                 # The terminal prompt (this agent's, or an interactive parent's
@@ -885,6 +897,7 @@ class _ExecutionMixin:
                         '<tool_call>\n{"name": "' + call.name + '", "args": '
                         "{...}}\n</tool_call>\nand it will run.")
                     reason = "lenient"
+                    self._lenient_denials += 1
                 else:
                     result = ToolResult.error(
                         f"{call.name} requires confirmation, but this run is "
@@ -899,7 +912,10 @@ class _ExecutionMixin:
                 return result
             if not approved:
                 reject_reason = consume_reject_reason()
-                if consume_unanswered():
+                unanswered = consume_unanswered()
+                if not unanswered:
+                    self._user_declines += 1
+                if unanswered:
                     err_msg = (
                         f"{call.name} was not run: nobody answered the approval "
                         "request before it timed out. The user did not refuse "
