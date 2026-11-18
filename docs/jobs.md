@@ -73,7 +73,8 @@ model the server has loaded, a coder job runs in the server, and a knowledge
 re-sync runs there too. If another job is already running in the server, the
 command says so and exits 1 instead of loading a second model. With no server
 running, the job runs in the terminal's own process and a chat or memory job
-loads its model there.
+loads its model there. A coder job always needs a running server: without one
+the run fails and says to start `localm serve` or `localm gui`.
 
 `localm job add` options:
 
@@ -282,6 +283,8 @@ reporting and its lock is reclaimed automatically.
 or denied folder policy as an interactive add (Settings > Plugins > Knowledge (RAG)), including
 the always-refused credential folders. A folder that was legal when it was
 indexed but is outside the policy now is skipped and reported, never indexed.
+When every folder of the collection is skipped, the run is recorded as an error
+("nothing was synced"), not as ok.
 Secret-looking files dropped into an indexed folder are filtered exactly as they
 are on a normal add.
 

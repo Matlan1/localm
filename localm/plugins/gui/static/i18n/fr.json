@@ -3153,6 +3153,7 @@
   "workflow.uploadedToast": "Importé et sélectionné",
   "workflow.useThisWorkflow": "Utiliser ce workflow",
   "chat.modelLoadingBanner": "Chargement de {model}. Un grand modèle peut prendre un moment.",
+  "chat.usage.firstToken": "premier jeton après {ms} ms",
   "chat.status.waitingForModel": "En attente du chargement de {model}",
   "chat.modelLoadFailed": "{model} ne s'est pas chargé, ce message n'a donc pas reçu de réponse. Renvoyez-le une fois un modèle chargé.",
   "coder.controls.verifyNoCheckReason": "Aucune vérification ne peut s'exécuter dans ce projet : {reason}"
