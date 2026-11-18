@@ -925,7 +925,7 @@ localm coder doctor --model mymodel                       # check the model serv
 - `-m/--model` (or `LOCALCODER_MODEL`), `-u/--url` (or `LOCALCODER_URL`), `-k/--api-key` (default `localm`, or `LOCALM_API_KEY`; a `require_auth` server needs the real key), `-p/--port` for the auto-started server (first free in 8642-8741), `-c/--cwd`.
 - `--no-server` starts no server; `--new` starts a dedicated one instead of attaching to the one already running for the project. Attached to that server while it holds another model, `coder` switches it to `--model` and says so; if the server cannot load it, `coder` says why and its requests still name the model, so the server tries again on the first one.
 - `--max-turns` (default 40) and `--max-tokens` (default 2048) may also come from `.localcoder/config.toml`; `--temperature`, `--verbose`.
-- `-y/--yes` auto-approves destructive tool calls, `--interactive-confirm` (with `--yes` or `auto_approve`) still asks before every tool that runs code (`run_shell`, `run_shell_background`, `run_tests`, an untrusted MCP server's tools), `--dry-run` runs without executing destructive or code-running tools.
+- `-y/--yes` auto-approves destructive tool calls (a call the model wrote outside the `<tool_call>` format is denied in an unattended run, and the model is asked again with the format enforced), `--interactive-confirm` (with `--yes` or `auto_approve`) still asks before every tool that runs code (`run_shell`, `run_shell_background`, `run_tests`, an untrusted MCP server's tools), `--dry-run` runs without executing destructive or code-running tools.
 - `--allow-network` lets an unattended run (a TASK, nobody to confirm) use `fetch_url`, `web_search`, the browser tools and `git_push` without asking while `net_mode` is `ask`; without it they are denied, unless the `coder_unattended_network` setting is `allow` (`localm config coder_unattended_network allow`, or Settings > Plugins > Coder). It covers that run only. `net_mode` `off` still refuses them, and an interactive session still asks.
 - `--estimate` plans only and exits; `--patch-mode FILE` captures all file writes as a unified diff written to FILE (`-` for stdout); `--native-tools` uses the OpenAI-compatible tools API (automatic for `--online` and `--anthropic`).
 - `--mode privacy|log|full` (default `privacy`); `--output-format text|json|jsonl` for non-interactive runs; `-r/--resume [ID]` resumes the last saved session or a checkpoint.
@@ -1080,7 +1080,9 @@ always-confirm setting holds back, a call the model wrote in a loose format and 
 that reaches localm's own data folder, and the project's verification check runs before the
 task finishes, detected when none is set; if the fix attempts run out the task is
 reported as not verified), or `n` or any text (the agent stays in plan mode and gets
-your feedback). `/plan off` leaves plan mode without a plan. The agent can also ask you
+your feedback). A plan written as an ordinary reply never reaches that prompt, so the
+agent is told twice to present it with `exit_plan_mode`, and the task then ends as not
+finished. `/plan off` leaves plan mode without a plan. The agent can also ask you
 a question with `ask_user`, offering numbered options or taking a typed answer. Plan
 mode and `ask_user` are terminal features: the GUI coder and one-shot tasks do not offer
 them.
