@@ -7,6 +7,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -125,6 +126,10 @@ def test_child_worktree_commit_leaves_session_state_out(repo):
     assert _committed(repo) == ["a.py"]
 
 
+def _staged(repo):
+    return _git(repo, "diff", "--cached", "--name-only").split()
+
+
 def test_full_mode_transcript_is_ignored_by_plain_git_add(repo):
     agent = _make_agent(repo, SessionMode.FULL)
     agent._messages = [{"role": "user", "content": "hi"}]
@@ -132,4 +137,65 @@ def test_full_mode_transcript_is_ignored_by_plain_git_add(repo):
     path = agent.close()
     assert path.exists()
     _git(repo, "add", "-A")
-    assert _git(repo, "status", "--porcelain").strip() == ""
+    assert _staged(repo) == [".localcoder/.gitignore"]
+
+
+def test_repl_history_is_ignored_by_plain_git_add(repo, monkeypatch):
+    import atexit
+    import types
+
+    from localm.plugins.coder.cli import repl
+
+    saved = []
+    fake = types.SimpleNamespace(
+        set_completer=lambda *a: None, set_completer_delims=lambda *a: None,
+        parse_and_bind=lambda *a: None, read_history_file=lambda *a: None,
+        set_history_length=lambda *a: None, get_line_buffer=lambda: "",
+        write_history_file=lambda path: Path(path).write_text("typed secret\n",
+                                                              encoding="utf-8"))
+    monkeypatch.setitem(sys.modules, "readline", fake)
+    monkeypatch.setattr(atexit, "register", saved.append)
+    agent = _make_agent(repo, SessionMode.FULL)
+    repl._setup_readline(agent)
+    assert saved
+    saved[0]()
+    assert (repo / ".localcoder" / "repl_history").read_text(encoding="utf-8")
+    _git(repo, "add", "-A")
+    assert _staged(repo) == [".localcoder/.gitignore"]
+
+
+def test_ignore_file_keeps_user_lines_and_adds_only_missing_ones(repo):
+    from localm.plugins.coder.tools.git import ensure_private_state_ignored
+    d = repo / ".localcoder"
+    d.mkdir()
+    (d / ".gitignore").write_text("mine.txt\n/repl_history", encoding="utf-8")
+    ensure_private_state_ignored(repo)
+    ensure_private_state_ignored(repo)
+    lines = (d / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert lines == ["mine.txt", "/repl_history", "/sessions/", "/checkpoint.json"]
+    (d / "config.toml").write_text("mode = 'full'\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    assert "config.toml" in " ".join(_staged(repo))
+
+
+def test_history_is_not_persisted_when_it_cannot_be_kept_out_of_git(repo, monkeypatch):
+    import atexit
+    import types
+
+    from localm.plugins.coder.cli import repl
+
+    saved = []
+    fake = types.SimpleNamespace(
+        set_completer=lambda *a: None, set_completer_delims=lambda *a: None,
+        parse_and_bind=lambda *a: None, read_history_file=lambda *a: None,
+        set_history_length=lambda *a: None, get_line_buffer=lambda: "",
+        write_history_file=lambda path: None)
+    monkeypatch.setitem(sys.modules, "readline", fake)
+    monkeypatch.setattr(atexit, "register", saved.append)
+
+    def boom(_p):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(repl, "ensure_private_state_ignored", boom)
+    repl._setup_readline(_make_agent(repo, SessionMode.FULL))
+    assert saved == []

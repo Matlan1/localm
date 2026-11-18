@@ -24,6 +24,7 @@ from ..display import (
     safe_markup,
 )
 from ..review_guard import classify_sensitive_changes, render_warning
+from ..tools.git import ensure_private_state_ignored
 from .goal import _run_goal_loop
 
 _AT_MENTION_RE = re.compile(
@@ -240,6 +241,12 @@ def _setup_readline(agent: Agent) -> None:
 
     if agent.mode != SessionMode.PRIVACY:
         hist = agent.cwd / ".localcoder" / "repl_history"
+        try:
+            ensure_private_state_ignored(agent.cwd)
+        except OSError as e:
+            print_warning(f"Input history is not saved: could not keep it out of "
+                          f"git ({e}).")
+            return
         try:
             hist.parent.mkdir(parents=True, exist_ok=True)
             if hist.is_file():

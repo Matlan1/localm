@@ -152,6 +152,31 @@ PRIVATE_PROJECT_PATHS = (
 )
 
 
+def ensure_private_state_ignored(project: Path) -> None:
+    """Make git ignore localm's own session files in *project*.
+
+    Adds the missing entries of ``PRIVATE_PROJECT_PATHS`` to
+    ``.localcoder/.gitignore`` (created if absent); existing lines are kept and
+    the rest of ``.localcoder`` stays committable. Raises OSError when the file
+    cannot be written, so a caller never writes private state it could not
+    protect."""
+    folder = project / ".localcoder"
+    wanted = []
+    for rel in PRIVATE_PROJECT_PATHS:
+        name = rel.split("/", 1)[1]
+        wanted.append("/" + name + ("/" if name == "sessions" else ""))
+    ignore = folder / ".gitignore"
+    folder.mkdir(parents=True, exist_ok=True)
+    text = ignore.read_text(encoding="utf-8") if ignore.exists() else ""
+    have = {line.strip() for line in text.splitlines()}
+    missing = [w for w in wanted if w not in have]
+    if not missing:
+        return
+    sep = "" if (not text or text.endswith("\n")) else "\n"
+    with ignore.open("a", encoding="utf-8", newline="") as fh:
+        fh.write(sep + "".join(m + "\n" for m in missing))
+
+
 def _unstage_private(cwd: Path) -> Optional[str]:
     """Take localm's own session files out of the index; the error text, or None."""
     out, ok = _git(cwd, "reset", "-q", "--", *PRIVATE_PROJECT_PATHS)
