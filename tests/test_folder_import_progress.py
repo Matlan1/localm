@@ -78,9 +78,13 @@ class TestTerminalLines:
     def test_each_file_is_announced_with_its_place_in_the_batch(
             self, home, tmp_path, printed):
         mm.add_local(str(_folder(tmp_path / "pile")))
-        for k, name in enumerate(("alpha", "beta", "gamma"), 1):
+        assert not any("Hashing alpha.gguf for duplicate detection" in line
+                       for line in printed), "no registered file had alpha's size yet"
+        for k, name in ((2, "beta"), (3, "gamma")):
             assert any(f"Hashing {name}.gguf for duplicate detection ({k} of 3" in line
                        for line in printed), printed
+        assert any("Hashing alpha.gguf to compare with beta.gguf (2 of 3" in line
+                   for line in printed), printed
 
     def test_final_summary_counts_registered_files(self, home, tmp_path, printed):
         mm.add_local(str(_folder(tmp_path / "pile")))
@@ -170,9 +174,9 @@ class TestOtherFolderBranches:
             _gguf(unit / "model.gguf", payload=bytes([i + 5]) * 2048)
         assert mm.add_local(str(tmp_path / "Jan" / "data")) is True
         assert _index(printed, "Scanning") < _index(printed, "Registered")
-        assert any("Hashing model.gguf for duplicate detection (1 of 2" in line
+        assert any("Hashing model.gguf for duplicate detection (2 of 2" in line
                    for line in printed), printed
-        assert any("(2 of 2" in line for line in printed)
+        assert any("Registering" not in line and "(2 of 2" in line for line in printed)
 
     def test_store_copy_announces_the_copy_before_registering(self, home, tmp_path, printed):
         assert mm.add_local(str(_folder(tmp_path / "pile")), store="copy") is True

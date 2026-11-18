@@ -3239,6 +3239,17 @@ if ($("upload-send")) {
 // started it, and what the user asked to do to it. "pause" keeps the
 // partially downloaded data so Resume continues from it; "cancel" deletes it.
 let activePull = null;
+
+// True for a spec that names a path on this machine (the server registers it in
+// place rather than downloading it).
+function specIsHostPath(spec) {
+  const s = String(spec || "").trim();
+  return /^([A-Za-z]:|[\\/]|~)/.test(s) || s.split(/[\\/]/).includes("..");
+}
+// The pull whose start request is still on its way (null when none). Pause or
+// Cancel clicked in that window is recorded here and applied to the job as soon
+// as its id is known.
+let startingPull = null;
 // The request of the last pull that was paused, so Resume can send it again.
 let pausedPull = null;
 
@@ -3317,18 +3328,22 @@ async function runPull(payload, start = () => postPull(payload)) {
   pct.textContent = t("models.pull.starting");
   if ($("pull-file")) { $("pull-file").hidden = true; $("pull-file").textContent = ""; }
   setPullButtons("running");
+  startingPull = { intent: null };
   const samples = [];   // rolling {t, downloaded} window, used when the server sends no rate
   let last = { downloaded: 0, total: 0, pct: null };
   try {
     const data = await start();
+    const early = startingPull ? startingPull.intent : null;
+    startingPull = null;
     if (!data) {
       prog.style.display = "none";
       log.style.display = "none";
       setPullButtons("idle");
       return;
     }
-    const mine = { id: data.job_id, payload, intent: null };
+    const mine = { id: data.job_id, payload, intent: early };
     activePull = mine;
+    if (early) cancelJob(data.job_id);
     const end = await streamJob(data.job_id, (line) => {
       log.textContent += line + "\n";
       log.scrollTop = log.scrollHeight;
@@ -3401,7 +3416,8 @@ async function runPull(payload, start = () => postPull(payload)) {
       bar.classList.remove("indeterminate");
       bar.style.width = "100%";
       pct.textContent = t("models.pull.done");
-      toast(t("models.pull.finishedToast"));
+      toast(t(specIsHostPath(payload.spec) ? "models.pull.registeredToast"
+                                            : "models.pull.finishedToast"));
       $("pull-spec").value = "";
       $("pull-name").value = "";
       if (sha256Input) sha256Input.value = "";
@@ -3458,6 +3474,7 @@ async function runPull(payload, start = () => postPull(payload)) {
     }
   } catch (e) {
     activePull = null;
+    startingPull = null;
     bar.classList.remove("indeterminate");
     bar.classList.add("failed");
     setPullButtons("idle");
@@ -3465,6 +3482,8 @@ async function runPull(payload, start = () => postPull(payload)) {
     toast(t("models.pull.failedException", { message: e.message }), true);
   } finally {
     $("pull-start").disabled = false;
+    $("pull-pause").disabled = false;
+    $("pull-cancel").disabled = false;
     loadInterrupted();
   }
 }
@@ -3517,7 +3536,14 @@ $("pull-start").onclick = async () => {
 };
 
 $("pull-pause").onclick = async () => {
-  if (!activePull) return;
+  if (!activePull) {
+    if (startingPull && !startingPull.intent) {
+      startingPull.intent = "pause";
+      $("pull-pause").disabled = true;
+      $("pull-cancel").disabled = true;
+    }
+    return;
+  }
   activePull.intent = "pause";
   $("pull-pause").disabled = true;
   await cancelJob(activePull.id);
@@ -3525,7 +3551,11 @@ $("pull-pause").onclick = async () => {
 };
 
 $("pull-cancel").onclick = async () => {
-  if (activePull) {
+  if (!activePull && startingPull) {
+    startingPull.intent = "cancel";
+    $("pull-pause").disabled = true;
+    $("pull-cancel").disabled = true;
+  } else if (activePull) {
     activePull.intent = "cancel";
     $("pull-cancel").disabled = true;
     await cancelJob(activePull.id);

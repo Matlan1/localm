@@ -76,6 +76,13 @@ def _spec_names_a_host_path(spec: str) -> bool:
     return False
 
 
+def _pull_label(spec: str) -> str:
+    """The Activity label of the job that runs *spec*: a path on this machine is
+    registered in place, so it reads "Register <path>"; anything else is a
+    download."""
+    return f"Register {spec}" if _spec_names_a_host_path(spec) else f"Model pull {spec}"
+
+
 def _remote_only_args(request: Request) -> list[str]:
     """``["--remote-only"]`` for a caller without host filesystem access, else
     ``[]``. Decided from the key alone, never from the spec or the disk."""
@@ -120,7 +127,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         # which also covers the contender this cannot see - a `localm pull` a
         # user ran in a terminal. This only spares the user a job that would
         # start and immediately refuse.
-        label = f"Model pull {spec}"
+        label = _pull_label(spec)
         if any(j.get("kind") == "pull" and j.get("status") == "running"
                and j.get("label") == label for j in jobs.snapshot()):
             raise HTTPException(
@@ -154,7 +161,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         job = jobs.start_cli("pull", args, extra_env={
             "LOCALM_PROGRESS_JSON": "1",
             "HF_HUB_DISABLE_PROGRESS_BARS": "1",
-        }, host_label=f"Model pull {spec}", owner=principal_id(request))
+        }, host_label=_pull_label(spec), owner=principal_id(request))
         return {"job_id": job.id}
 
     @app.post("/api/models/pull/discard",
@@ -168,7 +175,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         spec = req.spec.strip()
         if not spec or set(spec) <= {"-"} or _spec_names_a_host_path(spec):
             raise HTTPException(400, "Enter a remote model spec.")
-        label = f"Model pull {spec}"
+        label = _pull_label(spec)
         if any(j.get("kind") == "pull" and j.get("status") == "running"
                and j.get("label") == label for j in jobs.snapshot()):
             raise HTTPException(
@@ -200,7 +207,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
     # --------------- Interrupted downloads ---------------------------------- #
 
     def _pull_running(spec: str) -> bool:
-        label = f"Model pull {spec}"
+        label = _pull_label(spec)
         return any(j.get("kind") == "pull" and j.get("status") == "running"
                    and j.get("label") == label for j in jobs.snapshot())
 
@@ -223,7 +230,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         running = {j.get("label") for j in jobs.snapshot()
                    if j.get("kind") == "pull" and j.get("status") == "running"}
         out["downloads"] = [d for d in out["downloads"]
-                            if f"Model pull {d['spec']}" not in running]
+                            if _pull_label(d['spec']) not in running]
         return out
 
     @app.post("/api/models/pulls/interrupted/{pull_id}/resume",
@@ -290,7 +297,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                                       *pending_pulls.resume_args(rec)], extra_env={
             "LOCALM_PROGRESS_JSON": "1",
             "HF_HUB_DISABLE_PROGRESS_BARS": "1",
-        }, host_label=f"Model pull {spec}", owner=principal_id(request))
+        }, host_label=_pull_label(spec), owner=principal_id(request))
         return {"status": "started", "job_id": job.id, "spec": spec, "note": note}
 
     @app.post("/api/models/pulls/interrupted/{pull_id}/delete",
@@ -679,5 +686,5 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         job = jobs.start_cli("pull", args, extra_env={
             "LOCALM_PROGRESS_JSON": "1",
             "HF_HUB_DISABLE_PROGRESS_BARS": "1",
-        }, host_label=f"Model pull {source.spec}", owner=principal_id(request))
+        }, host_label=_pull_label(source.spec), owner=principal_id(request))
         return {"job_id": job.id}

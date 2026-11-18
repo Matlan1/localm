@@ -116,6 +116,14 @@ def can_prompt() -> bool:
     return stdin_is_interactive()
 
 
+def _runs_as_gui_job() -> bool:
+    """True when this process is a command the GUI runs for a click on Add: it
+    has no terminal to ask at, but a person asked for the model by name, so a
+    duplicate question takes the answer a terminal's prompt offers by default
+    (alias) instead of the script answer (skip)."""
+    return os.environ.get("LOCALM_PROGRESS_JSON") == "1"
+
+
 def is_auto_chat_eligible(entry: dict) -> bool:
     """True when a registry *entry* may be auto-selected as the default chat model.
 
@@ -1918,8 +1926,14 @@ def list_models(type_filter: Optional[str] = None) -> None:
     from rich.markup import escape
 
     reg = _mm.load_registry()
+    registered = len(reg)
     if type_filter:
         reg = models_of_type(type_filter, reg)
+    if not reg and registered:
+        console.print(f"[dim]No [bold]{escape(type_filter)}[/bold] models. "
+                      f"{registered} model(s) of other types are registered: run "
+                      "[bold]localm list[/bold] to see them.[/dim]")
+        return
     if not reg:
         console.print("[dim]No models yet. Use [bold]localm pull <name>[/bold] to download one.[/dim]")
         console.print("[dim]Run [bold]localm models[/bold] to see what's available.[/dim]")
@@ -2144,6 +2158,10 @@ def _prompt_predownload_dup(dup_names: list[str], model_name: str) -> str:
         f"{names}[/yellow] [dim](sha256 match via HF metadata)[/dim]"
     )
     if not can_prompt():
+        if _runs_as_gui_job():
+            console.print(f"[dim]Nothing is downloaded: adding it as "
+                          f"'{escape(model_name)}'.[/dim]")
+            return "alias"
         console.print("[dim]Non-interactive session - skipping download. "
                       "Use --redownload to force.[/dim]")
         return "skip"
@@ -2532,6 +2550,9 @@ def _prompt_duplicate_action(existing_names: list[str], reason: str) -> str:
         f"[dim]({reason})[/dim]"
     )
     if not can_prompt():
+        if _runs_as_gui_job():
+            console.print("[dim]Adding it under the new name.[/dim]")
+            return "alias"
         console.print("[dim]Non-interactive session - skipping. "
                       "Use 'localm alias' to add a name for it.[/dim]")
         return "skip"
@@ -5012,8 +5033,11 @@ def _digest_for_add(gguf: Path, reg: dict, no_hash: bool,
                     ) -> "tuple[Optional[str], Optional[int]]":
     """``(sha256, size)`` to register *gguf* with: neither under *no_hash*; only
     the size under *fast* (dedup on size alone); otherwise the hash, computed only
-    when it can change the outcome (an unknown path or a registered alias with no
-    digest).
+    when it can change the outcome: a path already registered needs none, and a
+    file whose size no registered file has cannot be a copy of one, so it is
+    registered without being read. When a registered file has the same size, the
+    two are compared by hash (:func:`_backfill_same_size_digests` hashes the
+    registered one when it has none).
 
     *recorded* holds the sha256 digests another localm install stored. When it
     holds a usable digest for *gguf* (``RecordedDigests.lookup``), that digest is
@@ -5026,9 +5050,7 @@ def _digest_for_add(gguf: Path, reg: dict, no_hash: bool,
             return None, gguf.stat().st_size
         except OSError:
             return None, None
-    already_known = find_aliases_by_path(gguf, reg)
-    needs_backfill = any(not reg[n].get("sha256") for n in already_known)
-    if already_known and not needs_backfill:
+    if find_aliases_by_path(gguf, reg):
         return None, None
     stored = recorded.lookup(gguf) if recorded is not None else None
     if stored is not None:
@@ -5036,7 +5058,41 @@ def _digest_for_add(gguf: Path, reg: dict, no_hash: bool,
             f"Using the hash recorded by the other install for {gguf.name}"
             + (f" ({label})" if label else ""))
         return stored, None
+    try:
+        size = gguf.stat().st_size
+    except OSError:
+        return None, None
+    twins = find_by_size(size, reg)
+    if not twins:
+        return None, None
+    _backfill_same_size_digests(twins, reg, label, gguf.name)
     return _mm._hash_with_progress(gguf, label=label), None
+
+
+def _backfill_same_size_digests(names: list[str], reg: dict,
+                                label: Optional[str], against: str) -> None:
+    """Hash the file of each registered entry in *names* that records no sha256
+    and store the digest on every entry that names that file, so a content
+    comparison with the file *against* can match."""
+    by_path: dict = {}
+    for n in names:
+        entry = reg.get(n)
+        path = _entry_path(entry) if isinstance(entry, dict) else None
+        if path is not None and not entry.get("sha256"):
+            by_path.setdefault(str(Path(path).resolve()), []).append((n, Path(path)))
+    for owners in by_path.values():
+        file = owners[0][1]
+        digest = _mm._hash_with_progress(
+            file, purpose=f"to compare with {against}", label=label)
+        if not digest:
+            continue
+
+        def _store(r: dict, owners=owners, digest=digest) -> None:
+            for n, _file in owners:
+                e = r.get(n)
+                if isinstance(e, dict) and not e.get("sha256"):
+                    e["sha256"] = digest.lower()
+        _mm.update_registry(_store)
 
 
 def _add_local_gguf_dir(
@@ -6024,7 +6080,8 @@ def add_local(
     # agree on the exact same name.
     hub_repo = hub_snapshot_repo_id(p) if p.is_dir() else None
     model_name = _sanitize_name(name) if name else (
-        split_base or (_sanitize_name(hub_repo) if hub_repo else p.stem))
+        split_base or (_sanitize_name(hub_repo) if hub_repo
+                       else p.name if p.is_dir() else p.stem))
     kind = "hf" if is_hf else "local"
 
     # Bring an external file/dir into managed storage BEFORE registering, so the
@@ -6073,16 +6130,7 @@ def add_local(
         except OSError:
             size = None
     else:
-        # Hash when it can change the outcome: unknown path (content-tier
-        # check) or known path missing its digest (lazy backfill)
-        reg = _mm.load_registry()
-        already_known = find_aliases_by_path(p, reg)
-        needs_backfill = any(
-            not reg[n].get("sha256") for n in already_known
-        )
-        digest = None
-        if not already_known or needs_backfill:
-            digest = _mm._hash_with_progress(p)
+        digest, size = _digest_for_add(p, _mm.load_registry(), False, False)
 
     # Resolve an unspecified type deterministically (GGUF -> llm, HF config.json ->
     # architectures, else 'unknown') instead of silently defaulting to 'llm'.

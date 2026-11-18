@@ -1522,6 +1522,24 @@ def resolve_hf_revision(repo_id: str, ref: str) -> HfRevision:
     return HfRevision(ref, commit)
 
 
+def _gated_refusal(repo_id: str) -> Optional[str]:
+    """The sentence saying *repo_id* is a gated Hugging Face repo this pull cannot
+    read, or None when it can be read (or Hugging Face cannot be asked: the pull
+    then goes on and reports whatever it meets). Asked before a pull writes
+    anything, so a refusal leaves no partial folder and no download record."""
+    from huggingface_hub.errors import GatedRepoError
+    try:
+        _hf_api().auth_check(repo_id)
+    except GatedRepoError:
+        how = ("accept its terms on huggingface.co with the account the saved "
+               "Hugging Face token belongs to" if _hf_token()
+               else "accept its terms on huggingface.co and set a Hugging Face token")
+        return f"{repo_id} is gated: {how} to pull it"
+    except Exception as e:
+        logger.debug("could not check access to %s: %s", repo_id, e)
+    return None
+
+
 def _rev_commit(revision: "Optional[HfRevision]") -> Optional[str]:
     """The commit a revision pull is pinned to, or None for a pull of the default branch."""
     return revision.commit if revision is not None else None
@@ -2333,6 +2351,10 @@ def _pull_gguf_file(
     else:
         parts = spec.rsplit("/", 1)
         repo_id, remote = parts[0], parts[1]
+    gated = _gated_refusal(repo_id)
+    if gated is not None:
+        console.print(f"[red]Cannot pull:[/red] {escape(gated)}.")
+        return False
     # "owner/repo:sub/dir/file" names a file inside a repo folder. huggingface_hub
     # writes it to <stage_dir>/sub/dir/file, which is then moved to
     # base_dir/file; stage_dir is under base_dir's hidden .cache so no folder of
@@ -3390,6 +3412,10 @@ def _pull_hf_snapshot_locked(
     # not just config.json) and to size the disk-space preflight and progress
     # display below. A disk-full mid-download can leave config.json, one of the
     # smallest and earliest files, on disk while weight shards are missing.
+    gated = _gated_refusal(repo_id)
+    if gated is not None:
+        console.print(f"[red]Cannot pull:[/red] {escape(gated)}.")
+        return False
     repo_siblings = None
     commit = _rev_commit(revision)
     total_size = 0

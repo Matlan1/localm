@@ -1462,6 +1462,7 @@ export const I18N_EN = {
   "models.pull.fileOf": "file {index} of {count}: {name}",
   "models.pull.fileOfBare": "file {index} of {count}",
   "models.pull.finishedToast": "Pull finished",
+  "models.pull.registeredToast": "Model registered",
   "models.pull.intro":
     "From HuggingFace (owner/repo[:file.gguf]) or an https URL, or add one already on disk - paste a folder/file path, or use Browse to pick a folder.",
   "models.pull.namePlaceholder": "name (optional)",
