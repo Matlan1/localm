@@ -25,7 +25,7 @@ from .constants import (
     _ACTION_VERBS, _IMPERATIVE_LEADS, _IMPERATIVE_ONLY_VERBS, _MAX_NOCALL_ESCALATIONS, _MAX_TOOL_REPAIRS,
     _NON_FILE_SUFFIXES, _STATEMENT_LINKS, _STATEMENT_PARTICIPLES, _STATEMENT_PREDICATES,
     _REPEAT_HISTORY_MAX, _REPEAT_RESPONSE_ABORT, _REPEAT_SIMILARITY,
-    _SKILL_STATE_TOOLS,
+    _BROWSER_TOOLS, _SKILL_STATE_TOOLS,
 )
 from .planmode import INTERACTION_TOOLS
 from localm.textguard import compose, compose_join
@@ -41,6 +41,19 @@ _RE_POLITE_VERB = re.compile(
     r"(?:\s+(?:also|just|please|kindly|now|then|quickly|first|simply))*"
     r"\s+(?=([a-z]+)\b)", re.IGNORECASE)
 _RE_NO_TOOL_NEEDED = re.compile(r"\s*\[no tool needed\][ \t]*", re.IGNORECASE)
+_RE_RUN_REQUEST = re.compile(r"\b(?:run|rerun|re-run|execute)\b", re.IGNORECASE)
+_RE_TOOL_WORD = re.compile(r"[a-z][a-z_]*")
+# A tag this harness puts at the start of its own re-prompts.
+_RE_HARNESS_TAG = re.compile(
+    r"\s*\[(?:no tool call|nothing written|code not written|tool-call format"
+    r"|unfinished|self-verification|unverified code|plan not submitted"
+    r"|not verified|code review)\]", re.IGNORECASE)
+
+
+def _echoes_harness_prompt(text: str) -> bool:
+    """True when *text* opens with one of the harness's own re-prompt tags: the
+    model has repeated what it was told, which is not an answer."""
+    return _RE_HARNESS_TAG.match(text) is not None
 _QUESTION_OPENERS = frozenset({
     "why", "what", "whats", "what's", "how", "when", "where", "who", "which",
     "is", "are", "was", "were", "does", "do", "did", "has", "have", "had",
@@ -622,12 +635,18 @@ class _LoopMixin:
 
         def apply_project_trust(self, interactive: bool = False) -> bool: ...
 
+        def can_force_tool_calls(self) -> bool: ...
+
         @property
         def disabled_tools(self) -> frozenset: ...
 
         max_turns: int
         _task_start_turns: int
         patch_mode: bool
+        dry_run: bool
+        _user_declines: int
+        _lenient_denials: int
+        _denied_lock: Any
         cwd: Path
         _unverified_writes: set
         _audit: Any
@@ -814,7 +833,9 @@ class _LoopMixin:
                              files_at_start={f["path"]: f["writes"]
                                              for f in self.changed_files()},
                              start_turns=start_turns,
-                             unfounded_checked=False)
+                             unfounded_checked=False,
+                             plan_submitted=False, plan_nudges=0,
+                             declines_at_start=self._user_declines)
 
         try:
             while self._task_turns_left():
@@ -993,7 +1014,14 @@ class _LoopMixin:
                 self._add_assistant(response)
 
                 # Execute tools - run non-destructive batches in parallel
+                lenient_before = self._lenient_denials
                 result_blocks = self._execute_tools(calls, interactive=interactive)
+                st.plan_submitted = st.plan_submitted or any(
+                    c.name == "exit_plan_mode" for c in calls)
+                if self._lenient_denials > lenient_before:
+                    owed_note = self._force_after_lenient_denial()
+                    if owed_note:
+                        result_blocks.append(owed_note)
 
                 # parse_tool_calls silently drops a tool-call-shaped block whose
                 # body could not be recovered, and the only downstream check
@@ -1227,22 +1255,29 @@ class _LoopMixin:
             if not interactive and self.on_event is None:
                 print_assistant_response(notice, name=self.name)
             self._add_assistant(response)
+            self._last_run_ok = False
             return (True, notice)
 
         # Zero-attempt escalation: the model produced nothing tool-shaped on a
         # request that needs a tool. Every branch above is reached only via
         # looks_like_tool_attempt().
         request = getattr(self, "_last_user_request", "") or ""
+        if self._plan_owed(request, response, st):
+            return self._plan_not_submitted(response, interactive, st)
         offered = st.nocall_escalation >= 1 or st.code_nudged
         marker = _RE_NO_TOOL_NEEDED.match(response)
-        if marker is not None and self._change_still_owed(request, st):
+        if marker is not None and (self._change_still_owed(request, st)
+                                   or self._tool_demanded(request, st)):
             # The escape does not answer a request to change the project while
-            # nothing was written: the marker is dropped and the reply is judged
-            # as written. See test_the_escape_does_not_answer_a_change_request.
+            # nothing was written, nor one that names a tool or says to run
+            # something while no tool ran: the marker is dropped and the reply
+            # is judged as written. See
+            # test_the_escape_does_not_answer_a_change_request.
             response = response[marker.end():] or st.nocall_response
             marker = None
         declined = marker if offered else None
-        if declined is not None and not response[declined.end():].strip():
+        if declined is not None and (not response[declined.end():].strip()
+                                     or _echoes_harness_prompt(response[declined.end():])):
             # The marker with no answer after it: an imperative request keeps
             # climbing the ladder, anything else is answered by the reply the
             # nudge was sent for.
@@ -1334,6 +1369,8 @@ class _LoopMixin:
                 "\n\n[tool use not achieved: this model was asked "
                 f"{st.nocall_escalation} more time(s) to call a tool and did not, "
                 f"so nothing was run or written.{why}]")
+            if self._tool_demanded(getattr(self, "_last_user_request", "") or "", st):
+                self._last_run_ok = False
             self._audit.notice(
                 "no_tool_call",
                 f"escalation exhausted after {st.nocall_escalation} attempt(s); "
@@ -1470,8 +1507,10 @@ class _LoopMixin:
         """True when *request* tells the agent to change the project (an
         imperative with a change verb), the session can write files and is not
         in plan mode, and nothing that can write has run this task: no write
-        the tracker saw, no unverified changed file, no patch-mode capture, and
-        no call :func:`_may_write_files` counts as a possible write."""
+        the tracker saw, no unverified changed file, no patch-mode capture, no
+        call :func:`_may_write_files` counts as a possible write, no dry-run
+        session (its writes are shown, never made) and no call the user refused
+        at an approval prompt (their answer stands)."""
         if self.plan_mode:
             return False
         if not {"write_file", "edit_file", "patch_file"} - self.disabled_tools:
@@ -1479,7 +1518,83 @@ class _LoopMixin:
         if not (demands_action(request) and asks_for_change(request)):
             return False
         return not (self._write_total() > st.writes_at_start or self.patch_mode
-                    or st.possible_write or bool(self._unverified_writes))
+                    or self.dry_run or st.possible_write
+                    or bool(self._unverified_writes)
+                    or self._user_declines > st.declines_at_start)
+
+    def _tool_demanded(self, request: str, st) -> bool:
+        """True when *request* names an available tool or tells the agent to
+        run something, and no tool has run this task: only a tool call answers
+        it, so the ``[no tool needed]`` escape does not."""
+        if self._used_tools_this_task(st) or not demands_action(request):
+            return False
+        if _RE_RUN_REQUEST.search(request):
+            return True
+        names = set(_agent.TOOL_REGISTRY) - self.disabled_tools
+        return any(w in names for w in _RE_TOOL_WORD.findall(request.lower()))
+
+    def _plan_owed(self, request: str, response: str, st) -> bool:
+        """True in plan mode when the request asks for a change, the plan was
+        never submitted with exit_plan_mode, and the reply is not a question."""
+        return (self.plan_mode and "exit_plan_mode" not in self.disabled_tools
+                and not st.plan_submitted
+                and demands_action(request) and asks_for_change(request)
+                and not _asks_a_question(response))
+
+    def _plan_not_submitted(self, response, interactive, st):
+        """A reply with no tool call in plan mode is not a plan the user can
+        approve: ask for exit_plan_mode twice (the second turn constrained to a
+        tool call where the backend can), then end the run as not finished."""
+        if st.plan_nudges < 2 and self._task_turns_left():
+            st.plan_nudges += 1
+            self._audit.notice("plan_not_submitted",
+                               "plan mode reply without exit_plan_mode")
+            self._add_assistant(response)
+            self._add_user(
+                "[plan not submitted] You are in plan mode and this request asks "
+                "for a change. A plan written as a reply never reaches the user's "
+                "approval prompt, so nothing can go ahead. Call exit_plan_mode "
+                "now with the whole plan as markdown in its plan argument "
+                "(read-only tools first if you still need to look). If you need "
+                "an answer from the user first, ask one short question instead.")
+            if st.plan_nudges == 2 and self.can_force_tool_calls():
+                self._force_tool_grammar = True
+            if interactive:
+                print_info("(plan mode: asking the agent to submit the plan)")
+            self._emit("info", text=(
+                "plan mode: the reply was not submitted with exit_plan_mode - "
+                "asking the agent to submit it"))
+            return (False, "")
+        self._last_run_ok = False
+        self._emit("info", text="plan mode: the plan was never submitted")
+        self._add_assistant(response)
+        return (True, response + (
+            "\n\n[not finished: plan mode needs the plan submitted with "
+            "exit_plan_mode, and it never was, so you were not asked to approve "
+            "it]") + self._grounding_footer())
+
+    def _force_after_lenient_denial(self) -> str:
+        """A call denied only for its loose format is re-emitted next turn with
+        the tool-call grammar bound from the first token, so the retry arrives
+        in the <tool_call> format the unattended run accepts. Returns the note
+        that names the denied calls for the model, "" when forcing is not
+        available."""
+        if not self.can_force_tool_calls():
+            return ""
+        self._force_tool_grammar = True
+        with self._denied_lock:
+            owed = [f"- {name} {key[:300]}" for name, key, reason
+                    in self._denied_unconfirmed if reason == "lenient"]
+        self._audit.notice(
+            "lenient_call_forced",
+            "a call was denied for its loose format - the next turn is "
+            "constrained to the tool-call format")
+        self._emit("info", text=(
+            "a tool call was denied for its loose format - asking again with "
+            "the tool-call format enforced"))
+        return ("[tool-call format] These calls did NOT run because of their "
+                "format. Emit exactly these calls again now, nothing else:\n"
+                + "\n".join(owed))
 
     def _used_tools_this_task(self, st) -> bool:
         """Has the model demonstrated, THIS TASK, that it can drive a tool?
@@ -1576,7 +1691,8 @@ class _LoopMixin:
                 "Use one of the available tools by its exact name, with valid "
                 "JSON args. Emit one call now and I will run it and give you the "
                 "result."
-                + ("" if self._change_still_owed(request, st) else
+                + ("" if (self._change_still_owed(request, st)
+                            or self._tool_demanded(request, st)) else
                    ' If this genuinely needs no tool at all, begin your reply '
                    'with "[no tool needed]" and answer in plain text, and I will '
                    "accept that as your answer.")
@@ -1927,7 +2043,8 @@ class _LoopMixin:
         for call in calls:
             td = TOOL_REGISTRY.get(call.name)
             destructive = td.destructive if td else True
-            solo = call.name in _SKILL_STATE_TOOLS or call.name in INTERACTION_TOOLS
+            solo = (call.name in _SKILL_STATE_TOOLS or call.name in INTERACTION_TOOLS
+                    or call.name in _BROWSER_TOOLS)
             if (extendable and not solo
                     and segments and segments[-1][0] == destructive):
                 segments[-1][1].append(call)

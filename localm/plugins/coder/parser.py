@@ -149,10 +149,10 @@ def looks_like_tool_attempt(text: str, tool_names: Optional[set] = None) -> bool
     if _RE_NAME_KEY.search(text) and _RE_ARGS_KEY.search(text):
         return True
     if tool_names:
-        pattern = re.compile(
-            r"<\s*(?:" + "|".join(re.escape(n) for n in tool_names) + r")\b",
-            re.IGNORECASE)
-        if pattern.search(text):
+        names = "|".join(re.escape(n) for n in tool_names)
+        if re.search(r"<\s*(?:" + names + r")\b", text, re.IGNORECASE):
+            return True
+        if re.search(r"\b(?:" + names + r")\s*\(\s*[{\[]", text):
             return True
     return False
 

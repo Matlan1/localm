@@ -201,6 +201,21 @@ export function register(ctx) {
   paintKeysHint();
   document.addEventListener("localm:language", paintKeysHint);
   const status = el("div", "browser-status", "No browser open.");
+  status.setAttribute("role", "status");
+  let problemText = null;
+  /** Show a refusal of the person's own click on the status line, in the error
+   *  colour, until the line says something else. */
+  function problem(text) {
+    status.textContent = text;
+    problemText = text;
+    status.classList.add("browser-status-error");
+  }
+  new window.MutationObserver(() => {
+    if (problemText !== null && status.textContent !== problemText) {
+      problemText = null;
+      status.classList.remove("browser-status-error");
+    }
+  }).observe(status, { childList: true, characterData: true, subtree: true });
   const refused = el("ul", "browser-refused");
   // What the configured browser needs before it can start: the download action
   // for the bundled browser, or the list of browsers looked for. Empty and
@@ -465,8 +480,7 @@ export function register(ctx) {
       const data = await r.json().catch(() => ({}));
       if (!r.ok) {
         setMode("idle");
-        status.textContent = data.detail || "Could not open a browser.";
-        toast(status.textContent, true);
+        problem(data.detail || "Could not open a browser.");
         return;
       }
       jobId = data.job_id;
@@ -522,17 +536,15 @@ export function register(ctx) {
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) {
-        status.textContent = data.detail || "Could not go there.";
-        toast(status.textContent, true);
+        problem(data.detail || "Could not go there.");
         return;
       }
       if (data.ok) {
         status.textContent = "Opened " + (data.url || target);
       } else {
-        status.textContent = data.refused
+        problem(data.refused
           ? "Refused: " + data.refused
-          : "Could not load " + (data.url || target) + ": " + (data.error || "unknown error");
-        toast(status.textContent, true);
+          : "Could not load " + (data.url || target) + ": " + (data.error || "unknown error"));
       }
     } catch (e) {
       status.textContent = "Could not go there.";
@@ -586,8 +598,7 @@ export function register(ctx) {
       const data = await r.json().catch(() => ({}));
       if (!r.ok) {
         setMode("idle");
-        status.textContent = data.detail || "No agent browser to watch.";
-        toast(status.textContent, true);
+        problem(data.detail || "No agent browser to watch.");
         return;
       }
       jobId = data.job_id;
@@ -745,6 +756,15 @@ export function register(ctx) {
         setMode("own");
         status.textContent = "A browser is already open for this key. "
           + "Go sends it to another address; Stop closes it.";
+        const v = await fetch(API + "/view", {
+          method: "POST", headers: authHeaders(),
+        });
+        const vd = await v.json().catch(() => ({}));
+        if (v.ok && vd.job_id && mode === "own" && !jobId) {
+          jobId = vd.job_id;
+          stream(jobId);
+          poll();
+        }
       }
     } catch (e) { /* transient; the next visit retries */ }
   }

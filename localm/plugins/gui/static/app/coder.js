@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { addMessageRow, isWarnStatus, lsSetScoped, statusLabel } from "./chat.js";
-import { $, authHeaders, autoGrow, chooseAsync, confirmDanger, confirmDangerAsync, el, nearBottom, openModal, readSSE, renderMarkdown, toast } from "./helpers.js";
+import { $, authHeaders, autoGrow, chooseAsync, closeModal, confirmDanger, confirmDangerAsync, el, nearBottom, openModal, readSSE, renderMarkdown, toast } from "./helpers.js";
 import { t, tn } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
 import { confirmLoadText, modelCache, refreshModels } from "./models-sidebar.js";
@@ -1475,6 +1475,7 @@ export async function closeCoderSession(s) {
 export function dropCoderSession(s) {
   stopInlineBrowserStream(s);
   s.closed = true;
+  _closeModalOf(s);
   s.feedEl.remove();
   if (!coder.sessions.has(s.info.id)) return;
   coder.sessions.delete(s.info.id);
@@ -1483,6 +1484,33 @@ export function dropCoderSession(s) {
     coder.activeId = remaining[remaining.length - 1] || null;
   }
   activateSession(coder.activeId);
+}
+
+/** Mark the shared modal's content as belonging to session *s*. The marker is
+ *  a child of the modal body, so it survives a picker opened over the dialog
+ *  and is gone as soon as any other dialog replaces it. */
+function _bindModalToSession(body, s) {
+  const mark = el("span", "");
+  mark.hidden = true;
+  mark.dataset.coderSession = s.info.id;
+  _boundMarks.add(mark);
+  body.appendChild(mark);
+}
+const _boundMarks = new Set();
+
+/** Close the shared modal when it is a dialog opened for *s*: a dialog must
+ *  never outlive its session and act on whichever one is active next. */
+function _closeModalOf(s) {
+  let shown = false;
+  for (const m of [..._boundMarks]) {
+    if (m.dataset.coderSession !== s.info.id) continue;
+    // A dialog set aside under a picker is not on screen: marking it dead
+    // keeps the picker from putting it back.
+    m.dataset.dead = "1";
+    _boundMarks.delete(m);
+    if (m.isConnected && $("modal").style.display !== "none") shown = true;
+  }
+  if (shown) closeModal();
 }
 
 /** A session that ended somewhere else (another tab, the API, the server):
@@ -2242,8 +2270,7 @@ $("setup-history").onclick = openSessionHistory;
 /** POST a live settings change and refresh the cached session info.
  *  Only the keys PRESENT in *body* are touched server-side, so a caller
  *  changing one control cannot silently restate (and clobber) the others. */
-export async function postSessionSettings(body) {
-  const s = activeSession();
+export async function postSessionSettings(body, s = activeSession()) {
   if (!s) throw new Error(t("coder.session.none"));
   const r = await fetch(`/api/coder/sessions/${s.info.id}/settings`, {
     method: "POST", headers: authHeaders(), body: JSON.stringify(body),
@@ -2314,7 +2341,12 @@ function _renderModelBar(updated, model) {
 /** Switch the active session's model, updating bar and indicators. *pin*
  *  false makes it the session's preferred model rather than its pin. */
 export async function switchActiveSessionModel(model, pin = true) {
-  const s = activeSession();
+  return switchSessionModel(activeSession(), model, pin);
+}
+
+/** Switch *s*'s model (the session a dialog was opened for, which is not
+ *  necessarily the active one by the time the button is pressed). */
+export async function switchSessionModel(s, model, pin = true) {
   if (!s) { toast(t("coder.session.none"), true); return; }
   if (s.busy) {
     toast(t("coder.controls.busyError"), true);
@@ -2324,7 +2356,7 @@ export async function switchActiveSessionModel(model, pin = true) {
     const updated = await _applySessionModel(s, model, pin);
     if (!updated) return;
     if (pin) s.pendingModel = null;
-    _renderModelBar(updated, model);
+    if (s.info.id === coder.activeId) _renderModelBar(updated, model);
     toast(t("coder.controls.modelSwitched", { model: updated.model || model }));
   } catch (e) {
     toast(t("coder.controls.modelSwitchFailed") + e.message, true);
@@ -2377,6 +2409,7 @@ export function openSessionControls() {
   if (!s) { toast(t("coder.session.startFirst"), true); return; }
   openModal(t("coder.controls.modalTitle", { label: sessionLabel(s.info) }), (body) => {
     const info = s.info || {};
+    _bindModalToSession(body, s);
 
     body.appendChild(el("p", "sub", t("coder.controls.intro")));
 
@@ -2418,10 +2451,10 @@ export function openSessionControls() {
     const modelBtn = el("button", "btn-secondary", t("coder.controls.switchModelBtn"));
     modelBtn.onclick = async () => {
       const chosen = modelInput.value.trim();
-      if (!chosen || chosen === activeSession()?.info?.model) return;
+      if (!chosen || chosen === s.info.model) return;
       modelBtn.disabled = true;
       try {
-        await switchActiveSessionModel(chosen);
+        await switchSessionModel(s, chosen);
       } finally {
         modelBtn.disabled = false;
       }
@@ -2446,7 +2479,7 @@ export function openSessionControls() {
     appBox.onchange = async () => {
       appBox.disabled = true;
       try {
-        const d = await postSessionSettings({ auto_approve: appBox.checked });
+        const d = await postSessionSettings({ auto_approve: appBox.checked }, s);
         appBox.checked = !!d.auto_approve;
         toast(t(d.auto_approve ? "coder.controls.autoApproveOn" : "coder.controls.autoApproveRevoked"));
       } catch (e) {
@@ -2473,7 +2506,7 @@ export function openSessionControls() {
         // "" is sent as null, which CLEARS - the server distinguishes an absent
         // field (leave alone) from an explicit null (clear).
         const v = scopeIn.value.trim();
-        const d = await postSessionSettings({ scope: v || null });
+        const d = await postSessionSettings({ scope: v || null }, s);
         toast(d.scope ? t("coder.controls.scopeSet", { scope: d.scope }) : t("coder.controls.scopeCleared"));
       } catch (e) { toast(t("coder.controls.scopeSetFailed") + e.message, true); }
       finally { scopeBtn.disabled = false; }
@@ -2502,7 +2535,7 @@ export function openSessionControls() {
       vSet.disabled = true;
       try {
         const v = vIn.value.trim();
-        const d = await postSessionSettings({ verify: v || null });
+        const d = await postSessionSettings({ verify: v || null }, s);
         vIn.value = d.verify || "";
         toast(d.verify ? t("coder.controls.verificationIs", { verify: d.verify }) : t("coder.controls.verificationOff"));
       } catch (e) { toast(t("coder.controls.verifySetFailed") + e.message, true); }
@@ -2513,7 +2546,7 @@ export function openSessionControls() {
     vAuto.onclick = async () => {
       vAuto.disabled = true;
       try {
-        const d = await postSessionSettings({ auto_verify: true });
+        const d = await postSessionSettings({ auto_verify: true }, s);
         vIn.value = d.verify || "";
         // A re-detect that found nothing is SAID, not left looking like a set.
         toast(d.verify ? t("coder.controls.verificationIs", { verify: d.verify })
@@ -2557,7 +2590,7 @@ export function openSessionControls() {
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.detail || r.statusText);
         s.info = d;
-        $("coder-cwd").textContent = d.cwd;
+        if (s.info.id === coder.activeId) $("coder-cwd").textContent = d.cwd;
         renderSessionSelect();
         toast(t("coder.controls.cwdSetToast") + d.cwd);
       } catch (e) { toast(t("coder.controls.cwdSetFailed") + e.message, true); }
@@ -2590,8 +2623,7 @@ export function openSessionControls() {
  *  remembered about the user), and these scripts share ONE global lexical
  *  environment - so the shorter name silently shadowed it and the chat memory
  *  chip stopped opening anything. Two different memories, two different names. */
-export async function openCoderMemoryModal() {
-  const s = activeSession();
+export async function openCoderMemoryModal(s = activeSession()) {
   if (!s) { toast(t("coder.session.startFirst"), true); return; }
   let data;
   try {
@@ -2600,8 +2632,10 @@ export async function openCoderMemoryModal() {
     data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
   } catch (e) { toast(t("coder.memory.readFailed") + e.message, true); return; }
+  if (s.closed) return;
 
   openModal(t("coder.memory.modalTitle", { label: sessionLabel(s.info) }), (body) => {
+    _bindModalToSession(body, s);
     if (data.warning) body.appendChild(el("div", "modal-warn", data.warning));
     if (!data.exists) {
       body.appendChild(emptyState("book", t("coder.memory.emptyTitle"),
@@ -2633,7 +2667,7 @@ export async function openCoderMemoryModal() {
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.detail || r.statusText);
         toast(t("coder.memory.remembered"));
-        openCoderMemoryModal();
+        openCoderMemoryModal(s);
       } catch (e) { toast(t("coder.memory.addFailed") + e.message, true); }
       finally { addBtn.disabled = false; }
     };
@@ -2666,7 +2700,7 @@ export async function openCoderMemoryModal() {
         if (!d.had_file) toast(t("coder.memory.noFile"), true);
         else if (!d.removed) toast(t("coder.memory.noMatch", { pattern }), true);
         else toast(tn("coder.memory.removed", d.removed));
-        openCoderMemoryModal();
+        openCoderMemoryModal(s);
       } catch (e) { toast(t("coder.memory.forgetFailed") + e.message, true); }
       finally { dropBtn.disabled = false; }
     };
@@ -2680,8 +2714,7 @@ export async function openCoderMemoryModal() {
 /** Background work THIS session started (the REPL's /bg). An owner session can
  *  start background shell jobs and sub-agents and, until now, could enumerate
  *  them nowhere. */
-export async function openBackgroundModal() {
-  const s = activeSession();
+export async function openBackgroundModal(s = activeSession()) {
   if (!s) { toast(t("coder.session.startFirst"), true); return; }
   let data;
   try {
@@ -2690,8 +2723,10 @@ export async function openBackgroundModal() {
     data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
   } catch (e) { toast(t("coder.bg.readFailed") + e.message, true); return; }
+  if (s.closed) return;
 
   openModal(t("coder.bg.modalTitle", { label: sessionLabel(s.info) }), (body) => {
+    _bindModalToSession(body, s);
     const jobs = data.jobs || [];
     const running = jobs.filter((j) => j.state === "running");
     const done = jobs.filter((j) => j.state !== "running");
@@ -2743,15 +2778,15 @@ export async function openBackgroundModal() {
 
     const foot = el("div", "actions");
     const refresh = el("button", "btn-secondary", t("coder.bg.refreshBtn"));
-    refresh.onclick = () => openBackgroundModal();
+    refresh.onclick = () => openBackgroundModal(s);
     foot.appendChild(refresh);
     body.appendChild(foot);
   });
 }
 
 $("coder-controls").onclick = openSessionControls;
-$("coder-memory").onclick = openCoderMemoryModal;
-$("coder-bg").onclick = openBackgroundModal;
+$("coder-memory").onclick = () => openCoderMemoryModal();
+$("coder-bg").onclick = () => openBackgroundModal();
 const coderModelBtn = $("coder-model");
 if (coderModelBtn) coderModelBtn.onclick = openSessionControls;
 

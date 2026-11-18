@@ -10,6 +10,7 @@ Routes (mounted by the engine, auto-scoped to the ``browser`` capability):
   POST   /api/browser/scroll     - scroll the open browser's page
   POST   /api/browser/key        - send a named key press to the open browser
   POST   /api/browser/type       - type text into the open browser
+  POST   /api/browser/view       - stream this key's already-open browser to this caller
   POST   /api/browser/stop       - close the browser and end the stream
   GET    /api/browser/state      - whether one is open, and what it reached
   GET    /api/browser/engine     - whether the configured browser can start, and why not
@@ -276,6 +277,15 @@ async def watch_agent_browser(request: Request,
     entry = found[0]
     live = entry["browser"]
 
+    job = _start_view_job(jobs, request, live, "Agent browser view",
+                          "watching the agent browser")
+    return {"job_id": job.id, "session_id": entry["session_id"]}
+
+
+def _start_view_job(jobs, request: Request, live, label: str, line: str):
+    """Start a job that streams *live*'s frames to this caller until the job is
+    cancelled or the session goes away. The session keeps running either way."""
+
     def _run(job) -> bool:
         ok = live.enable_live_view(
             lambda data: job.push({"type": FRAME_EVENT, "data": data}))
@@ -283,19 +293,36 @@ async def watch_agent_browser(request: Request,
             job.push({"type": "line",
                       "text": "this browser build has no live view"})
             return False
-        job.push({"type": "line", "line": "watching the agent browser"})
+        job.push({"type": "line", "line": line})
         try:
             while (not job.cancel_requested
                    and bsession.get(live.session_id) is live):
                 time.sleep(_TICK)
         finally:
-            # The agent keeps browsing; only the viewer goes away.
             live.disable_live_view()
         return True
 
-    job = jobs.start_fn("browser", _run, owner=principal_id(request),
-                        label="Agent browser view")
-    return {"job_id": job.id, "session_id": entry["session_id"]}
+    return jobs.start_fn("browser", _run, owner=principal_id(request),
+                         label=label)
+
+
+@_router.post("/api/browser/view")
+async def view_own_browser(request: Request):
+    """Stream this key's already-open browser to this caller, for a page that
+    was reloaded or reopened while the browser stayed up."""
+    _require_enabled()
+    jobs = getattr(request.app.state, "jobs", None)
+    if jobs is None:
+        raise HTTPException(503, "The live browser view needs this server's "
+                                 "background job registry, which is "
+                                 "unavailable.")
+    sid = _gui_session_id(request)
+    live = bsession.get(sid)
+    if live is None:
+        raise HTTPException(404, "No browser is open. Open one first.")
+    job = _start_view_job(jobs, request, live, "Browser session view",
+                          "browser ready")
+    return {"job_id": job.id, "session_id": sid}
 
 
 @_router.post("/api/browser/navigate")

@@ -310,8 +310,16 @@ def test_the_first_nudge_offers_the_no_tool_needed_escape(tmp_path):
     agent = _make_agent(tmp_path, max_turns=6)
     with patch.object(agent, "_call_llm", return_value="Nope."), \
          patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]):
-        agent.run_task("run the tests")
+        agent.run_task("show me the project layout")
     assert "[no tool needed]" in str(_nocall_prompts(agent)[0]["content"])
+
+
+def test_the_first_nudge_to_run_something_offers_no_escape(tmp_path):
+    agent = _make_agent(tmp_path, max_turns=6)
+    with patch.object(agent, "_call_llm", return_value="Nope."), \
+         patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]):
+        agent.run_task("run the tests")
+    assert "[no tool needed]" not in str(_nocall_prompts(agent)[0]["content"])
 
 
 def test_the_no_tool_needed_escape_is_accepted_and_never_forced(tmp_path):
@@ -320,7 +328,7 @@ def test_the_no_tool_needed_escape_is_accepted_and_never_forced(tmp_path):
     enforcement report."""
     agent = _make_agent(tmp_path, max_turns=8)
     forced = []
-    replies = iter(["I cannot do that.", "[no tool needed] The tests already pass."])
+    replies = iter(["I cannot do that.", "[no tool needed] The layout is flat."])
 
     def _reply(*a, **k):
         forced.append(bool(getattr(agent, "_force_tool_grammar", False)))
@@ -328,8 +336,8 @@ def test_the_no_tool_needed_escape_is_accepted_and_never_forced(tmp_path):
 
     with patch.object(agent, "_call_llm", side_effect=_reply), \
          patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]):
-        result = agent.run_task("run the tests")
-    assert _final_answer(result) == "The tests already pass."
+        result = agent.run_task("show me the project layout")
+    assert _final_answer(result) == "The layout is flat."
     assert forced == [False, False]
     assert len(_nocall_prompts(agent)) == 1
     assert "tool use not achieved" not in result

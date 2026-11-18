@@ -150,11 +150,30 @@ export function pickPath(opts = {}) {
   return new Promise((resolve) => {
     let settled = false;
     let cleanup = () => {};
-    const finish = (value) => {
+    // The one #modal holds a single dialog, so opening the picker would
+    // destroy the dialog it was opened from. Its content is set aside here and
+    // put back when the picker is answered, so the caller's dialog (its fields
+    // and handlers) is still there to receive the pick.
+    const prior = $("modal").style.display !== "none" ? {
+      title: $("modal-title").textContent,
+      nodes: Array.from($("modal-body").childNodes),
+      cls: ($("modal").querySelector(".modal") || $("modal")).className,
+    } : null;
+    const finish = (value, { closed = false } = {}) => {
       if (settled) return;
       settled = true;
       cleanup();
-      $("modal").style.display = "none";
+      const dead = prior && prior.nodes.some(
+        (n) => n.matches?.("[data-dead]") || n.querySelector?.("[data-dead]"));
+      if (prior && !closed && !dead) {
+        $("modal-title").textContent = prior.title;
+        $("modal-body").replaceChildren(...prior.nodes);
+        const box = $("modal").querySelector(".modal");
+        if (box) box.className = prior.cls;
+        $("modal").style.display = "flex";
+      } else {
+        $("modal").style.display = "none";
+      }
       resolve(value);
     };
 
@@ -699,7 +718,7 @@ export function pickPath(opts = {}) {
       // Dismissing via the shared modal chrome (x / Escape) sets
       // display:none; poll for that and resolve null.
       const watch = setInterval(() => {
-        if ($("modal").style.display === "none") { clearInterval(watch); finish(null); }
+        if ($("modal").style.display === "none") { clearInterval(watch); finish(null, { closed: true }); }
       }, 200);
       const escHandler = (e) => {
         if (e.key !== "Escape") return;
