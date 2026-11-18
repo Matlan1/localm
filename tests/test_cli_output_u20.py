@@ -40,10 +40,11 @@ def test_ps_keeps_the_port_and_directory_at_80_columns(monkeypatch):
     res = CliRunner().invoke(main, ["ps"])
     assert res.exit_code == 0
     assert "\u2026" not in res.output
-    cells = [line.split("\u2502")[-2].strip() for line in res.output.splitlines()
-             if line.startswith("\u2502")]
-    assert "x" * 90 in "".join(cells)
-    assert "8642" in "".join(res.output.split())
+    import re
+    rows = [re.split("[\u2502\u2503]", line)[1:-1] for line in res.output.splitlines()
+            if line[:1] in ("\u2502", "\u2503")]
+    assert "x" * 90 in "".join(r[5].strip() for r in rows)
+    assert "8642" in "".join(r[3].strip() for r in rows)
 
 
 def test_list_keeps_a_long_path_on_a_narrow_terminal(monkeypatch, tmp_path):
