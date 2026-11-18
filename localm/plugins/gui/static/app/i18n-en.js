@@ -3503,6 +3503,7 @@ export const I18N_EN = {
   "browser.setup.systemMissing":
     "No supported browser was found on this computer. localm looked for {names}.",
   "browser.setup.useBundled": "Use the bundled browser instead",
+  "coder.controls.verifyNoCheckReason": "No check can run in this project: {reason}",
 
   // ---- Setup page (guided runtime + first model, manual entry only) ----
 };

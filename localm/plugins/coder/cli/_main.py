@@ -431,6 +431,8 @@ def main(
         # does not exit with it still in flight on a daemon thread.
         agent.reflect_in_background = False
 
+    agent.verify_off = bool(no_verify)
+
     if patch_mode:
         agent.patch_mode = True
 
@@ -559,11 +561,17 @@ def main(
         if patch_mode and agent.has_patch():
             patch_content = agent.flush_patch()
             if patch_mode == "-":
-                sys.stdout.write(patch_content)
+                raw = getattr(sys.stdout, "buffer", None)
+                if raw is None:
+                    sys.stdout.write(patch_content)
+                else:
+                    sys.stdout.flush()
+                    raw.write(patch_content.encode("utf-8"))
+                    raw.flush()
             else:
                 out = Path(patch_mode)
                 out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_text(patch_content, encoding="utf-8")
+                out.write_text(patch_content, encoding="utf-8", newline="")
                 print_info(f"Patch written to {out}")
 
         md_path = finish_agent(agent)
@@ -589,7 +597,8 @@ def _run_doctor(work_dir: Path, model, url, api_key, native_tools, port,
     backend = _build_backend(
         provider, url, model or "localm", api_key, native_tools, port, False,
         False, work_dir, False, probe_only=True,
-        machine_output=(output_format or "text").lower() in ("json", "jsonl"))
+        machine_output=(output_format or "text").lower() in ("json", "jsonl"),
+        check_registered=bool(model))
     checks = run_doctor(work_dir, backend, verify_cmd=verify_cmd)
     click.echo(render(checks, output_format))
     if not report_ok(checks):
@@ -981,7 +990,7 @@ def _serve_on_attached(base_url: str, token, model: str, *, machine_output: bool
 
 def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                    force_new, work_dir, ci, probe_only=False, machine_output=False,
-                   session_mode=None):
+                   session_mode=None, check_registered=True):
     """Build the LLM backend for the chosen provider / explicit URL / offline path.
     Returns backend. Split out of main; exits
     (2 under --ci, else 1) on a missing required option or a failed server start.
@@ -1000,7 +1009,8 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
     try:
         return _build_backend_gated(
             provider, url, model, api_key, native_tools, port, no_server,
-            force_new, work_dir, ci, probe_only, machine_output, session_mode)
+            force_new, work_dir, ci, probe_only, machine_output, session_mode,
+            check_registered)
     except (OffMachineModelRefused, NetworkPolicyError) as e:
         print_error(str(e))
         sys.exit(2 if ci else 1)
@@ -1008,7 +1018,7 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
 
 def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                          no_server, force_new, work_dir, ci, probe_only,
-                         machine_output, session_mode):
+                         machine_output, session_mode, check_registered=True):
     # Live-attribute access so a test patching cli.make_localm_backend is honoured.
     make_localm_backend = _cli.make_localm_backend
 
@@ -1057,7 +1067,7 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                 "Run `localm list` to see registered models."
             )
             sys.exit(2 if ci else 1)
-        refusal = _unregistered_model_message(model, work_dir)
+        refusal = _unregistered_model_message(model, work_dir) if check_registered else None
         if refusal:
             print_error(refusal)
             sys.exit(2 if ci else 1)
@@ -1290,4 +1300,4 @@ def console_main() -> None:
     (a separate ``pip install``) hits it."""
     from localm._venvguard import require_venv
     require_venv()
-    main()
+    main(windows_expand_args=False)

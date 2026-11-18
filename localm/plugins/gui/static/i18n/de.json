@@ -3147,5 +3147,6 @@
   "workflow.uploadFailed": "Upload fehlgeschlagen",
   "workflow.uploadUse": "Hochladen + verwenden",
   "workflow.uploadedToast": "Hochgeladen und ausgewählt",
-  "workflow.useThisWorkflow": "Diesen Workflow verwenden"
+  "workflow.useThisWorkflow": "Diesen Workflow verwenden",
+  "coder.controls.verifyNoCheckReason": "Keine Prüfung kann in diesem Projekt laufen: {reason}"
 }

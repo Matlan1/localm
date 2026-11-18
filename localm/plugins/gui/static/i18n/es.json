@@ -3147,5 +3147,6 @@
   "workflow.uploadFailed": "La subida falló",
   "workflow.uploadUse": "Subir y usar",
   "workflow.uploadedToast": "Subido y seleccionado",
-  "workflow.useThisWorkflow": "Usar este flujo de trabajo"
+  "workflow.useThisWorkflow": "Usar este flujo de trabajo",
+  "coder.controls.verifyNoCheckReason": "Ninguna comprobación puede ejecutarse en este proyecto: {reason}"
 }

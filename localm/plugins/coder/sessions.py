@@ -296,6 +296,11 @@ class CoderSession:
             verify_cmd = verify or (
                 self._detect_verify(cwd) if auto_verify else None)
         self.verify_cmd = verify_cmd
+        self.verify_off = (not restricted and verify_cmd is None
+                           and not verify and not auto_verify)
+        self.verify_reason = (None if restricted or verify_cmd is not None
+                              or self.verify_off
+                              else self._no_check_reason(cwd))
 
         # Every tool that runs project code keeps its confirmation even under
         # auto_approve. A RESTRICTED session never has those tools, so the set
@@ -348,6 +353,21 @@ class CoderSession:
             verify_max_retries=verify_max_retries,
             **gen_kwargs,
         )
+
+    @staticmethod
+    def _no_check_reason(cwd: Path):
+        """Why the project's check cannot run (see verify.no_check_reason), or
+        None. Best-effort like detection: a failure here is logged and leaves the
+        session without a reason, never fails it."""
+        try:
+            from .verify import no_check_reason
+            return no_check_reason(cwd)
+        except Exception:                                      # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).warning(
+                "coder: could not work out why no check runs for %s", cwd,
+                exc_info=True)
+            return None
 
     @staticmethod
     def _detect_verify(cwd: Path):
@@ -722,6 +742,10 @@ class CoderSession:
             new = command.strip() or None
         self.agent.verify_cmd = new
         self.verify_cmd = new
+        self.verify_off = new is None and not detect
+        self.agent.verify_off = self.verify_off
+        self.verify_reason = (self._no_check_reason(self.cwd)
+                              if new is None and detect else None)
         return new
 
     def set_cwd(self, cwd: Path) -> bool:
@@ -1039,6 +1063,11 @@ class CoderSession:
             # instead of leaving the user to guess whether one is running.
             "verify": (_verify_text(self.agent.verify_cmd)
                        if self.agent.verify_cmd is not None else None),
+            # Why no check runs when the project has a test setup but none can
+            # (null when a check runs, verification was turned off, or the
+            # project simply has none), and whether it was turned off.
+            "verify_reason": self.verify_reason,
+            "verify_off": self.verify_off,
             # How many fix attempts the exit-code oracle gets before it reports
             # failure - the web equivalent of the CLI's --goal-max-iters.
             "verify_max_retries": self.agent.verify_max_retries,

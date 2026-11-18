@@ -3147,5 +3147,6 @@
   "workflow.uploadFailed": "Échec de l'import",
   "workflow.uploadUse": "Importer et utiliser",
   "workflow.uploadedToast": "Importé et sélectionné",
-  "workflow.useThisWorkflow": "Utiliser ce workflow"
+  "workflow.useThisWorkflow": "Utiliser ce workflow",
+  "coder.controls.verifyNoCheckReason": "Aucune vérification ne peut s'exécuter dans ce projet : {reason}"
 }
