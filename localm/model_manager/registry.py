@@ -1076,7 +1076,13 @@ def _pick_mmproj_candidate(model_name: str, names: list[str], *,
     matches = [n for n in names if token in n.lower()]
     if matches:
         if len(matches) != 1:
-            return None
+            own = _name_residue(model_name)
+            named = [n for n in matches
+                     if len(res := _name_residue(n.lower().replace("mmproj", " "))) > len(token)
+                     and res in own]
+            if len(named) != 1:
+                return None
+            matches = named
         key = _model_key(matches[0])
         # A projector named exactly for another model in the folder is that model's.
         if key and key != _model_key(model_name) and any(

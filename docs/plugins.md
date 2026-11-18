@@ -420,9 +420,8 @@ Scope and limits:
   nothing. The built-in chat plugin's two inlets (a style note asking the model
   to answer directly and to speak of itself as "I", and the `<think>` note for
   reasoning models) apply only to `chat`; an API caller's messages reach the
-  model unchanged. The style note is off by default; the `chat_style_note` setting (Settings > Model >
-  Add the chat style note) turns it on for the own chat. It is added only when the request carries no
-  system prompt of its own, and never to a conversation-summary request.
+  model unchanged. The `chat_style_note` setting (Settings > Model > Add the chat style note) turns the
+  style note off for the own chat as well.
 - Hooks see scrubbed content text, not model-internal control markers (the
   pipeline sits downstream of the engine's marker scrubbing).
 - This is a server-side seam. It is independent of localm's existing

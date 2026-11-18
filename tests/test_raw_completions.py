@@ -451,15 +451,6 @@ def test_localms_own_chat_never_adds_the_style_note_to_the_users_system_prompt(e
     assert _THINK_INSTRUCTION in system
 
 
-def test_the_style_note_is_off_by_default(env):
-    engine = _recording_engine(reply="BANANA", name="qwen3-8b")
-    with TestClient(_app(engine)) as c:
-        r = c.post("/v1/chat/completions", headers={"X-Client-Id": "chat"}, json={
-            "model": "qwen3-8b", "messages": [{"role": "user", "content": "hi"}]})
-    assert r.status_code == 200, r.text
-    assert _ROLE_WORD_INSTRUCTION not in _system_text(engine.calls[0])
-
-
 def test_the_setting_turns_the_style_note_off_for_the_own_chat(env):
     _enable_style_note(False)
     engine = _recording_engine(reply="BANANA", name="qwen3-8b")
