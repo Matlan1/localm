@@ -234,7 +234,15 @@ def test_a_cli_job_is_tracked_until_its_worker_ends(monkeypatch):
             self.returncode = 0
             return 0
 
-    monkeypatch.setattr(jobmanager.subprocess, "Popen", _Child)
+    class _Subprocess:
+        """jobmanager's ``subprocess`` with only ``Popen`` replaced."""
+        Popen = _Child
+
+        def __getattr__(self, name):
+            return getattr(jobmanager_subprocess, name)
+
+    jobmanager_subprocess = jobmanager.subprocess
+    monkeypatch.setattr(jobmanager, "subprocess", _Subprocess())
     before = set(config.home_bound_runs())
     jobmanager.JobManager().start_cli("probe", ["--version"])
     try:
