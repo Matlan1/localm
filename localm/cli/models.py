@@ -1777,8 +1777,8 @@ def rename(old_name, new_name):
     Unlike 'localm alias', OLD_NAME stops working wherever a name is typed or
     sent. Only the name changes: the file stays, and settings, jobs, pinned chats,
     Knowledge collections, adapters and media workflows keep pointing at this
-    model. A per-project .localcoder/config.toml 'model' setting is a name you
-    typed, so it must name the model as it is called now.
+    model. A per-project .localcoder/config.toml 'model' setting is a stored name,
+    so it follows the rename.
 
     If a localm server is serving this directory it performs the rename, so a
     model that is loaded right now keeps serving under its new name instead of

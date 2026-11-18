@@ -748,7 +748,7 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
         hooks = getattr(agent, "_tool_hooks", None)
         checks = run_doctor(
             agent.cwd, agent.backend, verify_cmd=agent.verify_cmd,
-            verify_off=agent.verify_cmd is None,
+            verify_off=agent.verify_off and agent.verify_cmd is None,
             project_map=agent._project_map,
             trusted_mcp_servers=(hooks.mcp_servers
                                  if hooks is not None and hooks.trusted else None))
@@ -766,11 +766,13 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
                 "  /verify off        no exit-code check")
         elif arg == "off":
             agent.verify_cmd = None
+            agent.verify_off = True
             print_info("Verification off - turns finish without an exit-code "
                        "check. The model's own 'done' is the only gate again.")
         elif arg == "auto":
             detected = detect_verify_command(agent.cwd)
             agent.verify_cmd = detected
+            agent.verify_off = False
             reason = None if detected else no_check_reason(agent.cwd)
             if reason:
                 print_warning("This project has a pytest setup but no check "
@@ -785,6 +787,7 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
                 print_success(f"Verification: `{command_text(detected)}`")
         else:
             agent.verify_cmd = arg
+            agent.verify_off = False
             print_success(f"Verification: `{arg}` must exit 0 before a turn "
                           "that changed files finishes.")
 

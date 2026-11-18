@@ -192,6 +192,20 @@ def _tiers(residents: Iterable[Resident], unload_policy: str
     return out
 
 
+def _best_option(options: Sequence[Fit]) -> Fit:
+    """The option to report for one candidate: the best one usable without
+    asking, else the best class, else the cheapest. A no-ask option that leaves
+    layers on the CPU (``FIT_PARTIAL``) gives way to an option that reaches a
+    better class by unloading models the user chose, so the candidate is
+    offered with the unload as its reason instead of being loaded split."""
+    best = min(options, key=lambda f: (f.needs_ask, f.cls, len(f.evicts_user)))
+    if best.cls == FIT_PARTIAL and not best.evicts_user:
+        better = [f for f in options if f.evicts_user and f.cls < FIT_PARTIAL]
+        if better:
+            return min(better, key=lambda f: (f.cls, len(f.evicts_user)))
+    return best
+
+
 def assess(names: Sequence[str], *, residents: Mapping[str, Resident],
            build: Callable[[str], object], reading: VramReading,
            ram_available: Optional[int], ram_total: Optional[int],
@@ -201,8 +215,9 @@ def assess(names: Sequence[str], *, residents: Mapping[str, Resident],
     A resident model or one a peer answers is ``FIT_RESIDENT`` (``FIT_DISK``
     when its own placement reads from disk). Any other is built with *build*
     (an unloaded engine) and classified at each option ``_tiers`` allows; the
-    best option usable without asking wins, else the best class, else the
-    cheapest. An option that unloads models adds their VRAM to the reading's
+    best option usable without asking wins (unless it runs split on the CPU
+    and unloading the user's models reaches a better class: ``_best_option``),
+    else the best class, else the cheapest. An option that unloads models adds their VRAM to the reading's
     free figure; it is left out when a freed amount is unknown or the load
     spreads over two or more GPUs (a freed amount has no device). Blocking:
     reads model files."""
@@ -236,5 +251,5 @@ def assess(names: Sequence[str], *, residents: Mapping[str, Resident],
                                disk_read_bytes=disk,
                                configured_layers=(_configured_cpu_layers(engine)
                                                   if cls == FIT_CPU_ONLY else None)))
-        out[name] = min(options, key=lambda f: (f.needs_ask, f.cls, len(f.evicts_user)))
+        out[name] = _best_option(options)
     return out

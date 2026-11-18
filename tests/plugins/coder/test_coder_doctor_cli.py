@@ -367,10 +367,11 @@ def test_json_without_a_task_leaves_the_repl_on_stdout(proj, scripted, monkeypat
 class _SessionAgent:
     """What /doctor reads from a live session."""
 
-    def __init__(self, cwd, backend, verify_cmd):
+    def __init__(self, cwd, backend, verify_cmd, verify_off=False):
         self.cwd = cwd
         self.backend = backend
         self.verify_cmd = verify_cmd
+        self.verify_off = verify_off
 
         class _Map:
             def to_context_string(self):
@@ -399,9 +400,21 @@ def test_repl_doctor_says_so_when_the_session_has_verification_off(
         tmp_path, models_server, capsys):
     from localm.plugins.coder.backends.http import HTTPBackend
     from localm.plugins.coder.cli import repl
-    agent = _SessionAgent(tmp_path, HTTPBackend(models_server, "m1"), None)
+    agent = _SessionAgent(tmp_path, HTTPBackend(models_server, "m1"), None,
+                          verify_off=True)
     repl._handle_command("/doctor", agent)
     assert "verification is off for this session" in capsys.readouterr().out
+
+
+def test_repl_doctor_does_not_say_off_when_nothing_was_detected(
+        tmp_path, models_server, capsys):
+    from localm.plugins.coder.backends.http import HTTPBackend
+    from localm.plugins.coder.cli import repl
+    agent = _SessionAgent(tmp_path, HTTPBackend(models_server, "m1"), None)
+    repl._handle_command("/doctor", agent)
+    out = capsys.readouterr().out
+    assert "verification is off" not in out
+    assert "no verify command" in out
 
 
 def test_doctor_is_a_listed_slash_command_and_in_the_help():

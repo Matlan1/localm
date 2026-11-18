@@ -698,9 +698,8 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
     if not sys.stdin.isatty() and prompt is None:
         prompt = sys.stdin.read().strip()
 
-    from ..audit import make_audit_log, make_transcript
-    audit = make_audit_log(session_mode, label="chat")
-    transcript = make_transcript(session_mode, label="chat")
+    from ..audit import make_session_recording
+    audit, transcript = make_session_recording(session_mode, label="chat")
 
     if prompt is not None and router.in_process:
         # A single prompt is known before anything loads: when it routes, the

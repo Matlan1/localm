@@ -1912,6 +1912,7 @@
   "keygate.wrongKey": "Cette clé n'a pas été acceptée. Vérifiez qu'elle ne contient pas de faute de frappe, ou demandez une clé valide au propriétaire de ce serveur.",
   "keygate.unreachable": "Impossible de joindre le serveur LocaLM pour vérifier la clé. Vérifiez qu'il fonctionne, puis réessayez.",
   "keygate.refused": "Le serveur a refusé la connexion (HTTP {status}).",
+  "keygate.configUnreadable": "LocaLM n'a pas pu lire son config.json (le fichier est endommagé) et est donc verrouillé. Aucune clé d'API n'est en cause. Réparez le fichier ou restaurez config.json.bak, placé à côté, puis redémarrez LocaLM.",
   "keygate.sessionEnded": "Votre connexion a pris fin : la clé a peut-être été révoquée ou a expiré. Saisissez une clé pour continuer.",
   "keygate.keyCreated": "Une clé API a été créée pour ce serveur après l'ouverture de cette page, il en demande donc une maintenant. Saisissez la clé pour continuer.",
   "qr.title": "Scanner le QR d'appairage",
@@ -3151,5 +3152,6 @@
   "workflow.uploadUse": "Importer et utiliser",
   "workflow.uploadedToast": "Importé et sélectionné",
   "workflow.useThisWorkflow": "Utiliser ce workflow",
-  "chat.modelLoadingBanner": "Chargement de {model}. Un grand modèle peut prendre un moment."
+  "chat.modelLoadingBanner": "Chargement de {model}. Un grand modèle peut prendre un moment.",
+  "coder.controls.verifyNoCheckReason": "Aucune vérification ne peut s'exécuter dans ce projet : {reason}"
 }
