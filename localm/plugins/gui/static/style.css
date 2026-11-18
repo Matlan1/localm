@@ -2358,7 +2358,7 @@ div:has(> .data-table) { overflow-x: auto; }
    settings FOLDER/PATH field row) and stay. */
 
 .modal.picker-modal { width: min(880px, 95vw); height: min(620px, 86vh); }
-.picker-modal .modal-body { padding: 0; overflow: hidden; display: flex; min-height: 0; }
+.picker-modal .modal-body { flex: 1 1 auto; padding: 0; overflow: hidden; display: flex; min-height: 0; }
 .picker { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 
 /* nav bar: back / up / path */
