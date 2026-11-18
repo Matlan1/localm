@@ -724,12 +724,16 @@ def _detect_verify(work_dir: Path):
     quietly did not is exactly the kind of hidden problem that wastes their
     time."""
     try:
-        from ..verify import command_text, detect_verify_command
+        from ..verify import command_text, detect_verify_command, no_check_reason
         cmd = detect_verify_command(work_dir)
+        reason = None if cmd else no_check_reason(work_dir)
     except Exception as exc:                                   # noqa: BLE001
         print_warning(f"Could not detect a project check ({exc}); "
                       "no exit-code verification will run this session.")
         return None
+    if reason:
+        print_warning("This project has a pytest setup but no check can run. "
+                      + reason)
     if cmd is not None:
         print_info(f"Verification: `{command_text(cmd)}` must exit 0 before a "
                    "turn that changed files finishes (/verify off to disable).")

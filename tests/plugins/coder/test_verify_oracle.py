@@ -272,8 +272,12 @@ class TestDetectVerifyCommand:
         cmd = verify.detect_verify_command(tmp_path)
         assert cmd is not None and "pytest" in verify.command_text(cmd)
 
-    def test_detected_python_command_uses_this_interpreter(self, tmp_path):
-        """Not a bare `python` off PATH - that is a different env on many boxes."""
+    def test_detected_python_command_uses_this_interpreter(
+            self, tmp_path, monkeypatch):
+        """With no project venv and nothing on PATH, localm's own interpreter
+        is used when it has pytest."""
+        monkeypatch.setattr(
+            "localm.plugins.coder.pyenv._path_interpreters", lambda cwd: [])
         (tmp_path / "pytest.ini").write_text("[pytest]\n")
         assert verify.detect_verify_command(tmp_path)[0] == sys.executable
 
@@ -354,21 +358,31 @@ class TestDetectionConfirmsTheRunnerCanRun:
         self._fake_which(monkeypatch, {"yarn": "/usr/bin/yarn"})
         assert verify.detect_verify_command(tmp_path)[0] == "/usr/bin/yarn"
 
-    def test_python_project_without_pytest_importable_is_not_a_check(
+    def test_python_project_without_any_pytest_is_not_a_check(
             self, tmp_path, monkeypatch):
-        """The interpreter always launches, so the launch check cannot see this
-        one: with no pytest importable the check exits 1 with "No module named
-        pytest" on every run, unfixable by the model and wearing an exit code
-        that looks like a genuine test failure."""
+        """With no pytest in the project, on PATH or in localm, the check would
+        exit 1 with "No module named pytest" on every run, unfixable by the
+        model and wearing an exit code that looks like a genuine test failure.
+        The reason is available so a message can say what to fix."""
         (tmp_path / "pytest.ini").write_text("[pytest]\n")
         monkeypatch.setattr(
-            "importlib.util.find_spec",
-            lambda name, *a, **k: None if name == "pytest" else object())
+            "localm.plugins.coder.pyenv._path_interpreters", lambda cwd: [])
+        monkeypatch.setattr(
+            "localm.plugins.coder.pyenv._own_interpreter_has_pytest",
+            lambda: False)
         assert verify.detect_verify_command(tmp_path) is None
+        assert "pytest" in verify.no_check_reason(tmp_path)
 
-    def test_python_project_with_pytest_still_detects(self, tmp_path):
-        """The other direction, unpatched: pytest is importable here (it is
-        running this test), so the oracle must still be offered."""
+    def test_no_check_reason_is_none_without_a_python_test_setup(
+            self, tmp_path):
+        assert verify.no_check_reason(tmp_path) is None
+
+    def test_python_project_with_pytest_still_detects(
+            self, tmp_path, monkeypatch):
+        """The other direction: pytest is importable here (it is running this
+        test), so the oracle is still offered."""
+        monkeypatch.setattr(
+            "localm.plugins.coder.pyenv._path_interpreters", lambda cwd: [])
         (tmp_path / "pytest.ini").write_text("[pytest]\n")
         assert verify.detect_verify_command(tmp_path)[0] == sys.executable
 
