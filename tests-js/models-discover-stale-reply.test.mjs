@@ -83,6 +83,25 @@ test("changing the source drops the running HF search", async () => {
   assert.equal(window.document.getElementById("disc-search").disabled, false);
 });
 
+test("a reply that was not aborted in time is still dropped by its generation number", async () => {
+  const pending = [];
+  const ignoreAbort = (url) => new Promise((resolve) => {
+    if (!String(url).includes("/api/discover/search")) {
+      resolve({ ok: true, status: 200, json: async () => ({}), text: async () => "" });
+      return;
+    }
+    pending.push({ resolve });
+  });
+  const { window } = loadAppWithPages({ fetchImpl: ignoreAbort });
+  const first = window.discoverSearch();
+  const second = window.discoverSearch();
+  pending[1].resolve(hfReply("new/repo"));
+  await second;
+  pending[0].resolve(hfReply("old/repo"));
+  await first;
+  assert.deepEqual(names(window), ["new/repo"]);
+});
+
 test("ticking no format cancels the running search and clears the VRAM caption", async () => {
   const pending = [];
   const { window } = loadAppWithPages({ fetchImpl: deferredFetch(pending) });
