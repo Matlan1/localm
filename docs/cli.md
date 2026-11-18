@@ -979,7 +979,7 @@ tools, which only the terminal offers (see [gui.md](gui.md)).
 | `run_shell_background` | Start a shell command in the background, returning a job id | yes | no |
 | `check_shell_job` | Check a background shell job's state and output | no | no |
 | `kill_shell_job` | Stop a background job and its process tree; for a background sub-agent's job, the sub-agent runs no further tool call and ends after its current reply | yes | no |
-| `git_commit` | Stage and commit (without `files`, every change, new untracked files included) | yes | no |
+| `git_commit` | Stage and commit (without `files`, every change, new untracked files included; localm's own session files in `.localcoder` are never committed) | yes | no |
 | `git_create_branch` | Create a branch, optionally checking it out | yes | no |
 | `git_push` | Push the current branch | yes | no |
 | `spawn_agent` | Spawn a sub-agent for a sub-task and return its result | yes | no |

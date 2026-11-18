@@ -145,6 +145,19 @@ def tool_git_log(cwd: Path, n: int = 10, path: str = "") -> ToolResult:
     return ToolResult(ok=ok, output=out, summary=f"git log -{n}")
 
 
+PRIVATE_PROJECT_PATHS = (
+    ".localcoder/sessions",
+    ".localcoder/repl_history",
+    ".localcoder/checkpoint.json",
+)
+
+
+def _unstage_private(cwd: Path) -> Optional[str]:
+    """Take localm's own session files out of the index; the error text, or None."""
+    out, ok = _git(cwd, "reset", "-q", "--", *PRIVATE_PROJECT_PATHS)
+    return None if ok else out
+
+
 def tool_git_commit(
     cwd: Path,
     message: str,
@@ -160,6 +173,10 @@ def tool_git_commit(
     files:
         List of file paths to stage.  When omitted, stages every change,
         new untracked files included (``git add -A``; ignored files stay out).
+
+    localm's own session state in the project (``PRIVATE_PROJECT_PATHS``:
+    transcripts, input history, a legacy checkpoint) is never committed, whether
+    or not it is named in *files*.
     """
     # Stage
     if files:
@@ -172,10 +189,16 @@ def tool_git_commit(
         if not ok:
             return ToolResult.error(f"Failed to stage changes: {out}")
 
+    failed = _unstage_private(cwd)
+    if failed is not None:
+        return ToolResult.error(
+            f"Not committed: localm's own session files could not be kept out of "
+            f"the commit: {failed}")
+
     # Commit
     out, ok = _git(cwd, "commit", "-m", message, timeout=30)
     if not ok:
-        if "nothing to commit" in out.lower():
+        if "nothing to commit" in out.lower() or "nothing added to commit" in out.lower():
             return ToolResult.success(
                 "Nothing to commit, working tree clean.",
                 summary="git commit - nothing to commit",
@@ -446,6 +469,9 @@ def git_commit_all_in(cwd: Path, message: str) -> tuple[str, bool]:
     out, ok = _git(cwd, "add", "-A", timeout=30)
     if not ok:
         return f"failed to stage child work: {out}", False
+    failed = _unstage_private(cwd)
+    if failed is not None:
+        return f"failed to keep localm's session files out of the commit: {failed}", False
     out, ok = _git(cwd, "commit", "-m", message, timeout=60)
     if not ok and "nothing to commit" in out.lower():
         return "nothing to commit", True

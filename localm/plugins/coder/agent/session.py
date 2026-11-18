@@ -481,6 +481,9 @@ class _SessionMixin:
 
         out_dir = self.cwd / ".localcoder" / "sessions"
         out_dir.mkdir(parents=True, exist_ok=True)
+        keep_out = out_dir / ".gitignore"
+        if not keep_out.exists():
+            keep_out.write_text("*\n", encoding="utf-8")
         out_path = out_dir / f"{ts_label}_{self._checkpoint_id}.md"
 
         tokens_line = (
