@@ -99,6 +99,7 @@ class _CollectionSearch:
     _vectors: Optional[list]
     _note_vector_degrade: Callable[..., None]
     embedding_model: Callable[[], Optional[str]]
+    embedding_model_mixed: Callable[[], bool]
 
     def query(self, text: str, k: int = 4,
               embed_fn: Optional[EmbedFn] = None, *,
