@@ -12,13 +12,14 @@ from localm.plugins.builtin.image.backends import native as image_native
 
 
 @pytest.mark.parametrize("steps,strength,expected", [
-    (10, 0.6, 6),
-    (20, 0.25, 5),
-    (10, 1.0, 0),
-    (10, None, 0),
-    (10, 0.0, 0),
-    (2, 0.2, 0),
-    (2, 0.75, 1),
+    (10, 0.6, (6, 7)),
+    (20, 0.25, (5, 6)),
+    (10, 1.0, ()),
+    (10, None, ()),
+    (10, 0.0, ()),
+    (2, 0.2, ()),
+    (2, 0.75, (1,)),
+    (10, 0.95, (9,)),
 ])
 def test_trimmed_sample_steps(steps, strength, expected):
     assert _child.trimmed_sample_steps(steps, strength) == expected
@@ -43,17 +44,17 @@ def progress_cb():
 def test_a_trimmed_schedule_reports_sampling_progress(progress_cb):
     progress, q = progress_cb
     _child._State.sample_steps = 10
-    _child._State.trimmed_steps = 6
+    _child._State.trimmed_steps = (6, 7)
     _child._State.hires_steps = 0
-    progress(1, 6, 0.5, None)
+    progress(1, 7, 0.5, None)
     kind, info = q.get_nowait()
-    assert kind == "progress" and info["phase"] == "sampling" and info["steps"] == 6
+    assert kind == "progress" and info["phase"] == "sampling" and info["steps"] == 7
 
 
 def test_an_untrimmed_job_still_reports_sampling_at_the_requested_steps(progress_cb):
     progress, q = progress_cb
     _child._State.sample_steps = 10
-    _child._State.trimmed_steps = 0
+    _child._State.trimmed_steps = ()
     progress(1, 10, 0.5, None)
     assert q.get_nowait()[1]["phase"] == "sampling"
 

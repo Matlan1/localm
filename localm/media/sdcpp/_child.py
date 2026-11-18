@@ -66,7 +66,7 @@ class _State:
     crash_fh: Optional[TextIO] = None
     generating = False
     sample_steps = 0
-    trimmed_steps = 0
+    trimmed_steps: tuple = ()
     hires_steps = 0
     upscaling = False
     decoding = False
@@ -261,8 +261,8 @@ def _make_callbacks(resp_q):
         _State.last_progress = now
         if _State.upscaling:
             phase = "upscaling"
-        elif steps and steps in (_State.sample_steps, _State.trimmed_steps,
-                                 _State.hires_steps) and not _State.decoding:
+        elif steps and (steps in (_State.sample_steps, _State.hires_steps)
+                        or steps in _State.trimmed_steps) and not _State.decoding:
             phase = "sampling"
         elif _State.decoding:
             phase = "decoding"
@@ -283,7 +283,8 @@ def _make_callbacks(resp_q):
             if not img.data or w < 1 or h < 1:
                 return
             png = preview_png(w, h, c, ctypes.string_at(img.data, w * h * c))
-            shown = int(_State.trimmed_steps or _State.sample_steps)
+            shown = int(_State.trimmed_steps[-1] if _State.trimmed_steps
+                        else _State.sample_steps)
             resp_q.put(("preview", {"step": abs(int(step)), "steps": shown,
                                     "width": w, "height": h, "png": png}))
         except Exception as e:  # noqa: BLE001
@@ -360,14 +361,17 @@ def _error_with_native(message: str) -> str:
     return message
 
 
-def trimmed_sample_steps(steps: int, strength: Optional[float]) -> int:
-    """The step count the sampler reports for an image-to-image job: the
-    schedule is cut to ``int(steps * strength)`` steps. 0 when the job is not
-    image-to-image, or when the cut leaves the schedule whole or empty."""
+def trimmed_sample_steps(steps: int, strength: Optional[float]) -> tuple:
+    """The step totals the sampler reports for an image-to-image job: the
+    schedule is cut to ``int(steps * strength)`` steps and the library counts
+    one more (a 10 step job at strength 0.6 reports a total of 7). Empty when
+    the job is not image-to-image or the cut leaves nothing to sample."""
     if strength is None or not 0.0 < strength < 1.0:
-        return 0
-    trimmed = int(steps * strength)
-    return trimmed if 0 < trimmed < steps else 0
+        return ()
+    cut = int(steps * strength)
+    if cut < 1:
+        return ()
+    return tuple(t for t in (cut, cut + 1) if t != steps)
 
 
 def _reset_generation_state() -> None:
@@ -854,7 +858,8 @@ def _do_upscale_image(payload):
                          f"image; each side is limited to {max_side} pixels")
     _State.last_errors = []
     _State.decoding = False
-    _State.sample_steps = _State.trimmed_steps = _State.hires_steps = 0
+    _State.sample_steps = _State.hires_steps = 0
+    _State.trimmed_steps = ()
     if path not in _State.paths:
         _State.paths = _State.paths + (path,)
     keep = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
@@ -930,7 +935,8 @@ def _do_generate_video(payload, cancel_event):
     lib.sd_cancel_generation(ctx, b.SD_CANCEL_RESET)
     _reset_generation_state()
     _State.sample_steps = int(p.sample_params.sample_steps)
-    _State.trimmed_steps = _State.hires_steps = 0
+    _State.trimmed_steps = ()
+    _State.hires_steps = 0
     _State.decoding = False
     previewing = _arm_preview(lib, payload, _State.sample_steps)
     _State.generating = True
