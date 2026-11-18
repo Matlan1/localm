@@ -192,7 +192,8 @@ def _job_run_appears(before, name: str) -> list:
     """The names of the tracked runs not in *before*, once one named *name*
     shows up or 10 s have passed."""
     deadline = time.monotonic() + 10.0
-    while (not any(r.name == name for r in config.home_bound_runs())
+    while (not any(r.name == name and r not in before
+                   for r in config.home_bound_runs())
            and time.monotonic() < deadline):
         time.sleep(0.01)
     return [r.name for r in unfinished_home_bound_runs(before, timeout=0.0)]
