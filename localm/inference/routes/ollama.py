@@ -216,7 +216,7 @@ def _tag_object(name: str, entry: dict, facts: tuple[int, Optional[float], str])
         "model": name,
         "modified_at": P.iso_from_timestamp(mtime if mtime is not None else 0),
         "size": size,
-        "digest": P.digest_of(entry),
+        "digest": P.digest_of(entry, name),
         "details": _entry_details(entry, fmt),
     }
 
@@ -292,7 +292,7 @@ def register(app: FastAPI, ctx) -> None:
             for name, entry, engine in loaded:
                 if entry is None:
                     obj = {"name": name, "model": name, "size": 0,
-                           "digest": "", "details": {}}
+                           "digest": P.digest_of({}, name), "details": {}}
                 else:
                     obj = _tag_object(name, entry, _file_facts(entry))
                     obj.pop("modified_at")

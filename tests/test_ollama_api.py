@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -152,7 +153,7 @@ def test_tags_lists_registered_chat_and_embedding_models_only(client, home):
     weights = home / "m.gguf"
     weights.write_bytes(b"x" * 1234)
     _write_registry(home, {
-        "alpha": {"path": str(weights), "model_type": "llm", "sha256": "sha256:abc",
+        "alpha": {"path": str(weights), "model_type": "llm", "sha256": "sha256:" + "ab" * 32,
                   "architecture": "llama"},
         "embed": {"path": str(weights), "model_type": "embedding"},
         "proj": {"path": str(weights), "model_type": "mmproj"},
@@ -164,7 +165,8 @@ def test_tags_lists_registered_chat_and_embedding_models_only(client, home):
     assert set(by_name) == {"alpha", "embed", MODEL}
     alpha = by_name["alpha"]
     assert alpha["model"] == "alpha" and alpha["size"] == 1234
-    assert alpha["digest"] == "abc"
+    assert alpha["digest"] == "ab" * 32
+    assert all(re.fullmatch(r"[0-9a-f]{64}", m["digest"]) for m in body["models"]), body
     assert alpha["details"]["format"] == "gguf" and alpha["details"]["family"] == "llama"
     assert alpha["modified_at"].endswith("Z")
 
