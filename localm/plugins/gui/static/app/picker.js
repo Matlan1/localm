@@ -397,7 +397,8 @@ export function pickPath(opts = {}) {
         const canSelect = selectable(entry);
         const full = joinPath(current, entry.name);
         const row = el("div", "picker-row " +
-          (entry.is_dir ? "is-dir" : "is-file") + (canSelect ? "" : " unselectable"));
+          (entry.is_dir ? "is-dir" : "is-file")
+          + (canSelect || entry.is_dir ? "" : " unselectable"));
         row.dataset.path = full;
         row._entry = entry;
         if (multi) {
@@ -564,6 +565,7 @@ export function pickPath(opts = {}) {
         return fetchDirs(path, true, true, true).then((d) => {
           if (seq !== reqSeq) return;                 // superseded by a newer nav
           if (push && current !== d.path) history.push(current);
+          if (current !== d.path && filterText) { filterIn.value = ""; filterText = ""; }
           current = d.path;
           data = d;
           // Landing in a dot-directory turns the Hidden toggle on.
@@ -649,7 +651,9 @@ export function pickPath(opts = {}) {
         if (e.key === "ArrowDown") { e.preventDefault(); listEl.focus(); moveActive(1); }
         else if (e.key === "Enter") { e.preventDefault(); if (visibleRows.length) onRowActivate(visibleRows[0]); }
         else if (e.key === "Escape") {
-          if (filterText) { filterIn.value = ""; filterText = ""; renderList(); }
+          e.preventDefault();
+          e.stopPropagation();
+          if (filterText) { filterIn.value = ""; filterText = ""; renderList(); updateCount(); }
           else finish(null);
         }
       };
