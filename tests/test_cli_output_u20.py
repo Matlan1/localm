@@ -82,8 +82,8 @@ def test_rag_query_runs_the_query_with_native_output_paused(monkeypatch):
 
     monkeypatch.setattr(rag_pkg, "Collection", _Coll)
     from localm.rag import rerank as rr
-    monkeypatch.setattr(rr, "rerank_plan", lambda enabled: SimpleNamespace(
-        note=None, fn=None, candidates=0, min_score=None))
+    monkeypatch.setattr(rr, "rerank_plan",
+                        lambda enabled: rr.RerankPlan(None, 0, None, None))
     res = CliRunner().invoke(main, ["rag", "query", "c", "hello", "--no-rerank"])
     assert res.exit_code == 0, res.output
     assert seen["paused"] is True
