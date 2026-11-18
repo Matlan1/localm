@@ -115,7 +115,7 @@ The streaming usage block adds `ttft_ms` and `tokens_per_sec`. See [docs/server-
 ### Benchmark
 
 ```bash
-localm benchmark mymodel
+localm benchmark mymodel                           # TTFT is the full prefill of each prompt (prompt cache off, one untimed warm-up)
 localm benchmark mymodel --gen-tokens 256         # tokens per run (default 128)
 localm benchmark mymodel --prompts "64,512,2048"  # prompt sizes to test
 localm benchmark mymodel --ctx 8192               # context window

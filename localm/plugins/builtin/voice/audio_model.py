@@ -25,8 +25,6 @@ REPLY_TOKEN_CEILING = 8192
 
 _LABEL_RE = re.compile(r"^[a-z0-9]{1,8}$")
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-_ASR_TAG = "<asr_text>"
-_ASR_LANGUAGE_RE = re.compile(r"language [^<\n]{0,40}" + re.escape(_ASR_TAG))
 
 
 def audio_model_names() -> list[str]:
@@ -84,7 +82,8 @@ def clean_transcript(reply: str) -> str:
     (``language None`` for a clip with no speech); both are removed, as is any
     ``<think>`` block."""
     reply = _THINK_RE.sub("", reply)
-    return _ASR_LANGUAGE_RE.sub("", reply).replace(_ASR_TAG, "").strip()
+    from localm.textnorm import strip_asr_header
+    return strip_asr_header(reply).strip()
 
 
 def build_messages(data: bytes, label: str, language: Optional[str],

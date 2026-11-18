@@ -105,7 +105,7 @@ def job_add(name, prompt, cron, every, coder, memory, rag, collection, cwd,
     # reaches disk") true for every writer, and turns an unregistered name from a
     # silent repeating failure on every scheduled tick into one immediate error.
     from localm.model_manager import unregistered_model_error
-    _bad = unregistered_model_error(model)
+    _bad = unregistered_model_error(model, from_cli=True)
     if _bad:
         click.echo(f"Invalid job: {_bad}", err=True)
         sys.exit(1)

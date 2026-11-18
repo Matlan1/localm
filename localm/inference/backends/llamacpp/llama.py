@@ -2047,8 +2047,10 @@ class LlamaCpp:
             from ._slots import LlamaSlotOps, SlotScheduler
             self._draft_source()
             self._slots = SlotScheduler(LlamaSlotOps(self), self.n_parallel)
+        slot_note = self.parallel_note or (
+            self._one_slot_reason() if self.n_parallel == 1 else "")
         _mtp_log.info("parallel slots: %d%s", self.n_parallel,
-                      " (%s)" % self.parallel_note if self.parallel_note else "")
+                      " (%s)" % slot_note if slot_note else "")
 
         # Optional in-process vision (C1): load the mmproj via mtmd so image
         # messages can be answered. Best-effort - any failure (no mtmd.dll, an
@@ -4148,6 +4150,17 @@ class LlamaCpp:
                                     keep_prefix=keep_prefix)
         return True
 
+    def _one_slot_reason(self) -> str:
+        """Why this model always answers one request at a time, "" when it does
+        not."""
+        if self.is_encoder_decoder:
+            return "encoder-decoder models answer one request at a time"
+        if self.is_diffusion:
+            return "diffusion models answer one request at a time"
+        if self._spec_source_name != SPEC_OFF:
+            return "speculative drafting is on"
+        return ""
+
     def _resolve_parallel(self, requested: int, n_ctx: int) -> tuple[int, str]:
         """The sequences this model's context holds for *requested* slots, and
         why it holds fewer ("" when it does not).
@@ -4161,12 +4174,9 @@ class LlamaCpp:
             want = 1
         if want <= 1:
             return 1, ""
-        if self.is_encoder_decoder:
-            return 1, "encoder-decoder models answer one request at a time"
-        if self.is_diffusion:
-            return 1, "diffusion models answer one request at a time"
-        if self._spec_source_name != SPEC_OFF:
-            return 1, "speculative drafting is on"
+        reason = self._one_slot_reason()
+        if reason:
+            return 1, reason
         if not self._memory_api_available():
             return 1, "this llama.cpp runtime cannot manage separate sequences"
         n_ubatch = min(n_ctx, 2048)

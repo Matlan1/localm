@@ -111,17 +111,19 @@ def speak_cmd(text, output, text_file, model, voice, voice_file, language, seed,
         console.print(f"[red]{escape(str(e))}[/red]")
         sys.exit(1)
 
+    from ..debuglog import native_console_paused
     status_ctx = console.status("Starting...") if console.is_terminal else None
     try:
-        if status_ctx is not None:
-            with status_ctx as status:
+        with native_console_paused():
+            if status_ctx is not None:
+                with status_ctx as status:
+                    out = speech.synthesize(target, text, language=language,
+                                            reference_wav=reference, seed=seed,
+                                            on_progress=_Progress(status))
+            else:
                 out = speech.synthesize(target, text, language=language,
                                         reference_wav=reference, seed=seed,
-                                        on_progress=_Progress(status))
-        else:
-            out = speech.synthesize(target, text, language=language,
-                                    reference_wav=reference, seed=seed,
-                                    on_progress=_Progress(None))
+                                        on_progress=_Progress(None))
     except KeyboardInterrupt:
         speech.reset_speech()
         console.print("[yellow]Cancelled.[/yellow]")

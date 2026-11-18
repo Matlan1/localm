@@ -3151,5 +3151,6 @@
   "workflow.uploadUse": "Subir y usar",
   "workflow.uploadedToast": "Subido y seleccionado",
   "workflow.useThisWorkflow": "Usar este flujo de trabajo",
-  "chat.modelLoadingBanner": "Cargando {model}. Un modelo grande puede tardar un poco."
+  "chat.modelLoadingBanner": "Cargando {model}. Un modelo grande puede tardar un poco.",
+  "chat.usage.firstToken": "primer token a los {ms} ms"
 }
