@@ -1372,16 +1372,14 @@ def _probe_descendants(proc) -> list:
 
 def stop_probe_daemon(wait: float = 5.0) -> None:
     """Stop the probe daemon, if one is running, and its descendants
-    (:func:`_probe_descendants`), waiting up to *wait* seconds for each to
-    exit, so the runtime it loaded is free on return. The next query spawns a
+    (:func:`_probe_descendants`), waiting up to *wait* seconds for each of them
+    to exit, so the runtime it loaded is free on return. The next query spawns a
     fresh one. Never raises."""
-    import time
     with _PROBE_LOCK:
         proc = _PROBE_PROC
         children = _probe_descendants(proc) if proc is not None and proc.poll() is None else []
         _kill_and_clear_probe()
         if proc is not None:
-            deadline = time.monotonic() + wait
             try:
                 proc.wait(timeout=wait)
             except Exception as e:
@@ -1390,8 +1388,7 @@ def stop_probe_daemon(wait: float = 5.0) -> None:
             if children:
                 from localm import install_manifest
                 for pid, start in children:
-                    left = max(0.0, deadline - time.monotonic())
-                    if not install_manifest._stop(pid, timeout=left, start=start):
+                    if not install_manifest._stop(pid, timeout=wait, start=start):
                         logger.debug("vram-probe: process %s of the stopped daemon did "
                                      "not exit within %.1fs", pid, wait)
 
