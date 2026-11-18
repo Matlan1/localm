@@ -44,7 +44,9 @@ export function showView(name) {
     confirmDangerAsync(t("nav.leaveSettings.title"), t("settings.unsavedConfirm"),
       t("nav.leaveSettings.leave")).then((leave) => {
       _leaveAsked = false;
-      if (leave) _showViewNow(name);
+      if (!leave) return;
+      if (window.discardSettingsEdits) window.discardSettingsEdits();
+      _showViewNow(name);
     });
     return;
   }

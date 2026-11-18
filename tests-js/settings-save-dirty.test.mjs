@@ -134,3 +134,37 @@ test("R10: leaving a clean Settings page does not prompt", async () => {
   assert.ok(!modalOpen(win), "no prompt when there are no unsaved edits");
   assert.equal(win.isSettingsView(), false, "navigation proceeds");
 });
+
+test("Leave without saving discards the edit: saved value back, not dirty, not carried, no draft", async () => {
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch([]) });
+  await render(win);
+  makeSettingsActive(win);
+  const edit = (key, set) => {
+    const n = win.document.querySelector(`input[data-key="${key}"]`);
+    set(n);
+    n.dispatchEvent(new win.Event("input", { bubbles: true }));
+    n.dispatchEvent(new win.Event("change", { bubbles: true }));
+  };
+  edit("n_ctx", (n) => { n.value = "8192"; });
+  edit("require_auth", (n) => { n.checked = true; });
+  assert.equal(win.settingsDirty(), true);
+
+  runScript(win, 'showView("chat");');
+  modalButton(win, "Leave without saving").click();
+  await settle();
+  assert.equal(win.isSettingsView(), false);
+  assert.equal(win.settingsDirty(), false, "no unsaved edit is left");
+  assert.equal(win.sessionStorage.getItem("localm.settingsDraft"), null, "no draft is kept");
+
+  await render(win);
+  await drain();
+  assert.equal(win.document.querySelector('input[data-key="n_ctx"]').value, "4096",
+    "back on Settings the saved value shows, not the discarded edit");
+  assert.equal(win.document.querySelector('input[data-key="require_auth"]').checked, false);
+  assert.equal(win.settingsDirty(), false);
+
+  edit("n_ctx", (n) => { n.value = "1024"; });
+  win.dispatchEvent(new win.Event("pagehide"));
+  assert.ok(win.sessionStorage.getItem("localm.settingsDraft"),
+    "an edit made after the discard is kept for a reload again");
+});

@@ -1885,6 +1885,17 @@ export function discardSettingsDraft() {
   try { sessionStorage.removeItem(SETTINGS_DRAFT_KEY); } catch { /* storage blocked: nothing kept */ }
 }
 
+/** Discard the unsaved Settings edits while the page stays: every drawn
+ *  control goes back to its saved value, the carried edits and the stored
+ *  draft are dropped, and later edits are kept for a reload again. */
+export function discardSettingsEdits() {
+  forEachChangedControl((id, ctrl) => ctrl.write(ctrl.shown));
+  _pendingEdits.clear();
+  _draftRestored = 0;
+  try { sessionStorage.removeItem(SETTINGS_DRAFT_KEY); } catch { /* storage blocked: nothing kept */ }
+}
+window.discardSettingsEdits = discardSettingsEdits;
+
 /** Move a draft stored by an earlier load of this tab into the carried edits,
  *  once per page load. Returns the number of edits read. */
 function readSettingsDraft() {
