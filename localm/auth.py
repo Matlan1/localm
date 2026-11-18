@@ -1597,9 +1597,13 @@ def _touch_last_used(key_hash: str) -> None:
         logger.debug("last_used stamp failed (non-fatal): %s", e)
 
 
-def verify(presented: Optional[str]) -> Optional[set]:
+def verify(presented: Optional[str], *, record_use: bool = True) -> Optional[set]:
     """Resolve a presented bearer token to the set of scopes it grants, or None
-    if it matches nothing. The owner key grants ADMIN (every scope)."""
+    if it matches nothing. The owner key grants ADMIN (every scope).
+
+    *record_use* stamps the key's last_used. Pass False for a check made by the
+    key's own minter (not a device presenting it), so the key does not show as
+    used before any device has used it."""
     if not presented or not presented.strip():
         return None
     from localm import scopes as S
@@ -1617,5 +1621,6 @@ def verify(presented: Optional[str]) -> Optional[set]:
         # Legacy row: it verified on the cheap path. Record that now so the
         # construction is declared rather than assumed on every later verify.
         _mark_record_alg(rec.get("id"), _ALG_FAST)
-    _touch_last_used(str(rec.get("hash", "")))
+    if record_use:
+        _touch_last_used(str(rec.get("hash", "")))
     return set(rec.get("scopes", []))
