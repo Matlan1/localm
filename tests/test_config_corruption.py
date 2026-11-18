@@ -570,6 +570,7 @@ def test_peek_registry_creates_no_directories(tmp_path, monkeypatch):
 
 def _write_registry(home, reg):
     (home / "registry.json").write_text(json.dumps(reg), encoding="utf-8")
+    cfg._loop_reads_invalidate()
 
 
 def _stored_registry(home):

@@ -75,6 +75,8 @@ def _key(scopes):
 
 def _register(home, entries):
     (home / "registry.json").write_text(json.dumps(entries), encoding="utf-8")
+    import localm.config as _cfg
+    _cfg._loop_reads_invalidate()
 
 
 def _gui_app(tmp_path, *plugins):
