@@ -180,6 +180,23 @@ def test_install_unknown_is_error(cli_env):
     assert "No such plugin" in r.output
 
 
+def test_install_missing_folder_names_the_problem(cli_env, tmp_path):
+    missing = tmp_path / "typo"
+    r = CliRunner().invoke(cli_env.main, ["plugin", "install", str(missing)])
+    assert r.exit_code == 1
+    assert "no such folder" in r.output
+    assert "invalid plugin name" not in r.output
+
+
+def test_install_folder_without_manifest_names_the_problem(cli_env, tmp_path):
+    empty = tmp_path / "emptydir"
+    empty.mkdir()
+    r = CliRunner().invoke(cli_env.main, ["plugin", "install", str(empty), "-y"])
+    assert r.exit_code == 1
+    assert "no plugin.toml" in r.output
+    assert "invalid plugin name" not in r.output
+
+
 def test_install_warns_missing_requires_with_real_names(cli_env):
     """The dependency warning names the actual missing plugin and gives the
     exact install command, with no literal <name> placeholder."""

@@ -12,7 +12,7 @@ import { $, SHELL_TOKEN, authHeaders, confirmDangerAsync, el, instanceCacheTrust
 import { setLanguageReloadOpen, syncLanguageFromConfig, t } from "./i18n.js";
 import { syncLogoStyleFromConfig } from "./logo.js";
 import { addRevealToggle, applyInstallGateUI, dismissInstallGate, isIOSSafari, reattachActivity, refreshModels, shouldShowInstallGate, showInstallGate, showKeyGate, startHwStats, startQrScan, stopQrScan, submitKeyGate } from "./models-sidebar.js";
-import { capsReady, loadClientPlugins, onVoicePick, pluginState, populateVoicePicker, refreshKbSelect, refreshMemory, refreshPersonas, refreshPluginCommands, refreshVoiceStatus, setupPerfCard, voice } from "./settings-perf.js";
+import { capsReady, loadClientPlugins, onVoicePick, pluginState, populateVoicePicker, clearKbSelect, refreshKbSelect, refreshMemory, refreshPersonas, refreshPluginCommands, refreshVoiceStatus, setupPerfCard, voice } from "./settings-perf.js";
 import { VIEWS, showView } from "./tabs.js";
 
 // CSRF self-heal: a cookie-authed write can 403 if the in-memory CSRF token went
@@ -580,7 +580,7 @@ function markVoiceNotInstalled() {
  *  read of a plugin route is listed here and run through runPluginProbes. */
 export const PLUGIN_BOOT_PROBES = Object.freeze([
   Object.freeze({ plugin: "chat", run: refreshPersonas }),
-  Object.freeze({ plugin: "rag", run: refreshKbSelect }),
+  Object.freeze({ plugin: "rag", run: refreshKbSelect, absent: clearKbSelect }),
   Object.freeze({ plugin: "memory", run: refreshMemory }),
   Object.freeze({ plugin: "voice", run: refreshVoiceStatus, absent: markVoiceNotInstalled }),
   Object.freeze({ plugin: "coder", run: reattachSessions }),
@@ -911,6 +911,11 @@ populateVoicePicker();
 // the guard costs nothing and closes the same class of gap this fix exists for.
 window.addEventListener("focus", () => {
   if (window.__localmLocked === false) refreshPluginCommands();
+});
+// The set of active plugins changed (Plugins page, another tab, the CLI): re-run
+// the page-load plugin reads so the chat drawer's collections and the mic follow.
+window.addEventListener("localm:plugins-changed", () => {
+  if (window.__localmLocked === false) runPluginProbes();
 });
 // R50: a plugin toggled in ANOTHER tab bumps a shared localStorage rev; the
 // storage event fires in every OTHER same-origin tab, so we re-sync nav/commands

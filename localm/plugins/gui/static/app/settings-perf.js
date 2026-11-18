@@ -1986,6 +1986,9 @@ export async function refreshPluginCommands() {
     }
     pluginCommands.map = map;
     pluginCommands.suggest = data.suggest_plugins !== false;
+    const activeKey = (list) => list.filter((p) => p && p.active)
+      .map((p) => p.name).sort().join(",");
+    const activeChanged = _capsAnswered && activeKey(pluginState) !== activeKey(data.plugins || []);
     pluginState = data.plugins || [];
     _capsAnswered = true;
     caps.fsAccess = data.fs_access || "none";
@@ -2022,6 +2025,7 @@ export async function refreshPluginCommands() {
     if (isSec) isSec.hidden = !data.issues_available;
     await loadClientPlugins(pluginState);
     renderNav();
+    if (activeChanged) window.dispatchEvent(new CustomEvent("localm:plugins-changed"));
   } catch { /* server unreachable; fall back to plain unknown-command */ }
   finally { _markCapsReady(); }   // see capsReady: must settle on EVERY exit path
 }
@@ -3640,11 +3644,19 @@ export async function retrieveKnowledge(conv, query, opts = {}) {
 
 /** Populate the params-drawer knowledge selector. pages.js calls this after
  *  collections change on the Knowledge page. */
+export function clearKbSelect() {
+  const sel = $("p-kb");
+  if (!sel) return;
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = t("chat.none");
+  sel.replaceChildren(none);
+}
+
 export async function refreshKbSelect() {
   try {
     const r = await fetch("/api/rag/collections", { headers: authHeaders() });
-    if (!r.ok) return;
-    const data = await r.json();
+    const data = r.ok ? await r.json() : { collections: [] };
     const sel = $("p-kb");
     const current = sel.value;
     sel.replaceChildren();
