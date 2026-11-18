@@ -9,7 +9,7 @@
 import { iconEl } from "./icons.js";
 import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, elideAudioForWire, elideImagesForWire, isToolEvent, latestTurnHasAudio, latestTurnIsAudioOnly, lsSetScoped, markNotSent, markRefusedBy, maybeCompactConversation, memorySavedText, modelCannotHearAudio, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, persistChatParams, pinnedModelName, refreshWebPolicy, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, resolvePinnedModel, saveConversations, scopedKeyPrivate, setConversationPin, showPinnedGone, syncPinModelToggle, updateStatusIndicator, wireHasImageAndAudio, wireParts } from "./chat.js";
 import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, localizeServerNotes, autoGrow, confirmDanger, confirmDangerAsync, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setCanvasNavigationAllowed, setPreviewAllowed, splitThink, streamJob, stripAsrPrefix, stripThink, toast } from "./helpers.js";
-import { t, tn } from "./i18n.js";
+import { onLanguageReload, t, tn } from "./i18n.js";
 import { isPeerSelected, modelCache, modelSelect, refreshModels, reloadModel, toastLoadResult } from "./models-sidebar.js";
 import { pickPath, saveTextFs } from "./picker.js";
 import { execChatCommand, handleSlashSubmit } from "./slash.js";
@@ -1987,6 +1987,7 @@ export async function refreshPluginCommands() {
     pluginCommands.map = map;
     pluginCommands.suggest = data.suggest_plugins !== false;
     pluginState = data.plugins || [];
+    _capsAnswered = true;
     caps.fsAccess = data.fs_access || "none";
     caps.fsSave = data.fs_save === true;
     caps.networkBind = data.network_bind === true;
@@ -2052,6 +2053,13 @@ export function pluginSuggestion(cmd) {
 /* ---- dynamic nav rail (tabs follow the active plugins) ---- */
 // The most recent /api/plugins entries, refreshed alongside the command cache.
 export let pluginState = [];
+let _capsAnswered = false;
+
+/** False only when /api/capabilities has answered and does not list plugin *name*
+ *  as active for this key; true before it answers, so an unknown is read. */
+export function pluginReadable(name) {
+  return !_capsAnswered || pluginState.some((p) => p && p.name === name && p.active === true);
+}
 
 // Each plugin's manifest icon name -> a shared SVG icon name (see app/icons.js).
 // Kernel nav buttons carry their own data-icon in index.html; "studio" is the
@@ -4064,7 +4072,7 @@ if ($("mtb-new")) {
 
 // The Persona and Knowledge dropdowns replace their own "(none)" option, so
 // they are rebuilt when the interface language changes.
-document.addEventListener("localm:language", () => {
-  refreshPersonas();
-  refreshKbSelect();
+onLanguageReload(() => {
+  if (pluginReadable("chat")) refreshPersonas();
+  if (pluginReadable("rag")) refreshKbSelect();
 });

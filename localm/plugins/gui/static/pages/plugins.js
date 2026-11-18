@@ -4,7 +4,7 @@
 
 // --- ES module imports ---
 import { $, authHeaders, confirmDanger, el, readSSE, toast, whileBusy } from "../app/helpers.js";
-import { t, tn, tOr } from "../app/i18n.js";
+import { onLanguageReload, t, tn, tOr } from "../app/i18n.js";
 import { emptyState, iconEl } from "../app/icons.js";
 import { refreshPluginCommands } from "../app/settings-perf.js";
 
@@ -472,7 +472,7 @@ $("plugin-install").onclick = async () => {
 // The catalog and external tables are painted from fetched data, not marked
 // up in index.html, so both are re-fetched and redrawn when the interface
 // language changes.
-document.addEventListener("localm:language", () => {
+onLanguageReload(() => {
   renderCatalogPlugins();
   refreshPluginsPage();
 });

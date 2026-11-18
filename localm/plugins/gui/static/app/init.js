@@ -9,7 +9,7 @@
 import { chat, convUI, ingestSharedFiles, initServerConversations, refreshCtxLimit, renderChat, renderConvList } from "./chat.js";
 import { populateSetupModels, reattachSessions } from "./coder.js";
 import { $, SHELL_TOKEN, authHeaders, confirmDangerAsync, el, instanceCacheTrusted, refreshCsrf, reloadApp, safeStorageGet, sentPreviousShellToken, sentShellToken, setShellToken, toast } from "./helpers.js";
-import { syncLanguageFromConfig, t } from "./i18n.js";
+import { setLanguageReloadOpen, syncLanguageFromConfig, t } from "./i18n.js";
 import { syncLogoStyleFromConfig } from "./logo.js";
 import { addRevealToggle, applyInstallGateUI, dismissInstallGate, isIOSSafari, reattachActivity, refreshModels, shouldShowInstallGate, showInstallGate, showKeyGate, startHwStats, startQrScan, stopQrScan, submitKeyGate } from "./models-sidebar.js";
 import { capsReady, loadClientPlugins, onVoicePick, pluginState, populateVoicePicker, refreshKbSelect, refreshMemory, refreshPersonas, refreshPluginCommands, refreshVoiceStatus, setupPerfCard, voice } from "./settings-perf.js";
@@ -44,6 +44,12 @@ function _requestUrl(input) {
 function _sameOriginUrl(url) {
   if (!url) return false;
   try { return new URL(url, location.href).origin === location.origin; }
+  catch { return false; }
+}
+
+/** True for the sign-in and sign-out routes, whose 401 is a wrong key, not an ended sign-in. */
+function _isSessionLogin(url) {
+  try { return new URL(url, location.href).pathname.startsWith("/api/session"); }
   catch { return false; }
 }
 
@@ -91,6 +97,12 @@ window.fetch = async function (input, init) {
         }
       }
     }
+    if (res.status === 401 && window.__localmLocked === false) {
+      const url = _requestUrl(input);
+      if (_sameOriginUrl(url) && !_isSessionLogin(url)) {
+        lockUI(t(sentShellToken(hdrs) ? "keygate.keyCreated" : "keygate.sessionEnded"));
+      }
+    }
   } catch { /* fall through with the original response */ }
   return res;
 };
@@ -132,6 +144,7 @@ if ($("install-gate-install")) $("install-gate-install").onclick = () => {
 // boot steps (deep-link restore, pages.js) bail too.
 export function lockUI(message) {
   window.__localmLocked = true;
+  setLanguageReloadOpen(false);
   const app = $("app");
   if (app) app.style.display = "none";          // nothing of localm behind the gate
   showKeyGate(message || t("keygate.required"));
@@ -499,6 +512,7 @@ const _UP_POLLS_WITHOUT_DOWN = 3;   // ~9s at the 3s poll interval
 // keeps that overlay.
 export function onServerUnreachable(opts) {
   window.__localmLocked = true;
+  setLanguageReloadOpen(false);
   const app = $("app");
   if (app) app.style.display = "none";
   const gate = $("key-gate");
@@ -549,6 +563,7 @@ async function _serverBack() {
   _shutdownRequested = false;
   if (SHELL_TOKEN) await renewShellToken(SHELL_TOKEN);
   unlockUI();
+  setLanguageReloadOpen(true);
 }
 
 /** Grey the chat microphone as "voice plugin not installed". */
@@ -564,6 +579,7 @@ function markVoiceNotInstalled() {
  *  (optional) sets the page state for a plugin that is not active. Every page-load
  *  read of a plugin route is listed here and run through runPluginProbes. */
 export const PLUGIN_BOOT_PROBES = Object.freeze([
+  Object.freeze({ plugin: "chat", run: refreshPersonas }),
   Object.freeze({ plugin: "rag", run: refreshKbSelect }),
   Object.freeze({ plugin: "memory", run: refreshMemory }),
   Object.freeze({ plugin: "voice", run: refreshVoiceStatus, absent: markVoiceNotInstalled }),
@@ -699,12 +715,12 @@ window.bootAuthProbe = bootAuthProbe;
   // function would have been a structural no-op for this exact race, since the
   // flag itself is not set until lockUI()/unlockUI() run, which is further
   // down this same async chain.
-  refreshPersonas();
   runPluginProbes();
   // Kept (not fired and forgotten) because the `?view=` deep link below has to
   // wait for the plugin tabs' view sections to exist before it can land on one.
   const clientPluginsReady = loadClientPlugins();
   refreshPluginCommands();
+  capsReady.then(() => { if (window.__localmLocked === false) setLanguageReloadOpen(true); });
   setInterval(refreshModels, 30000);
   // A tab brought back to the front re-reads the model at once: a model loaded
   // or unloaded from another tab or the API is shown without waiting for the poll.

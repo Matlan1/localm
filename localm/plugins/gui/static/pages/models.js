@@ -6,7 +6,7 @@
 import { clearRecentGuiErrors, dismissRecentGuiError, onRecentGuiErrorsChange, recentGuiErrors } from "../app/client-log.js";
 import { pickDirectory } from "../app/picker.js";
 import { $, GIB, authHeaders, cancelJob, confirmDanger, confirmDangerAsync, downloadRate, el, fmtBytes, fmtDuration, openModal, promptText, readSSE, renderMarkdown, showInlineError, streamJob, toast, setBusy, whileBusy } from "../app/helpers.js";
-import { t, tn } from "../app/i18n.js";
+import { onLanguageReload, t, tn } from "../app/i18n.js";
 import { onServerUnreachable } from "../app/init.js";
 import { emptyState, iconEl } from "../app/icons.js";
 import { refreshModels, showKeyGate, switchModel, toastLoadResult } from "../app/models-sidebar.js";
@@ -450,7 +450,7 @@ export async function refreshModelsPage() {
       // Expired or absent session. Show the in-page key gate rather than falling
       // through to the models=[] path, which would read as "No models yet". Not
       // gated on myGen.
-      showKeyGate(t("models.keyRequired"));
+      if (window.__localmLocked !== true) showKeyGate(t("models.keyRequired"));
       return;
     }
     if (!r.ok) {
@@ -4052,7 +4052,7 @@ if (unloadAllBtn) {
 // index.html, so it is redrawn when the interface language changes.
 // applyDiscSource() re-derives the search placeholder. The three Settings
 // lists redrawn alongside it are fetched the same way (onViewShown, dispatch.js).
-document.addEventListener("localm:language", () => {
+onLanguageReload(() => {
   refreshModelsPage();
   applyDiscSource();
   refreshInstancesCard();

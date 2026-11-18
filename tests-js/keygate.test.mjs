@@ -292,7 +292,7 @@ test("P1a: a keyless (401) boot fires ONLY the one auth probe - zero other " +
 test("P1a: an authenticated (200) boot still fires the normal boot-time /api " +
      "calls - the sequencing fix must not silently drop them for the common case", async () => {
   const calls = [];
-  const plugins = ["rag", "memory", "voice", "coder"].map((name) => ({ name, active: true }));
+  const plugins = ["chat", "rag", "memory", "voice", "coder"].map((name) => ({ name, active: true }));
   const fetchImpl = async (url) => {
     calls.push(String(url));
     const body = String(url) === "/api/capabilities" ? { plugins } : {};

@@ -1748,6 +1748,7 @@
   "keygate.unreachable": "Der LocaLM-Server war nicht erreichbar, um den Schlüssel zu prüfen. Prüfen Sie, ob er läuft, und versuchen Sie es erneut.",
   "keygate.refused": "Der Server hat die Anmeldung abgelehnt (HTTP {status}).",
   "keygate.sessionEnded": "Ihre Anmeldung ist beendet: Der Schlüssel wurde vielleicht widerrufen oder ist abgelaufen. Geben Sie einen Schlüssel ein, um fortzufahren.",
+  "keygate.keyCreated": "Für diesen Server wurde ein API-Schlüssel erstellt, nachdem diese Seite geöffnet wurde, daher wird jetzt einer verlangt. Geben Sie den Schlüssel ein, um fortzufahren.",
   "qr.title": "Kopplungs-QR scannen",
   "qr.body": "Öffnen Sie auf dem Computer, auf dem LocaLM läuft, <b>Einstellungen → Server & Netzwerk → Begleit-App</b> und richten Sie die Kamera auf den QR-Code.",
   "qr.starting": "Kamera wird gestartet…",
