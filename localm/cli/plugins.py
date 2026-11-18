@@ -181,6 +181,18 @@ def plugin_install_engine(target, force, with_deps, assume_yes):
                 f"({', '.join(escape(x) for x in spec.requires_extras)}); "
                 f"install per its own instructions.[/dim]")
         return
+    from localm.plugins.ids import _is_valid_plugin_name
+    if not _is_valid_plugin_name(target):
+        if not src.exists():
+            why = f"no such folder: {target}"
+        elif not src.is_dir():
+            why = f"not a folder: {target}"
+        else:
+            why = f"no plugin.toml in folder: {target}"
+        console.print(f"[red]{escape(why)}[/red] "
+                      "(give a first-party plugin name or a folder that "
+                      "contains plugin.toml)")
+        sys.exit(1)
     run_or_die(mgr.set_installed_state, target, True,
               missing_msg=f"No such plugin: {target}")
     console.print(f"[green]Installed[/green] plugin [bold]{escape(target)}[/bold]")
