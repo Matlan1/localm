@@ -82,7 +82,7 @@ localm gui --keep-diagnostics    # keep diagnostics (hang trace, debug log) even
 localm gui --project D:\path\to\project   # project root that keys this instance
 localm gui --new                 # start a fresh server instead of attaching to the running one
 localm gui --isolated            # private server invisible to discovery (implies --new)
-localm gui --api-mode            # API only, no Web GUI
+localm gui --api-mode            # API only, no Web GUI; "/" redirects to the API docs at /docs
 localm gui --mmproj mmproj.gguf --device cuda:0   # projector file, explicit device
 ```
 
