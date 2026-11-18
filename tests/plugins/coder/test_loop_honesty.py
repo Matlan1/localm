@@ -57,6 +57,14 @@ def test_the_escape_does_not_answer_a_request_to_run_the_tests(tmp_path):
     assert rung1 and "[no tool needed]" not in rung1[0]
 
 
+def test_an_imperative_with_no_tool_demand_answered_in_prose_stays_ok(tmp_path):
+    agent = _make_agent(tmp_path, max_turns=8)
+    with _scripted(agent, ["The parser drops the last record; that is the bug."] * 6):
+        result = agent.run_task("Review this log: parse failed at record 7, last record dropped.")
+    assert "[tool use not achieved" in result
+    assert agent.last_run_ok is True
+
+
 def test_the_escape_still_answers_a_plain_question(tmp_path):
     agent = _make_agent(tmp_path, max_turns=6)
     with _scripted(agent, ["Here is the answer in prose, no file involved."]):
