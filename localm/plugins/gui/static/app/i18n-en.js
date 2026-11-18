@@ -3509,4 +3509,6 @@ export const I18N_EN = {
 
   // ---- Setup page (guided runtime + first model, manual entry only) ----
   "chat.modelLoadingBanner": "Loading {model}. A large model can take a while to load.",
+  "chat.status.waitingForModel": "Waiting for {model} to load",
+  "chat.modelLoadFailed": "{model} did not load, so this message was not answered. Send it again once a model is loaded.",
 };

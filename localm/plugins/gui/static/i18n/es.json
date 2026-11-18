@@ -3151,5 +3151,7 @@
   "workflow.uploadUse": "Subir y usar",
   "workflow.uploadedToast": "Subido y seleccionado",
   "workflow.useThisWorkflow": "Usar este flujo de trabajo",
-  "chat.modelLoadingBanner": "Cargando {model}. Un modelo grande puede tardar un poco."
+  "chat.modelLoadingBanner": "Cargando {model}. Un modelo grande puede tardar un poco.",
+  "chat.status.waitingForModel": "Esperando a que se cargue {model}",
+  "chat.modelLoadFailed": "{model} no se cargó, así que este mensaje no se respondió. Vuelve a enviarlo cuando haya un modelo cargado."
 }
