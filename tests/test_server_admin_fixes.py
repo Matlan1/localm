@@ -120,8 +120,7 @@ def _evicting_make_room(monkeypatch, victims, on_free):
     async def free_victim(loop, victim, engine, probe_, needed=None, extra_wait=True):
         freed.append(victim)
         on_free(victim)
-        return switch_admission.VictimRelease() if hasattr(
-            switch_admission, "VictimRelease") else hs.VictimRelease(victim)
+        return hs.VictimRelease(victim, True, None, None, 0.0)
 
     monkeypatch.setattr(hs, "_switch_probe_vram", probe)
     monkeypatch.setattr(switch_admission, "decide_admission", decide)
@@ -183,3 +182,16 @@ def test_vram_estimate_with_no_model_says_so_and_claims_no_fit(setup_multi_model
     assert body["model"] == "" and body["model_bytes"] == 0
     assert body["fits"] is None
     assert "No model is selected" in body["note"]
+
+
+def test_an_unreadable_registry_does_not_make_the_held_model_look_removed(
+        setup_multi_model, monkeypatch, tmp_path):
+    engine = FakeEngine("model-a")
+    engine.model_path = str(tmp_path / "model-a.gguf")
+    app = hs.create_app(engine)
+    client = _authed_client(app)
+    assert client.post("/v1/models/unload", params={"model": "model-a"}).status_code == 200
+    monkeypatch.setattr("localm.config.load_registry", lambda: {})
+    monkeypatch.setattr("localm.storekit.read_json_checked", lambda path, default: ({}, False))
+    client.get("/health")
+    assert "model-a" in hs._engines and hs._default_model_name == "model-a"

@@ -2845,6 +2845,12 @@ def prune_removed_models(registry: dict) -> bool:
     and last-active names) that *registry* no longer lists
     (:func:`_forget_removed_model`). An empty *registry* drops only a name this
     process saw registered. Returns whether anything was dropped."""
+    if not registry:
+        from localm.config import REGISTRY_FILE
+        from localm.storekit import read_json_checked
+        _, read_ok = read_json_checked(REGISTRY_FILE, {})
+        if not read_ok:
+            return False
     dropped = False
     for held in {_default_model_name, _active_model_name, _last_active_model_name}:
         if (held and held not in registry and (registry or held in _registered_seen)
