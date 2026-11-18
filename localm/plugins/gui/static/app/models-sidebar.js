@@ -1104,11 +1104,12 @@ export function announcedLoadingModel() {
 
 function _releaseLoadWaiters() {
   if (!_loadWaiters.size || _announcedLoading(_peerSelected !== null)) return;
-  const failed = !!_lastLoadFailed || (!modelCache.active && !modelCache.resumable);
-  for (const w of [..._loadWaiters]) {
-    _loadWaiters.delete(w);
-    w({ aborted: false, failed, failedModel: _lastLoadFailed });
-  }
+  const waiting = [..._loadWaiters];
+  _loadWaiters.clear();
+  queueMicrotask(() => {
+    const failed = !!_lastLoadFailed || (!modelCache.active && !modelCache.resumable);
+    for (const w of waiting) w({ aborted: false, failed, failedModel: _lastLoadFailed });
+  });
 }
 
 /** Resolves once no load is announced: {aborted: false, failed, failedModel},

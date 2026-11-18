@@ -72,6 +72,35 @@ test("Stop cancels the held send and nothing is ever sent", async () => {
   assert.equal(chatBodies.length, 0);
 });
 
+test("a real switchModel load: the held send goes to the model the load made active", async () => {
+  const state = { payload: { models: [{ name: "old", active: true }, { name: "new", active: false }], active: "old" } };
+  const chatBodies = [];
+  let finishLoad;
+  const base = makeFetch(state, chatBodies);
+  const fetchImpl = async (url, init) => {
+    if (String(url).startsWith("/api/models/load")) {
+      await new Promise((r) => { finishLoad = r; });
+      state.payload = { models: [{ name: "old", active: false }, { name: "new", active: true }], active: "new" };
+      return { ok: true, status: 200, json: async () => ({ status: "ok", model: "new" }), text: async () => "" };
+    }
+    return base(url, init);
+  };
+  const { window: win } = loadApp({ fetchImpl });
+  await drain();
+  await win.refreshModels();
+  win.document.getElementById("chat-input").value = "hello";
+  const load = runScript(win, "switchModel('new', { local: true })");
+  await drain();
+  const sent = win.sendChat();
+  await drain();
+  assert.equal(chatBodies.length, 0);
+  finishLoad();
+  await load;
+  await sent;
+  assert.equal(chatBodies.length, 1);
+  assert.equal(chatBodies[0].model, "new");
+});
+
 test("a load that fails turns the held message into a visible error", async () => {
   const { win, state, chatBodies } = await boot({ models: [{ name: "big", active: false }], active: "", loading: "big" });
   const sent = win.sendChat();
