@@ -11,7 +11,7 @@ import { restoreRecentGuiErrors, setRecentGuiErrorStore } from "./client-log.js"
 import { t, tn, tOr } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
-import { openMemoryModal, processChatQueue, renderQueuedIndicator, runCompletion, speak, setWebAskSession, toolEventPrompt } from "./settings-perf.js";
+import { openMemoryModal, pluginState, processChatQueue, renderQueuedIndicator, runCompletion, speak, setWebAskSession, toolEventPrompt } from "./settings-perf.js";
 import { showView } from "./tabs.js";
 import { applyCoderRailSide } from "./coder.js";
 
@@ -1266,6 +1266,17 @@ export function pinnedModelName(conv) {
   return row.name;
 }
 
+/** Shows the drawer's Knowledge selector only while the rag plugin is active,
+ *  since without it there is no Knowledge page to manage collections on. */
+function syncKnowledgeRow() {
+  const row = $("p-kb-row");
+  if (row) row.hidden = !pluginState.some((p) => p && p.name === "rag" && p.active === true);
+}
+const _paramsDrawer = document.getElementById("params");
+if (_paramsDrawer && typeof MutationObserver === "function") {
+  new MutationObserver(syncKnowledgeRow).observe(_paramsDrawer, { attributes: true, attributeFilter: ["class"] });
+}
+
 /** Reflects *conv*'s pinned model in the drawer's pin checkbox and its label:
  *  checked and naming the pinned model when there is one, otherwise unchecked
  *  and naming the model selected in the sidebar. */
@@ -1275,7 +1286,8 @@ export function syncPinModelToggle(conv) {
   if (!box) return;
   const pinned = pinnedModelName(conv);
   box.checked = !!pinned;
-  if (label) label.textContent = pinned || modelSelect.value || modelCache.active || "";
+  if (label) label.textContent = pinned || modelSelect.value || modelCache.active || t("chat.pinModel.none");
+  syncKnowledgeRow();
   const note = $("pin-mismatch");
   if (note) {
     const active = modelCache.active;
@@ -1796,8 +1808,9 @@ export function buildConvItem(conv, snippet) {
   item.appendChild(del);
 
   item.onclick = async () => {
+    const alreadyActive = chat.activeId === conv.id;
     chat.activeId = conv.id;
-    renderConvList();
+    if (!alreadyActive) renderConvList();
     if (conv._meta) await hydrateConversation(conv);   // R40: load the body on open
     renderChat();
     showView("chat");
@@ -1895,11 +1908,21 @@ export function imageFilename(url) {
 // Copy an image (by its resolved src) to the clipboard. Returns true on success.
 // Not every browser/context can write an image to the clipboard, so the caller
 // surfaces a fallback instead of silently failing (RULE 5).
+export function dataUrlToBlob(src) {
+  const m = /^data:([^;,]*)(?:;[^;,]*)*?(;base64)?,(.*)$/s.exec(src);
+  if (!m) return null;
+  const raw = m[2] ? atob(m[3]) : decodeURIComponent(m[3]);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  return new Blob([bytes], { type: m[1] || "application/octet-stream" });
+}
+
 export async function copyImageSrc(src) {
   try {
     if (!window.ClipboardItem || !navigator.clipboard || !navigator.clipboard.write)
       return false;
-    const blob = await (await fetch(src)).blob();
+    const blob = src.startsWith("data:") ? dataUrlToBlob(src) : await (await fetch(src)).blob();
+    if (!blob) return false;
     await navigator.clipboard.write([new window.ClipboardItem({ [blob.type]: blob })]);
     return true;
   } catch { return false; }
@@ -2598,6 +2621,17 @@ export function updateUsageDisplay(usage) {
   }
 }
 
+const liveRows = new Set();
+
+/** Keeps *row*, an unsaved status bubble of *conv* (a running media
+ *  generation), on screen across re-renders of the chat. Returns the function
+ *  that stops keeping it. */
+export function trackLiveRow(conv, row) {
+  const entry = { conv, row };
+  liveRows.add(entry);
+  return () => { liveRows.delete(entry); };
+}
+
 export function renderChat() {
   const box = $("chat-messages");
   box.innerHTML = "";
@@ -2691,6 +2725,7 @@ export function renderChat() {
       final: true,
     });
   });
+  for (const entry of liveRows) if (entry.conv === conv) box.appendChild(entry.row);
   // R31: only re-pin to the bottom when the user has not scrolled up. This tail
   // runs on every re-render (incl mid-stream web/finalize), so an unconditional
   // scroll here used to yank a reader back down while a reply was still streaming.

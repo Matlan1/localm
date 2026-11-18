@@ -3,7 +3,7 @@
 "use strict";
 
 // --- ES module imports ---
-import { addMessageRow, chat, chatBusy, currentConv, newConversation, newToolEvent, renderChat, renderConvList, saveConversations } from "./chat.js";
+import { addMessageRow, chat, chatBusy, currentConv, newConversation, newToolEvent, renderChat, renderConvList, saveConversations, trackLiveRow } from "./chat.js";
 import { activeSession, exportCoderSession, openFilesModal, switchActiveSessionModel } from "./coder.js";
 import { $, CHAT_SURFACE_HEADERS, authHeaders, autoGrow, checkModelsBeforeGenerate, createMissingModelOffer, el, jobStatusWord, nearBottom, openModal, streamJob, toast } from "./helpers.js";
 import { t } from "./i18n.js";
@@ -61,26 +61,32 @@ function preflightBody(picked) {
   return { model_overrides: picked.model_overrides, native_models: picked.native_models };
 }
 
-export async function runImagineInChat(promptText) {
-  if (!promptText) { toast(t("slash.usage.image"), true); return; }
+/** Runs one inline media generation for the chat: the user's command line, a
+ *  live "generating" bubble that survives any re-render of the chat while the
+ *  job runs, and a settled assistant message for the outcome (the result, or
+ *  the text of why nothing was generated) so a reload or a later send keeps it. */
+async function runGenerationInChat(spec, promptText) {
+  if (!promptText) { toast(t(spec.usage), true); return; }
   if (!currentConv()) newConversation();
   const conv = currentConv();
-  conv.messages.push({ role: "user", content: "/generate-image " + promptText });
+  conv.messages.push({ role: "user", content: spec.command + " " + promptText });
   saveConversations(conv);
   renderChat();
   const box = $("chat-messages");
-  const { body } = addMessageRow(box, "assistant", "");
-  body.textContent = t("slash.generatingImage");
+  const { row, body } = addMessageRow(box, "assistant", "");
+  const untrack = trackLiveRow(conv, row);
+  body.textContent = t(spec.generating);
   box.scrollTop = box.scrollHeight;
+  let outcome = null;
   try {
-    const picked = await chatModelFields("image");
-    if (!picked || !(await checkModelsBeforeGenerate("image", null, preflightBody(picked)))) {
-      body.textContent = t("slash.modelsNotDownloaded");
+    const picked = await chatModelFields(spec.media);
+    if (!picked || !(await checkModelsBeforeGenerate(spec.media, null, preflightBody(picked)))) {
+      outcome = t("slash.modelsNotDownloaded");
       return;
     }
-    const r = await fetch("/api/imagine", {
+    const r = await fetch(spec.endpoint, {
       method: "POST", headers: authHeaders(CHAT_SURFACE_HEADERS),
-      body: JSON.stringify({ prompt: promptText, ...picked }),
+      body: JSON.stringify(spec.body(promptText, picked)),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
@@ -91,24 +97,67 @@ export async function runImagineInChat(promptText) {
       if (nearBottom(box)) box.scrollTop = box.scrollHeight;
     }, undefined, undefined, missing.onEvent);
     if (end.status === "done" && end.result) {
-      conv.messages.push({
-        role: "assistant",
-        content: [
-          { type: "text", text: t("slash.resultImageLabel") },
-          { type: "image_url",
-            image_url: { url: "/api/imagine/file/" + encodeURIComponent(end.result) } },
-        ],
-      });
+      untrack();
+      conv.messages.push(spec.result(end.result));
       saveConversations(conv);
       renderChat();
     } else {
-      body.textContent = t("slash.imageStatus", { status: jobStatusWord(end.status) });
+      outcome = t(spec.status, { status: jobStatusWord(end.status) });
+      body.textContent = outcome;
       await missing.offer();
     }
   } catch (e) {
-    body.textContent = t("slash.imageFailed", { message: e.message });
+    outcome = t(spec.failed, { message: e.message });
+  } finally {
+    if (outcome !== null) {
+      untrack();
+      conv.messages.push({ role: "assistant", content: outcome });
+      saveConversations(conv);
+      if (currentConv() === conv) renderChat();
+    }
   }
 }
+
+const GENERATE_IMAGE = {
+  command: "/generate-image", media: "image", endpoint: "/api/imagine",
+  usage: "slash.usage.image", generating: "slash.generatingImage",
+  status: "slash.imageStatus", failed: "slash.imageFailed",
+  body: (prompt, picked) => ({ prompt, ...picked }),
+  result: (file) => ({
+    role: "assistant",
+    content: [
+      { type: "text", text: t("slash.resultImageLabel") },
+      { type: "image_url", image_url: { url: "/api/imagine/file/" + encodeURIComponent(file) } },
+    ],
+  }),
+};
+const GENERATE_MUSIC = {
+  command: "/generate-music", media: "music", endpoint: "/api/music",
+  usage: "slash.usage.music", generating: "slash.generatingTrack",
+  status: "slash.musicStatus", failed: "slash.musicFailed",
+  body: (tags, picked) => ({ tags, ...picked }),
+  result: (file) => ({
+    role: "assistant", content: t("slash.resultTrackLabel"),
+    audio: "/api/music/file/" + encodeURIComponent(file),
+  }),
+};
+const GENERATE_VIDEO = {
+  command: "/generate-video", media: "video", endpoint: "/api/video",
+  usage: "slash.usage.video", generating: "slash.generatingClip",
+  status: "slash.videoStatus", failed: "slash.videoFailed",
+  body: (prompt, picked) => ({ prompt, ...picked }),
+  result: (file) => ({
+    role: "assistant", content: t("slash.resultClipLabel"),
+    video: "/api/video/file/" + encodeURIComponent(file),
+  }),
+};
+
+/** /imagine <prompt> - generate an image inline. */
+export function runImagineInChat(promptText) { return runGenerationInChat(GENERATE_IMAGE, promptText); }
+/** /music <tags> - generate a default-length instrumental inline. */
+export function runMusicInChat(tags) { return runGenerationInChat(GENERATE_MUSIC, tags); }
+/** /video <prompt> - generate a default-length (~5s) clip inline. */
+export function runVideoInChat(promptText) { return runGenerationInChat(GENERATE_VIDEO, promptText); }
 
 /** /web <query> - search, read the top result pages (the shared retrieval
  *  controller behind POST /api/web/retrieve), inject the evidence into the
@@ -156,100 +205,6 @@ export async function runWebInChat(query) {
   saveConversations(conv);
   renderChat();
   await runCompletion(conv);
-}
-
-/** /music <tags> - generate a default-length instrumental inline. */
-export async function runMusicInChat(tags) {
-  if (!tags) { toast(t("slash.usage.music"), true); return; }
-  if (!currentConv()) newConversation();
-  const conv = currentConv();
-  conv.messages.push({ role: "user", content: "/generate-music " + tags });
-  saveConversations(conv);
-  renderChat();
-  const box = $("chat-messages");
-  const { body } = addMessageRow(box, "assistant", "");
-  body.textContent = t("slash.generatingTrack");
-  box.scrollTop = box.scrollHeight;
-  try {
-    const picked = await chatModelFields("music");
-    if (!picked || !(await checkModelsBeforeGenerate("music", null, preflightBody(picked)))) {
-      body.textContent = t("slash.modelsNotDownloaded");
-      return;
-    }
-    const r = await fetch("/api/music", {
-      method: "POST", headers: authHeaders(CHAT_SURFACE_HEADERS),
-      body: JSON.stringify({ tags, ...picked }),
-    });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.detail || r.statusText);
-    const missing = createMissingModelOffer(null);
-    const end = await streamJob(data.job_id, (line) => {
-      if (!missing.show(line)) return;
-      body.textContent = line;
-      if (nearBottom(box)) box.scrollTop = box.scrollHeight;
-    }, undefined, undefined, missing.onEvent);
-    if (end.status === "done" && end.result) {
-      conv.messages.push({
-        role: "assistant",
-        content: t("slash.resultTrackLabel"),
-        audio: "/api/music/file/" + encodeURIComponent(end.result),
-      });
-      saveConversations(conv);
-      renderChat();
-    } else {
-      body.textContent = t("slash.musicStatus", { status: jobStatusWord(end.status) });
-      await missing.offer();
-    }
-  } catch (e) {
-    body.textContent = t("slash.musicFailed", { message: e.message });
-  }
-}
-
-/** /video <prompt> - generate a default-length (~5s) clip inline. */
-export async function runVideoInChat(promptText) {
-  if (!promptText) { toast(t("slash.usage.video"), true); return; }
-  if (!currentConv()) newConversation();
-  const conv = currentConv();
-  conv.messages.push({ role: "user", content: "/generate-video " + promptText });
-  saveConversations(conv);
-  renderChat();
-  const box = $("chat-messages");
-  const { body } = addMessageRow(box, "assistant", "");
-  body.textContent = t("slash.generatingClip");
-  box.scrollTop = box.scrollHeight;
-  try {
-    const picked = await chatModelFields("video");
-    if (!picked || !(await checkModelsBeforeGenerate("video", null, preflightBody(picked)))) {
-      body.textContent = t("slash.modelsNotDownloaded");
-      return;
-    }
-    const r = await fetch("/api/video", {
-      method: "POST", headers: authHeaders(CHAT_SURFACE_HEADERS),
-      body: JSON.stringify({ prompt: promptText, ...picked }),
-    });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.detail || r.statusText);
-    const missing = createMissingModelOffer(null);
-    const end = await streamJob(data.job_id, (line) => {
-      if (!missing.show(line)) return;
-      body.textContent = line;
-      if (nearBottom(box)) box.scrollTop = box.scrollHeight;
-    }, undefined, undefined, missing.onEvent);
-    if (end.status === "done" && end.result) {
-      conv.messages.push({
-        role: "assistant",
-        content: t("slash.resultClipLabel"),
-        video: "/api/video/file/" + encodeURIComponent(end.result),
-      });
-      saveConversations(conv);
-      renderChat();
-    } else {
-      body.textContent = t("slash.videoStatus", { status: jobStatusWord(end.status) });
-      await missing.offer();
-    }
-  } catch (e) {
-    body.textContent = t("slash.videoFailed", { message: e.message });
-  }
 }
 
 /** Other names a chat command answers to, mapped to its CHAT_COMMANDS name. */
