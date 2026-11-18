@@ -8,6 +8,7 @@ import re
 import sys
 from pathlib import Path
 
+from ..pyenv import find_project_python
 from .base import (
     ToolResult,
     _partial_on_timeout,
@@ -690,11 +691,15 @@ def _detect_test_runner(cwd: Path) -> list[str]:
     if (cwd / "package.json").exists():
         lock = "yarn" if (cwd / "yarn.lock").exists() else "npm"
         return _js_test_command(cwd, lock)
-    # Python - prefer pytest; fall back to unittest. Uses the SAME interpreter
-    # that runs localm (sys.executable), not a bare "python" off PATH: on many
-    # machines PATH `python` is a different env (uv/conda/system) without pytest
-    # or the project deps.
-    return [sys.executable, "-m", "pytest", "--tb=short", "-q", "--no-header"]
+    return _pytest_command(find_project_python(cwd).python or sys.executable)
+
+
+def _pytest_command(python: str) -> list[str]:
+    return [python, "-m", "pytest", "--tb=short", "-q", "--no-header"]
+
+
+def _is_python_pytest(cmd: list[str]) -> bool:
+    return len(cmd) >= 3 and cmd[1:3] == ["-m", "pytest"]
 
 
 def _runner_label(cmd: list[str]) -> str:
@@ -731,8 +736,15 @@ def tool_run_tests(
     """
     if runner == "auto":
         cmd = _detect_test_runner(cwd)
+        if _is_python_pytest(cmd):
+            python = find_project_python(cwd)
+            if python.python is None:
+                return ToolResult.error(python.reason)
     elif runner == "pytest":
-        cmd = [sys.executable, "-m", "pytest", "--tb=short", "-q", "--no-header"]
+        python = find_project_python(cwd)
+        if python.python is None:
+            return ToolResult.error(python.reason)
+        cmd = _pytest_command(python.python)
     elif runner == "cargo":
         cmd = [resolve_runner("cargo") or "cargo", "test", "--color=never"]
     elif runner == "go":

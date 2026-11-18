@@ -196,13 +196,18 @@ def check_verify(work_dir: Path, verify_cmd=None, *,
                  verify_off: bool = False) -> Check:
     """Is there a verify command, and does its program resolve? ``verify_off``
     reports a session that has verification turned off."""
-    from .verify import command_text, detect_verify_command
+    from .verify import command_text, detect_verify_command, no_check_reason
     if verify_off:
         return Check("verify", INFO,
                      "verification is off for this session (/verify auto "
                      "turns it back on)")
     command = verify_cmd or detect_verify_command(work_dir)
     if not command:
+        reason = no_check_reason(work_dir)
+        if reason:
+            return Check("verify", WARN,
+                         "this project has a pytest setup but no check can "
+                         "run: " + reason)
         return Check("verify", INFO,
                      "no verify command: a turn that changes files is not "
                      "gated on an exit-code check (set `verify` in "

@@ -748,7 +748,7 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
         console.print(Text(format_text(checks)), soft_wrap=True)
 
     elif cmd == "verify":
-        from ..verify import command_text, detect_verify_command
+        from ..verify import command_text, detect_verify_command, no_check_reason
         if not arg:
             current = (command_text(agent.verify_cmd)
                        if agent.verify_cmd is not None else "(off)")
@@ -764,7 +764,11 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
         elif arg == "auto":
             detected = detect_verify_command(agent.cwd)
             agent.verify_cmd = detected
-            if detected is None:
+            reason = None if detected else no_check_reason(agent.cwd)
+            if reason:
+                print_warning("This project has a pytest setup but no check "
+                              "can run. " + reason)
+            elif detected is None:
                 print_warning(
                     "No obvious check found in this project (looked for a "
                     "verify key in .localcoder/config.toml, Cargo.toml, go.mod, "
@@ -778,7 +782,7 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
                           "that changed files finishes.")
 
     elif cmd == "goal":
-        from ..verify import command_text, detect_verify_command
+        from ..verify import command_text, detect_verify_command, no_check_reason
         if not arg:
             current = (command_text(agent.goal_cmd)
                        if agent.goal_cmd is not None else "(off)")
@@ -797,7 +801,11 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
         elif arg == "auto":
             detected = detect_verify_command(agent.cwd)
             agent.goal_cmd = detected
-            if detected is None:
+            reason = None if detected else no_check_reason(agent.cwd)
+            if reason:
+                print_warning("This project has a pytest setup but no check "
+                              "can run. " + reason)
+            elif detected is None:
                 print_warning(
                     "No obvious check found in this project (looked for a "
                     "verify key in .localcoder/config.toml, Cargo.toml, go.mod, "

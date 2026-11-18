@@ -208,9 +208,11 @@ class TestDetectTestRunner:
         cmd = _detect_test_runner(tmp_path)
         assert "pytest" in " ".join(cmd)
 
-    def test_python_runner_uses_current_interpreter(self, tmp_path):
-        # The pytest runner invokes sys.executable, not a bare python off PATH.
+    def test_python_runner_uses_current_interpreter(
+            self, tmp_path, monkeypatch):
         import sys
+        monkeypatch.setattr(
+            "localm.plugins.coder.pyenv._path_interpreters", lambda cwd: [])
         cmd = _detect_test_runner(tmp_path)
         assert cmd[0] == sys.executable
         assert cmd[1:3] == ["-m", "pytest"]
