@@ -220,10 +220,8 @@ def extract(complete: Complete, session_text: str, *,
     if facts is None:
         raise ConsolidationReplyError(_unreadable_reason(raw))
     from localm.debuglog import logger
-    from .store import _content_tokens
     user_text = _user_turn_text(session_text)
-    user_stems = (None if user_text is None
-                  else {w[:_STEM_CHARS] for w in _content_tokens(user_text)})
+    user_stems = None if user_text is None else _first_person_stems(user_text)
     out: list[dict] = []
     for item in facts:
         text, confidence = _fact_item(item)
@@ -249,12 +247,11 @@ def extract(complete: Complete, session_text: str, *,
     return out
 
 
-# A candidate fact must share at least this many content words, or this fraction
-# of them, with what the user wrote; one that does not was invented from the
-# assistant's text.
-GROUNDING_MIN_WORDS = 2
-GROUNDING_MIN_OVERLAP = 0.5
+# A candidate fact must be about the user and share a content word with a
+# sentence in which the user speaks of themselves (first person); one that does
+# not is about the world, taken from a request or from the assistant's reply.
 _STEM_CHARS = 4
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
 
 
 def _user_turn_text(session_text: str) -> Optional[str]:
@@ -274,16 +271,27 @@ def _user_turn_text(session_text: str) -> Optional[str]:
     return "\n".join(lines) if seen else None
 
 
+def _first_person_stems(user_text: str) -> set:
+    """The first letters of every content word in the sentences of *user_text*
+    where the user speaks of themselves (store._is_self_referential)."""
+    from .store import _content_tokens, _is_self_referential
+    stems: set = set()
+    for sentence in _SENTENCE_SPLIT.split(user_text):
+        if _is_self_referential(sentence):
+            stems |= {w[:_STEM_CHARS] for w in _content_tokens(sentence) if len(w) > 1}
+    return stems
+
+
 def _is_grounded(fact: str, user_stems: set) -> bool:
-    """True when at least GROUNDING_MIN_WORDS, or GROUNDING_MIN_OVERLAP of, *fact*'s
-    content words (the word "user" aside) appear, by their first letters, in
+    """True when *fact* is written about the user (it says "user" or speaks in
+    the first person) and shares a content word, by its first letters, with
     *user_stems*."""
-    from .store import _content_tokens
-    words = _content_tokens(fact) - {"user"}
-    if not words:
+    from .store import _SELF_REF, _content_tokens, _tokenize
+    toks = set(_tokenize(fact))
+    if "user" not in toks and not (_SELF_REF & toks):
         return False
-    hit = sum(1 for w in words if w[:_STEM_CHARS] in user_stems)
-    return hit >= GROUNDING_MIN_WORDS or hit / len(words) >= GROUNDING_MIN_OVERLAP
+    words = _content_tokens(fact) - {"user"}
+    return any(w[:_STEM_CHARS] in user_stems for w in words)
 
 
 def _fact_item(item) -> tuple:
