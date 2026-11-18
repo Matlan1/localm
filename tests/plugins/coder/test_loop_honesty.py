@@ -166,6 +166,8 @@ def test_a_lenient_denial_binds_the_next_turn_to_the_tool_call_format(tmp_path):
          patch.object(agent, "can_force_tool_calls", return_value=True):
         agent.run_task("create hello.txt containing hi")
     assert seen == [False, True, False]
+    note = [t for t in _user_texts(agent) if "[tool-call format] These calls did NOT run" in t]
+    assert note and '- write_file {"content": "hi", "path": "hello.txt"}' in note[0]
     assert (tmp_path / "hello.txt").read_text() == "hi"
     assert agent.last_run_ok is True
 

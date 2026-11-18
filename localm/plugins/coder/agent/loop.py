@@ -635,6 +635,8 @@ class _LoopMixin:
 
         def apply_project_trust(self, interactive: bool = False) -> bool: ...
 
+        def can_force_tool_calls(self) -> bool: ...
+
         @property
         def disabled_tools(self) -> frozenset: ...
 
@@ -644,6 +646,7 @@ class _LoopMixin:
         dry_run: bool
         _user_declines: int
         _lenient_denials: int
+        _denied_lock: Any
         cwd: Path
         _unverified_writes: set
         _audit: Any
@@ -1016,7 +1019,9 @@ class _LoopMixin:
                 st.plan_submitted = st.plan_submitted or any(
                     c.name == "exit_plan_mode" for c in calls)
                 if self._lenient_denials > lenient_before:
-                    self._force_after_lenient_denial()
+                    owed_note = self._force_after_lenient_denial()
+                    if owed_note:
+                        result_blocks.append(owed_note)
 
                 # parse_tool_calls silently drops a tool-call-shaped block whose
                 # body could not be recovered, and the only downstream check
@@ -1567,13 +1572,18 @@ class _LoopMixin:
             "exit_plan_mode, and it never was, so you were not asked to approve "
             "it]") + self._grounding_footer())
 
-    def _force_after_lenient_denial(self) -> None:
+    def _force_after_lenient_denial(self) -> str:
         """A call denied only for its loose format is re-emitted next turn with
         the tool-call grammar bound from the first token, so the retry arrives
-        in the <tool_call> format the unattended run accepts."""
+        in the <tool_call> format the unattended run accepts. Returns the note
+        that names the denied calls for the model, "" when forcing is not
+        available."""
         if not self.can_force_tool_calls():
-            return
+            return ""
         self._force_tool_grammar = True
+        with self._denied_lock:
+            owed = [f"- {name} {key[:300]}" for name, key, reason
+                    in self._denied_unconfirmed if reason == "lenient"]
         self._audit.notice(
             "lenient_call_forced",
             "a call was denied for its loose format - the next turn is "
@@ -1581,6 +1591,9 @@ class _LoopMixin:
         self._emit("info", text=(
             "a tool call was denied for its loose format - asking again with "
             "the tool-call format enforced"))
+        return ("[tool-call format] These calls did NOT run because of their "
+                "format. Emit exactly these calls again now, nothing else:\n"
+                + "\n".join(owed))
 
     def _used_tools_this_task(self, st) -> bool:
         """Has the model demonstrated, THIS TASK, that it can drive a tool?
