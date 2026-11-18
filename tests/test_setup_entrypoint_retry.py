@@ -182,11 +182,8 @@ def test_retry_install_is_guarded_in_source():
     reads `-e ".[${EXTRAS}]"` at both call sites, never the resolved value.
     """
     block = _install_block()
-    needle = 'uv pip install -p .venv -e ".[${EXTRAS}]"'
-    first = block.index(needle)
-    second = block.index(needle, first + 1)
-    line_end = block.index("\n", second)
-    retry_line = block[second:line_end]
+    needle = "  install_localm_packages || true"
+    retry_line = block[block.index(needle):].split("\n", 1)[0]
     assert "||" in retry_line, "the retry install must be guarded (e.g. `|| true`)"
 
 

@@ -933,7 +933,7 @@ if [ ! -x .venv/bin/localm ]; then
   # fix), and the rest of this script does not depend on the entry point (see the
   # block comment above). Without this guard, a non-zero retry under
   # `set -euo pipefail` kills setup mid-way and that warning never prints.
-  uv pip install -p .venv -e ".[${EXTRAS}]" || true
+  install_localm_packages || true
   if [ ! -x .venv/bin/localm ]; then
     say ""
     say "  [!!] .venv/bin/localm is STILL missing after a retry."
