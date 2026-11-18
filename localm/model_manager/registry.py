@@ -1930,7 +1930,7 @@ def list_models(type_filter: Optional[str] = None) -> None:
     if type_filter:
         reg = models_of_type(type_filter, reg)
     if not reg and registered:
-        console.print(f"[dim]No [bold]{escape(type_filter or "")}[/bold] models. "
+        console.print(f"[dim]No [bold]{escape(type_filter or '')}[/bold] models. "
                       f"{registered} model(s) of other types are registered: run "
                       "[bold]localm list[/bold] to see them.[/dim]")
         return
