@@ -25,7 +25,7 @@ from .constants import (
     _ACTION_VERBS, _IMPERATIVE_LEADS, _IMPERATIVE_ONLY_VERBS, _MAX_NOCALL_ESCALATIONS, _MAX_TOOL_REPAIRS,
     _NON_FILE_SUFFIXES, _STATEMENT_LINKS, _STATEMENT_PARTICIPLES, _STATEMENT_PREDICATES,
     _REPEAT_HISTORY_MAX, _REPEAT_RESPONSE_ABORT, _REPEAT_SIMILARITY,
-    _SKILL_STATE_TOOLS,
+    _BROWSER_TOOLS, _SKILL_STATE_TOOLS,
 )
 from .planmode import INTERACTION_TOOLS
 from localm.textguard import compose, compose_join
@@ -2042,7 +2042,8 @@ class _LoopMixin:
         for call in calls:
             td = TOOL_REGISTRY.get(call.name)
             destructive = td.destructive if td else True
-            solo = call.name in _SKILL_STATE_TOOLS or call.name in INTERACTION_TOOLS
+            solo = (call.name in _SKILL_STATE_TOOLS or call.name in INTERACTION_TOOLS
+                    or call.name in _BROWSER_TOOLS)
             if (extendable and not solo
                     and segments and segments[-1][0] == destructive):
                 segments[-1][1].append(call)

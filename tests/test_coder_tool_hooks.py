@@ -1218,3 +1218,23 @@ def test_a_corrupt_trust_store_warns_once_until_it_is_readable_again(tmp_path, m
     store.write_text("{not json", encoding="utf-8")
     assert hooks.refresh_trust() is False
     assert log.warning.call_count == 2
+
+
+def test_browser_tools_in_one_reply_run_one_after_another_in_order(tmp_path):
+    import threading
+    from localm.plugins.coder.tools import ToolResult
+    agent = _make_agent(tmp_path, auto_approve=True)
+    seen: list[tuple[str, bool]] = []
+    main = threading.current_thread()
+
+    def fake(call, interactive):
+        seen.append((call.name, threading.current_thread() is main))
+        return ToolResult.success("x")
+    agent._execute_tool = fake
+    agent._execute_tools([_call("browser_navigate", {"url": "http://a/"}),
+                          _call("browser_read", {})], interactive=False)
+    assert seen == [("browser_navigate", True), ("browser_read", True)], seen
+    seen.clear()
+    agent._execute_tools([_call("read_file", {"path": "a"}),
+                          _call("read_file", {"path": "b"})], interactive=False)
+    assert [on_main for _n, on_main in seen] == [False, False], seen

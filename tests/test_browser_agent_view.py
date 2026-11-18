@@ -13,6 +13,7 @@ SessionManager.list rather than re-implementing it.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -216,3 +217,31 @@ class TestWatchAgentTargetsOneSession:
         assert r.status_code == 404, (
             f"a scoped key reached the owner's browser by targeting its id: "
             f"{r.status_code}")
+
+
+class TestViewOwnBrowser:
+    def test_view_is_404_when_this_key_has_no_browser(self, app, monkeypatch):
+        _enable()
+        _wire(app, monkeypatch, sessions=[], live_ids=[],
+              is_owner=True, principal=None)
+        with TestClient(app) as c:
+            assert c.post("/api/browser/view").status_code == 404
+
+    def test_view_attaches_a_viewer_to_the_open_browser_of_this_key(
+            self, app, monkeypatch):
+        _enable()
+        _plug, browsers = _wire(app, monkeypatch, sessions=[],
+                                live_ids=["gui-owner"],
+                                is_owner=True, principal=None)
+        with TestClient(app) as c:
+            r = c.post("/api/browser/view")
+            assert r.status_code == 200, r.text
+            job_id = r.json()["job_id"]
+            try:
+                deadline = time.time() + 5
+                while browsers["gui-owner"].viewer is None and time.time() < deadline:
+                    time.sleep(0.05)
+                assert browsers["gui-owner"].viewer is not None, (
+                    "an open browser was not attached to the caller's view")
+            finally:
+                c.post(f"/api/jobs/{job_id}/cancel")
