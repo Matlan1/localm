@@ -363,7 +363,7 @@ def test_a_double_click_starts_again_without_a_console_and_ends_at_once(tmp_path
     clone, _, _, out = _run(tmp_path, hidden=True)
     ran = [ln for ln in out.stdout.splitlines() if ln.startswith("CONHOST-RAN")]
     assert len(ran) == 1, out.stdout
-    assert "/d /c \"\"" in ran[0] and str(clone / "probe.bat") in ran[0], ran[0]
+    assert "/d /v:off /c \"\"" in ran[0] and str(clone / "probe.bat") in ran[0], ran[0]
     assert len(_fields(out, "WINDOW-UV")) == 1, "the window opened more or less than once"
     assert out.returncode == 0, (out.stdout, out.stderr)
 
