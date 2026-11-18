@@ -43,6 +43,7 @@ def test_locked_config_is_named_in_the_401_and_the_session_state(damaged_home):
         assert r.status_code == 401
         assert "config.json" in r.text and "damaged" in r.text
         assert "No API key is involved" in r.text
+        assert r.headers["X-Localm-Config-Unreadable"] == "1"
         assert client.get("/api/session").json()["config_unreadable"] is True
 
 

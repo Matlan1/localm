@@ -5026,6 +5026,9 @@ LAST_KEY_NETWORK_DETAIL = (
     "restart the server bound to 127.0.0.1 first.")
 
 
+CONFIG_UNREADABLE_HEADER = "X-Localm-Config-Unreadable"
+
+
 def _enforce_request(request: Request, scope: Optional[str]) -> None:
     """Shared auth core (request-aware). Open/dev mode when no key is configured
     anywhere (unless LOCALM_REQUIRE_AUTH forces fail-closed). Otherwise a valid
@@ -5043,8 +5046,9 @@ def _enforce_request(request: Request, scope: Optional[str]) -> None:
                 if (request.url.path == "/v1/server/shutdown" and inst_token
                         and ct_equal(_bearer_token(request), inst_token)):
                     return
-                raise HTTPException(status_code=401,
-                                    detail=config_unreadable_detail())
+                raise HTTPException(
+                    status_code=401, detail=config_unreadable_detail(),
+                    headers={CONFIG_UNREADABLE_HEADER: "1"})
             raise HTTPException(
                 status_code=401,
                 detail="Auth required but no API key configured "
