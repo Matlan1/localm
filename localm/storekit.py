@@ -207,9 +207,12 @@ def restrict_file_perms(path: Path, *, mode: int = 0o600) -> bool:
             if not icacls:
                 _perm_warn(path, "icacls was not found in the Windows system folder")
                 return False
+            # Runs icacls without a console of its own, also when the caller has none.
+            # See test_restrict_file_perms_runs_icacls_without_a_console.
             r = subprocess.run(
                 [icacls, str(path), "/inheritance:r", "/grant:r", f"*{sid}:F"],
-                capture_output=True, check=False)
+                capture_output=True, check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             if r.returncode != 0:
                 # icacls FAILS without raising (access denied, an unresolvable
                 # principal, a non-NTFS volume), so a non-zero exit is reported
