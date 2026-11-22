@@ -245,8 +245,8 @@ if "%CONTAINED%"=="1" (
     set "UVDIR=!CD!\.uv"
     echo  Portable: installing uv itself under .\.uv
 )
-set "UV_INSTALLER_VERSION=0.13.8"
-set "UV_INSTALLER_SHA256=200a377ed0f8e719b1c9cbe849c736e7712ee684212f61dc9565d747ac163db0"
+set "UV_INSTALLER_VERSION=0.13.9"
+set "UV_INSTALLER_SHA256=43b64ed13b8abfcdb3bcfc6ad6a1600dec0849d9e656c18f8ad81305b5d6d4a2"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; $f=$null; $t=$null; $w=$null; try { $d=$env:STMP; if ($d) { $d=[IO.Path]::GetFullPath($d); if (-not [IO.Directory]::Exists($d)) { exit 63 }; if ($d.IndexOfAny([char[]]'[]') -ge 0) { $w=Join-Path ([IO.Path]::GetTempPath()) ('localm-uv-'+[guid]::NewGuid()); try { $null=[IO.Directory]::CreateDirectory($w) } catch { $w=$null; exit 63 }; $d=$w } } else { $d=[IO.Path]::GetTempPath() }; $f=Join-Path $d ('uv-installer-'+[guid]::NewGuid()+'.ps1'); try { Invoke-WebRequest -UseBasicParsing -Uri ('https://github.com/astral-sh/uv/releases/download/'+$env:UV_INSTALLER_VERSION+'/uv-installer.ps1') -OutFile $f -ErrorAction Stop } catch { exit 61 }; $h=$null; $fs=$null; try { $fs=[IO.File]::Open($f,'Open','Read','Read'); $h=[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($fs)).Replace('-','') } catch { }; if ($h -ne $env:UV_INSTALLER_SHA256) { exit 62 }; $t=Join-Path $d ('uv-tmp-'+[guid]::NewGuid()); try { $null=[IO.Directory]::CreateDirectory($t) } catch { $t=$null; exit 63 }; $env:TEMP=$t; $env:TMP=$t; $env:PSModulePath=$null; & powershell -NoProfile -ExecutionPolicy Bypass -File $f; exit $LASTEXITCODE } finally { if ($fs) { $fs.Dispose() }; if ($f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }; if ($t) { Remove-Item -LiteralPath $t -Recurse -Force -ErrorAction SilentlyContinue }; if ($w) { Remove-Item -LiteralPath $w -Recurse -Force -ErrorAction SilentlyContinue } }"
 set "UVRC=%errorlevel%"
 if "%UVRC%"=="61" echo  [^^!] Could not download the uv %UV_INSTALLER_VERSION% installer.

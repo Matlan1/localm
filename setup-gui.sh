@@ -16,8 +16,8 @@ cd "$(dirname "$0")"
 
 # The uv release this setup installs; its installer script runs only when its
 # sha256 matches UV_INSTALLER_SHA256.
-UV_INSTALLER_VERSION="0.13.8"
-UV_INSTALLER_SHA256="4d8fa56e00f16b66feecacbd943773c61d61ab768b13856de350d86fd8740e2f"
+UV_INSTALLER_VERSION="0.13.9"
+UV_INSTALLER_SHA256="ccc888115ac831bd9c30855c1d4abeae32fce679701d2aac8e72eb0beffb41c2"
 file_sha256() {  # file_sha256 FILE  ->  prints the hex sha256, or nothing when no hashing tool exists
     if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
     elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
