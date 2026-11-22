@@ -12,6 +12,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Changed
+- **The bundled AMD ROCm llama.cpp runtime moved from b1372 to b1384.** An existing install picks it up with `localm setup-llama --force`.
 - **localm's managed ComfyUI now installs v0.46.0, up from v0.45.0.** An existing install picks it up with `localm comfy update --reinstall-requirements` (this release's Python requirements changed).
 
 ## [0.3.4b4] - 2026-11-18
