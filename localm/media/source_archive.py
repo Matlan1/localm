@@ -37,8 +37,8 @@ SOURCE_RECORD = ".localm-source.json"
 
 # sha256 of the GitHub zip archive of each pinned commit, keyed by commit.
 ARCHIVE_SHA256 = {
-    "989d93d0d968e704c589ce0146bb18c77f6b50cc":
-        "2cf3eef6f4016b234dcc8c2d978abe42e6665121f1ca008ca60acb62fe830c63",
+    "a277b5bf213e8a44fa34817b7770b54f86ef4cea":
+        "618bda67bfefcc3920973055f75fe2ec392d3abf1aaaa972532999047cc764f8",
     "6ea2651e7df66d7585f6ffee804b20e92fb38b8a":
         "aad273a0b774684285b4496f6edff7e2293bd29d71ef89926d6861bfdf4947ac",
 }
