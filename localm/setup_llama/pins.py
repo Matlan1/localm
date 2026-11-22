@@ -86,7 +86,7 @@ _UPSTREAM_REPO = "ggml-org/llama.cpp"
 # fails a user as surely as tracking latest does. scripts/check_llama_pin.py
 # reports how far behind this constant has fallen, and `--tag latest` is the
 # escape hatch for a user who needs an upstream fix today.
-_PINNED_TAG = "b12343"
+_PINNED_TAG = "b12620"
 
 
 # WHAT THE PIN RESTS ON, PER BACKEND. Not a boolean and not a single "confirmed"
@@ -152,8 +152,8 @@ _CUDA_LINUX_REPO = "hybridgroup/llama-cpp-builder"
 # Offline checksums for the Linux CUDA assets of _PINNED_TAG on _CUDA_LINUX_REPO.
 # Only consulted when that repo's release listing is unavailable.
 _CUDA_LINUX_PINNED_SHA256 = {
-    "llama-b12343-bin-ubuntu-cuda-13-x64.tar.gz": "b59b5a25160c2044e3bb3366eccebb458a798c79137ebc48b87da5ffc33c1518",
-    "llama-b12343-bin-ubuntu-cuda-x64.tar.gz": "31875eae261f73cb95a23037d8e4b94fded28729ac4342de08ef9519527c6059",
+    "llama-b12620-bin-ubuntu-cuda-13-x64.tar.gz": "584b840435efa9f41957158ef20de146a5cf28a0ebb74f75b4e75da946d3165a",
+    "llama-b12620-bin-ubuntu-cuda-x64.tar.gz": "f2e5faa2789bda298f07b5fd5f6a5c08ec7a34ea58f244023af03779a9175d1e",
 }
 
 
@@ -174,46 +174,46 @@ _CUDA_LINUX_PINNED_SHA256 = {
 #
 # The values are the API's own `digest` fields.
 _PINNED_FALLBACK_SHA256 = {
-    # tag b12343 upstream assets (_PINNED_TAG). The three cudart bundles carry no
+    # tag b12620 upstream assets (_PINNED_TAG). The three cudart bundles carry no
     # tag in their names and upstream re-uploads the same file each release.
-    "cudart-llama-b12343-bin-ubuntu-cuda-12.8-x64.tar.gz": "1f1695f1c86c04e90a50a00a08daa0c0ddf388d53dbd60d6a970ebc97daed17b",
-    "cudart-llama-b12343-bin-ubuntu-cuda-13.5-arm64.tar.gz": "ff2507250c8929ac14d3061afd1ded3426d125c892f5d32abc3e62a10712a5be",
-    "cudart-llama-b12343-bin-ubuntu-cuda-13.5-x64.tar.gz": "0992a9431950e95f061d76dc6d4c48719968bfdfbc7d3556a7f36fc2bafec33e",
+    "cudart-llama-b12620-bin-ubuntu-cuda-12.8-x64.tar.gz": "b67527ca01ecaf97a57c582392b85e4dce44efcb42fb7ecfb664fe7382df0c5c",
+    "cudart-llama-b12620-bin-ubuntu-cuda-13.5-arm64.tar.gz": "97ac5a470fd869fa688fa6be9401b1a28eb745db57999b230133608cfe9a63a1",
+    "cudart-llama-b12620-bin-ubuntu-cuda-13.5-x64.tar.gz": "7c1db91dc7d5cdca60357e3201ad40d9d2eee7b6d2c2a5e4be414dd9ff06e0a9",
     "cudart-llama-bin-win-cuda-12.4-x64.zip": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
     "cudart-llama-bin-win-cuda-13.5-arm64.zip": "f89e7b2457f627d052dd99f42205ddfd01964454809754cdc649cffc74320dca",
     "cudart-llama-bin-win-cuda-13.5-x64.zip": "c2bf4cc202bfbaaa7a0b75f5082457c3811326947bb216059b72839d844e9cba",
-    "llama-b12343-bin-android-arm64-snapdragon.tar.gz": "a0dde32ac28bf64b4e4b401aef1fa6f2c705e4b958615757fcc3d66e93e335a2",
-    "llama-b12343-bin-android-arm64.tar.gz": "96767b5e5b1a57ae884e336ddedb336ef6cf4d3cf1389e4c0362e7f3ec67ecad",
-    "llama-b12343-bin-linux-arm64-snapdragon.tar.gz": "982ede88508bbdf9aa1983a7f61367349349b7dfad449e0902d627f6c089682a",
-    "llama-b12343-bin-macos-arm64.tar.gz": "58f740df2a0c4002f116e9c4fbc6f49fd2d3645063e3faa5fcfb5f37d67b328e",
-    "llama-b12343-bin-macos-x64.tar.gz": "f71709a91fc06f057d2552ba3e9a91f285ea258edc9f4bb3ca0be05018b97e35",
-    "llama-b12343-bin-ubuntu-26.04-s390x.tar.gz": "c506332ab69575bb056328965d990e5df15775cb77ca753aef558d8c14174622",
-    "llama-b12343-bin-ubuntu-arm64.tar.gz": "a6ff539bf3f0c30efe849c78ef33ab2d9158f8581d89f4606859aa9fd2c3b362",
-    "llama-b12343-bin-ubuntu-cuda-12.8-x64.tar.gz": "ad866c99256c6f985aa3bb83283d5adfcb7b9cd1a43b6b516a46e29189283703",
-    "llama-b12343-bin-ubuntu-cuda-13.5-arm64.tar.gz": "42d2bf63c1a8964b02a21985f4b8ff638638d9442e4aa87a24fbfa3686d67e0b",
-    "llama-b12343-bin-ubuntu-cuda-13.5-x64.tar.gz": "801628c1a48ed395694de31fabe3382cae60326f0186eb077a88422d0ae6097f",
-    "llama-b12343-bin-ubuntu-openvino-2026.4.1-x64.tar.gz": "ffa29e69fb7e5d869ee8c8a3f93c591d645faea4c675c188af6d8d67ef2739b2",
-    "llama-b12343-bin-ubuntu-rocm-10.0-x64.tar.gz": "8df74f66b3b9a632d1d00f5990f516cdd6a8e45080089d02d3b70604ef5df502",
-    "llama-b12343-bin-ubuntu-s390x.tar.gz": "9a1075910693a641a0097936768488d4079abb9406202e06da6a45130b140d60",
-    "llama-b12343-bin-ubuntu-sycl-fp16-x64.tar.gz": "e8d2db0167cc8f93a2bff03268eafdd8944e3331229e0cc56393653360b2bb30",
-    "llama-b12343-bin-ubuntu-sycl-fp32-x64.tar.gz": "daf88f00140fdcb3376461520a8b04d10b0dbf9f0dbf86c3af8087c59d97cabb",
-    "llama-b12343-bin-ubuntu-vulkan-arm64.tar.gz": "835b6b361e606710ff94fcd5b94c4e8404093795f126bb307b04d4ef98516e7d",
-    "llama-b12343-bin-ubuntu-vulkan-x64.tar.gz": "74e64ec74da3345963e35142120f2671c0e6a21b8144e0c62d4f208c03952efb",
-    "llama-b12343-bin-ubuntu-x64.tar.gz": "fe4f16988ceb35a5b01ca6306b29602ef3ea4ef7a877ff596ed7d309c6714335",
-    "llama-b12343-bin-ubuntu-zdnn-s390x.tar.gz": "376df7f69f9d387d332260eb0dc74738b2f0ed1ebdb4c06b75a6515d0afb3b0f",
-    "llama-b12343-bin-win-cpu-arm64.zip": "5b735fa6f2e81727da2e9f2f2d8990506c6f1f629e38494be7be9ec8a44900c9",
-    "llama-b12343-bin-win-cpu-x64.zip": "3f343af50e5068e40af6628c8079a221bf0d4a7a1f4402643bdd8412dc68a226",
-    "llama-b12343-bin-win-cuda-12.4-x64.zip": "8e81b8da78666e05c83f033c603e596a5c24db031ad400b4dc454aa8dad1a0c5",
-    "llama-b12343-bin-win-cuda-13.5-arm64.zip": "5a8acb454d66d39acd952b93b8ac7def9f71e26dcddb7f2ad45c667bb93915c9",
-    "llama-b12343-bin-win-cuda-13.5-x64.zip": "e705e5ae4f7025c7fa95dd28955d5734d4eeac4acbccd2966261458c9e2edb91",
-    "llama-b12343-bin-win-opencl-adreno-arm64.zip": "aadb4cd4a48dcbc2c7c6aa833a36419159a86ebb15d7c57cca9c232739765f8b",
-    "llama-b12343-bin-win-openvino-2026.4.1-x64.zip": "29ca2b10fe44b498e5ff0b9b0d009e2c151cdde46072045e47024789897c4bb5",
-    "llama-b12343-bin-win-rocm-10.0-x64.zip": "2f243f7fe4e25be26382ef0ca6ef4dc3b1a5ed620dfe4d348144a3bf682610a8",
-    "llama-b12343-bin-win-sycl-x64.zip": "5804a1b65bda0b05fb911181a121e674f78f651e69e839be58396313e5e2bb40",
-    "llama-b12343-bin-win-vulkan-arm64.zip": "176b7325d8dd589e1f5916c2934940aea9f20cc4fd28af9096f63d674c60c9d1",
-    "llama-b12343-bin-win-vulkan-x64.zip": "0170da0d41eb20250beb16085bc2ac397163b8e82bd725aab5632f732b8512b1",
-    "llama-b12343-ui.tar.gz": "15f84359e4181a1080858549b92968458147aa71c239b7b401e35a459c60af8e",
-    "llama-b12343-xcframework.zip": "8de59ad8f2dc13e816cfac6457e5ebae00bf27c2985af2cc046cff7cf75e1244",
+    "llama-b12620-bin-android-arm64-snapdragon.tar.gz": "9703e4e0918ae2fde38d41247aadd83c0dbfe9466be09bd5c62feccbfc7b1572",
+    "llama-b12620-bin-android-arm64.tar.gz": "386d567389de4d6d0f81eb4216780d475da08ee3bfde52925262f20442463d0b",
+    "llama-b12620-bin-linux-arm64-snapdragon.tar.gz": "b5134784abd92945f8dbe9fe65f8956971f8e15e079d5e807c2705500304d688",
+    "llama-b12620-bin-macos-arm64.tar.gz": "7e0c724681cbec4a62b95c23bfde3a341fcb3c15fff1b2f52ab8026f56812c1d",
+    "llama-b12620-bin-macos-x64.tar.gz": "c9854c1504ec308d524d3a735145f3fffd4269d69b05bfb1e4607c6f932a4c9a",
+    "llama-b12620-bin-ubuntu-26.04-s390x.tar.gz": "16c28621ec1725bad64b675c1a7e940f58ca46d976ae88ece919b43aa959611c",
+    "llama-b12620-bin-ubuntu-arm64.tar.gz": "3027dfc592c6b4d88c237280b0551c3db8d45af947c836cbdc94a4ea3f275e8d",
+    "llama-b12620-bin-ubuntu-cuda-12.8-x64.tar.gz": "6dcdbd5aacf63e91b4a11a10c2c3d63fa1a00b61e3468998cb016ecf1a2a1b46",
+    "llama-b12620-bin-ubuntu-cuda-13.5-arm64.tar.gz": "147712866f0986a1e11041305b84ce6b319410d1435ee542ab2f92e5de77c6f4",
+    "llama-b12620-bin-ubuntu-cuda-13.5-x64.tar.gz": "d00665f29ad7df994aee9221a6f733cd1788e0019d5c59e80731b881b607d104",
+    "llama-b12620-bin-ubuntu-openvino-2026.4.1-x64.tar.gz": "62d10940e4b10fab4866859f97b0d30dd6b0a233415d5b422845eb41253dd6a9",
+    "llama-b12620-bin-ubuntu-rocm-10.0-x64.tar.gz": "94a89fb20d0c2be439960db0c58be7eaeed396779934153c65d5a722425ef4a0",
+    "llama-b12620-bin-ubuntu-s390x.tar.gz": "162b9349d448c45863019c8f38169c91160ca750a5d6afbc31799cf547cb8c09",
+    "llama-b12620-bin-ubuntu-sycl-fp16-x64.tar.gz": "ab5099c1aba6cb3aaccf0c411b4d53eb8c783459a74d5f330505e78443c32f3f",
+    "llama-b12620-bin-ubuntu-sycl-fp32-x64.tar.gz": "95008ffaf05e45ad70cb495eb2d4a11d0a236c8825e4f2fd5822575aeb29a71c",
+    "llama-b12620-bin-ubuntu-vulkan-arm64.tar.gz": "eded4ded67b7c35a8f852a579689e63a6b38c08a447900a570fb4270484ce3e5",
+    "llama-b12620-bin-ubuntu-vulkan-x64.tar.gz": "445c1aa4b8b90b2120692ed742f7999c0bbdb15da1d3da8de357ac574521b289",
+    "llama-b12620-bin-ubuntu-x64.tar.gz": "74bb9abb909c85cc831a5ca7689e5478eaffd911705257f9e329ee2d37ae81e3",
+    "llama-b12620-bin-ubuntu-zdnn-s390x.tar.gz": "a0bd1e5c781cc79022dd96813ef114d91c14f33c89d3f4d827861c1a08c2c8fe",
+    "llama-b12620-bin-win-cpu-arm64.zip": "b237a81829acbf6fa0f7a1b74878a12d6c4b5fe98d41665c8271c2264649d722",
+    "llama-b12620-bin-win-cpu-x64.zip": "7a7b5359b7af7704c1b23d442eb537cdad0214c1ad55bc861038d6057c7dbf9b",
+    "llama-b12620-bin-win-cuda-12.4-x64.zip": "5c972d389313227bcefa90b281363f8c0ad3947d3fbcfe5b8f50f826d7ae61df",
+    "llama-b12620-bin-win-cuda-13.5-arm64.zip": "92a1cd19eaeba4b55838f71962211020b0a0404c0ddc93b7275a9fd1fd5b0eeb",
+    "llama-b12620-bin-win-cuda-13.5-x64.zip": "7a9bf4fbbfbedf63b17aeaf9989e9a62ba3abeb06aee8e7fb65dc43f1f56cf56",
+    "llama-b12620-bin-win-opencl-adreno-arm64.zip": "44123c7bb882d5b5521e7941d82565368b683ce50c98a7691492a33b8a145d4b",
+    "llama-b12620-bin-win-openvino-2026.4.1-x64.zip": "b3cc0ed5bab049f079da0481c644db72e1f54b92f32792043054751257ed2232",
+    "llama-b12620-bin-win-rocm-10.0-x64.zip": "1de0e1c8a3465cdc8ff7c5a66180f1da638898432b8d6319578cb644d22a2f60",
+    "llama-b12620-bin-win-sycl-x64.zip": "84cdbb6fee221c6107019cc41b042987adcbaf5309b93a3717fd3c56dffcf9f3",
+    "llama-b12620-bin-win-vulkan-arm64.zip": "7a681a10971cbf5887f3211d9ef733c4c637c7b11a70e811ff31bb5b4da21520",
+    "llama-b12620-bin-win-vulkan-x64.zip": "eb3fb8dd7767da9b9826e378987fa36bc514adc850c4af78b86b5ff553dbfaf9",
+    "llama-b12620-ui.tar.gz": "6cbfa8a568305715e851288b3c6dee48f98a70e52c00b52772321cd78b40b8cd",
+    "llama-b12620-xcframework.zip": "13831f866aaa33ac768b9c6e1adea34b04eac96964a14c4097e1d243732efd24",
     # tag b1372 ROCm assets (llama.cpp 0eebb6eddcd5, ROCm 10.3.0a20261109)
     "llama-b1372-windows-rocm-gfx103X-x64.zip": "c9163fc8e7d1b5c70db707ef1ff821020fc3c74c38cc43fb600507690d28ec50",
     "llama-b1372-windows-rocm-gfx110X-x64.zip": "48ba544e013ff484c689a0affdede60e559e320e9a7ff31ab96e30d7e6dc12f9",

@@ -11,6 +11,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Changed
+- **The bundled llama.cpp runtime moved from b12343 to b12620.** An existing install picks it up with `localm setup-llama --force`.
+
 ## [0.3.4b4] - 2026-11-18
 
 ### Added
