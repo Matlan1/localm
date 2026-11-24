@@ -1940,6 +1940,26 @@ def audio_input_guidance(projector_failed: bool = False,
             f"ggml-org/Qwen3-ASR-0.6B-GGUF:Qwen3-ASR-0.6B-Q8_0.gguf`.")
 
 
+def _file_format(path: Path) -> str:
+    """The format name ``localm list`` shows for the model file *path*:
+    ``safetensors`` for ``.safetensors`` and ``.sft``, ``gguf`` for ``.gguf`` and
+    for any file that starts with the GGUF magic whatever its name (an Ollama
+    blob has no extension), else the extension without its dot, or ``file``
+    when there is none or the file cannot be read."""
+    suffix = path.suffix.lower()
+    if suffix in (".safetensors", ".sft"):
+        return "safetensors"
+    if suffix == ".gguf":
+        return "gguf"
+    try:
+        with open(path, "rb") as fh:
+            if fh.read(4) == b"GGUF":
+                return "gguf"
+    except OSError as e:
+        logger.debug("cannot read the start of %s: %s", path, e)
+    return suffix.lstrip(".") or "file"
+
+
 def list_models(type_filter: Optional[str] = None) -> None:
     from rich.markup import escape
 
@@ -1993,7 +2013,7 @@ def list_models(type_filter: Optional[str] = None) -> None:
             size = "[dim]dir[/dim]"
             name_cell = escape(name)
         elif path.exists():
-            kind = "safetensors" if path.suffix.lower() in (".safetensors", ".sft") else "gguf"
+            kind = _file_format(path)
             b = path.stat().st_size
             size = f"{b/1024**3:.2f} GB" if b >= 1024**3 else f"{b/1024**2:.0f} MB"
             name_cell = escape(name)

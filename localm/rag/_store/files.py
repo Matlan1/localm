@@ -7,7 +7,8 @@ from __future__ import annotations
 import json
 import time
 import weakref
-from typing import Iterable, Optional
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Iterable, Optional
 
 from localm.debuglog import logger as _log
 from localm.jsonl import dumps_lines
@@ -15,6 +16,7 @@ from localm.rag import store as _st
 
 from .cache import (_COLLECTION_CACHE, _Snapshot, _cache_key, _copy_json,
                     _files_changing, _freeze_snapshot)
+from .commit import StagedSave, finish_save, read_current
 from .sidecar import _REJECTED_VECTORS
 from .types import ProgressFn
 from .vecfile import (counted_vectors_json_pieces, load_vectors_json,
@@ -59,6 +61,14 @@ def _plain_rows(vectors: list) -> list:
 class _CollectionFiles:
     """Mixin of ``Collection``: loading a collection from disk or the snapshot
     cache, and writing it back."""
+
+    if TYPE_CHECKING:
+        dir: Path
+        _meta: dict
+
+        def _discard_rejected_vectors(self, why: str) -> None:
+            """Provided by ``_CollectionSidecar`` (sidecar.py)."""
+            ...
 
     def _serve_snapshot(self, snap: _Snapshot) -> None:
         """Adopt *snap*'s state: fresh containers over its read-only chunks and
@@ -133,7 +143,8 @@ class _CollectionFiles:
         set and a minimal meta in place, when it cannot be read or parsed or is
         not a JSON object."""
         try:
-            meta = json.loads((self.dir / "meta.json").read_text(encoding="utf-8"))
+            meta = json.loads(read_current(
+                self.dir, "meta.json", lambda p: p.read_text(encoding="utf-8")))
             if not isinstance(meta, dict):
                 raise ValueError("meta.json is not an object")
             self._meta = meta
@@ -147,10 +158,13 @@ class _CollectionFiles:
         """Read chunks.jsonl into ``self._chunks``, skipping and counting lines
         that are not a chunk."""
         self._chunks = []
-        chunks_file = self.dir / "chunks.jsonl"
-        if chunks_file.is_file():
+        try:
+            text = read_current(self.dir, "chunks.jsonl", lambda p: p.read_text(
+                encoding="utf-8", errors="surrogateescape"))
+        except FileNotFoundError:
+            text = None
+        if text is not None:
             bad_lines = 0
-            text = chunks_file.read_text(encoding="utf-8", errors="surrogateescape")
             # A byte that is not UTF-8 survives the read as a lone surrogate and
             # costs the line it is in, not the whole file. split_jsonl, NOT
             # str.splitlines(): JSONL is delimited by LINE FEED and nothing else.
@@ -196,20 +210,24 @@ class _CollectionFiles:
         self._vec_dim = None
         self.vector_degrade_reason = None
         self._vectors_file_rejected = False
-        vec_file = self.dir / "vectors.json"
-        if vec_file.is_file():
-            # vectors.json PRESENT but unusable is handled on its own path, never
-            # collapsed into "simply absent".
-            try:
-                data = load_vectors_json(vec_file)
-                if not isinstance(data, dict):
-                    raise ValueError("vectors.json is not an object")
-                vectors = data.get("vectors", [])
-            except (ValueError, OSError, RecursionError) as e:
-                data, vectors = None, None
-                self._note_vector_degrade(
-                    f"vectors.json is unreadable ({type(e).__name__}); "
-                    f"using BM25 lexical retrieval only", warn=True)
+        # vectors.json PRESENT but unusable is handled on its own path, never
+        # collapsed into "simply absent".
+        present = True
+        data: Any = None
+        vectors: Any = None
+        try:
+            data = read_current(self.dir, "vectors.json", load_vectors_json)
+            if not isinstance(data, dict):
+                raise ValueError("vectors.json is not an object")
+            vectors = data.get("vectors", [])
+        except FileNotFoundError:
+            present = False
+        except (ValueError, OSError, RecursionError) as e:
+            data, vectors = None, None
+            self._note_vector_degrade(
+                f"vectors.json is unreadable ({type(e).__name__}); "
+                f"using BM25 lexical retrieval only", warn=True)
+        if present:
             if vectors is not None:
                 if not _well_formed_vectors(vectors):
                     # Valid JSON but the entries are not vectors (scalars or
@@ -351,13 +369,11 @@ class _CollectionFiles:
                     phase="saving the index", done=total, total=total, unit="vectors")
 
     def _write_files(self, on_progress: Optional[ProgressFn] = None) -> None:
+        """Write the three files as one change (see ``commit``): a process that
+        ends, or a write that fails, at any point leaves the collection as it
+        was or as saved, never a mix."""
         self.dir.mkdir(parents=True, exist_ok=True)
-        self._atomic_write("meta.json", _st.meta_json(self._meta))
-        # dumps_lines escapes the line-break-alikes json.dumps(ensure_ascii=False)
-        # would otherwise emit raw (U+0085/U+2028/U+2029), so a record cannot be
-        # split in half by a line-oriented reader.
-        self._atomic_write("chunks.jsonl", dumps_lines(_plain_chunks(self._chunks)))
-        # meta.json and chunks.jsonl were just rewritten from this instance's own
+        # meta.json and chunks.jsonl are rewritten from this instance's own
         # in-memory state, which _load() only ever fills with well-formed
         # records, so both corruption flags are cleared here as well as in
         # _load().
@@ -365,32 +381,16 @@ class _CollectionFiles:
         self.chunks_bad_lines = 0
         self._meta_unreadable = False
         # The fate of a REJECTED vectors.json is decided FIRST, before anything
-        # below writes or unlinks that filename.
+        # below replaces or removes that filename.
         if self._vectors_file_rejected:
             if self._chunks:
                 self._quarantine_rejected_vectors()
             self._vectors_file_rejected = False
         # "Complete" means every chunk has a usable vector. Partial coverage
         # does not clear a set-aside sidecar's degrade.
-        complete = self._vector_index_complete()
-        if self._vectors is not None and any(v for v in self._vectors):
-            self._vec_dim = _first_dim(self._vectors)
-            self._atomic_write("vectors.json", self._vector_pieces(
-                _plain_rows(self._vectors), on_progress))
-        else:
-            # Nothing usable to write. A REJECTED file was already moved out of
-            # the way above.
-            (self.dir / "vectors.json").unlink(missing_ok=True)
-            self._vec_dim = None
-        if not self._chunks:
-            # Every document is gone. Stored vectors are positional against
-            # chunks, so nothing is left to realign a set-aside sidecar to.
-            self._discard_rejected_vectors("the collection no longer has any "
-                                           "documents to realign them to")
-            self.vector_degrade_reason = None
-        elif complete:
-            # Every chunk has a vector, so the degrade clears. The sidecar file
-            # itself is KEPT.
+        if not self._chunks or self._vector_index_complete():
+            # Nothing to score, or every chunk has a vector, so the degrade
+            # clears. A set-aside sidecar is KEPT while there are documents.
             self.vector_degrade_reason = None
         elif self._rejected_vector_files():
             self.vector_degrade_reason = (
@@ -400,28 +400,50 @@ class _CollectionFiles:
                 f"rebuild it with 'localm rag repair <name> --embed'")
         else:
             self.vector_degrade_reason = None
+        save = StagedSave(self.dir)
+        try:
+            # dumps_lines escapes the line-break-alikes json.dumps(ensure_ascii=
+            # False) would otherwise emit raw (U+0085/U+2028/U+2029), so a record
+            # cannot be split in half by a line-oriented reader.
+            save.add("chunks.jsonl", dumps_lines(_plain_chunks(self._chunks)))
+            if self._vectors is not None and any(v for v in self._vectors):
+                self._vec_dim = _first_dim(self._vectors)
+                save.add("vectors.json", self._vector_pieces(
+                    _plain_rows(self._vectors), on_progress))
+            else:
+                # Nothing usable to write: the save removes vectors.json. A
+                # REJECTED file was already moved out of the way above.
+                self._vec_dim = None
+            # Cache the LISTING-relevant fields that are NOT otherwise persisted -
+            # vector_degrade_reason and the vector-coverage math above - so a
+            # listing can answer from meta.json alone, without reconstructing
+            # this Collection at all (see peek_stats() / peek_detail() in
+            # introspect.py).
+            #
+            # The cache carries a cheap (mtime_ns, size) fingerprint of
+            # chunks.jsonl and vectors.json, taken AFTER they were written:
+            # peek_stats() / peek_detail() stat (never read) both files again and
+            # refuse the cache the instant either no longer matches, and fall
+            # back to a full load whenever the cache is missing entirely.
+            self._meta[_STATS_CACHE_KEY] = self._stats_cache_block(save)
+            save.add("meta.json", _st.meta_json(self._meta))
+            save.commit()
+        except BaseException:
+            save.discard()
+            raise
         self._bm25 = None
         self._bm25_source = None
-        # Cache the LISTING-relevant fields that are NOT otherwise persisted -
-        # vector_degrade_reason and the vector-coverage math above - so a listing
-        # can answer from meta.json alone, without reconstructing this Collection
-        # at all (see peek_stats() / peek_detail() in introspect.py).
-        #
-        # The cache carries a cheap (mtime_ns, size) fingerprint of chunks.jsonl
-        # and vectors.json, taken AFTER they were written: peek_stats() /
-        # peek_detail() stat (never read) both files again and refuse the cache
-        # the instant either no longer matches, and fall back to a full load
-        # whenever the cache is missing entirely.
-        #
-        # A second, small atomic write: the meta.json write at the top of this
-        # method happens BEFORE vector_degrade_reason is finalised above.
-        self._meta[_STATS_CACHE_KEY] = self._stats_cache_block()
-        self._atomic_write("meta.json", _st.meta_json(self._meta))
+        if not self._chunks:
+            # Every document is gone. Stored vectors are positional against
+            # chunks, so nothing is left to realign a set-aside sidecar to.
+            self._discard_rejected_vectors("the collection no longer has any "
+                                           "documents to realign them to")
 
-    def _stats_cache_block(self) -> dict:
+    def _stats_cache_block(self, save: Optional[StagedSave] = None) -> dict:
         """The ``_stats_cache`` block for meta.json, computed from THIS
         instance's current in-memory state and a FRESH fingerprint of
-        chunks.jsonl/vectors.json taken right now (see ``_file_fingerprint``).
+        chunks.jsonl/vectors.json, or of the ones *save* staged, taken right now
+        (see ``_file_fingerprint``).
 
         Caller must hold this collection's write lock; without that, the
         fingerprint could describe files a concurrent writer is mid-way
@@ -432,7 +454,7 @@ class _CollectionFiles:
             "vector_degrade_reason": self.vector_degrade_reason,
             "corrupt": self.corrupt,
             "chunks_bad_lines": self.chunks_bad_lines,
-            "fingerprint": self._file_fingerprint(),
+            "fingerprint": self._file_fingerprint(save),
             # Lets a listing-time caller compare against the currently active
             # embedding model WITHOUT loading anything.
             "vector_dim": self._vec_dim,
@@ -456,6 +478,7 @@ class _CollectionFiles:
         stays valid too."""
         self.dir.mkdir(parents=True, exist_ok=True)
         with _files_changing(self.dir):
+            finish_save(self.dir)
             self._atomic_write("meta.json", _st.meta_json(self._meta))
         self._snapshot_ref = None
 
@@ -487,17 +510,17 @@ class _CollectionFiles:
         _WARNED_DEGRADES.add(key)
         _log.warning("RAG collection %r: %s", self.name, reason)
 
-    def _file_fingerprint(self) -> dict:
+    def _file_fingerprint(self, save: Optional[StagedSave] = None) -> dict:
         """(mtime_ns, size) for chunks.jsonl and vectors.json (None for
         either that does not exist) - a cheap (stat only, no content read)
         signature of the two files the ``_stats_cache`` block is derived
-        from. Written by _save() right after both files were rewritten, and
-        checked by ``_fingerprint_matches`` before the cache is ever trusted, so
-        a file that changed WITHOUT going through this class is detected and the
-        cache refused."""
+        from. Taken by _save() of the files it staged (*save*), whose times and
+        sizes the move into place keeps, and checked by ``_fingerprint_matches``
+        before the cache is ever trusted, so a file that changed WITHOUT going
+        through this class is detected and the cache refused."""
         def _stat(name: str) -> list[int] | None:
             try:
-                st = (self.dir / name).stat()
+                st = (save.path(name) if save else self.dir / name).stat()
             except OSError:
                 return None
             return [st.st_mtime_ns, st.st_size]

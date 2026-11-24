@@ -486,6 +486,19 @@ uv pip install -p .venv torch==2.11.0+rocm7.13.0 torchvision==0.26.0+rocm7.13.0 
 uv pip install -p .venv torch torchvision --torch-backend=cpu
 ```
 
+Setup then adds transformers and the other packages HF models need (einops,
+tiktoken and more), held to the PyTorch just installed; by hand, after any line
+above except `-e ".[gpu]"` (which already includes them):
+
+```bash
+.venv/bin/python -m localm.hwdetect torch-pins --out .venv/localm-torch-pins.txt
+uv pip install -p .venv -e ".[hf]" -c .venv/localm-torch-pins.txt
+```
+
+On Windows the first command starts with `.venv\Scripts\python`. The second one
+needs a source checkout; in a `pip install localm` environment it is
+`uv pip install "localm[hf]"`.
+
 The `[gpu]` extra is the gfx103X (RX 6000) self-contained build (Windows, Python
 3.12) - on other AMD Windows cards use the ROCm preview wheels above, and on
 Linux use the upstream ROCm index. AMD ROCm on Windows is a recent **public
