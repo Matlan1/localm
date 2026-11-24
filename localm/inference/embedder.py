@@ -782,7 +782,7 @@ def _usable_as_embedder(name: str, entry: dict) -> bool:
 
 
 def _embedding_model_chosen(spec: str) -> bool:
-    """Whether somebody set ``embedding_model`` (Settings, the Knowledge picker,
+    """Whether somebody set ``embedding_model`` (in the app, with
     ``localm setup-embeddings``, ``localm config``, config.json), as opposed to the
     default applying."""
     from localm.config import config_key_stored
