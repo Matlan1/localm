@@ -20,8 +20,8 @@ FENCE = "```"
 
 
 class _Backend:
-    """Answers the canned replies in order, and a check answer whenever the
-    request carries the two-answer grammar."""
+    """Answers the canned replies in order, and *check* whenever it is asked
+    whether its calls were meant to run."""
 
     model_id = "stub-model"
     native_tools = False
@@ -38,8 +38,9 @@ class _Backend:
         pass
 
     def chat(self, messages, **kw):
-        if "[example]" in (kw.get("grammar") or ""):
+        if messages[-1]["content"].startswith("[tool-call check]"):
             self.checks.append([dict(m) for m in messages])
+            self.check_kw = kw
             return self.check
         self.calls.append(([dict(m) for m in messages], kw))
         return self.replies.pop(0) if self.replies else "Done."
@@ -94,12 +95,33 @@ def test_loose_calls_run_unattended_once_the_model_says_they_were_meant(tmp_path
 
 def test_a_call_the_model_calls_an_example_never_runs(tmp_path):
     reply = "A call looks like this:\n" + _loose("write_file", path="a.txt", content="1")
-    backend = _Backend([reply, "That was how a call looks."], check="[example]")
+    backend = _Backend([reply, "unused"], check="[example]")
     agent = _agent(tmp_path, backend)
-    agent.run_task("explain with an example how a tool call looks")
+    result = agent.run_task("explain with an example how a tool call looks")
     assert not (tmp_path / "a.txt").exists()
     assert agent.denied_unconfirmed == []
+    assert result.startswith(reply) and agent.last_run_ok is True
+    assert len(backend.calls) == 1
+
+
+def test_an_example_does_not_answer_a_request_for_a_change(tmp_path):
+    reply = "Like this:\n" + _loose("write_file", path="a.txt", content="1")
+    backend = _Backend([reply, _xml("write_file", path="a.txt", content="1"), "Done."],
+                       check="[example]")
+    agent = _agent(tmp_path, backend)
+    agent.run_task("create a.txt containing 1")
     assert any("you said it was an example" in t for t in _texts(agent, "user"))
+    assert (tmp_path / "a.txt").read_text() == "1"
+
+
+def test_an_example_beside_a_call_that_ran_does_not_end_the_run(tmp_path):
+    (tmp_path / "b.txt").write_text("real")
+    reply = _loose("read_file", path="b.txt") + "\nand like this:\n" \
+        + _loose("write_file", path="a.txt", content="1")
+    backend = _Backend([reply, "b.txt holds real."], check="[example]")
+    agent = _agent(tmp_path, backend)
+    assert agent.run_task("what does b.txt say?").startswith("b.txt holds real.")
+    assert not (tmp_path / "a.txt").exists()
 
 
 @pytest.mark.parametrize("check", ["", "sure, go ahead", "[run] [example] maybe"])
@@ -111,15 +133,26 @@ def test_an_answer_that_is_neither_denies_the_call(tmp_path, check):
     assert agent.denied_unconfirmed == [("write_file", "lenient")]
 
 
-def test_without_a_grammar_the_model_is_not_asked_and_the_call_is_denied(tmp_path):
+def test_the_question_is_held_to_its_two_answers_by_a_grammar(tmp_path):
+    from localm.plugins.coder.agent.context import _CALL_CHECK_GRAMMAR
     reply = "Writing.\n" + _loose("write_file", path="a.txt", content="1")
-    backend = _Backend([reply, "Done."])
+    backend = _Backend([reply, "Done."], check="<think>\nyes\n</think>\n[run]")
+    _agent(tmp_path, backend, max_tokens=9, max_tokens_explicit=False).run_task("create a.txt")
+    assert backend.check_kw["grammar"] == _CALL_CHECK_GRAMMAR
+    assert "max_tokens" not in backend.check_kw
+    assert (tmp_path / "a.txt").exists()
+
+
+@pytest.mark.parametrize("check,ran", [("[run]", True), (" [run]\n", True),
+                                       ("I think [run]", False), ("[example]", False),
+                                       ("[run] write_file", False)])
+def test_without_a_grammar_only_an_exact_answer_counts(tmp_path, check, ran):
+    reply = "Writing.\n" + _loose("write_file", path="a.txt", content="1")
+    backend = _Backend([reply, "Done."], check=check)
     backend.supports_grammar = False
-    agent = _agent(tmp_path, backend)
-    agent.run_task("create a.txt")
-    assert backend.checks == []
-    assert not (tmp_path / "a.txt").exists()
-    assert agent.denied_unconfirmed == [("write_file", "lenient")]
+    _agent(tmp_path, backend).run_task("create a.txt")
+    assert "grammar" not in backend.check_kw
+    assert (tmp_path / "a.txt").exists() is ran
 
 
 def test_a_person_who_can_be_asked_is_asked_instead_of_the_model(tmp_path):

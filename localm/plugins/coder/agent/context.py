@@ -221,6 +221,8 @@ think-char ::= [^<] | "<" [^/] | "</" [^t]
 _CALL_CHECK_GRAMMAR = (
     'root ::= opt-think opt-ws ("[run]" | "[example]") opt-ws\n'
     + _OPT_THINK_RULES + r"opt-ws ::= [ \t\n\r]? [ \t\n\r]?")
+# The reply limit of that question on a backend without a grammar.
+_CALL_CHECK_MAX_TOKENS = 512
 # The key the arguments of one call object stand under in tool_grammar's output.
 _RE_ARGUMENTS_KEY = re.compile(
     r'^(root-body(?:-\d+)?-arguments-kv ::= )"\\"arguments\\""', re.MULTILINE)
@@ -1704,12 +1706,11 @@ ws     ::= [ \t\n\r]*
 
     def _ask_if_calls_meant(self, calls: list) -> Optional[bool]:
         """Ask the model whether the calls it wrote as plain JSON were meant to
-        run: True for ``[run]``, False for ``[example]``, None when it could not
-        be asked (no grammar on this backend or config, an error, a stop, or an
-        answer that is neither). The reply is held to those two answers by the
-        grammar, and the exchange is not kept in the conversation."""
-        if not self.can_force_tool_calls():
-            return None
+        run: True for ``[run]``, False for ``[example]``, None for any other
+        answer, a refused grammar or a stop. Where the backend can enforce a
+        grammar the reply is held to those two answers; elsewhere it counts only
+        when it is exactly one of them. The exchange is not kept in the
+        conversation."""
         from ..backends.http import CoderServerError
         from .execution import _call_key
         listed = "\n".join(f"- {c.name} {_call_key(c)[:600]}" for c in calls)
@@ -1717,9 +1718,12 @@ ws     ::= [ \t\n\r]*
             "[tool-call check] Your reply contains JSON text that names a tool:\n"
             + listed + "\nNothing of it has run. Answer [run] if you wrote it as a "
             "call for me to execute now. Answer [example] if it was an example, a "
-            "quotation, or an illustration for the user.")}]
+            "quotation, or an illustration for the user. Answer with nothing else.")}]
         kw = {k: v for k, v in self.gen_kwargs.items() if k != "max_tokens"}
-        kw["grammar"] = _CALL_CHECK_GRAMMAR
+        if self.can_force_tool_calls():
+            kw["grammar"] = _CALL_CHECK_GRAMMAR
+        else:
+            kw["max_tokens"] = _CALL_CHECK_MAX_TOKENS
         try:
             reply = self.backend.chat(messages, **kw)
         except CoderServerError as e:
@@ -1727,14 +1731,15 @@ ws     ::= [ \t\n\r]*
                 raise
             return None
         self._accumulate_usage()
+        answer = reply.strip() if isinstance(reply, str) else ""
+        if "grammar" in kw:
+            answer = answer.rpartition("</think>")[2].strip()
         self._audit.notice("loose_call_check",
                            f"asked whether {', '.join(c.name for c in calls)} was "
-                           f"meant to run; the model answered {str(reply)[-40:]!r}")
-        if self.stop_pending or not isinstance(reply, str):
+                           f"meant to run; the model answered {answer[:60]!r}")
+        if self.stop_pending:
             return None
-        if reply.rstrip().endswith("[run]"):
-            return True
-        return False if reply.rstrip().endswith("[example]") else None
+        return {"[run]": True, "[example]": False}.get(answer)
 
     def can_force_tool_calls(self) -> bool:
         """True when this backend + config can bind the tool-call grammar from

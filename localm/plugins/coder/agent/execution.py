@@ -937,6 +937,8 @@ class _ExecutionMixin:
                         "run is non-interactive with no approval handler - denied.")
                     reason = "untrusted-content"
                 elif lenient_only and (self._loose_check or {}).get("meant") is False:
+                    if self._loose_check is not None:
+                        self._loose_check["examples"] = self._loose_check.get("examples", 0) + 1
                     result = ToolResult.error(
                         f"{call.name} was not run: you said it was an example, not "
                         "a call. If it should run after all, write it as\n"

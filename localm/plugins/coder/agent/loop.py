@@ -1095,11 +1095,20 @@ class _LoopMixin:
 
                 # Execute tools - run non-destructive batches in parallel
                 loose = [c for c in calls if c.lenient]
-                self._loose_check = {"calls": loose} if loose else None
+                check: dict = {"calls": loose}
+                self._loose_check = check if loose else None
                 try:
                     result_blocks = self._execute_tools(calls, interactive=interactive)
                 finally:
                     self._loose_check = None
+                if (check.get("examples", 0) == len(calls)
+                        and not self._change_still_owed(
+                            getattr(self, "_last_user_request", "") or "", st)):
+                    # Every call in the reply was an example: the reply is the answer.
+                    final_response = response + self._grounding_footer()
+                    if self.on_event is None:
+                        print_assistant_response(final_response, name=self.name)
+                    break
                 st.plan_submitted = st.plan_submitted or any(
                     c.name == "exit_plan_mode" for c in calls)
                 if invented:
