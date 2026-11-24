@@ -562,6 +562,7 @@ class _ContextMixin:
 
         def _say_progress(self, text: str) -> None: ...
 
+        name: str
         _loose_unasked: dict
         _foreign_calls: dict[str, list[dict]]
         _foreign_read: list
@@ -1901,6 +1902,21 @@ ws     ::= [ \t\n\r]*
                 "_memory", "_custom_instructions", "_mcp_docs", "_plugin_docs",
                 "_skill_docs")) if t]
 
+    def _stands_in_prompt(self, name: str, mine: dict) -> bool:
+        """Whether a call of *name* with the comparable arguments *mine* stands in
+        the system prompt (the project map included) and is not one of the
+        example calls of localm's own documentation."""
+        from ..parser import calls_standing_in
+        calls, complete = calls_standing_in(str(self._system_prompt), {name})
+        same = [c for c in calls if _same_call(mine, _comparable_args(c))]
+        if complete and not same:
+            return False
+        from ..prompts import build_system_prompt
+        own, _complete = calls_standing_in(str(build_system_prompt(
+            self.cwd, agent_name=self.name, disabled_tools=self.disabled_tools)), {name})
+        documented = [_comparable_args(c) for c in own]
+        return not complete or any(_comparable_args(c) not in documented for c in same)
+
     def _stands_in_foreign_text(self, call) -> bool:
         """Whether *call* also stands in text this agent, or an agent above it,
         was given by anything but the user."""
@@ -1918,6 +1934,8 @@ ws     ::= [ \t\n\r]*
                 calls, complete = calls_standing_in(text, {call.name})
                 if not complete or any(_same_call(mine, _comparable_args(c)) for c in calls):
                     return True
+            if agent._stands_in_prompt(call.name, mine):
+                return True
             agent = getattr(agent, "parent", None)
         return False
 

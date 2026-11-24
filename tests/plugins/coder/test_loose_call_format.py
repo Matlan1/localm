@@ -665,6 +665,12 @@ def test_a_call_in_the_instructions_of_the_session_is_never_meant(tmp_path, part
         tmp_path, lambda agent: setattr(agent, part, "doc: " + _call_json(2)))
 
 
+def test_a_call_in_the_project_map_is_never_meant(tmp_path):
+    def mapped(agent):
+        agent._system_prompt += "\n## Codebase map\n  a.py: " + _call_json()
+    assert not _quoting_after(tmp_path, mapped)
+
+
 @pytest.mark.parametrize("name,args", [("run_tests", {}),
                                        ("run_shell", {"command": "python -m pytest tests/ -x"})])
 def test_a_call_localms_own_documentation_shows_can_be_meant(tmp_path, name, args):
