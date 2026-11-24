@@ -320,6 +320,8 @@ def cleanup(lock: Lock) -> list:
     if not lock.held:
         raise ValueError("the lock of the install is not held")
     left = []
+    with contextlib.suppress(OSError):   # a write that never took effect
+        disk.unlink(record_path(lock.root).with_name("job.json.tmp"))
     for update_id in _ids(lock.root):
         try:
             if not _delete(lock.root, update_id):
@@ -336,6 +338,8 @@ def _delete(root, update_id: str) -> bool:
     False when a part is left."""
     work = mover.work_folder(root, update_id)
     if disk.lstat(work / _FINISHED) is None:
+        with contextlib.suppress(OSError):   # only an empty one goes
+            os.rmdir(work)
         return True
     gone = disk.remove_tree(mover.area(root, update_id, mover.PACKAGES).old.parent)
     for name in sorted(os.listdir(work)):

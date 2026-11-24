@@ -374,6 +374,10 @@ def plan_files(root, update_id: str, new_files: Mapping, old_files: Optional[Map
         if st is None or (stat.S_ISDIR(st.st_mode) and not disk.is_link(st)):
             changes.append(Op(rel, ADD, new=want))
             taken.append(rel)
+            other = _other_spelling(path) if st is None else None
+            if other is not None and other.name != path.name:
+                removes.append(Op(other.relative_to(a.base).as_posix(), REMOVE,
+                                  disk.content_identity(other), edited=old_files is not None))
             continue
         old = disk.content_identity(path)
         if not _differs(old, want) and _executable(st) == _executable(source_st):
@@ -381,6 +385,8 @@ def plan_files(root, update_id: str, new_files: Mapping, old_files: Optional[Map
         edited = (old_files is not None and rel != package.NAME
                   and (rel not in old_files or _differs(old, old_files[rel])))
         changes.append(Op(rel, REPLACE, old, want, swap=rel in swap, edited=edited))
+    named = {op.path: op for op in reversed(removes)}
+    removes = [named[path] for path in sorted(named)]
     leaving = {op.path for op in removes}
     for rel in taken:
         _check_taken(a, rel, leaving)
@@ -398,6 +404,19 @@ def plan_files(root, update_id: str, new_files: Mapping, old_files: Optional[Map
 
 def _differs(identity: dict, stated: Mapping) -> bool:
     return any(identity[k] != stated[k] for k in ("sha256", "size"))
+
+
+def _other_spelling(path: Path) -> Optional[Path]:
+    """The regular file that *path* reaches under another spelling of its last part,
+    None when there is none."""
+    st = disk.lstat(path)
+    if st is None or disk.spelled(path) or disk.is_link(st) or not stat.S_ISREG(st.st_mode):
+        return None
+    for name in os.listdir(path.parent):
+        other = path.with_name(name)
+        if name != path.name and os.path.samestat(os.lstat(other), st):
+            return other
+    return None
 
 
 def _check_taken(a: Area, rel: str, leaving: set) -> None:
@@ -558,10 +577,12 @@ def _undo(a: Area, op: Op, wait: Wait) -> None:
         return
     if not disk.same(kept, op.old):
         raise Refused(f"{kept} is not the file that was replaced")
-    if op.swap and present and op.new is not None and (
-            disk.same(path, op.old) or disk.same(path, op.new)):
-        disk.put_over(kept, path, wait)
-        return
+    if op.swap and st is not None and present and op.new is not None:
+        if disk.same(path, op.old) and st.st_mode == kept_st.st_mode:
+            return
+        if disk.same(path, op.old) or disk.same(path, op.new):
+            disk.put_over(kept, path, wait)
+            return
     if present:
         aside(a, op, path, wait)
     disk.move(kept, path, wait)

@@ -664,7 +664,7 @@ def test_the_way_back_waits_for_a_uv_that_outlived_the_update(world, tmp_path):
     spec.write_text(json.dumps({"do": "update", "root": str(root), "id": ID,
                                 "uv": [*argv(world), "--link-mode", "copy"], "env": world.env}),
                     encoding="utf-8")
-    p = subprocess.Popen([sys.executable, "-I", "-S", str(um.DRIVER), str(run_dir), str(spec), "-1"],
+    p = subprocess.Popen([um.PYTHON, "-I", "-S", str(um.DRIVER), str(run_dir), str(spec), "-1"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **um.NO_WINDOW)
     deadline = time.monotonic() + 60
     while not (site(root) / "big" / "d1").exists():

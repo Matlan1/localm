@@ -102,8 +102,13 @@ def test_a_swapped_file_is_never_absent(root, monkeypatch):
 
 def test_without_the_installed_statement_nothing_is_removed(root):
     plan = planned(root, old_files=None)
-    assert {op.kind for op in plan.ops} == {"replace", "add"}
+    gone = {op.path for op in plan.ops if op.kind == "remove"}
+    assert gone == ({"Readme.md"} if os.path.exists(root / "README.MD") else set())
     assert not any(op.edited for op in plan.ops)
+    before = um.tree(root)
+    mover.forward(root, ID, plan)
+    assert (root / "localm" / "gone.py").is_file() and (root / "README.md").is_file()
+    assert undo(root).state == "old" and um.tree(root) == before
 
 
 def test_a_new_file_that_is_not_the_stated_one_is_refused(root):
@@ -322,6 +327,7 @@ def test_a_held_file_takes_everything_back_and_names_the_holder(root, rel, share
         assert Path(rel).name in str(e.value)
         assert f"pid {os.getpid()}" in str(e.value)
         assert e.value.errors == [] or share == 0
+    assert um.tree(root) == before
     assert mover.back(root, ID, plan) == []
     assert um.tree(root) == before
 
@@ -341,7 +347,7 @@ def test_a_file_held_with_delete_sharing_is_replaced_and_put_back(root, tmp_path
 def test_a_file_let_go_within_the_wait_does_not_stop_the_update(root):
     plan = planned(root)
     holder = subprocess.Popen(
-        [sys.executable, "-I", "-S", "-c",
+        [um.PYTHON, "-I", "-S", "-c",
          "import sys, time; f = open(sys.argv[1], 'rb'); print('held', flush=True); time.sleep(1.5)",
          str(root / "localm" / "changed.py")], stdout=subprocess.PIPE, **um.NO_WINDOW)
     try:
@@ -668,7 +674,7 @@ def test_a_folder_that_may_not_be_changed_takes_everything_back(root):
     plan = planned(root)
     folder = root / "localm" / "olddir"
     with no_write(folder):
-        with pytest.raises(mover.StepFailed, match="x.py") as e:
+        with pytest.raises(mover.StepFailed, match="olddir") as e:
             mover.forward(root, ID, plan, wait_s=0.2)
     assert e.value.errors == []
     assert um.tree(root) == before
@@ -721,7 +727,7 @@ def test_only_one_process_updates_an_install(root, run_dir, tmp_path):
     before = um.tree(root)
     spec = tmp_path / "hold.json"
     spec.write_text(json.dumps({"do": "hold", "root": str(root)}), encoding="utf-8")
-    holder = subprocess.Popen([sys.executable, "-I", "-S", str(um.DRIVER), str(run_dir), str(spec),
+    holder = subprocess.Popen([um.PYTHON, "-I", "-S", str(um.DRIVER), str(run_dir), str(spec),
                                "-1"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, **um.NO_WINDOW)
     assert holder.stdin is not None and holder.stdout is not None
     try:
@@ -748,7 +754,7 @@ def test_two_restores_at_once_put_back_one_version(root, run_dir, tmp_path):
     before = um.tree(root)
     plan = planned(root)
     mover.forward(root, ID, plan)
-    both = [subprocess.Popen([sys.executable, "-I", "-S", str(run_dir), "restore", str(root)],
+    both = [subprocess.Popen([um.PYTHON, "-I", "-S", str(run_dir), "restore", str(root)],
                              stderr=subprocess.PIPE, **um.NO_WINDOW) for _ in range(2)]
     codes = []
     for p in both:

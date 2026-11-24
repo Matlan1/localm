@@ -15,6 +15,8 @@ from localm.update_mechanism import shared
 
 REPO = Path(__file__).resolve().parents[1]
 DRIVER = REPO / "tests" / "_update_mechanism_driver.py"
+#: The interpreter itself, not a venv's launcher of it.
+PYTHON: str = getattr(sys, "_base_executable", None) or sys.executable
 UPDATE_ID = "0123456789abcdef0123456789abcdef"
 NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
 
@@ -134,7 +136,7 @@ def applier(dest: Path) -> Path:
 
 def run(argv: list, **kw) -> subprocess.CompletedProcess:
     """Run python with *argv*, isolated, hidden, output captured."""
-    return subprocess.run([sys.executable, "-I", "-S", *map(str, argv)], capture_output=True,
+    return subprocess.run([PYTHON, "-I", "-S", *map(str, argv)], capture_output=True,
                           text=True, stdin=subprocess.DEVNULL, timeout=120, **NO_WINDOW, **kw)
 
 
