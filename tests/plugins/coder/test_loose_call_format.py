@@ -1008,8 +1008,8 @@ def test_code_shown_while_the_tests_fail_is_named_as_not_written(tmp_path):
     assert notes == [3]
 
 
-SHOWN_EDIT = (FENCE + "python\nedit_file({\n    \"path\": \"a.py\",\n    \"old\": \"x = 1\",\n"
-              "    \"new\": \"x = 2\"\n})\n" + FENCE + "\n")
+SHOWN_EDIT = (FENCE + "python\nedit_file(\n    path='a.py',\n    old='x = 1',\n"
+              "    new='x = 2',\n)\n" + FENCE + "\n")
 
 
 def test_a_call_shown_as_code_beside_a_real_one_is_named_and_then_forced(tmp_path):
