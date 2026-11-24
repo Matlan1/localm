@@ -74,6 +74,32 @@ def _strip_unreleased(markdown: str) -> str:
     return "".join(ln for ln in kept if not _UNRELEASED_LINKDEF.match(ln))
 
 
+async def _saved_report_response(save, show) -> dict:
+    """Run *save* (blocking; returns the saved path or None) off the event loop and
+    return the save routes' response: the file's name, path and text, with the
+    digest the send route checks. When the file cannot be read back, its text and
+    digest are left out. HTTPException 500 when nothing was saved, 504 when saving
+    took too long."""
+    from localm import bugreport
+    try:
+        path = await run_in_threadpool_bounded(save, timeout=_BUG_REPORT_SAVE_TIMEOUT_S)
+    except ThreadCallTimeout as e:
+        raise HTTPException(504, f"Saving the bug report timed out: {e}") from e
+    if path is None:
+        # A failed save must not report success.
+        raise HTTPException(500, "Could not save the bug report to disk.")
+    result = {"saved": True, "filename": path.name,
+              "path": show(path),
+              "maintainer": bugreport.MAINTAINER_EMAIL}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return result
+    result["report_markdown"] = text
+    result["report_sha256"] = bugreport.report_digest(text)
+    return result
+
+
 def register(app: FastAPI, ctx) -> None:
     require_scope = _hs.require_scope
     _request_shutdown = _hs._request_shutdown
@@ -160,27 +186,35 @@ def register(app: FastAPI, ctx) -> None:
                 stall_stacks=recent_stall_stacks(),
                 scrub=None if show is str else show)
 
-        try:
-            path = await run_in_threadpool_bounded(
-                _save, timeout=_BUG_REPORT_SAVE_TIMEOUT_S)
-        except ThreadCallTimeout as e:
-            raise HTTPException(504, f"Saving the bug report timed out: {e}") from e
-        if path is None:
-            # A failed save must not report success.
-            raise HTTPException(500, "Could not save the bug report to disk.")
-        result = {"saved": True, "filename": path.name,
-                  "path": show(path),
-                  "maintainer": bugreport.MAINTAINER_EMAIL}
-        # The saved text for review and download, with the digest the send route
-        # checks. When it cannot be read back, neither is returned: the file is on
-        # disk, and the report cannot be sent from the GUI.
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            return result
-        result["report_markdown"] = text
-        result["report_sha256"] = bugreport.report_digest(text)
-        return result
+        return await _saved_report_response(_save, show)
+
+    @app.post("/api/feedback",
+              dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    async def save_feedback_ep(body: dict, request: Request):
+        """Save feedback or a suggestion from the GUI and return it for review.
+        Never sends.
+
+        *body* is ``{"kind": "feedback" | "suggestion", "text": ...}``. Saves an
+        editable markdown file with that text and the localm version, nothing
+        else, and returns ``filename``, ``path``, ``maintainer``,
+        ``report_markdown`` and ``report_sha256`` as ``POST /api/bug-report``
+        does; sending is ``POST /api/bug-report/send`` with that filename and
+        digest. For a caller other than the local operator the text is
+        path-scrubbed before it is saved. 400 for another kind or an empty text,
+        500 when the file cannot be written, 504 when saving takes too long.
+        Requires the owner or config-write scope, and a same-origin request."""
+        from localm import bugreport
+        kind, text = body.get("kind"), body.get("text")
+        if not isinstance(kind, str) or kind not in bugreport.FEEDBACK_KINDS:
+            raise HTTPException(400, 'kind must be "feedback" or "suggestion".')
+        if not isinstance(text, str) or not bugreport.feedback_text(text):
+            raise HTTPException(400, "Please write something before sending.")
+        show = _hs.path_formatter(request)
+
+        def _save():
+            return bugreport.save_feedback(text, kind, scrub=None if show is str else show)
+
+        return await _saved_report_response(_save, show)
 
     @app.post("/api/bug-report/send",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
@@ -188,7 +222,8 @@ def register(app: FastAPI, ctx) -> None:
         """Upload a report the user has reviewed, as a GitHub issue via the
         configured proxy.
 
-        *body* names a report saved by ``POST /api/bug-report``: ``filename``
+        *body* names a report saved by ``POST /api/bug-report`` or ``POST
+        /api/feedback``, whose kind is sent with it: ``filename``
         and ``sha256``, the ``report_sha256`` that route returned. The saved
         file is uploaded only when its current text has that digest, so what is
         sent is the text the user was shown, without its closing edit note;
@@ -225,12 +260,13 @@ def register(app: FastAPI, ctx) -> None:
                 409, "The saved report changed after it was shown. Review it again "
                      "before sending.")
         title = bugreport.report_title_from_markdown(text)
+        kind = bugreport.saved_report_kind(filename)
         result: dict = {"filename": filename, "maintainer": bugreport.MAINTAINER_EMAIL}
 
         # Off the event loop: a blocking HTTPS POST to the upload proxy on
         # upload_report's own 15s socket timeout.
         def _upload():
-            return bugreport.upload_report(title, text, send_anyway=send_anyway)
+            return bugreport.upload_report(title, text, send_anyway=send_anyway, kind=kind)
 
         try:
             up = await run_in_threadpool_bounded(
@@ -272,7 +308,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/issues", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def issues_ep():
-        """The bug reports this install filed, each looked up by number through
+        """The reports this install filed, each looked up by number through
         the proxy. Rows are ``{number, title, state, closed_at, html_url}``; a row
         whose lookup failed, or that the lookup's time budget did not reach,
         carries ``error`` instead of ``state``. ``persisted`` is False when the

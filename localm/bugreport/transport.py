@@ -26,14 +26,14 @@ def _truncate_body(body: str) -> str:
     return body[:_MAX_PREFILL_BODY] + "\n\n... (truncated - see the saved report file)"
 
 
-def mailto_url(summary: str, body: str) -> str:
-    """A ``mailto:`` link to MAINTAINER_EMAIL whose subject and body are
-    *summary* and *body* after ``_scrub_secrets``, the body truncated to
+def mailto_url(summary: str, body: str, kind: str = "bug") -> str:
+    """A ``mailto:`` link to MAINTAINER_EMAIL whose subject (prefixed
+    ``localm <kind>:``) and body are *summary* and *body* after ``_scrub_secrets``, the body truncated to
     ``_MAX_PREFILL_BODY`` characters."""
     summary = _br._scrub_secrets(summary)
     body = _br._scrub_secrets(body)
     q = urllib.parse.urlencode(
-        {"subject": f"localm bug: {summary}", "body": _truncate_body(body)},
+        {"subject": f"localm {kind}: {summary}", "body": _truncate_body(body)},
         quote_via=urllib.parse.quote)
     return f"mailto:{MAINTAINER_EMAIL}?{q}"
 
@@ -195,7 +195,7 @@ SEND_ANYWAY_FLAG = "--send-anyway"
 
 def upload_report(title: str, body: str, *, url: Optional[str] = None,
                   token: Optional[str] = None, timeout: float = 15.0,
-                  opener=None, send_anyway: bool = False) -> dict:
+                  opener=None, send_anyway: bool = False, kind: str = "bug") -> dict:
     """POST a user-reviewed report to the upload endpoint and return its JSON
     response (e.g. ``{"url": "<issue url>"}``).
 
@@ -207,8 +207,9 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
     send is NEVER
     reported as success (we do not hide problems). *send_anyway* True is the
     person's consent, given for this one report, to send it while ``net_mode``
-    is off; nothing is written to the config. *opener* is injectable for
-    tests (defaults to urllib)."""
+    is off; nothing is written to the config. *kind* one of ``FEEDBACK_KINDS`` is
+    sent as the request's ``type``; a bug report sends no type. *opener* is
+    injectable for tests (defaults to urllib)."""
     import json as _json
 
     # Scrub the title at the upload boundary: it becomes a PUBLIC GitHub issue
@@ -250,9 +251,10 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
             logging.getLogger("localm").info(
                 "bugreport: sending one report on the person's Send anyway choice; "
                 "the Network access setting is unchanged")
-    payload = _json.dumps(
-        {"title": (title or "localm bug report")[:200], "body": body or ""}
-    ).encode("utf-8")
+    message = {"title": (title or "localm bug report")[:200], "body": body or ""}
+    if kind != "bug":
+        message["type"] = kind
+    payload = _json.dumps(message).encode("utf-8")
     headers = {"Content-Type": "application/json", "User-Agent": "localm-bugreport"}
     if token:
         headers["X-Localm-Token"] = token

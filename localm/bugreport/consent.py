@@ -102,7 +102,8 @@ def _consents_to_save(*, interactive: bool, assume_yes: bool, prompt) -> bool:
 def offer_to_send(summary: str, path: Optional[Path], text: str, *,
                    interactive: bool = True, assume_yes: bool = False,
                    auto_send: bool = False, send_anyway: bool = False,
-                   open_browser=webbrowser.open, prompt=None) -> Optional[bool]:
+                   open_browser=webbrowser.open, prompt=None,
+                   kind: str = "bug", command: str = "localm bug-report") -> Optional[bool]:
     """Offer to send an ALREADY-BUILT, already-saved report (upload / email /
     self), or send it immediately with ``auto_send``.
 
@@ -119,7 +120,8 @@ def offer_to_send(summary: str, path: Optional[Path], text: str, *,
     *send_anyway* sends at once, as *auto_send* does, and is the person's
     consent to send this one report while Network access is off. In the
     interactive menu, a send refused because Network access is off asks in
-    place whether to send it anyway (default no).
+    place whether to send it anyway (default no). *kind* is ``bug`` or one of
+    ``FEEDBACK_KINDS`` and *command* the command named in a hint to run it again.
 
     Returns, for *auto_send* or *send_anyway*, True when the report was sent and
     False when it was not; None otherwise."""
@@ -128,12 +130,12 @@ def offer_to_send(summary: str, path: Optional[Path], text: str, *,
 
     if auto_send or send_anyway:
         return _auto_send(summary, path, text, can_upload, up_url, up_token,
-                          send_anyway=send_anyway)
+                          send_anyway=send_anyway, kind=kind, command=command)
 
     if not interactive or assume_yes:
         if can_upload:
             console.print(
-                "[dim]Run[/dim] [bold]localm bug-report --send[/bold] [dim]to send it now "
+                f"[dim]Run[/dim] [bold]{command} --send[/bold] [dim]to send it now "
                 "(no GitHub account needed) - or email/Discord it yourself.[/dim]")
         else:
             console.print(f"[dim]Send it to the maintainer ({MAINTAINER_EMAIL}) by email or "
@@ -170,12 +172,12 @@ def offer_to_send(summary: str, path: Optional[Path], text: str, *,
 
     try:
         if action == "upload":
-            _upload_with_retries(summary, path, text, up_url, up_token, ask, where)
+            _upload_with_retries(summary, path, text, up_url, up_token, ask, where, kind)
         elif action == "email":
             report = _read_report(summary, path, text, where)
             if report is None:
                 return
-            open_browser(mailto_url(*report))
+            open_browser(mailto_url(*report, kind=kind))
             console.print(f"[green]Opened your mail app to {MAINTAINER_EMAIL}.[/green]")
         elif action == "self":
             console.print(f"[dim]Thanks. Send {markup_safe(where)} to {MAINTAINER_EMAIL} or on "
@@ -187,15 +189,16 @@ def offer_to_send(summary: str, path: Optional[Path], text: str, *,
                       f"{markup_safe(where)}.[/yellow]", soft_wrap=True)
 
 
-def _send_anyway_offer() -> str:
-    """The line naming ``localm bug-report --send-anyway`` after a send refused
+def _send_anyway_offer(command: str = "localm bug-report") -> str:
+    """The line naming ``<command> --send-anyway`` after a send refused
     because Network access is off."""
-    return (f"[dim]To send this one report anyway, run[/dim] [bold]localm bug-report "
+    return (f"[dim]To send this one report anyway, run[/dim] [bold]{command} "
             f"{SEND_ANYWAY_FLAG}[/bold][dim]. {SEND_ANYWAY_EFFECT}[/dim]")
 
 
 def _auto_send(summary: str, path: Optional[Path], text: str,
-               can_upload: bool, up_url, up_token, *, send_anyway: bool = False) -> bool:
+               can_upload: bool, up_url, up_token, *, send_anyway: bool = False,
+               kind: str = "bug", command: str = "localm bug-report") -> bool:
     """Send the report at *path* (*text* when there is no file) straight away,
     the ``auto_send`` branch of offer_to_send; *send_anyway* is passed to
     upload_report. Nothing is sent when no endpoint
@@ -210,14 +213,14 @@ def _auto_send(summary: str, path: Optional[Path], text: str,
         return False
     try:
         res = _br.upload_report(summary, body, url=up_url, token=up_token,
-                                send_anyway=send_anyway)
+                                send_anyway=send_anyway, kind=kind)
     except RateLimitedError as e:
         import time as _time
         console.print(f"[yellow]Rate limited. Retrying in {e.retry_after}s...[/yellow]")
         _time.sleep(e.retry_after)
         try:
             res = _br.upload_report(summary, body, url=up_url, token=up_token,
-                                    send_anyway=send_anyway)
+                                    send_anyway=send_anyway, kind=kind)
         except LocalmError as e2:
             console.print(f"[yellow]Still could not send it.[/yellow] "
                           f"{e2.hint or e2.reason}")
@@ -227,7 +230,7 @@ def _auto_send(summary: str, path: Optional[Path], text: str,
     except LocalmError as e:
         console.print(f"[yellow]Could not send it.[/yellow] {markup_safe(e.hint or e.reason)}")
         if e.stage == "network_off":
-            console.print(_send_anyway_offer(), soft_wrap=True)
+            console.print(_send_anyway_offer(command), soft_wrap=True)
         console.print(f"[dim]The report is at {where} - email it to "
                       f"{MAINTAINER_EMAIL} instead.[/dim]")
         return False
@@ -258,7 +261,7 @@ def _read_report(summary: str, path: Optional[Path], text: str, where: str):
 
 
 def _upload_with_retries(summary: str, path: Optional[Path], text: str, up_url, up_token,
-                         ask, where: str) -> None:
+                         ask, where: str, kind: str = "bug") -> None:
     """Upload the report for the menu's send choice, read afresh for each attempt
     by _read_report. A rate limit is waited out and retried once; any other failure
     says where the report is and is retried only when the user answers yes, for at
@@ -273,7 +276,7 @@ def _upload_with_retries(summary: str, path: Optional[Path], text: str, up_url, 
             return
         try:
             res = _br.upload_report(report[0], report[1], url=up_url, token=up_token,
-                                    send_anyway=send_anyway)
+                                    send_anyway=send_anyway, kind=kind)
             _print_sent(res)
             break
         except RateLimitedError as e:

@@ -71,7 +71,7 @@ This keeps users account-less, which a baked-in token cannot do safely.
 5. **That is it - localm already points at the Worker.** The Worker URL and the
    public client token ship as DEFAULTS in `localm/config.py` (`bugreport_upload_url`
    / `bugreport_upload_token`), so a fresh download works with **zero config**: the
-   GUI shows **Report a bug**, an **Issues** view, and the **Update** check, and the
+   GUI shows **Report a bug**, **Feedback**, **Suggestion**, an **Issues** view, and the **Update** check, and the
    CLI has `localm issues` / `localm update`, out of the box. One Worker hosts all
    three surfaces, so those two defaults also drive the issues list and the updater
    (`update_url`/`update_token` fall back to them; set those only to host updates on a
@@ -88,7 +88,10 @@ This keeps users account-less, which a baked-in token cannot do safely.
 ## Spam / abuse control
 
 - Set `SHARED_SECRET` so random scanners that find the URL cannot file issues.
-- Only a body with the structure a localm reporter writes is filed:
+- A request with a `type` (`feedback`, `suggestion`) is filed as that type, with the
+  label `TYPE_LABELS` names for it (a type that is not listed is filed without a label).
+- A request without a `type` is a bug report. Only a body with the structure a localm
+  reporter writes is filed:
   - the in-app reporter: the `# localm bug report:` title line, then `## What I was
     doing`, `## What happened`, `## App state` followed by its `- Model:` line, and
     `## Environment` followed by its `- localm:` line (or by

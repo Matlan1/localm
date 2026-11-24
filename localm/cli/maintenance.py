@@ -443,6 +443,52 @@ def bug_report_cmd(message: str, expected: str, happened: str,
         sys.exit(1)
 
 
+@main.command("feedback")
+@click.option("-m", "--message", default="", help="What you want to say.")
+@click.option("--suggestion", is_flag=True,
+              help="It is a suggestion or feature request, not general feedback.")
+@click.option("-s", "--send", is_flag=True,
+              help="Send it to the maintainer immediately via the hosted proxy - "
+                   "no GitHub account needed.")
+@click.option("--send-anyway", "send_anyway", is_flag=True,
+              help="Send it immediately, as --send does, also with Network access "
+                   "off: one connection to the bug-report server for this report "
+                   "only. Network access stays off.")
+def feedback_cmd(message: str, suggestion: bool, send: bool, send_anyway: bool) -> None:
+    """Write feedback or a suggestion and offer to send it to the maintainer.
+
+    Only your text and the localm version are included: no diagnostics, log,
+    settings or chat content. It is saved as an editable markdown file first,
+    and becomes a public GitHub issue when sent. No GitHub account is needed.
+    To report a problem use localm bug-report."""
+    from rich.markup import escape
+
+    from localm import bugreport
+    kind = "suggestion" if suggestion else "feedback"
+    interactive = bugreport.stdin_is_interactive()
+    text = bugreport.feedback_text(message)
+    if interactive and not text:
+        text = bugreport.feedback_text(click.prompt(
+            "Your suggestion" if suggestion else "Your feedback", default="", show_default=False))
+    if not text:
+        console.print("[yellow]Write something first (-m, or answer the prompt).[/yellow]")
+        sys.exit(1)
+    report = bugreport.build_feedback(text)
+    path = bugreport.save_feedback(text, kind)
+    if path is not None:
+        console.print(f"[dim]Saved (edit it before sending):[/dim] {escape(str(path))}",
+                      soft_wrap=True)
+    else:
+        console.print("[yellow]Could not save a file; you can still copy this:[/yellow]")
+        console.print(escape(report), soft_wrap=True)
+    sent = bugreport.offer_to_send(
+        bugreport.report_title_from_markdown(report), path, report, interactive=interactive,
+        auto_send=send, send_anyway=send_anyway, kind=kind,
+        command="localm feedback --suggestion" if suggestion else "localm feedback")
+    if (send or send_anyway) and not sent:
+        sys.exit(1)
+
+
 
 
 def _update_list(updater) -> None:
@@ -775,11 +821,11 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool, list_only: bool,
 @main.command("issues")
 @click.argument("number", required=False, type=int)
 def issues_cmd(number) -> None:
-    """Show the bug reports this install filed, or any issue of the localm
+    """Show the reports this install filed, or any issue of the localm
     tracker by NUMBER (marked when this install did not file it).
 
     Read-only, through the bug-report proxy - no GitHub account needed. Lets a tester
-    see whether a bug they filed is acknowledged or fixed. Requires the proxy to be
+    see whether a report they filed is answered or fixed. Requires the proxy to be
     configured."""
     from localm import issue_tracker
     from localm.bugreport import LocalmError
@@ -814,7 +860,7 @@ def issues_cmd(number) -> None:
         return
 
     if not issues:
-        console.print("[dim]This install has not filed any bug reports. "
+        console.print("[dim]This install has not filed any reports. "
                       f"All issues: {issue_tracker.ISSUES_URL}[/dim]")
         return
     for it in issues:
