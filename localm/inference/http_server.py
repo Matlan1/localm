@@ -8905,7 +8905,7 @@ def _memory_used_header(ctx) -> dict:
                               separators=(",", ":"))
             if len(blob) < MEMORY_HEADER_BYTES:
                 return {"X-Localm-Memory": blob}
-        blob = json.dumps({**_cut_texts(payload, 0), "items": []}, ensure_ascii=True,
+        blob = json.dumps(_cut_texts({**payload, "items": []}, 0), ensure_ascii=True,
                           separators=(",", ":"))
     except (TypeError, ValueError):
         return {}
