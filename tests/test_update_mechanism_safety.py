@@ -179,7 +179,7 @@ def test_an_update_whose_end_cannot_be_written_ends_at_the_next_try(root, tmp_pa
     real = job._write_state
 
     def full(lock, record):
-        if record.phase == "ended":
+        if record.phase == "left":
             raise OSError(errno.ENOSPC, "No space left on device")
         real(lock, record)
     with monkeypatch.context() as m:
