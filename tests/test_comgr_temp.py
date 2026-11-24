@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -251,8 +252,11 @@ def test_finish_does_not_wait_for_what_another_process_started(temp, process, mo
     pid, _end = process()
     path = _records()[0]
     path.write_text(json.dumps({**json.loads(path.read_text()), "starter": "1"}))
-    monkeypatch.setattr(comgr_temp.time, "sleep", lambda s: pytest.fail("waited"))
-    comgr_temp.finish(wait=30)
+    waited: list = []
+    monkeypatch.setattr(comgr_temp, "time", SimpleNamespace(
+        time=time.time, monotonic=time.monotonic, sleep=waited.append))
+    comgr_temp.finish(wait=1)
+    assert waited == []
 
 
 def test_the_starter_is_handed_to_the_processes_started(temp, monkeypatch):
