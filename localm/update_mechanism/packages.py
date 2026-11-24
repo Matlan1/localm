@@ -479,16 +479,20 @@ def forward(root, update_id: str, plan: Plan, argv: Iterable, *, env: Mapping,
     with locked:
         try:
             venv = mover.area(root, update_id, plan.step).base
-            locked.enter_context(_uv_waits(venv, Wait(wait_s, ask)))
+            locked.enter_context(_uv_waits(plan, venv, Wait(wait_s, ask)))
         except (OSError, Held, Unsafe) as e:
             raise mover.StepFailed(e) from e
         mover.forward(root, update_id, plan, wait_s=wait_s, ask=ask, then=nothing_left, back=undo)
 
 
 @contextlib.contextmanager
-def _uv_waits(venv: Path, wait: Wait) -> Iterator[None]:
-    """Hold uv's lock of *venv* for the block. Raises :class:`.disk.Held` when uv has
-    it for longer than *wait*, OSError otherwise."""
+def _uv_waits(plan: Plan, venv: Path, wait: Wait) -> Iterator[None]:
+    """Hold uv's lock of *venv* for the block when *plan* is of the venv of the
+    install. Raises :class:`.disk.Held` when uv has it for longer than *wait*,
+    OSError otherwise."""
+    if plan.step != PACKAGES:
+        yield
+        return
     path = venv / ".lock"
 
     def lock() -> int:
@@ -521,7 +525,7 @@ def back(root, update_id: str, plan: Plan, *, wait_s: Optional[float] = None,
             raise Refused(f"{Path(root) / '.venv'} leads nowhere")
         if site is None or mover.made_anew(a, plan):
             return mover.back(root, update_id, plan, wait_s=wait_s, ask=ask, out=out)
-        with _uv_waits(a.base, Wait(wait_s, ask)):
+        with _uv_waits(plan, a.base, Wait(wait_s, ask)):
             with mover.Marks(root, update_id, plan) as marks:
                 had = {op.dist for op in plan.ops if op.old is not None}
                 changed = {op.dist for n, op in enumerate(plan.ops)
