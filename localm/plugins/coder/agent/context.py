@@ -1850,8 +1850,8 @@ ws     ::= [ \t\n\r]*
         """Why *call*, written as plain JSON, never counts as meant whatever the
         model says, as a clause for a sentence, or "": it stands only in the
         reply's reasoning, or it also stands in text that did not come from the
-        user in this session, localm's own example calls included (one without
-        arguments excepted)."""
+        user in this session. The example calls of localm's own tool
+        documentation do not count."""
         from .execution import _IN_REASONING, _QUOTED
         if getattr(call, "in_reasoning", False):
             return _IN_REASONING
@@ -1918,11 +1918,6 @@ ws     ::= [ \t\n\r]*
                 calls, complete = calls_standing_in(text, {call.name})
                 if not complete or any(_same_call(mine, _comparable_args(c)) for c in calls):
                     return True
-            if mine and any(
-                    _same_call(mine, _comparable_args(c)) for c in
-                    calls_standing_in(str(agent._system_prompt), {call.name})[0] if c.args):
-                # The example calls of localm's own tool documentation.
-                return True
             agent = getattr(agent, "parent", None)
         return False
 

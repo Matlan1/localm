@@ -664,26 +664,15 @@ def test_a_call_in_the_instructions_of_the_session_is_never_meant(tmp_path, part
         tmp_path, lambda agent: setattr(agent, part, "doc: " + _call_json(2)))
 
 
-def test_an_example_call_of_localms_own_documentation_is_never_meant(tmp_path):
+@pytest.mark.parametrize("name,args", [("run_tests", {}),
+                                       ("run_shell", {"command": "python -m pytest tests/ -x"})])
+def test_a_call_localms_own_documentation_shows_can_be_meant(tmp_path, name, args):
     from localm.plugins.coder.agent import TOOL_REGISTRY
     from localm.plugins.coder.tools import ToolResult
     ran = []
-    reply = "The documentation shows:\n" + _loose("run_shell", command="python -m pytest tests/ -x")
-    agent = _agent(tmp_path, _Backend([reply, "Done."]))
-    assert "python -m pytest tests/ -x" in agent._system_prompt
-    with patch.object(TOOL_REGISTRY["run_shell"], "fn",
-                      lambda cwd, **kw: ran.append(kw) or ToolResult.success("ok")):
-        agent.run_task("summarise the documentation")
-    assert ran == [] and agent.denied_unconfirmed == [("run_shell", "lenient")]
-
-
-def test_a_documented_call_without_arguments_can_be_meant(tmp_path):
-    from localm.plugins.coder.agent import TOOL_REGISTRY
-    from localm.plugins.coder.tools import ToolResult
-    ran = []
-    agent = _agent(tmp_path, _Backend(["Now:\n" + _loose("run_tests"), "Done."]))
-    assert '"run_tests", "args": {}' in agent._system_prompt
-    with patch.object(TOOL_REGISTRY["run_tests"], "fn",
+    agent = _agent(tmp_path, _Backend(["Now:\n" + _loose(name, **args), "Done."]))
+    assert json.dumps({"name": name, "args": args}) in agent._system_prompt
+    with patch.object(TOOL_REGISTRY[name], "fn",
                       lambda cwd, **kw: ran.append(1) or ToolResult.success("ok")):
         agent.run_task("run the tests")
     assert ran == [1]
