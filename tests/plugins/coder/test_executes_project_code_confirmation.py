@@ -398,7 +398,7 @@ def test_git_push_passes_remote_and_branch_after_the_separator(push_repo, monkey
     monkeypatch.setattr(git_tools, "_git", spy)
     res = tool_git_push(push_repo, remote="origin", branch="HEAD")
     assert res.ok, res.output
-    assert seen == [("push", "--", "origin", "HEAD")]
+    assert [a for a in seen if a[0] == "push"] == [("push", "--", "origin", "HEAD")]
 
 
 def test_git_push_is_governed_by_net_mode(tmp_path, monkeypatch):

@@ -552,6 +552,12 @@ def planned_edit_text(path: Path, text: str, old: str, new: str) -> Optional[str
     return plan[0]
 
 
+_EMPTY_OLD_MESSAGE = (
+    "`old` is empty - pass the exact text to replace (read the file first and "
+    "copy the snippet). To replace the whole file, use write_file."
+)
+
+
 def tool_edit_file(cwd: Path, path: str, old: str, new: str,
                    _restricted: bool = True) -> ToolResult:
     """Replace the first occurrence of `old` with `new` in `path`."""
@@ -569,11 +575,7 @@ def tool_edit_file(cwd: Path, path: str, old: str, new: str,
 
     # Reject an empty old: the empty string is contained in every string.
     if not old:
-        return ToolResult.error(
-            "`old` is empty - pass the exact text to replace (read the file "
-            "first and copy the snippet). To replace the whole file, use "
-            "write_file."
-        )
+        return ToolResult.error(_EMPTY_OLD_MESSAGE)
 
     plan = _plan_edit(p, text, old, new)
     if plan is None:
@@ -603,6 +605,39 @@ def tool_edit_file(cwd: Path, path: str, old: str, new: str,
     else:
         result = _with_diagnostics(result, cwd, [p], _restricted)
     return result
+
+
+def edit_call_refusal(cwd: Path, tool_name: str, args: dict) -> Optional[str]:
+    """Why an ``edit_file`` or ``edit_files`` call is certain to be refused, in the
+    words the tool itself would answer with, or None when the call can run.
+
+    Reads and writes nothing. It is the check a caller makes BEFORE asking anyone
+    to approve the call, so a call that cannot succeed is answered rather than put
+    to a person as a decision."""
+    if tool_name == "edit_files":
+        plan = plan_edit_files(cwd, args.get("edits"))
+        return plan if isinstance(plan, str) else None
+    if tool_name != "edit_file":
+        return None
+    path, old, new = args.get("path"), args.get("old"), args.get("new")
+    if not isinstance(path, str) or not isinstance(old, str) or not isinstance(new, str):
+        return None
+    try:
+        p = _confine(cwd, path)
+    except PermissionError as e:
+        return str(e)
+    if not p.exists():
+        return f"File not found: {p}"
+    try:
+        text = _EOL_RE.sub("\n", _read_raw(p))
+    except Exception as e:
+        return str(e)
+    if not old:
+        return _EMPTY_OLD_MESSAGE
+    plan = _plan_edit(p, text, old, new)
+    if plan is None:
+        return _edit_miss_message(path, old, text)
+    return None
 
 
 def _edit_miss_message(path: str, old: str, text: str) -> str:
@@ -940,6 +975,7 @@ def tool_tree(
 
     lines: list[str] = []
     total = 0
+    limit_hit = False
     cwd_resolved = cwd.resolve()
     escaped: list[str] = []
 
@@ -963,7 +999,7 @@ def tool_tree(
         return f"{n}B"
 
     def _walk(dirpath: Path, prefix: str, depth: int) -> None:
-        nonlocal total
+        nonlocal total, limit_hit
         if depth > max_depth or total >= max_files:
             return
         try:
@@ -980,10 +1016,7 @@ def tool_tree(
         entries = kept
         for i, entry in enumerate(entries):
             if total >= max_files:
-                lines.append(
-                    f"{prefix}    ... (file limit {max_files} reached - entries "
-                    "omitted; raise max_files or point tree at a subdirectory)"
-                )
+                limit_hit = True
                 return
             connector = "└── " if i == len(entries) - 1 else "├── "
             if entry.is_dir():
@@ -1001,6 +1034,11 @@ def tool_tree(
     rel = root.relative_to(cwd) if root.is_relative_to(cwd) else root
     lines.append(f"{rel}/")
     _walk(root, "", 1)
+    if limit_hit:
+        lines.append(
+            f"    ... (file limit {max_files} reached - entries "
+            "omitted; raise max_files or point tree at a subdirectory)"
+        )
     if escaped:
         shown = ", ".join(sorted(set(escaped))[:5])
         lines.append(
@@ -1072,6 +1110,10 @@ def tool_search_files(cwd: Path, pattern: str, path: str = ".") -> ToolResult:
         base = _confine(cwd, path)
     except PermissionError as e:
         return ToolResult.error(str(e))
+    if not base.exists():
+        return ToolResult.error(f"Path not found: {base}")
+    if not base.is_dir():
+        return ToolResult.error(f"Not a directory: {base}")
     full_pattern = str(base / pattern) if not Path(pattern).is_absolute() else pattern
     try:
         matches = set(_glob.glob(full_pattern, recursive=True))
@@ -1263,6 +1305,9 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "",
     context = max(0, int(context))
 
     file_glob = glob or "**/*"
+    if not base.exists() and not (
+            _overlay is not None and list(_overlay.new_files(base, file_glob))):
+        return ToolResult.error(f"Path not found: {base}")
     candidates = sorted(base.glob(file_glob)) if base.is_dir() else [base]
 
     try:
