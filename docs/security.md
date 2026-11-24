@@ -76,7 +76,7 @@ the coder agent, which can run shell commands.
 
 **The refusal above is a hard exit only for an explicit CLI bind.** The bind
 address and the TLS toggle/cert/key are also settable from the GUI (Settings >
-Server; `bind_host`, `tls_enabled`, `tls_cert`, `tls_key`, each `admin_only` -
+Server & network; `bind_host`, `tls_enabled`, `tls_cert`, `tls_key`, each `admin_only` -
 see [docs/tls.md](tls.md)) and take effect on the next restart. `--insecure`
 has no config form, so it can only ever be supplied from a terminal; a
 Settings-driven bind that fails the key check (or whose TLS setup fails, or
@@ -408,9 +408,10 @@ this section states the security properties and, more importantly, their edges.
   update; an update's own dependency step also runs under `update_ignore_net_policy`).
   It never applies to model-initiated access (the
   coder's `fetch_url` and `web_search`, chat web access), which stays governed
-  by `net_mode` alone. Some paths never consult `net_mode` at all: the
-  bug-report upload (sent only when you press Send), and requests to your
-  configured ComfyUI (see *What it does not cover* above).
+  by `net_mode` alone. Requests to your configured ComfyUI never consult
+  `net_mode` (see *What it does not cover* above). The bug-report upload is sent
+  only when you press Send, and `off` refuses it unless you choose to send that
+  one report anyway.
   The coder's off-machine model backends do not opt out: building
   one (`--online`, `--anthropic`, `--url`, `LOCALCODER_URL`, the GUI's backend
   choice, the reviewer) runs the network policy, so `off` refuses it, and
@@ -516,7 +517,7 @@ update`, or the GUI "Update now" button). The client is signature-verifying:
 - **No downgrades.** A validly signed but older, equal, or version-less build is
   refused: a signature proves authenticity, not freshness.
 - **Installing a version you choose.** `localm update --to <version>` (and Settings >
-  Updates > Choose a version) installs the exact release you name, older ones
+  System > Updates > Choose a version) installs the exact release you name, older ones
   included. Both points above still apply to the plain update; for a chosen version
   they work like this. The build's VERSION must be the one you asked for, or it is
   refused. The signature is checked the same way, and when it does not verify
@@ -580,7 +581,7 @@ from the CLI applies the same way but does not restart for you - you relaunch by
 hand, so a build that misbehaves after that manual restart has no automatic
 watchdog and is recovered with `localm update --rollback` (or by restoring the
 backup directory the update left behind). The GUI has the same rollback as a
-button (Settings > Updates), backed by `GET`/`POST /api/update/rollback`: the
+button (Settings > System > Updates), backed by `GET`/`POST /api/update/rollback`: the
 GET is a read-only check for whether a backup exists and which build it would
 restore; the POST requires the `admin` scope specifically (not merely
 `config:write`) and restores the previous build's files from the local backup
