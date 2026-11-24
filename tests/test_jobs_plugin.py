@@ -1547,7 +1547,6 @@ def test_tick_cron_job_edited_before_claim_does_not_run(home):
     store.add(_make_job(schedule_kind="cron", schedule="* * * * *"))
     when = _at(2026, 6, 17, 9, 30)
     calls: list = []
-    from localm.plugins.builtin.jobs.scheduler import JobScheduler
     sched = JobScheduler(store, run_job=_cron_runner(calls, when + 10))
     assert sched.tick(now=when + 1) == []
     assert calls == []
@@ -1574,7 +1573,6 @@ def test_tick_catches_up_a_missed_cron_slot_once(home):
                               last_run=_at(2026, 6, 16, 9, 0)))
     now = _at(2026, 6, 17, 9, 5)
     calls: list = []
-    from localm.plugins.builtin.jobs.scheduler import JobScheduler
     sched = JobScheduler(store, run_job=_cron_runner(calls, now + 1))
     assert sched.tick(now=now) == [job.id]
     assert sched.tick(now=now + 30) == []
