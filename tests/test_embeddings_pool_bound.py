@@ -114,9 +114,9 @@ def test_dedicated_embed_path_holds_one_pool_worker_at_a_time(app_client, monkey
 
 
 def test_memory_off_loop_holds_one_embedder_slot_at_a_time(app_client, monkeypatch):
-    """Four concurrent POST /api/memory/append: at most ONE is inside
-    get_embedder() (on a default-pool worker) at any instant, and all four
-    still succeed. The memory plugin's _off_loop wraps every embedder-resolving
+    """Four concurrent POST /api/memory/append answer without waiting for the
+    embedder, and at most ONE vector-fill thread is inside get_embedder() at any
+    instant. The memory plugin's _off_loop wraps every embedder-resolving
     call in the same _get_embedder_sem() the dedicated /v1/embeddings path
     uses above, so a burst of chat turns (which hit this same helper via the
     registered inlet hook) cannot park more than one worker waiting inside
@@ -163,20 +163,24 @@ def test_memory_off_loop_holds_one_embedder_slot_at_a_time(app_client, monkeypat
     threads = [threading.Thread(target=_post, args=(i,)) for i in range(n_requests)]
     for t in threads:
         t.start()
-    # Wait until the FIRST request is inside get_embedder, then give the other
-    # three time to arrive (and queue on the semaphore); only then release.
-    assert issued.acquire(timeout=10.0), "no request reached get_embedder"
-    time.sleep(0.5)
-    release.set()
+    # The writes answer without waiting for the embedder: every request returns
+    # while get_embedder is still blocked. The vector fill that follows resolves
+    # the embedder on ONE background thread at a time.
     for t in threads:
         t.join(20.0)
-    assert not any(t.is_alive() for t in threads), "a request never returned"
-
-    assert state["peak"] == 1, (
-        f"{state['peak']} default-pool workers were inside get_embedder at once; "
-        "memory-plugin _off_loop callers that resolve the embedder must be bounded to one")
+    assert not any(t.is_alive() for t in threads), "a request waited for the embedder"
     for i, r in enumerate(results):
         assert r is not None and r.status_code == 200, (i, getattr(r, "text", r))
+    assert issued.acquire(timeout=10.0), "no vector fill reached get_embedder"
+    time.sleep(0.5)
+    release.set()
+    for th in threading.enumerate():
+        if th.name == "memory vector fill":
+            th.join(20.0)
+
+    assert state["peak"] == 1, (
+        f"{state['peak']} threads were inside get_embedder at once; "
+        "the memory vector fill must resolve the embedder one thread at a time")
 
 
 @pytest.fixture
