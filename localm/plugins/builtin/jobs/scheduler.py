@@ -315,8 +315,6 @@ class JobScheduler:
                     len(due_jobs))
                 return ran
             for job in due_jobs:
-                if job.schedule_kind == "cron":
-                    self._cron_fired[job.id] = int(now // 60) * 60
                 try:
                     claimed = self.store.claim(
                         job.id, predicate=lambda j: j.enabled and self.due(j, now))
@@ -328,6 +326,8 @@ class JobScheduler:
                 if claimed is None:
                     continue          # gone, disabled, already run or running elsewhere
                 job = claimed
+                if job.schedule_kind == "cron":
+                    self._cron_fired[job.id] = int(now // 60) * 60
                 try:
                     result = run_job(job, engine=engine)
                 except Exception as e:    # the runner shouldn't raise, but guard
