@@ -46,6 +46,9 @@ def _fake_repair_collection(monkeypatch, ragcli, *, has_vectors, captured):
         def corrupt(self):
             return False
 
+        def exists(self):
+            return True
+
         def documents(self):
             return ["/x/a.txt"]
 

@@ -516,7 +516,8 @@ actually uploaded.
 ## Knowledge (RAG)
 
 ```bash
-localm rag add NAME PATH... [--embed] [--force]   # index files/folders into a collection
+localm rag add NAME PATH... [--embed] [--force] [-y]   # index files/folders into a collection
+                                 # (--force without --embed asks before dropping a collection's embeddings)
 localm rag list                  # collections with doc/chunk counts
 localm rag docs NAME             # list a collection's documents: path, chunks, status
 localm rag query NAME "text" [--embed] [-k N] [--relevant-only] [--context "previous message"] [--rerank|--no-rerank]   # show the top matching excerpts (-k: how many, default 4)

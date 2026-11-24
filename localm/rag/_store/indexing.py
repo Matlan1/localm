@@ -34,6 +34,19 @@ _SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__",
 _MAX_WALK_DEPTH = 50
 
 
+def _is_file_or_dir(p) -> bool:
+    """False when *p* is neither a file nor a folder now (gone, or unreadable)."""
+    try:
+        return Path(p).is_file() or Path(p).is_dir()
+    except OSError:
+        return False
+
+
+def count_noun(n: int, noun: str) -> str:
+    """``"1 chunk"`` / ``"2 chunks"``: the count with the noun in the right number."""
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
+
+
 def _walk_files(root: Path, *, max_depth: int = _MAX_WALK_DEPTH):
     """Yield files under *root* without following linked DIRECTORIES, bounded by
     depth and a visited-realpath set.
@@ -188,14 +201,16 @@ class _CollectionIndexing:
         # before the expand, so an add that finds no indexable file still records
         # the folder.
         roots_changed = self._record_roots(paths)
+        not_found = [str(p) for p in paths if not _is_file_or_dir(p)]
         files = self._expand(paths, policy)
         if not files:
             if roots_changed:
                 self._save_meta()   # metadata only: this add indexed nothing
             return {"added": 0, "updated": 0, "skipped": 0, "failed": [],
-                    "chunks": len(self._chunks)}
+                    "not_found": not_found, "chunks": len(self._chunks)}
 
         added = updated = skipped = 0
+        meta_dirty = False
         failed: list = []
         embed_broken = embed_fn is None
 
@@ -217,18 +232,21 @@ class _CollectionIndexing:
                 failed.append({"path": key, "error": str(e)})
                 continue
             known = self._meta["docs"].get(key)
-            # Content hash as well as (mtime, size), so a same-size edit whose
-            # mtime is unchanged is still re-indexed. Legacy entries lacking
-            # "hash" compare unequal and self-heal on the next add.
+            # Size and content hash decide, not mtime: a same-size edit with an
+            # unchanged mtime is re-indexed, and a touched file with the same
+            # content is skipped. Legacy entries lacking "hash" compare unequal
+            # and self-heal on the next add.
             try:
                 digest = hashlib.sha256(f.read_bytes()).hexdigest()
             except OSError as e:
                 failed.append({"path": key, "error": str(e)})
                 continue
             if not force and known \
-                    and known.get("mtime") == stat.st_mtime \
                     and known.get("size") == stat.st_size \
                     and known.get("hash") == digest:
+                if known.pop("missing", None) is not None:
+                    known.pop("missing_since", None)
+                    meta_dirty = True
                 skipped += 1
                 continue
             say(f"[{index}/{len(files)}] reading {f.name}...")
@@ -262,11 +280,11 @@ class _CollectionIndexing:
                 "hash": digest,
                 "chunks": len(new_chunks),
             }
-            say(f"indexed {f.name} ({len(new_chunks)} chunks)")
+            say(f"indexed {f.name} ({count_noun(len(new_chunks), 'chunk')})")
 
         if added or updated:
             self._save(on_progress)
-        elif roots_changed or self.corrupt:
+        elif roots_changed or meta_dirty or self.corrupt:
             # Nothing was indexed (every file skipped as unchanged, or every one
             # failed), so chunks and vectors are exactly as _load() read them.
             # Persist metadata only, and only when there is something to persist:
@@ -275,7 +293,8 @@ class _CollectionIndexing:
             # return above.
             self._save_meta()
         return {"added": added, "updated": updated, "skipped": skipped,
-                "failed": failed, "chunks": len(self._chunks)}
+                "failed": failed, "not_found": not_found,
+                "chunks": len(self._chunks)}
 
     def _add_uploads_locked(self, uploads: list, *,
                             embed_fn: Optional[EmbedFn] = None,
@@ -344,7 +363,8 @@ class _CollectionIndexing:
                 "size": len(data), "hash": digest,
                 "chunks": len(new_chunks), "uploaded": True,
             }
-            _finished(n_done, f"indexed {filename} ({len(new_chunks)} chunks)")
+            _finished(n_done, f"indexed {filename} "
+                              f"({count_noun(len(new_chunks), 'chunk')})")
 
         self._save(on_progress)
         return {"added": added, "updated": updated, "skipped": skipped,
@@ -364,7 +384,7 @@ class _CollectionIndexing:
         vectors: list = [None] * len(new_chunks)
         if not embed_broken and new_chunks:
             say(f"{position} embedding {label} "
-                f"({len(new_chunks)} chunks)...")
+                f"({count_noun(len(new_chunks), 'chunk')})...")
             try:
                 vecs = embed_fn([c["text"] for c in new_chunks])
             except Exception as e:

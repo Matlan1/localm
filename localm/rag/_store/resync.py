@@ -46,7 +46,7 @@ class _CollectionResync:
                 policy=policy, force=force, model_name=model_name)
         else:
             result = {"added": 0, "updated": 0, "skipped": 0, "failed": [],
-                      "chunks": len(self._chunks)}
+                      "not_found": [], "chunks": len(self._chunks)}
 
         missing, restored, pruned = self._reconcile_missing(
             skipped_roots, was_missing=was_missing,
