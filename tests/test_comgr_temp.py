@@ -42,7 +42,7 @@ def process(temp):
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         procs.append(proc)
         pid = int(proc.stdout.readline())
-        comgr_temp._record(pid, str(temp))
+        comgr_temp._record(pid)
 
         def end():
             import psutil
@@ -133,7 +133,7 @@ def test_a_folder_older_or_younger_than_the_process_is_not_its_own(temp, process
 def test_a_pid_that_another_process_has_by_now_keeps_that_ones_folders(temp, monkeypatch):
     pid = os.getpid()
     mine = _folder(temp, pid)
-    comgr_temp._record(pid, str(temp))
+    comgr_temp._record(pid)
     path = _records()[0]
     rec = json.loads(path.read_text())
     rec["start"] = {"created": 1.0} if "created" in (rec["start"] or {}) else {
@@ -158,18 +158,13 @@ def test_no_records_folder_is_nothing_to_do(temp):
     assert comgr_temp.sweep() == 0 and not comgr_temp.records_dir().exists()
 
 
-_OK = {"pid": 2 ** 31 - 1, "start": None, "space": "x", "created": 1.0, "temp": "PLACE"}
-
-
-@pytest.mark.parametrize("change", [
-    {"pid": "1"}, {"pid": 0}, {"pid": -5}, {"pid": True}, {"pid": 2 ** 70}, {"pid": 1.5},
-    {"pid": None}, {"temp": "rel"}, {"temp": 5}, {"temp": None}, {"temp": ""},
-    {"temp": "\\\\192.0.2.1\\share"}, {"temp": "//192.0.2.1/share"},
-    {"temp": "\\\\?\\C:\\x"}, {"temp": "/tmp/\u0000x"}, {"temp": "/" + "a" * 5000}])
-def test_a_record_with_a_wrong_field_is_never_acted_on(temp, monkeypatch, change):
+@pytest.mark.parametrize("pid", ["1", 0, -5, True, 2 ** 70, 1.5, None, [1], {"a": 1},
+                                 "1-*", "../1"])
+def test_a_record_without_a_usable_pid_is_never_acted_on(temp, monkeypatch, pid):
     monkeypatch.setattr(comgr_temp, "_remove_folders",
                         lambda *a: pytest.fail("acted on a bad record"))
-    rec = {**_OK, "temp": str(temp), "space": comgr_temp.procid.pid_space_id(), **change}
+    rec = {"pid": pid, "start": None, "space": comgr_temp.procid.pid_space_id(),
+           "created": 1.0}
     comgr_temp.records_dir().mkdir(parents=True)
     (comgr_temp.records_dir() / "5-a.json").write_text(json.dumps(rec), encoding="utf-8")
     assert comgr_temp.sweep() == 0
@@ -194,6 +189,17 @@ def test_a_wrong_optional_field_never_raises(temp, process, field, value):
     path.write_text(json.dumps({**json.loads(path.read_text()), field: value}))
     end()
     comgr_temp.sweep()
+
+
+def test_a_path_in_a_record_is_not_used(temp, process, tmp_path):
+    pid, end = process()
+    elsewhere = tmp_path / "elsewhere"
+    other, own = _folder(elsewhere, pid), _folder(temp, pid)
+    path = _records()[0]
+    path.write_text(json.dumps({**json.loads(path.read_text()), "temp": str(elsewhere)}))
+    end()
+    comgr_temp.sweep()
+    assert other.is_dir() and not own.exists()
 
 
 def test_one_bad_record_does_not_stop_the_others(temp, process, monkeypatch):

@@ -6,13 +6,14 @@ in the temp folder of the process that uses it and does not remove them when
 that process is ended from outside, as localm ends its GPU workers.
 
 A process that is about to load a HIP runtime calls :func:`register`: it records
-its pid, start identity and temp folder in ``<data dir>/run/comgr-temp/``. The
+its pid and start identity in ``<data dir>/run/comgr-temp/``. The
 localm process that starts workers (:func:`watch`) removes the folders of each
 recorded process once that process is gone, and :func:`finish` does it for the
 last ones before a localm process ends. Records a killed localm left are handled
 at the next start.
 
-A folder is removed only when its name carries a recorded pid, the recorded
+A folder is removed only when it is in this process's temp folder, which every
+localm process of one data folder shares, its name carries a recorded pid, the recorded
 process is gone, the folder was last changed while that process was running, and
 it holds no file; nothing is followed through a link. A record's own change time
 is when its process was last seen running."""
@@ -24,7 +25,6 @@ import json
 import logging
 import math
 import os
-import re
 import secrets
 import stat
 import sys
@@ -48,9 +48,6 @@ _SEEN_MARGIN_SECONDS = 30.0
 # this shape, is ignored.
 _MAX_RECORD_BYTES = 4096
 _MAX_RECORDS = 1000
-_MAX_PID = 2 ** 31 - 1
-_MAX_TEMP_CHARS = 1024
-_WINDOWS_LOCAL = re.compile(r"[A-Za-z]:[\\/]")
 
 _lock = threading.Lock()
 _watcher: Optional[threading.Thread] = None
@@ -87,11 +84,11 @@ def _temp_folder() -> str:
     return "/tmp"
 
 
-def _record(pid: int, temp: str) -> None:
+def _record(pid: int) -> None:
     d = records_dir()
     d.mkdir(parents=True, exist_ok=True)
     data = {"pid": pid, "start": procid.process_start_identity(pid),
-            "space": procid.pid_space_id(), "created": _started_at(pid), "temp": temp}
+            "space": procid.pid_space_id(), "created": _started_at(pid)}
     tmp = d / f".{pid}-{secrets.token_hex(4)}.tmp"
     tmp.write_text(json.dumps(data), encoding="utf-8")
     os.replace(tmp, d / f"{pid}-{secrets.token_hex(4)}.json")
@@ -116,7 +113,7 @@ def register() -> None:
     try:
         if _home is None:
             importlib.import_module("localm.config")
-        _record(os.getpid(), _temp_folder())
+        _record(os.getpid())
     except Exception as e:
         logger.debug("comgr temp: could not record process %s (%s)", os.getpid(), e)
 
@@ -135,13 +132,12 @@ def register_if_hip(runtime_dir) -> None:
 
 def adopt_tree(pid: int) -> None:
     """Record the running process *pid* and its descendants (a ComfyUI localm
-    started and is about to end), assuming they use this process's temp folder.
-    Never raises."""
+    started and is about to end). Never raises."""
     try:
         import psutil
         root = psutil.Process(pid)
         for p in [root, *root.children(recursive=True)]:
-            _record(p.pid, _temp_folder())
+            _record(p.pid)
     except Exception as e:
         logger.debug("comgr temp: could not record the processes of %s (%s)", pid, e)
 
@@ -157,26 +153,12 @@ def _read(path: Path) -> Optional[dict]:
             data = json.loads(f.read(_MAX_RECORD_BYTES + 1).decode("utf-8"))
     except (OSError, ValueError, RecursionError):
         return None
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) or not procid.is_pid(data.get("pid")):
         return None
-    pid, temp, created = data.get("pid"), data.get("temp"), data.get("created")
-    if type(pid) is not int or not 0 < pid <= _MAX_PID:
-        return None
-    if not isinstance(temp, str) or not _is_local_folder(temp):
-        return None
-    if type(created) not in (int, float) or not math.isfinite(created):
+    created = data.get("created")
+    if not isinstance(created, (int, float)) or not math.isfinite(created):
         data["created"] = None
     return data
-
-
-def _is_local_folder(path: str) -> bool:
-    """Whether *path* is spelled as an absolute folder on a local drive. Asks the
-    system nothing."""
-    if len(path) > _MAX_TEMP_CHARS or any(ord(c) < 32 for c in path):
-        return False
-    if sys.platform == "win32":
-        return _WINDOWS_LOCAL.match(path) is not None
-    return path.startswith("/") and not path.startswith("//")
 
 
 def _is_gone(rec: dict) -> Optional[bool]:
@@ -220,7 +202,7 @@ def _remove_empty_tree(path: str) -> bool:
 def _remove_folders(rec: dict, last_seen: float) -> int:
     """Remove the empty comgr folders the recorded process, last seen running at
     *last_seen*, made. Returns how many."""
-    name = re.compile(rf"comgr-{rec['pid']}-[^/\\]*")
+    prefix = f"comgr-{int(rec['pid'])}-"
     created = rec["created"]
     until = last_seen + _SEEN_MARGIN_SECONDS
     holder = _started_at(rec["pid"]) if procid.pid_liveness(rec["pid"]) else None
@@ -228,10 +210,10 @@ def _remove_folders(rec: dict, last_seen: float) -> int:
         until = min(until, holder)
     removed = 0
     try:
-        with os.scandir(rec["temp"]) as it:
-            found = [e for e in it if name.fullmatch(e.name)]
+        with os.scandir(_temp_folder()) as it:
+            found = [e for e in it if e.name.startswith(prefix)]
     except OSError as e:
-        logger.debug("comgr temp: cannot list %s (%s)", rec["temp"], e)
+        logger.debug("comgr temp: cannot list the temp folder (%s)", e)
         return 0
     for e in found:
         try:
