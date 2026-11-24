@@ -600,29 +600,37 @@ async def memory_put(req: MemoryUpdate, request: Request = None):
 
 _fill_lock = _threading.Lock()
 _fill_pending = False
+_fill_again = False
 
 
 def _fill_vectors_later(store) -> None:
     """Embed the records of *store* that have no vector yet on a background thread
-    (at most one at a time), so a write need not wait for the embedder to load."""
-    global _fill_pending
+    (one at a time; a request that arrives while it runs makes it go round once
+    more), so a write need not wait for the embedder to load."""
+    global _fill_pending, _fill_again
     with _fill_lock:
-        if _fill_pending or _stop.is_set():
+        if _stop.is_set():
+            return
+        if _fill_pending:
+            _fill_again = True
             return
         _fill_pending = True
 
     def _run():
-        global _fill_pending
-        try:
-            embed_fn = _embed_fn()
-            if embed_fn is not None:
-                store.backfill_vectors(embed_fn)
-        except Exception as e:
-            from localm.debuglog import logger
-            logger.warning("memory: could not embed a new fact: %s", e)
-        finally:
+        global _fill_pending, _fill_again
+        while True:
+            try:
+                embed_fn = _embed_fn()
+                if embed_fn is not None:
+                    store.backfill_vectors(embed_fn)
+            except Exception as e:
+                from localm.debuglog import logger
+                logger.warning("memory: could not embed a new fact: %s", e)
             with _fill_lock:
-                _fill_pending = False
+                if not _fill_again:
+                    _fill_pending = False
+                    return
+                _fill_again = False
 
     from localm.config import home_bound
     _threading.Thread(target=home_bound(_run, name="memory vector fill"),

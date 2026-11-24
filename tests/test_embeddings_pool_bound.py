@@ -125,6 +125,8 @@ def test_memory_off_loop_holds_one_embedder_slot_at_a_time(app_client, monkeypat
     app_client.app.include_router(plug._router)
     monkeypatch.setattr(plug, "_persist_enabled", lambda: True)
     monkeypatch.setattr(plug, "_migrate_legacy", lambda store: None)
+    monkeypatch.setattr(plug, "_stop", threading.Event())
+    monkeypatch.setattr(plug, "_fill_pending", False)
     # Open-mode management routes (POST /api/memory/*) require the per-process
     # shell token as a bearer; the GUI shell injects it.
     shell = getattr(app_client.app.state, "shell_token", None)
