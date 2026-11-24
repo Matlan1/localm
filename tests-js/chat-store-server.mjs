@@ -43,7 +43,7 @@ function wouldLose(stored, body) {
 export function makeServer({ instance = "backend-x", principal = "owner" } = {}) {
   const s = { files: new Map(), deleted: new Set(), puts: [], mode: "full", calls: [], failPut: 0,
               gui: [], chatReply: null, instance, principal, pageSize: 0, hold: null, loseAnswer: 0,
-              chatPosts: [], active: "" };
+              chatPosts: [], active: "", refuseKey: false, failGet: 0 };
   let n = 0;
   const res = (status, body) => ({ ok: status < 400, status, statusText: String(status),
     headers: { get: () => null }, text: async () => JSON.stringify(body), json: async () => plain(body) });
@@ -91,6 +91,7 @@ export function makeServer({ instance = "backend-x", principal = "owner" } = {})
     const method = opts.method || "GET";
     s.calls.push(method + " " + u);
     if (s.hold) await s.hold(method, u);
+    if (s.refuseKey && !u.startsWith("/api/session")) return res(401, { detail: "key" });
     if (u === "/v1/config") {
       return res(200, { effective_mode: s.mode, n_ctx_max: 16384, instance_id: s.instance });
     }
@@ -107,6 +108,7 @@ export function makeServer({ instance = "backend-x", principal = "owner" } = {})
       const body = opts.body ? JSON.parse(opts.body) : null;
       const id = decodeURIComponent(m[1]);
       if (method === "PUT") s.puts.push({ id, body });
+      if (method === "GET" && s.failGet > 0) { s.failGet--; return res(500, { detail: "unreadable" }); }
       if (method === "PUT" && s.failPut) return res(s.failPut, { detail: "no" });
       const answer = s.store(method, id, body, opts.headers);
       if (method === "PUT" && s.loseAnswer > 0) {

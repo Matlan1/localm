@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -42,11 +43,13 @@ from collections import Counter
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from localm import model_ids
 from localm.config import model_index
-from localm.storekit import NamespaceLockRegistry, atomic_write
+from localm.storekit import (_REPLACE_RETRIES, NamespaceLockRegistry, _is_transient_permission_error,
+                             _transient_backoff, atomic_write)
 
 _router = APIRouter()
 
@@ -125,11 +128,30 @@ def _conv_with_current_pin(data: dict) -> dict:
     return data
 
 
-# Serialisation scope: writers inside this process (request handlers and the
-# executor thread running relabel_pinned_model) take one lock per target file.
+# Serialisation scope: readers and writers inside this process (request handlers
+# and the executor thread running relabel_pinned_model) take one lock per target
+# file.
 # The CLI and other processes are not covered; relabel_pinned_model re-checks
 # the file's updated_at before it replaces it.
 _LOCKS = NamespaceLockRegistry()
+
+
+def _riding_out(work, *args):
+    """``work(*args)``, a file operation, retried like storekit.replace_atomic
+    while a transient Windows sharing violation refuses it."""
+    attempt = 0
+    while True:
+        try:
+            return work(*args)
+        except PermissionError as e:
+            attempt += 1
+            if attempt == _REPLACE_RETRIES or not _is_transient_permission_error(e):
+                raise
+            _transient_backoff(attempt - 1)
+
+
+def _load_json(path: Path):
+    return json.loads(_riding_out(path.read_text, "utf-8"))
 
 
 def _principal_dir(request: Request) -> str | None:
@@ -178,25 +200,63 @@ _META_CACHE: dict = {}
 _NO_REV = "0"
 
 
+def _plain_text(value, default=None):
+    """*value* when it is text, with what UTF-8 cannot hold replaced, else
+    *default*."""
+    return value.encode("utf-8", "replace").decode("utf-8") if isinstance(value, str) else default
+
+
 def _rev_of(data) -> str:
     """The stored revision of conversation *data*: an opaque string, replaced on
     every save."""
     rev = data.get("rev") if isinstance(data, dict) else None
-    return rev if isinstance(rev, str) and rev else _NO_REV
+    return _plain_text(rev) or _NO_REV
 
 
 def _meta_row(conv_id: str, data: dict) -> dict:
     """The index row of conversation *data* stored under *conv_id*."""
+    at = data.get("updated_at", 0)
+    messages = data.get("messages")
     return {
         "id": conv_id,
-        "title": data.get("title", "Untitled"),
-        "updated_at": data.get("updated_at", 0),
+        "title": _plain_text(data.get("title"), "Untitled"),
+        "updated_at": at if isinstance(at, int) or (isinstance(at, float) and math.isfinite(at)) else 0,
         "pinned": bool(data.get("pinned", False)),
-        "folder": data.get("folder"),
-        "n_messages": len(data.get("messages") or []),
+        "folder": _plain_text(data.get("folder")),
+        "n_messages": len(messages) if isinstance(messages, list) else 0,
         "rev": _rev_of(data),
-        "save_id": data.get("save_id"),
+        "save_id": _plain_text(data.get("save_id")),
     }
+
+
+_FIELD_NAME = re.compile(r"[A-Za-z_]{1,32}\Z")
+
+
+def _not_storable(value, where: str = "") -> str | None:
+    """What in *value* a conversation file cannot hold, None when nothing: a
+    number that is not finite, text UTF-8 cannot hold, or a text part of a message
+    whose text is not text. The answer names the place, never the content."""
+    todo = [(where, "", value)]
+    while todo:
+        at, key, v = todo.pop()
+        if isinstance(v, str):
+            try:
+                v.encode("utf-8")
+            except UnicodeEncodeError:
+                return f"{at} is not valid text"
+        elif isinstance(v, float):
+            if not math.isfinite(v):
+                return f"{at} is not a finite number"
+        elif isinstance(v, list):
+            todo.extend((f"{at}[{i}]", key, x) for i, x in enumerate(v))
+        elif isinstance(v, dict):
+            if key == "content" and v.get("type") == "text" and not isinstance(v.get("text") or "", str):
+                return f"{at}.text is not text"
+            for k, x in v.items():
+                name = k if _FIELD_NAME.match(k) else "?"
+                todo.append((f"{at}.{name}".lstrip("."), k, x))
+                todo.append((f"a field name in {at or 'it'}", "", k))
+    return None
 
 
 def _conv_meta(p: Path) -> dict:
@@ -225,7 +285,7 @@ def _stored_row(path: Path) -> dict | None:
     """The index row of the conversation stored at *path*, None when no file is
     there. A file that cannot be read or parsed has revision ``_NO_REV``."""
     try:
-        return _conv_meta(path)
+        return _riding_out(_conv_meta, path)
     except FileNotFoundError:
         return None
     except (OSError, ValueError, RecursionError, AttributeError, TypeError):
@@ -235,7 +295,7 @@ def _stored_row(path: Path) -> dict | None:
 def _stored_data(path: Path) -> dict | None:
     """The conversation stored at *path*, None when it cannot be read."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = _load_json(path)
     except (OSError, ValueError, RecursionError):
         return None
     return data if isinstance(data, dict) else None
@@ -295,8 +355,11 @@ def _would_lose_turns(stored: dict | None, req: ConversationUpsert) -> bool:
     one, that *req* does not, or cannot be read."""
     if stored is None:
         return True
-    return bool(_all_turn_keys(stored.get("messages"), stored.get("branches"))
-                - _all_turn_keys(req.messages, req.branches))
+    try:
+        have = _all_turn_keys(stored.get("messages"), stored.get("branches"))
+    except RecursionError:
+        return True
+    return bool(have - _all_turn_keys(req.messages, req.branches))
 
 
 _NOT_THIS_STORE = {"error": "owner",
@@ -315,7 +378,8 @@ def _store_owner(principal: str | None) -> dict:
 # ---- ids of deleted conversations -------------------------------------- #
 # The one proof that a conversation that is not stored was deleted: a browser
 # that still holds it must not store it again. One id per line, appended before
-# the conversation's file is removed.
+# the conversation's file is removed; a line "!<id>" takes an earlier one back,
+# because the file could not be removed.
 
 _DELETED_MAX = 5000
 
@@ -332,8 +396,10 @@ def _deleted_ids(principal: str | None) -> list[str]:
     """The ids of conversations deleted from this store, oldest first; a line
     that is not an id is skipped. Raises _DeletedIdsUnreadable when the list
     exists and cannot be read."""
+    path = _deleted_path(principal)
     try:
-        raw = _deleted_path(principal).read_bytes()
+        with _LOCKS.get(str(path)):
+            raw = _riding_out(path.read_bytes)
     except FileNotFoundError:
         return []
     except OSError as e:
@@ -341,8 +407,13 @@ def _deleted_ids(principal: str | None) -> list[str]:
         logger.warning("chat store: the list of deleted conversations could not "
                        "be read (%s)", type(e).__name__)
         raise _DeletedIdsUnreadable from e
-    lines = raw.decode("ascii", errors="replace").split("\n")
-    return [line for line in lines if _CONV_ID.match(line)]
+    ids: dict[str, None] = {}
+    for line in raw.decode("ascii", errors="replace").split("\n"):
+        if _CONV_ID.match(line[1:] if line.startswith("!") else line):
+            ids.pop(line.lstrip("!"), None)
+            if not line.startswith("!"):
+                ids[line] = None
+    return list(ids)
 
 
 def _is_deleted(conv_id: str, principal: str | None) -> bool:
@@ -356,29 +427,31 @@ def _is_deleted(conv_id: str, principal: str | None) -> bool:
                  "not saved.") from e
 
 
-def _remember_deleted(conv_id: str, principal: str | None) -> None:
-    """Append *conv_id* to the list of deleted conversations. Raises OSError when
-    it cannot be written. A list that has grown past twice _DELETED_MAX is cut
-    to its newest ids, when all of it can be read."""
+def _remember_deleted(conv_id: str, principal: str | None, *, take_back: bool = False) -> None:
+    """Append *conv_id* to the list of deleted conversations, or with *take_back*
+    the line that takes it back. Raises OSError when it cannot be written. A list
+    that has grown past twice _DELETED_MAX is cut to its newest ids, when all of
+    it can be read."""
     path = _deleted_path(principal)
+    line = ("!" if take_back else "") + conv_id
     with _LOCKS.get(str(path)):
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "ab+") as f:
+        with _riding_out(open, path, "ab+") as f:
             f.seek(0, os.SEEK_END)
             torn = False
             if f.tell():
                 f.seek(-1, os.SEEK_END)
                 torn = f.read(1) != b"\n"
-            f.write((b"\n" if torn else b"") + conv_id.encode("ascii") + b"\n")
+            f.write((b"\n" if torn else b"") + line.encode("ascii") + b"\n")
             f.flush()
             os.fsync(f.fileno())
         try:
-            ids = list(dict.fromkeys(reversed(_deleted_ids(principal))))
+            ids = _deleted_ids(principal)
         except _DeletedIdsUnreadable:
             return
         if len(ids) > 2 * _DELETED_MAX:
             try:
-                atomic_write(path, "\n".join(reversed(ids[:_DELETED_MAX])) + "\n")
+                atomic_write(path, "\n".join(ids[-_DELETED_MAX:]) + "\n")
             except OSError as e:
                 from localm.debuglog import logger
                 logger.warning("chat store: the list of deleted conversations could "
@@ -398,20 +471,21 @@ def _message_text(m) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return "".join(p.get("text") or "" for p in content
-                       if isinstance(p, dict) and p.get("type") == "text")
+        return "".join(p["text"] for p in content if isinstance(p, dict)
+                       and p.get("type") == "text" and isinstance(p.get("text"), str))
     return ""
 
 
 def _content_snippet(data: dict, term: str) -> str | None:
     """Short excerpt around the first message match of *term* (lowercase), or None."""
-    for m in data.get("messages") or []:
+    messages = data.get("messages")
+    for m in messages if isinstance(messages, list) else ():
         text = _message_text(m)
         idx = text.lower().find(term)
         if idx != -1:
             start = max(0, idx - 18)
-            return (("\u2026" if start > 0 else "")
-                    + " ".join(text[start:idx + 50].split()))
+            return _plain_text(("\u2026" if start > 0 else "")
+                               + " ".join(text[start:idx + 50].split()))
     return None
 
 
@@ -471,20 +545,26 @@ def conversations_list(request: Request, meta: bool = False,
     unreadable: list[str] = []
     if chats_dir.is_dir():
         for p in chats_dir.glob("*.json"):
+            lock = _LOCKS.get(str(p))
             try:
                 if meta:
-                    row = _conv_meta(p)
+                    with lock:
+                        row = _riding_out(_conv_meta, p)
                     if term and term not in str(row["title"]).lower():
-                        data = json.loads(p.read_text(encoding="utf-8"))
+                        with lock:
+                            data = _load_json(p)
                         snippet = _content_snippet(data, term)
                         if snippet is None:
                             continue
                         row["snippet"] = snippet
                     rows.append(row)
                 else:
-                    data = json.loads(p.read_text(encoding="utf-8"))
+                    with lock:
+                        data = _load_json(p)
                     data["id"] = p.stem
                     data["rev"] = _rev_of(data)
+                    data["updated_at"] = _meta_row(p.stem, data)["updated_at"]
+                    json.dumps(data, ensure_ascii=False, allow_nan=False).encode("utf-8")
                     rows.append(_conv_with_current_pin(data))
             except FileNotFoundError:
                 continue
@@ -513,19 +593,23 @@ def conversation_get(conv_id: str, request: Request):
         raise HTTPException(403, "Chat persistence is off (privacy mode)")
     principal = _principal_dir(request)
     path = _conv_path(conv_id, principal)
-    if not path.is_file():
-        if _is_deleted(conv_id, principal):
-            raise HTTPException(410, "This conversation was deleted")
-        raise HTTPException(404, "No such conversation")
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, RecursionError) as e:
-        raise HTTPException(500, "Conversation file is unreadable") from e
+    with _LOCKS.get(str(path)):
+        if not path.is_file():
+            if _is_deleted(conv_id, principal):
+                raise HTTPException(410, "This conversation was deleted")
+            raise HTTPException(404, "No such conversation")
+        try:
+            data = _load_json(path)
+        except (OSError, ValueError, RecursionError) as e:
+            raise HTTPException(500, "Conversation file is unreadable") from e
     if not isinstance(data, dict):
         raise HTTPException(500, "Conversation file is unreadable")
     data["id"] = conv_id
     data["rev"] = _rev_of(data)
-    return _conv_with_current_pin(data)
+    try:
+        return JSONResponse(_conv_with_current_pin(data))
+    except (ValueError, RecursionError) as e:
+        raise HTTPException(500, "Conversation file is unreadable") from e
 
 
 def _stale(row: dict | None, message: str, *, deleted: bool = False) -> HTTPException:
@@ -555,7 +639,8 @@ def conversation_upsert(conv_id: str, req: ConversationUpsert, request: Request)
     refused with 403 ``{"detail": {"error": "owner"}}`` and nothing is written.
     503 when the list of deleted conversations has to be known and cannot be
     read. 403 in privacy mode, 413 when the conversation is larger than the store
-    accepts."""
+    accepts, 422 naming the place when it holds something a conversation cannot
+    (see _not_storable)."""
     if not _persist_enabled():
         raise HTTPException(
             403, "Chat persistence is off (privacy mode). "
@@ -577,6 +662,9 @@ def conversation_upsert(conv_id: str, req: ConversationUpsert, request: Request)
               "save_id": req.save_id,
               "branches": req.branches,
               "messages": req.messages}
+    wrong = _not_storable(record)
+    if wrong:
+        raise HTTPException(422, f"This conversation was not saved: {wrong}.")
     if req.pinned_model:
         index = model_index()
         record["pinned_model"] = model_ids.stored_to_current(req.pinned_model, None, index)
@@ -595,7 +683,10 @@ def conversation_upsert(conv_id: str, req: ConversationUpsert, request: Request)
         if row and "params" not in req.model_fields_set:
             stored = (_stored_data(path) or {}).get("params")
             record["params"] = stored if isinstance(stored, dict) else {}
-        payload = json.dumps(record, ensure_ascii=False)
+        try:
+            payload = json.dumps(record, ensure_ascii=False)
+        except RecursionError as e:
+            raise HTTPException(422, "This conversation was not saved: it is nested too deeply.") from e
         if len(payload.encode("utf-8")) > _CONV_MAX_BYTES:
             raise HTTPException(413, "Conversation too large to persist")
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -608,7 +699,8 @@ def conversation_upsert(conv_id: str, req: ConversationUpsert, request: Request)
 def conversation_delete(conv_id: str, request: Request):
     """Delete one conversation and record its id, also when none is stored under
     it (``absent``), so a save still on its way does not store it. Answers 500
-    and deletes nothing when the deletion cannot be recorded. A request whose
+    when the deletion cannot be recorded or the file cannot be removed; the
+    conversation then stays, and does not count as deleted. A request whose
     ``X-LocaLM-Chat-Store`` header (``<instance> <principal>``, as the list names
     them) is not the store it reaches is refused with 403
     ``{"detail": {"error": "owner"}}``."""
@@ -629,7 +721,18 @@ def conversation_delete(conv_id: str, request: Request):
             raise HTTPException(
                 500, "The deletion could not be recorded, so nothing was deleted.") from e
         if path.is_file():
-            path.unlink()
+            try:
+                _riding_out(path.unlink)
+            except OSError as e:
+                from localm.debuglog import logger
+                logger.warning("chat store: conversation %s could not be deleted (%s)",
+                               conv_id, type(e).__name__)
+                try:
+                    _remember_deleted(conv_id, principal, take_back=True)
+                except OSError as e2:
+                    logger.warning("chat store: the record that conversation %s was deleted "
+                                   "could not be taken back (%s)", conv_id, type(e2).__name__)
+                raise HTTPException(500, "The conversation could not be deleted.") from e
             _META_CACHE.pop(str(path), None)
             return {"status": "deleted", "id": conv_id}
     return {"status": "absent", "id": conv_id}

@@ -1105,7 +1105,7 @@ export function lsSetScoped(key, value) {
 }
 
 function _writeScoped(key, value) {
-  if (scopedKeyPrivate(key)) return;
+  if (scopedKeyPrivate(key) || (_cleared && CHAT_SCOPED_KEYS.includes(key))) return;
   if (!INSTANCE_SCOPED_KEYS.includes(key)) {
     // Loud, not silent: a key reaching here that is not in
     // the wipe list is LM-DA-047's exact failure mode. Warn rather than throw
@@ -1194,6 +1194,7 @@ const _dropped = new WeakSet();
 const _editCount = new WeakMap();
 
 function _markChanged(conv) {
+  if (conv._meta && conv._seen) noteRowChange(conv);
   conv.updated_at = Date.now();
   conv.unsaved = true;
   _editCount.set(conv, (_editCount.get(conv) || 0) + 1);
@@ -1341,6 +1342,7 @@ function leaveStore() {
   chat.inst = null;
   chat.prin = null;
   chat.persist = false;
+  _index = null;
   chat.queue = [];
   _drafts.clear();
   _rows.clear();
@@ -1351,14 +1353,40 @@ function leaveStore() {
   if (!chatBusy()) renderChat();
 }
 
-// Set when this browser was signed out: the page writes nothing more here.
+// Set when the sign-in of this browser ended: the page writes nothing more here,
+// until a store answers it again.
 let _cleared = false;
+// Set when it was this page that signed out: it writes nothing more at all.
+let _signedOutHere = false;
+// How often the sign-in ended.
+let _endings = 0;
 
 /** After a sign-out: removes what this browser kept of the store this page was
- *  connected to, and lets the page write nothing more. */
+ *  connected to, lets the page write nothing more, and tells the other tabs. */
 export function clearSignedOutChats() {
   _cleared = true;
-  return clearStoredChats(storeTag() || lastOwner());
+  _signedOutHere = true;
+  _endings++;
+  const done = clearStoredChats(storeTag() || lastOwner());
+  try {
+    localStorage.setItem("localm.signedOut", String(Date.now()));
+    localStorage.removeItem("localm.signedOut");
+  } catch { /* the other tabs see it at their next request */ }
+  return done;
+}
+
+/** The sign-in of this page ended: the server answered 401, or with *clear*
+ *  another tab signed out. All the page holds for that key leaves it and nothing
+ *  of it is written; with *clear* what this browser kept is removed. */
+export function dropSignedOut({ clear = false } = {}) {
+  const owner = storeTag() || lastOwner();
+  _cleared = true;
+  _endings++;
+  if (chat.abort) chat.abort.abort();
+  leaveStore();
+  if (!clear) return;
+  clearStoredChats(owner);
+  syncConversations();
 }
 
 /** Removes from this browser the conversations and drafts of the store *owner*. */
@@ -1370,8 +1398,8 @@ function clearStoredChats(owner) {
     else localStorage.removeItem("localm.conversations");
   } catch { toast(t("chat.drafts.clearFailed"), true); }
   _rows.clear();
-  if (!draftStore.available()) return Promise.resolve();
-  return draftCall(() => draftStore.remove((v) => !v.prin || sameStore(v, owner)),
+  if (!draftStore.exists()) return Promise.resolve();
+  return draftCall(() => draftStore.remove((v) => !v.prin || sameStore(v, owner), { force: true }),
                    () => toast(t("chat.drafts.clearFailed"), true));
 }
 
@@ -1384,7 +1412,8 @@ const _convTooLargeWarned = new Set();   // conversation ids already toasted for
 // The save of each conversation in flight: the next one of the same conversation
 // waits for it, so it names the revision that save returned.
 const _convPushChain = new WeakMap();
-const _savesInFlight = new Set();
+// The conversations with a save on its way, by that save.
+const _savesInFlight = new Map();
 
 /** Debounced upsert of one conversation to the server store. The save names the
  *  stored revision it replaces (`conv.rev`); when the store holds another one,
@@ -1400,34 +1429,18 @@ export function pushConversation(conv) {
     _convPushTimers.delete(conv.id);
     const run = (_convPushChain.get(conv) || Promise.resolve()).then(() => _putConversation(conv));
     _convPushChain.set(conv, run);
-    _savesInFlight.add(run);
+    _savesInFlight.set(run, conv);
     run.finally(() => _savesInFlight.delete(run));
   }, 600));
 }
 
-/** Saves a change of title, pin, folder, pinned model or drawer values made on
- *  *conv*, an index row whose messages are not loaded: loads the stored copy,
- *  puts only what was changed here on it and saves it. Says so when it cannot
- *  be loaded. */
+/** Saves what was changed on *conv*, an index row whose messages are not loaded:
+ *  loading it puts the changed fields on the stored copy and saves that (see
+ *  hydrateConversation). Says so when it cannot be loaded. */
 async function saveIndexRowChange(conv) {
-  const mine = convMeta(conv);
-  const row = conv._row || {};
-  const changed = {};
-  for (const key of ["title", "pinned", "folder"]) {
-    if (key in row && !_sameJSON(mine[key], row[key])) changed[key] = mine[key];
-  }
-  if (conv.pinnedModel) changed.pinned_model = mine.pinned_model;
-  if (conv.params) changed.params = mine.params;
-  const ok = await hydrateConversation(conv);
-  if (!ok || conv._meta) {
+  if (!(await hydrateConversation(conv)) || conv._meta) {
     toast(t("chat.conv.saveFailed"), true);
     return;
-  }
-  if (Object.keys(changed).length) {
-    applyConvMeta(conv, { ...convMeta(conv), ...changed });
-    saveConversations(conv);
-  } else if (conv.unsaved) {
-    pushConversation(conv);
   }
   renderConvList();
   if (conv === currentConv() && !chatBusy()) renderChat();
@@ -1435,8 +1448,37 @@ async function saveIndexRowChange(conv) {
 
 /** A list row of the stored conversation *row*. */
 function rowPlaceholder(row) {
-  return { ...row, _meta: true, messages: [],
-           _row: { title: row.title, pinned: !!row.pinned, folder: row.folder || null } };
+  const conv = { ...row, _meta: true, messages: [], _touched: { params: {} } };
+  conv._seen = convMeta(conv);
+  return conv;
+}
+
+/** Records which fields of the list row *conv* were changed since the last call,
+ *  each with its newest value; a drawer value taken away is null. */
+function noteRowChange(conv) {
+  const now = convMeta(conv);
+  const { params, ...fields } = now;
+  for (const key of Object.keys(fields)) {
+    if (!_sameJSON(now[key], conv._seen[key])) conv._touched[key] = now[key];
+  }
+  for (const key of new Set([...Object.keys(params), ...Object.keys(conv._seen.params)])) {
+    if (params[key] !== conv._seen.params[key]) conv._touched.params[key] = params[key] ?? null;
+  }
+  conv._seen = now;
+}
+
+/** Puts the fields *touched* (see noteRowChange) on *conv*. Returns whether that
+ *  changed anything. */
+function applyTouched(conv, touched) {
+  const before = convMeta(conv);
+  const { params, ...fields } = touched;
+  const next = { ...before, ...fields, params: { ...before.params } };
+  for (const [key, value] of Object.entries(params)) {
+    if (value === null) delete next.params[key];
+    else next.params[key] = value;
+  }
+  applyConvMeta(conv, next);
+  return !_sameJSON(convMeta(conv), before);
 }
 
 /** The title of *conv* as the list shows it. */
@@ -1479,7 +1521,7 @@ function bodyPrint(data) {
 
 /** What *conv* looked like when it was last the same as the stored copy. */
 function syncPoint(conv) {
-  return { ...convMeta(conv), body: bodyPrint(conv) };
+  return { ...convMeta(conv), body: bodyPrint(conv), at: conv.updated_at || 0 };
 }
 
 /** The PUT body of *conv*. `base_rev` is left out for a conversation whose
@@ -1532,11 +1574,8 @@ async function _putConversation(conv) {
       _convPushWarned = false;
       _saveFailed.delete(conv.id);
       const saved = await r.json().catch(() => null);
-      if (conv.deleted) {
-        // Deleted while this save was on its way.
-        deleteConversationRemote(conv);
-        return;
-      }
+      if (conv.deleted) return;
+      _saveRetries.delete(conv);
       if (saved && typeof saved.rev === "string") {
         conv.rev = saved.rev;
         conv.sync = sent;
@@ -1599,6 +1638,16 @@ function rekeyConversation(conv, id) {
   rekeyDraft(old, id);
 }
 
+// How often the save of a conversation was put off in a row.
+const _saveRetries = new WeakMap();
+
+/** Tries the save of *conv* again, after a pause that grows with each time. */
+function retrySave(conv) {
+  const n = _saveRetries.get(conv) || 0;
+  _saveRetries.set(conv, n + 1);
+  setTimeout(() => pushConversation(conv), Math.min(60000, 1000 * 2 ** n));
+}
+
 /** Settles a save of *conv* the store refused because it holds another
  *  revision. *detail* is the 409's detail: `rev` null when the conversation is
  *  not stored any more, `deleted` when that is because it was deleted. One
@@ -1606,8 +1655,10 @@ function rekeyConversation(conv, id) {
  *  else it goes here too; one that is missing is stored again from this copy. A
  *  stored copy this page wrote itself is recognised. Changes of the
  *  title, pin, folder, pinned model and drawer values are merged. When the
- *  messages changed both here and there, the copy here becomes a conversation
- *  of its own and the stored one is listed beside it. */
+ *  messages changed both here and there, or the stored copy is an older one that
+ *  lacks messages saved from here, the copy here becomes a conversation of its
+ *  own and the stored one is listed beside it. While the stored copy cannot be
+ *  read, nothing is decided and the save is tried again. */
 async function resolveStaleSave(conv, detail) {
   if (!convPersistable(conv)) return;
   if (!detail.rev) { settleNotStored(conv, !!detail.deleted); return; }
@@ -1618,25 +1669,58 @@ async function resolveStaleSave(conv, detail) {
                           { headers: authHeaders() });
     if (r.status === 410 || r.status === 404) { settleNotStored(conv, r.status === 410); return; }
     if (r.ok) data = await r.json();
-  } catch { /* kept as a copy below */ }
+  } catch { /* tried again below */ }
   if (!convPersistable(conv)) return;
-  if (data && typeof data === "object") {
-    migrateConversation(data);
-    const base = conv.sync;
-    const mine = bodyPrint(conv);
-    const theirs = bodyPrint(data);
-    const changedHere = mine !== theirs && (!base || mine !== base.body);
-    const changedThere = mine !== theirs && (!base || theirs !== base.body);
-    if (!(changedHere && changedThere)) {
-      if (changedThere && chatBusy()) {
-        setTimeout(() => pushConversation(conv), 1000);
-        return;
-      }
-      takeStoredCopy(conv, data, { body: changedThere });
-      return;
-    }
+  if (!data || typeof data !== "object") {
+    _saveFailed.add(conv.id);
+    retrySave(conv);
+    return;
   }
-  keepAsCopy(conv, detail.row);
+  migrateConversation(data);
+  const base = conv.sync;
+  const mine = bodyPrint(conv);
+  const theirs = bodyPrint(data);
+  const changedHere = mine !== theirs && (!base || mine !== base.body);
+  const changedThere = mine !== theirs && (!base || theirs !== base.body);
+  if (changedThere && !changedHere && chatBusy()) {
+    retrySave(conv);
+  } else if (changedThere && (changedHere || isOlderCopy(conv, data))) {
+    keepAsCopy(conv, detail.row);
+  } else {
+    takeStoredCopy(conv, data, { body: changedThere });
+  }
+}
+
+/** How often each message of *data* occurs, parked branches and archived messages
+ *  included. */
+function turnCounts(data) {
+  const out = new Map();
+  const walk = (messages) => {
+    for (const m of Array.isArray(messages) ? messages : []) {
+      if (!m || typeof m !== "object") continue;
+      const key = JSON.stringify(isToolEvent(m) ? ["", m.kind, m.query || m.url]
+        : [m.role, msgText(m), msgImages(m).length]);
+      out.set(key, (out.get(key) || 0) + 1);
+      walk(m.compacted);
+    }
+  };
+  walk(data.messages);
+  for (const rec of data.branches || []) for (const tail of (rec && rec.tails) || []) walk(tail);
+  return out;
+}
+
+/** When *conv* was last saved or loaded, by the stored copy's own time. */
+function savedAt(conv) {
+  if (conv.sync && Number.isFinite(conv.sync.at)) return conv.sync.at;
+  return conv.unsaved ? 0 : conv.updated_at || 0;
+}
+
+/** Whether the stored copy *data* is older than the one *conv* was saved as and
+ *  lacks messages it holds: the data folder was put back to an earlier state. */
+function isOlderCopy(conv, data) {
+  if (!((data.updated_at || 0) < savedAt(conv))) return false;
+  const have = turnCounts(data);
+  return [...turnCounts(conv)].some(([key, n]) => (have.get(key) || 0) < n);
 }
 
 let _restoredTold = false;
@@ -1661,6 +1745,17 @@ function settleNotStored(conv, deleted, { quiet = false } = {}) {
   pushConversation(conv);
 }
 
+/** The drawer values *stored* with those changed from *base* to *mine* on top. */
+function mergeParams(base, mine, stored) {
+  const out = { ...stored };
+  for (const key of new Set([...Object.keys(base || {}), ...Object.keys(mine)])) {
+    if (mine[key] === (base || {})[key]) continue;
+    if (mine[key] === undefined) delete out[key];
+    else out[key] = mine[key];
+  }
+  return out;
+}
+
 /** Merges the stored copy *data* into *conv*: the messages when *body*, and
  *  each other field this page did not change since the last sync. What then
  *  differs from the stored copy is saved on top of it. */
@@ -1675,13 +1770,14 @@ function takeStoredCopy(conv, data, { body }) {
     const changedHere = base && !_sameJSON(mine[key], base[key]);
     merged[key] = changedHere ? mine[key] : stored[key];
   }
+  if (base) merged.params = mergeParams(base.params, mine.params, stored.params);
   if (body) {
     conv.messages = data.messages || [];
     conv.branches = data.branches || [];
   }
   applyConvMeta(conv, merged);
   conv.rev = data.rev;
-  conv.sync = { ...stored, body: bodyPrint(data) };
+  conv.sync = { ...stored, body: bodyPrint(data), at: data.updated_at || 0 };
   delete conv._meta;
   if (!_sameJSON(merged, stored) || (!body && conv.sync.body !== bodyPrint(conv))) {
     saveConversations(conv);
@@ -1743,16 +1839,15 @@ function storeHeader(tag) {
   return tag && tag.inst && tag.prin ? { "X-LocaLM-Chat-Store": tag.inst + " " + tag.prin } : {};
 }
 
-/** Deletes *conv* from the server store, after its own saves that are on their
- *  way. */
+/** Deletes *conv* from the server store. The server refuses a save of it that
+ *  arrives later. The request outlives the page. */
 export async function deleteConversationRemote(conv) {
   if (!chat.persist) return;
   clearTimeout(_convPushTimers.get(conv.id));
   _convPushTimers.delete(conv.id);
-  try { await _convPushChain.get(conv); } catch { /* its failure was said when it happened */ }
   try {
     const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id), {
-      method: "DELETE", headers: { ...authHeaders(), ...storeHeader(storeTag()) },
+      method: "DELETE", headers: { ...authHeaders(), ...storeHeader(storeTag()) }, keepalive: true,
     });
     if (!r.ok) throw new Error("HTTP " + r.status);
   } catch (e) {
@@ -1773,7 +1868,8 @@ export async function deleteConversationRemote(conv) {
 export async function deleteAllServerConversations() {
   for (const timer of _convPushTimers.values()) clearTimeout(timer);
   _convPushTimers.clear();
-  await Promise.allSettled([..._savesInFlight]);
+  // Those whose first save is on its way are not listed yet.
+  const onTheirWay = new Map([..._savesInFlight.values()].map((c) => [c.id, c]));
   const deleted = new Set();
   const failed = new Set();
   const result = (listFailed) => ({ deleted: [...deleted], failed: [...failed], listFailed });
@@ -1792,7 +1888,7 @@ export async function deleteAllServerConversations() {
     for (const id of listed) {
       if (deleted.delete(id)) failed.add(id);
     }
-    const todo = listed.filter((id) => !failed.has(id));
+    const todo = [...new Set([...listed, ...onTheirWay.keys()])].filter((id) => !failed.has(id));
     if (!todo.length) return result(false);
     const outcomes = await Promise.all(todo.map(async (id) => {
       try {
@@ -1805,7 +1901,11 @@ export async function deleteAllServerConversations() {
         return false;
       }
     }));
-    todo.forEach((id, i) => (outcomes[i] ? deleted : failed).add(id));
+    todo.forEach((id, i) => {
+      (outcomes[i] ? deleted : failed).add(id);
+      if (outcomes[i] && onTheirWay.has(id)) onTheirWay.get(id).deleted = true;
+    });
+    onTheirWay.clear();
   }
 }
 
@@ -1828,7 +1928,8 @@ const _loading = new WeakMap();
 
 /** R40: fetch a full conversation's body on demand and replace its index-only
  *  ("_meta") placeholder in chat.conversations. Messages added to the placeholder
- *  meanwhile follow the stored ones. Calls for one conversation share a request.
+ *  meanwhile follow the stored ones, and the fields changed on it replace theirs.
+ *  Calls for one conversation share a request.
  *  Returns true on success. */
 export function hydrateConversation(conv) {
   if (!conv || !conv._meta) return Promise.resolve(true);
@@ -1841,13 +1942,12 @@ export function hydrateConversation(conv) {
         const data = await r.json();
         if (!conv._meta) return true;
         const added = conv.messages;
-        const unsaved = conv.unsaved;
+        const touched = conv._touched;
         applyStoredConversation(conv, data);
-        delete conv._meta;
-        delete conv._row;
+        for (const key of ["_meta", "_seen", "_touched"]) delete conv[key];
         if (added.length) conv.messages = [...conv.messages, ...added];
-        if (added.length || unsaved) conv.unsaved = true;
-        saveConversations();   // cache the now-full conversation locally
+        const changed = (!!touched && applyTouched(conv, touched)) || added.length > 0;
+        saveConversations(changed ? conv : undefined);   // cache the now-full conversation locally
         return true;
       } catch {
         return false;   // offline - keep the placeholder; renderChat shows the hint
@@ -1860,9 +1960,11 @@ export function hydrateConversation(conv) {
 }
 window.hydrateConversation = hydrateConversation;
 
-/** Takes the stored copy of *conv*, whose messages this page holds, unless
- *  anything was added to it or changed in it meanwhile. */
-async function refreshStored(conv) {
+/** Takes the stored copy of *conv* (its index row *row*), whose messages this page
+ *  holds, unless anything was added to it or changed in it meanwhile. When the
+ *  stored copy is an older one that lacks messages held here, they are kept as a
+ *  conversation of their own. */
+async function refreshStored(conv, row) {
   const { messages } = conv;
   const count = messages.length;
   const edits = _editCount.get(conv) || 0;
@@ -1873,7 +1975,9 @@ async function refreshStored(conv) {
     const data = await r.json();
     if (conv.unsaved || !convPersistable(conv) || chatBusy() || conv.messages !== messages ||
         messages.length !== count || (_editCount.get(conv) || 0) !== edits) return;
-    applyStoredConversation(conv, data);
+    migrateConversation(data);
+    if (isOlderCopy(conv, data)) keepAsCopy(conv, row);
+    else applyStoredConversation(conv, data);
   } catch { /* the next sync tries again */ }
 }
 
@@ -1893,10 +1997,14 @@ function applyStoredConversation(conv, data) {
   }
   delete conv.unsaved;
 }
+// The index last read from the store this page is connected to.
+let _index = null;
+
 /** The server store's index: the rows of its first page (`rows`, what the list
  *  shows), every stored row by id (`byId`), whether that is all of them
  *  (`complete`) and the ids of unreadable files. Null when it cannot be read. */
 async function fetchServerIndex() {
+  const endings = _endings;
   const page = async (offset) => {
     const r = await fetch(`/api/conversations?meta=true&limit=${offset ? 1000 : 200}&offset=${offset}`,
                           { headers: authHeaders() });
@@ -1907,6 +2015,8 @@ async function fetchServerIndex() {
   const first = await page(0);
   if (!first) return null;
   if (first.refused) return first;
+  if (endings !== _endings) return null;
+  if (!_signedOutHere) _cleared = false;
   adoptStore(first);
   if (!first.enabled) return null;
   const tag = storeTag();
@@ -1922,15 +2032,16 @@ async function fetchServerIndex() {
     offset += got.length;
   }
   if (tag && !sameStore(tag, storeTag())) return null;
-  return { rows, byId, complete, unreadable: new Set(first.unreadable || []) };
+  _index = { rows, byId, complete, unreadable: new Set(first.unreadable || []) };
+  return _index;
 }
 
 /** Loads the server store and merges it with what this page holds. R40: the
  *  server list is a lightweight index (no message bodies); each conversation's
  *  messages load when it is opened. A conversation this browser holds with the
  *  stored revision is kept, and saved when it holds a change; with another
- *  revision the stored copy is taken, unless it holds a change, in which case
- *  its save settles it (resolveStaleSave). One that was stored and is not
+ *  revision the stored copy is taken (see refreshStored), unless it holds a
+ *  change, in which case its save settles it (resolveStaleSave). One that was stored and is not
  *  stored any more was deleted elsewhere. One never stored is uploaded. */
 export async function initServerConversations() {
   if (chat.privacy) return;
@@ -1980,12 +2091,13 @@ export async function initServerConversations() {
           pushConversation(local);
         }
       } else if (local._meta) {
-        const kept = convMeta(local);
-        const was = local._row || {};
-        Object.assign(local, rowPlaceholder(remote), { messages: local.messages });
-        for (const key of ["title", "pinned", "folder"]) {
-          if (key in was && !_sameJSON(kept[key], was[key])) local[key] = kept[key];
+        const { messages, _touched: touched } = local;
+        Object.assign(local, rowPlaceholder(remote), { messages });
+        if (touched) {
+          applyTouched(local, touched);
+          local._touched = touched;
         }
+        local._seen = convMeta(local);
         keep();
       } else if (!local.rev || typeof remote.rev !== "string") {
         // Held since before conversations had a revision: the newer copy wins,
@@ -2005,11 +2117,11 @@ export async function initServerConversations() {
       } else if (local.unsaved) {
         keep();
         pushConversation(local);
-      } else if (boot) {
+      } else if (boot && !((remote.updated_at || 0) < savedAt(local))) {
         keepRow();
       } else {
         keep();
-        stale.push(local);
+        stale.push([local, remote]);
       }
     }
     chat.conversations = [...byId.values()]
@@ -2024,7 +2136,7 @@ export async function initServerConversations() {
     if (!chat.conversations.some((c) => c.id === chat.activeId)) {
       chat.activeId = chat.conversations[0]?.id || null;
     }
-    for (const conv of stale) await refreshStored(conv);
+    for (const [conv, row] of stale) await refreshStored(conv, row);
     if (boot || stale.length || before !== _listPrint()) {
       saveConversations();
       renderConvList();
@@ -2517,31 +2629,68 @@ function draftDb() {
   return _draftDb;
 }
 
+// How long one use of the database may take, opening it included.
+const DRAFT_LIMIT_MS = 4000;
+// Set when a use took longer: the database counts as unavailable for this page.
+let _draftsDead = false;
+
 /** One transaction over the rows. *work* gets the object store and returns an
  *  array or Map it fills; resolves with it once the transaction is complete. A
- *  connection that was lost is opened again once. */
-async function draftTx(mode, work) {
-  for (let again = false; ; again = true) {
-    const db = await draftDb();
-    try {
-      return await new Promise((resolve, reject) => {
-        const tx = db.transaction("rows", mode);
-        const out = work(tx.objectStore("rows"));
-        tx.oncomplete = () => resolve(out);
-        tx.onabort = () => reject(tx.error || new Error("aborted"));
-        tx.onerror = () => reject(tx.error);
-      });
-    } catch (e) {
-      if (again || !e || e.name !== "InvalidStateError") throw e;
-      _draftDb = null;
+ *  connection that was lost is opened again once. Rejects when it takes longer
+ *  than DRAFT_LIMIT_MS, and from then on at once unless *force*. */
+async function draftTx(mode, work, { force = false } = {}) {
+  if (_draftsDead && !force) throw new Error("the browser's database does not answer");
+  const use = { over: false, tx: null };
+  let timer = 0;
+  const late = new Promise((resolve, reject) => {
+    const arm = () => {
+      const due = Date.now() + DRAFT_LIMIT_MS;
+      timer = setTimeout(() => {
+        // Far too late: the page was suspended and the database with it.
+        if (Date.now() > due + 1000) { arm(); return; }
+        use.over = true;
+        _draftsDead = true;
+        _draftDb = null;
+        try { if (use.tx) use.tx.abort(); } catch { /* it ended just now */ }
+        reject(new Error("the browser's database did not answer"));
+      }, DRAFT_LIMIT_MS);
+    };
+    arm();
+  });
+  const run = async () => {
+    for (let again = false; ; again = true) {
+      const db = await draftDb();
+      if (use.over) throw new Error("too late");
+      try {
+        return await new Promise((resolve, reject) => {
+          const tx = use.tx = db.transaction("rows", mode);
+          const out = work(tx.objectStore("rows"));
+          tx.oncomplete = () => resolve(out);
+          tx.onabort = () => reject(tx.error || new Error("aborted"));
+          tx.onerror = () => reject(tx.error);
+        });
+      } catch (e) {
+        if (again || !e || e.name !== "InvalidStateError") throw e;
+        _draftDb = null;
+      }
     }
+  };
+  try {
+    return await Promise.race([run(), late]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
 /** The IndexedDB rows of the drafts. */
 export const draftStore = {
-  available() {
+  /** Whether this browser has the database. */
+  exists() {
     try { return !!window.indexedDB; } catch { return false; }
+  },
+  /** Whether this page may use it. */
+  available() {
+    return !_draftsDead && this.exists();
   },
   /** Every row by key. */
   all() {
@@ -2575,8 +2724,9 @@ export const draftStore = {
       return out;
     });
   },
-  /** Removes every row *match*(value) answers true for. */
-  remove(match) {
+  /** Removes every row *match*(value) answers true for; with *force* also when the
+   *  database counts as unavailable. */
+  remove(match, { force = false } = {}) {
     return draftTx("readwrite", (store) => {
       const gone = [];
       const req = store.openCursor();
@@ -2587,7 +2737,7 @@ export const draftStore = {
         cur.continue();
       };
       return gone;
-    });
+    }, { force });
   },
 };
 
@@ -2705,8 +2855,9 @@ function _writeDrafts() {
       const have = _rows.get(name);
       if (have && have.print === row.print && !have.extra) continue;
       const key = have ? have.key : randomId();
-      edits.push([key, (cur) => (have && !ownsRow(cur) ? undefined : row.value)]);
+      edits.push([key, (cur) => (_cleared || (have && !ownsRow(cur)) ? undefined : row.value)]);
       done.push((result) => {
+        if (_cleared) return;
         if (result === undefined) lostRow(name);
         else _rows.set(name, { key, print: row.print, conv: row.value.conv });
       });
@@ -2749,8 +2900,8 @@ export async function claimQueued(item) {
   const have = item.id ? _rows.get(name) : null;
   if (!have) return "mine";
   try {
-    const [row] = await draftStore.change([[have.key,
-      (cur) => (ownsRow(cur) && cur.state !== "sending" ? { ...cur, owner: PAGE, state: "sending" } : undefined)]]);
+    const [row] = await draftStore.change([[have.key, (cur) => (!_cleared && ownsRow(cur) && cur.state !== "sending"
+      ? { ...cur, owner: PAGE, state: "sending" } : undefined)]]);
     if (row) {
       _sending.add(name);
       return "mine";
@@ -2769,7 +2920,7 @@ export function unclaimQueued(item) {
   _sending.delete(name);
   if (have) {
     draftCall(() => draftStore.change([[have.key,
-      (cur) => (ownsRow(cur) ? { ...cur, state: "queued" } : undefined)]]));
+      (cur) => (!_cleared && ownsRow(cur) ? { ...cur, state: "queued" } : undefined)]]));
   }
 }
 
@@ -2794,7 +2945,9 @@ function wipeStoredDrafts(cacheWiped = true) {
   _rows.clear();
   const attempt = async () => {
     if (!chat.privacy) return true;
-    if (draftStore.available()) await draftStore.remove((v) => !v || !v.inst || !_serverInstance || v.inst === _serverInstance);
+    if (draftStore.exists()) {
+      await draftStore.remove((v) => !v || !v.inst || !_serverInstance || v.inst === _serverInstance, { force: true });
+    }
     return cacheWiped;
   };
   const run = _draftChain.then(attempt);
@@ -2838,7 +2991,7 @@ function forgetDrafts(ids, gone = (id) => ids.includes(id)) {
  *  user says. Does nothing until the mode and the store are known. */
 export async function restoreDrafts() {
   const tag = storeTag();
-  if (_draftsRestored || !chat.modeKnown || !tag) return;
+  if (_draftsRestored || !chat.modeKnown || !tag || _cleared) return;
   _draftsRestored = true;
   if (chat.privacy || !draftStore.available()) return;
   await draftCall(async () => {
@@ -2850,10 +3003,17 @@ export async function restoreDrafts() {
       (live ? !live.has(v.owner) : now - (v.at || 0) > DRAFT_ABANDONED_MS);
     const open = rows.filter(([, v]) => abandoned(v));
     const listed = (id) => chat.conversations.some((c) => c.id === id);
+    for (const [, v] of open) {
+      // A chat past the rows the list shows.
+      const row = v.conv && !listed(v.conv) && !_deletedHere.has(v.conv) && _index && _index.byId.get(v.conv);
+      if (row) chat.conversations.push(rowPlaceholder(row));
+    }
     const taken = await draftStore.change(open.map(([key, v]) => [key, (cur) => {
-      if (!cur || (cur.owner !== v.owner && cur.owner !== null)) return undefined;
+      if (_cleared || !cur || (cur.owner !== v.owner && cur.owner !== null)) return undefined;
       if (now - (cur.at || 0) > DRAFT_KEEP_MS) return null;
-      if (cur.conv && !listed(cur.conv) && chat.persist) return null;
+      if (cur.conv && !listed(cur.conv)) {
+        return chat.persist && _index && _index.complete && !_index.unreadable.has(cur.conv) ? null : undefined;
+      }
       return { ...cur, owner: PAGE, ...(cur.kind === "queue"
         ? { state: "queued", held: !!cur.held || cur.state === "sending" } : {}) };
     }]));
@@ -2884,6 +3044,7 @@ export async function restoreDrafts() {
       else _drafts.set(id, _drafts.has(id) ? joinDrafts(d, _drafts.get(id)) : d);
     }
   });
+  renderConvList();
   renderQueuedIndicator();
   saveDraftsNow();
 }

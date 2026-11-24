@@ -22,6 +22,8 @@ export function makeIndexedDB() {
     /** The next *n* readwrite transactions abort. */
     failWrites: 0,
     writes: 0,
+    /** "open": opening the database is never answered; "use": no transaction is. */
+    hang: "",
   };
 
   class Transaction {
@@ -34,6 +36,8 @@ export function makeIndexedDB() {
       this.work = [];
       this.state = "waiting";
       const start = () => {
+        if (this.state === "done") return;
+        if (fake.hang === "use") return;
         this.state = "active";
         if (mode === "readwrite" && fake.failWrites > 0) {
           fake.failWrites--;
@@ -50,6 +54,7 @@ export function makeIndexedDB() {
         before.then(() => later(start));
       } else later(start);
     }
+    abort() { this.abortWith(named("AbortError", "aborted")); }
     abortWith(e) {
       if (this.state === "done") return;
       this.state = "done";
@@ -132,6 +137,7 @@ export function makeIndexedDB() {
   fake.api = {
     open(name, wanted) {
       const req = new Request();
+      if (fake.hang === "open") return req;
       later(() => {
         const db = new Connection();
         req.result = db;

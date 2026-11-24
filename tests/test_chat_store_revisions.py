@@ -4,6 +4,7 @@ per-chat parameters and the count of chats left on disk in privacy mode."""
 
 import inspect
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -147,6 +148,7 @@ def test_a_list_that_cannot_be_read_refuses_the_save_that_depends_on_it(store, m
         return real(self)
 
     monkeypatch.setattr(Path, "read_bytes", refuse)
+    monkeypatch.setattr(plug, "_transient_backoff", lambda attempt: None)
     assert _put(client, "gone", "late").status_code == 503
     assert _put(client, "new1", "a").status_code == 503
     assert client.get("/api/conversations/gone").status_code == 503
@@ -166,6 +168,127 @@ def test_a_deletion_that_cannot_be_recorded_deletes_nothing(store, monkeypatch):
     monkeypatch.setattr(plug, "_remember_deleted", fail)
     assert client.delete("/api/conversations/c1").status_code == 500
     assert (chats / "c1.json").is_file()
+
+
+def _refuse(monkeypatch, method, times):
+    """Path.<method> of a chat file is refused *times* times like a file another
+    process has open."""
+    real = getattr(Path, method)
+    left = [times]
+
+    def call(self, *args, **kwargs):
+        if self.suffix == ".json" and left[0]:
+            left[0] -= 1
+            raise PermissionError("in use")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, method, call)
+    monkeypatch.setattr(plug, "_is_transient_permission_error", lambda e: True)
+    monkeypatch.setattr(plug, "_transient_backoff", lambda attempt: None)
+
+
+@pytest.mark.parametrize("method", ["read_text", "unlink", "stat"])
+def test_a_file_another_process_holds_for_a_moment_is_waited_for(store, monkeypatch, method):
+    client, chats, _ = store
+    _put(client, "c1", "a")
+    plug._META_CACHE.clear()
+    if method != "stat":
+        _refuse(monkeypatch, method, 3)
+        assert client.get("/api/conversations/c1").status_code == 200
+    else:
+        _refuse(monkeypatch, method, 1)
+    assert client.get("/api/conversations?meta=true").json()["unreadable"] == []
+    assert client.delete("/api/conversations/c1").json()["status"] == "deleted"
+    assert not (chats / "c1.json").exists()
+
+
+def test_a_file_that_cannot_be_removed_stays_and_does_not_count_as_deleted(store, monkeypatch):
+    client, chats, _ = store
+    _put(client, "c1", "a")
+    client.delete("/api/conversations/other")
+    with monkeypatch.context() as m:
+        _refuse(m, "unlink", 100)
+        assert client.delete("/api/conversations/c1").status_code == 500
+    assert client.get("/api/conversations/c1").status_code == 200
+    (chats / "c1.json").unlink()
+    assert client.get("/api/conversations/c1").status_code == 404
+    assert _put(client, "c1", "a").status_code == 200
+    assert client.get("/api/conversations/other").status_code == 410
+    assert client.delete("/api/conversations/c1").json()["status"] == "deleted"
+    assert client.get("/api/conversations/c1").status_code == 410
+
+
+@pytest.mark.parametrize("ask", [
+    lambda c: c.get("/api/conversations/c1"), lambda c: c.get("/api/conversations?meta=true"),
+    lambda c: c.get("/api/conversations"), lambda c: c.get("/api/conversations?meta=true&q=word")])
+def test_a_read_waits_for_the_chat_s_lock(store, ask):
+    client, chats, _ = store
+    _put(client, "c1", "a word")
+    plug._META_CACHE.clear()
+    got = []
+    with plug._LOCKS.get(str(chats / "c1.json")):
+        t = threading.Thread(target=lambda: got.append(ask(client).status_code))
+        t.start()
+        t.join(0.5)
+        assert got == []
+    t.join(10)
+    assert got == [200]
+
+
+BAD_BODIES = {
+    "a text part that is not text": ('"messages":[{"role":"user","content":[{"type":"text","text":5}]}]',
+                                     "messages[0].content[0].text is not text"),
+    "NaN as the time": ('"updated_at":NaN', "updated_at is not a finite number"),
+    "an infinite time": ('"updated_at":1e999', "updated_at is not a finite number"),
+    "NaN in a message": ('"messages":[{"role":"user","content":"a","x":NaN}]', "messages[0].x is not a finite number"),
+    "NaN as a drawer value": ('"params":{"seed":NaN}', "params.seed is not a finite number"),
+    "half a character": ('"messages":[{"role":"user","content":"\\ud800"}]', "messages[0].content is not valid text"),
+    "half a character in the title": ('"title":"\\ud800"', "title is not valid text"),
+    "half a character in a name": ('"messages":[{"\\ud800":1}]', "a field name in messages[0] is not valid text"),
+}
+
+
+@pytest.mark.parametrize("part, where", BAD_BODIES.values(), ids=BAD_BODIES.keys())
+def test_what_a_chat_file_cannot_hold_is_refused_by_name(store, part, where):
+    client, chats, _ = store
+    r = client.put("/api/conversations/c1", content="{" + part + "}", headers={"Content-Type": "application/json"})
+    assert r.status_code == 422, r.text
+    assert where in r.json()["detail"]
+    assert not chats.exists() or not list(chats.iterdir())
+
+
+BAD_FILES = {
+    "text": '{"title":"t","updated_at":5,"messages":[{"role":"user","content":[{"type":"text","text":5},'
+            '{"type":"text","text":"needle"}]}]}',
+    "nan": '{"title":"t","updated_at":NaN,"messages":[{"role":"user","content":"needle"}]}',
+    "string time": '{"title":"t","updated_at":"later","messages":[]}',
+    "surrogate": '{"title":"\\ud800","updated_at":5,"rev":"\\ud800","messages":[{"role":"user","content":"needle \\ud800"}]}',
+    "shapes": '{"title":7,"updated_at":5,"folder":[1],"messages":{"a":1},"branches":3,"save_id":{}}',
+    "list": "[1, 2]",
+}
+
+
+@pytest.mark.parametrize("text", BAD_FILES.values(), ids=BAD_FILES.keys())
+def test_one_bad_file_breaks_no_list_no_search_and_no_other_chat(store, text):
+    client, chats, _ = store
+    _put(client, "good", "needle here")
+    (chats / "bad.json").write_text(text, encoding="utf-8")
+    for url in ("?meta=true", "", "?meta=true&q=needle"):
+        r = client.get("/api/conversations" + url)
+        assert r.status_code == 200, url
+        assert "good" in [c["id"] for c in r.json()["conversations"]], url
+    assert client.get("/api/conversations/good").status_code == 200
+    assert client.get("/api/conversations/bad").status_code in (200, 500)
+    assert _put(client, "bad", "x").status_code in (200, 409)
+    assert _put(client, "good", "needle here", "more").status_code == 200
+
+
+def test_the_search_finds_the_text_beside_a_part_that_is_not_text(store):
+    client, chats, _ = store
+    chats.mkdir(parents=True)
+    (chats / "bad.json").write_text(BAD_FILES["text"], encoding="utf-8")
+    got = client.get("/api/conversations?meta=true&q=needle").json()
+    assert [c["id"] for c in got["conversations"]] == ["bad"] and got["unreadable"] == []
 
 
 def test_a_principal_s_deletions_are_its_own(store):

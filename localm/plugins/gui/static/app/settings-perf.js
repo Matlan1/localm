@@ -3741,25 +3741,37 @@ export async function processChatQueue() {
   const idx = chat.queue.findIndex((item) => !item.held && (!item.convId || item.convId === conv.id));
   if (idx === -1) return;
   if (!modelCache.active && !modelCache.resumable && !announcedLoadingModel()) return;
-  const [item] = chat.queue.splice(idx, 1);
+  // It stays in the queue until it is this page's to send.
+  const item = chat.queue[idx];
+  const take = () => {
+    const at = chat.queue.indexOf(item);
+    if (at !== -1) chat.queue.splice(at, 1);
+    return at !== -1;
+  };
   if (item.id) {
     _claiming = true;
     let claim;
     try { claim = await claimQueued(item); } finally { _claiming = false; }
     if (claim === "unknown") {
       item.held = true;
-      chat.queue.unshift(item);
+      renderQueuedIndicator();
+      toast(t("chat.queuedMaybeSent"), true);
+      return;
+    }
+    if (claim === "gone") { take(); processChatQueue(); return; }
+    if (chatBusy() || currentConv() !== conv) {
+      unclaimQueued(item);
       renderQueuedIndicator();
       return;
     }
-    if (claim === "gone") { processChatQueue(); return; }
-    if (chatBusy() || currentConv() !== conv) {
-      unclaimQueued(item);
-      chat.queue.unshift(item);
-      renderQueuedIndicator();
+    if (!chat.queue.includes(item)) {
+      // Cancelled meanwhile.
+      queuedDone(item);
+      processChatQueue();
       return;
     }
   }
+  take();
   saveDraftsSoon();
   renderQueuedIndicator();
   try {

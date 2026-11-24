@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { chat, clearSignedOutChats, connectStore, convUI, ingestSharedFiles, refreshCtxLimit, renderChat, renderConvList, syncConversations } from "./chat.js";
+import { chat, clearSignedOutChats, dropSignedOut, connectStore, convUI, ingestSharedFiles, refreshCtxLimit, renderChat, renderConvList, syncConversations } from "./chat.js";
 import { populateSetupModels, reattachSessions } from "./coder.js";
 import { $, SHELL_TOKEN, authHeaders, confirmDangerAsync, el, instanceCacheTrusted, refreshCsrf, reloadApp, safeStorageGet, sentPreviousShellToken, sentShellToken, setShellToken, toast } from "./helpers.js";
 import { setLanguageReloadOpen, syncLanguageFromConfig, t } from "./i18n.js";
@@ -100,6 +100,7 @@ window.fetch = async function (input, init) {
     if (res.status === 401 && window.__localmLocked === false) {
       const url = _requestUrl(input);
       if (_sameOriginUrl(url) && !_isSessionLogin(url)) {
+        dropSignedOut();
         lockUI(t(sentShellToken(hdrs) ? "keygate.keyCreated" : "keygate.sessionEnded"));
       }
     }
@@ -735,6 +736,7 @@ window.bootAuthProbe = bootAuthProbe;
   // Another tab of this browser saved or deleted a conversation.
   window.addEventListener("storage", (e) => {
     if (e.key === "localm.conversations") syncConversations();
+    if (e.key === "localm.signedOut" && e.newValue) dropSignedOut({ clear: true });
   });
   startHwStats();   // live CPU/RAM/VRAM/GPU readout in the status bar
   setupPerfCard();  // Settings: GPU-layers/context sliders + live VRAM estimate

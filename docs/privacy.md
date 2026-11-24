@@ -83,13 +83,18 @@ Notes:
   conversations and what you have typed, attached or queued but not sent. Each
   entry belongs to one install and one key: another install at the same address
   or another key does not see, save or remove it. Signing out, or signing in with
-  another key, removes what was kept for the old one. Privacy mode keeps none of
-  it there and empties what an earlier mode left; if the browser refuses that, the
-  app says so and tries again until it succeeds.
+  another key, removes what was kept for the old one; the other open tabs drop
+  what they hold and write none of it again. When the server no longer accepts
+  the key, an open tab also drops what it holds and writes nothing more; what was
+  kept before waits for the next sign-in. Privacy mode keeps none of it there and
+  empties what an earlier mode left; if the browser refuses that or does not
+  answer, the app says so and tries again until it succeeds.
 - When you delete a conversation in `log` or `full` mode, its id (a short code
   made from the time it was started, no title or text) is added to
   `chats/deleted-ids.txt`, so that another browser that still holds the
-  conversation does not save it again. A conversation whose file is missing
+  conversation does not save it again. If the file then cannot be removed, the
+  entry is taken back and the app says that the chat was not deleted. A
+  conversation whose file is missing
   without such an entry is saved again from a browser that holds it. The newest
   5000 to 10000 ids are kept.
 - In privacy mode, the interactive `localm run` chat and the coder REPL also

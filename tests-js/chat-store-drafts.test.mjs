@@ -773,6 +773,61 @@ test("a queued message whose claim fails waits and asks, and is not sent", async
   assert.equal(win.chat.queue[0].held, true);
 });
 
+test("a claim that is never answered leaves the message in the queue, and the next one is sent", async () => {
+  const b = browser();
+  const { win } = await twoChats(b);
+  await open(win, "One");
+  win.chat.queue.push({ text: "q", attachments: [], docs: [], clips: [], convId: "c1" });
+  win.renderAttachChips();
+  assert.ok(await waitFor(() => rowsOf(b).length === 1));
+  const sent = [];
+  win.__sent = sent;
+  runScript(win, `modelCache.active = 'm'; dispatchChatTurn = async (c, text) => { window.__sent.push(text); };`);
+  b.idb.hang = "use";
+  const done = win.processChatQueue();
+  await settle(300);
+  assert.equal(win.chat.queue.length, 1, "in the queue while it is being claimed");
+  await done;
+  assert.deepEqual(sent, []);
+  assert.equal(win.chat.queue[0].held, true);
+  win.document.getElementById("chat-input").value = "next";
+  await win.sendChat();
+  assert.deepEqual(sent, ["next"]);
+});
+
+test("a browser database that never answers does not keep the app from starting or sending", async () => {
+  const b = browser();
+  b.idb.hang = "open";
+  const server = makeServer();
+  server.put("c1", { title: "One", messages: [user("a")] });
+  const win = await boot(server, { ...b, wait: false });
+  assert.ok(await waitFor(() => win.document.getElementById("startup-overlay")?.style.display === "none", 8000));
+  const sent = [];
+  win.__sent = sent;
+  runScript(win, `modelCache.active = 'm'; dispatchChatTurn = async (c, text) => { window.__sent.push(text); };`);
+  await open(win, "One");
+  win.document.getElementById("chat-input").value = "hello";
+  await win.sendChat();
+  assert.deepEqual(sent, ["hello"]);
+  const out = await win.signOutSession();
+  assert.equal(out.ok, true);
+});
+
+test("a privacy wipe the browser never answers is said and tried again", async () => {
+  const b = browser();
+  const { win, server } = await twoChats(b);
+  await open(win, "One");
+  await typeDraft(win, "private words");
+  assert.ok(await waitFor(() => rowsOf(b).length === 1));
+  b.idb.hang = "use";
+  server.mode = "privacy";
+  await win.refreshCtxLimit();
+  assert.ok(await waitFor(() => win.document.getElementById("privacy-wipe-failed"), 8000));
+  b.idb.hang = "";
+  assert.ok(await waitFor(() => rowsOf(b).length === 0, 12000));
+  assert.ok(await waitFor(() => !win.document.getElementById("privacy-wipe-failed")));
+});
+
 test("a page that loses its connection to the browser's storage opens it again", async () => {
   const b = browser();
   const { win } = await twoChats(b);
@@ -1154,12 +1209,160 @@ test("a chat deleted while its first save is on its way is not stored", async ()
   const row = [...win.document.querySelectorAll("#conv-list .conv-item")].find((r) => r.textContent.includes("New chat") || r.textContent.includes("Secret"));
   [...row.querySelectorAll("button.del")].at(-1).click();
   win.document.querySelector("#modal-body button.btn-danger").click();
+  win.dispatchEvent(new win.Event("pagehide"));
   await drain(3);
-  assert.ok(!server.calls.some((x) => x.startsWith("DELETE")), "the delete waits for the save");
+  assert.equal(server.calls.filter((x) => x.startsWith("DELETE")).length, 1, "the delete waits for nothing");
   release();
-  assert.ok(await waitFor(() => server.calls.some((x) => x.startsWith("DELETE"))));
   await settle(50);
   assert.equal(server.files.size, 0);
+  assert.deepEqual(plain(win.__toasts), []);
+});
+
+test("clearing all chats does not wait for a save, and a first save on its way is not stored", async () => {
+  const server = makeServer();
+  server.put("c1", { title: "One", messages: [user("a")] });
+  const win = await boot(server);
+  win.newConversation();
+  const c = win.chat.conversations.find((x) => x.title === "New chat");
+  const release = gate(server, (method) => method === "PUT");
+  say(win, c, "secret words");
+  assert.ok(await waitFor(() => server.calls.some((x) => x.startsWith("PUT"))));
+  const out = await win.deleteAllServerConversations();
+  assert.deepEqual(plain(out.failed), []);
+  release();
+  await settle(50);
+  assert.equal(server.files.size, 0);
+});
+
+test("a drawer value changed while a chat loads leaves its other stored values", async () => {
+  const server = makeServer();
+  server.put("c0", { title: "Open one", updated_at: Date.now() + 5, messages: [user("x")] });
+  server.put("c1", { title: "Two", updated_at: 1, messages: [user("a")], params: { system: "BE TERSE", top_k: "40" } });
+  const win = await boot(server);
+  const release = gate(server, (method, url) => method === "GET" && url.endsWith("/c1"));
+  await open(win, "Two");
+  for (const [id, value] of [["p-temperature", "0.5"], ["p-top-k", "9"], ["p-top-k", ""]]) {
+    const field = win.document.getElementById(id);
+    field.value = value;
+    field.dispatchEvent(new win.Event("input", { bubbles: true }));
+  }
+  release();
+  assert.ok(await waitFor(() => server.files.get("c1").params.temperature === "0.5"));
+  assert.deepEqual(server.files.get("c1").params, { system: "BE TERSE", temperature: "0.5" });
+  assert.equal(win.document.getElementById("p-system").value, "BE TERSE");
+  assert.deepEqual(texts(server.files.get("c1")), ["a"]);
+});
+
+test("a pin set and taken back before the chat loads leaves it unpinned", async () => {
+  const server = makeServer();
+  server.put("c0", { title: "Open one", updated_at: Date.now() + 5, messages: [user("x")] });
+  server.put("c1", { title: "Two", updated_at: 1, messages: [user("a")] });
+  const win = await boot(server);
+  const release = gate(server, (method, url) => method === "GET" && url.endsWith("/c1"));
+  const row = () => [...win.document.querySelectorAll("#conv-list .conv-item")].find((r) => r.textContent.includes("Two"));
+  row().querySelector("button.del").click();
+  row().querySelector("button.del").click();
+  release();
+  await settle(1500);
+  assert.ok(!server.files.get("c1").pinned);
+  assert.ok(!conv(win, "Two").pinned);
+});
+
+test("drawer values changed here and elsewhere are merged value by value", async () => {
+  const server = makeServer();
+  const rev = server.put("c1", { title: "One", messages: [user("a")], params: { system: "old", seed: "1" } });
+  assert.ok(rev);
+  const win = await boot(server);
+  await open(win, "One");
+  server.put("c1", { title: "One", messages: [user("a")], params: { system: "theirs", seed: "1" } });
+  const field = win.document.getElementById("p-temperature");
+  field.value = "0.5";
+  field.dispatchEvent(new win.Event("input", { bubbles: true }));
+  assert.ok(await waitFor(() => server.files.get("c1").params.temperature === "0.5"));
+  assert.deepEqual(server.files.get("c1").params, { system: "theirs", seed: "1", temperature: "0.5" });
+});
+
+test("a stored copy that cannot be read after a refused save is asked for again and no copy is made", async () => {
+  const server = makeServer();
+  server.put("c1", { title: "One", messages: [user("a")] });
+  const win = await boot(server);
+  const c = await open(win, "One");
+  server.put("c1", { title: "One", messages: [user("a"), reply("theirs")] });
+  server.failGet = 2;
+  c.title = "Renamed";
+  win.saveConversations(c);
+  assert.ok(await waitFor(() => server.files.get("c1").title === "Renamed", 9000));
+  assert.deepEqual(texts(server.files.get("c1")), ["a", "theirs"]);
+  assert.equal(server.files.size, 1);
+});
+
+test("a save put off again and again waits longer each time", async () => {
+  const server = makeServer();
+  server.put("c1", { title: "One", messages: [user("a")] });
+  const win = await boot(server);
+  const c = await open(win, "One");
+  server.put("c1", { title: "One", messages: [user("a"), reply("theirs")] });
+  win.chat.busy = true;
+  c.title = "Renamed";
+  win.saveConversations(c);
+  await settle(8000);
+  assert.ok(server.puts.length >= 2 && server.puts.length <= 4, String(server.puts.length));
+  win.chat.busy = false;
+});
+
+for (const [what, unsaved] of [["opened", false], ["renamed", true]]) {
+  test(`newer turns than a store put back to an older copy holds are kept as a copy (${what})`, async () => {
+    const server = makeServer();
+    server.put("c1", { title: "One", updated_at: 10, messages: [user("a")] });
+    const old = plain(server.files.get("c1"));
+    const win = await boot(server);
+    const c = await open(win, "One");
+    say(win, c, "newer turn");
+    assert.ok(await waitFor(() => server.files.get("c1").messages.length === 2 && !c.unsaved));
+    await settle(50);
+    win.saveConversations();
+    await drain();
+    server.files.set("c1", { ...old, rev: "restored" });
+    const kept = cache(win).map((x) => (unsaved ? { ...x, title: "Renamed", unsaved: true, updated_at: Date.now() } : x));
+    const again = await boot(server, { cached: kept });
+    assert.ok(await waitFor(() => server.files.size === 2, 6000));
+    const copy = [...server.files.values()].find((x) => x.id !== "c1");
+    assert.deepEqual(copy.messages.map((m) => m.content), ["a", "newer turn"]);
+    assert.match(copy.title, /copy/);
+    assert.deepEqual(texts(server.files.get("c1")), ["a"]);
+    assert.equal(again.__toasts.filter((m) => /Both versions are kept/.test(m)).length, 1);
+  });
+}
+
+test("messages deleted in another browser do not make a copy", async () => {
+  const server = makeServer();
+  server.put("c1", { title: "One", updated_at: 10, messages: [user("a"), reply("b")] });
+  const win = await boot(server);
+  await open(win, "One");
+  await drain();
+  server.put("c1", { title: "One", updated_at: 20, messages: [user("a")] });
+  const again = await boot(server, { cached: cache(win) });
+  await settle(900);
+  assert.equal(server.files.size, 1);
+  assert.ok(conv(again, "One"));
+});
+
+test("a queued message of a chat past the listed rows is kept and its chat listed", async () => {
+  const b = browser();
+  seedRows(b, {
+    k: owned({ conv: "c9", kind: "queue", state: "queued", owner: null,
+      item: { id: "q9", convId: "c9", text: "for the old chat", attachments: [], docs: [], clips: [] } }),
+    d: owned({ conv: "deleted", kind: "text", text: "x", owner: null }) });
+  const server = makeServer();
+  server.pageSize = 2;
+  for (let i = 0; i < 4; i++) server.put("c" + i, { title: "Chat " + i, updated_at: 100 - i, messages: [user("a")] });
+  server.put("c9", { title: "Old chat", updated_at: 1, messages: [user("a")] });
+  const win = await boot(server, b);
+  assert.deepEqual(plain(win.chat.queue.map((q) => q.text)), ["for the old chat"]);
+  assert.ok(conv(win, "Old chat"));
+  assert.ok(await waitFor(() => rowsOf(b).length === 1), "the row of a chat that is gone is removed");
+  await win.syncConversations();
+  assert.ok(conv(win, "Old chat"));
 });
 
 test("a stored chat whose file is missing is saved again from this browser, and that is said once", async () => {
@@ -1363,11 +1566,15 @@ test("chats cached before rows were marked stay this browser's and are marked", 
 test("signing out removes what this browser kept, and the page writes nothing more", async () => {
   const b = browser();
   const { win } = await twoChats(b);
+  const told = [];
+  const set = win.Storage.prototype.setItem;
+  win.Storage.prototype.setItem = function (k, v) { told.push(k); return set.call(this, k, v); };
   const c = await open(win, "One");
   await typeDraft(win, "unsent words");
   assert.ok(await waitFor(() => rowsOf(b).length === 1 && cache(win).length > 0));
   const out = await win.signOutSession();
   assert.equal(out.ok, true);
+  assert.ok(told.includes("localm.signedOut"), "the other tabs are told");
   assert.equal(win.localStorage.getItem("localm.conversations"), null);
   assert.equal(rowsOf(b).length, 0);
   say(win, c, "late");
@@ -1375,6 +1582,42 @@ test("signing out removes what this browser kept, and the page writes nothing mo
   await settle(500);
   assert.equal(win.localStorage.getItem("localm.conversations"), null);
   assert.equal(rowsOf(b).length, 0);
+});
+
+test("after the key is refused, a page writes nothing more to this browser and drops what it holds", async () => {
+  const b = browser();
+  const { win, server } = await twoChats(b);
+  const c = await open(win, "One");
+  await typeDraft(win, "typed before");
+  assert.ok(await waitFor(() => rowsOf(b).length === 1 && cache(win).length > 0));
+  const before = [win.localStorage.getItem("localm.conversations"), JSON.stringify(rowsOf(b))];
+  server.refuseKey = true;
+  c.messages.push(reply("a reply that ended later"));
+  win.saveConversations(c);
+  await typeDraft(win, "typed after");
+  assert.ok(await waitFor(() => win.__localmLocked === true));
+  await settle(600);
+  assert.equal(win.localStorage.getItem("localm.conversations"), before[0]);
+  assert.equal(JSON.stringify(rowsOf(b)), before[1]);
+  assert.equal(win.chat.conversations.length, 0);
+  assert.equal(win.document.getElementById("chat-input").value, "");
+});
+
+test("a tab that sees another tab sign out drops what it holds and what it wrote meanwhile", async () => {
+  const b = browser();
+  const { win, server } = await twoChats(b);
+  const c = await open(win, "One");
+  await typeDraft(win, "typed here");
+  assert.ok(await waitFor(() => rowsOf(b).length === 1 && cache(win).length > 0));
+  server.refuseKey = true;
+  win.dispatchEvent(new win.StorageEvent("storage", { key: "localm.signedOut", newValue: "1" }));
+  c.messages.push(reply("a reply that ended later"));
+  win.saveConversations(c);
+  assert.ok(await waitFor(() => rowsOf(b).length === 0));
+  await settle(400);
+  assert.equal(win.localStorage.getItem("localm.conversations"), null);
+  assert.equal(win.chat.conversations.length, 0);
+  assert.equal(win.document.getElementById("chat-input").value, "");
 });
 
 // ----------------------------------------------------------------- mode reads ---
