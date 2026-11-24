@@ -1869,7 +1869,7 @@ def _saved_header(facts: list, statuses: list) -> dict:
     others = [{"text": f, "status": s} for f, s in zip(facts, statuses, strict=True) if s != "saved"]
     if not saved:
         return {"text": "; ".join(facts), "status": statuses[0] if statuses else "exists"}
-    header = {"text": "; ".join(saved), "status": "saved"}
+    header: dict = {"text": "; ".join(saved), "status": "saved"}
     if others:
         header["others"] = others
     return header
