@@ -409,8 +409,11 @@ def plan_packages(root, update_id: str) -> Plan:
     new: dict = {}
     dists: dict = {}
     for name, folder in _infos(staged_site, installed):
-        for rel in _records(staged_site, stage, folder, name):
+        for rel, row in _records(staged_site, stage, folder, name).items():
             new[rel] = disk.quick_identity(stage.joinpath(*rel.split("/")))
+            stated = _stated(row)
+            if stated is not None and "link" not in new[rel]:
+                new[rel]["copy"] = stated["sha256"]
             dists[rel] = name
     leaving: dict = {}
     for name, folder in removed:
@@ -499,15 +502,16 @@ def _uv_waits(venv: Path, wait: Wait) -> Iterator[None]:
 def back(root, update_id: str, plan: Plan, *, wait_s: Optional[float] = None) -> Outcome:
     """:func:`.mover.back` for a package step. A package the update has changed and
     somebody installed in another form since is first moved to the *kept* folder as a
-    whole, which is noted."""
+    whole, which is noted. One whose old version cannot be put back since somebody
+    installed another version or removed it stays as it is."""
     out = Outcome()
     try:
         a = mover.area(root, update_id, PACKAGES)
         a.watch(op.path for op in plan.ops)
         site = shared.updater_components.site_packages(a.base)
-        if site is None:
-            if disk.lstat(Path(root) / ".venv") is not None and not a.base.is_dir():
-                raise Refused(f"{Path(root) / '.venv'} leads nowhere")
+        if disk.lstat(Path(root) / ".venv") is not None and not a.base.is_dir():
+            raise Refused(f"{Path(root) / '.venv'} leads nowhere")
+        if site is None or mover.made_anew(a, plan):
             return mover.back(root, update_id, plan, wait_s=wait_s, out=out)
         with _uv_waits(a.base, Wait(wait_s)):
             with mover.Marks(root, update_id, plan) as marks:
@@ -515,8 +519,17 @@ def back(root, update_id: str, plan: Plan, *, wait_s: Optional[float] = None) ->
                 changed = {op.dist for n, op in enumerate(plan.ops)
                            if a.beside(a.old, op.path)[1] is not None
                            or (op.dist not in had and n in marks.changed)}
-            _set_aside_foreign(a, site, plan, changed, Wait(wait_s), out)
-            return mover.back(root, update_id, plan, wait_s=wait_s, out=out,
+                foreign = _foreign(a, site, plan)
+                users = {name: set() for name in changed & had
+                         if _is_users(a, site, plan, name, foreign, marks)}
+            for name, folder in foreign:
+                if name in had - changed:
+                    users.setdefault(name, {op.path for op in plan.ops if op.dist == name})
+                if name in users:
+                    users[name] |= _listed(site, a.base, folder, name)
+            _set_aside(a, site, plan, {f for f in foreign if f[0] in changed - set(users)},
+                       Wait(wait_s), out)
+            return mover.back(root, update_id, plan, wait_s=wait_s, out=out, users=users,
                               heal=lambda *args: _heal(a, *args))
     except (OSError, Held, Unsafe, Unreadable, Refused, disk.Blocked) as e:
         out.errors.append(str(e))
@@ -539,11 +552,44 @@ def _heal(a: Area, dist: str, ops: list, is_old: Callable[[Op], bool]) -> Option
     return None if whole and version else f"{dist} {version}".rstrip()
 
 
-def _set_aside_foreign(a: Area, site: Path, plan: Plan, changed: set, wait: Wait,
-                       out: Outcome) -> None:
+def _is_users(a: Area, site: Path, plan: Plan, name: str, foreign: set,
+              marks: mover.Marks) -> bool:
+    """Whether the old version of the package *name* cannot be put back, because
+    somebody installed another one over what was still of it, or removed it."""
+    changed = [op.path for n, op in enumerate(plan.ops)
+               if op.dist == name and op.old is not None and not marks.moved(n)
+               and a.beside(a.old, op.path)[1] is None
+               and not disk.same(a.find(op.path)[0], op.old)]
+    if any(rel.endswith(".dist-info/METADATA") and a.find(rel)[1] is None for rel in changed):
+        return True
+    return bool(changed) and any(
+        f[0] == name and _is_complete(site, a.base, f[1], name) for f in foreign)
+
+
+def _is_complete(site: Path, venv: Path, folder: str, name: str) -> bool:
+    try:
+        listed = _records(site, venv, folder, name)
+    except Refused:
+        return False
+    return all(disk.same(venv.joinpath(*rel.split("/")), stated) for rel, stated in
+               ((rel, _stated(row)) for rel, row in listed.items()) if stated is not None)
+
+
+def _listed(site: Path, venv: Path, folder: str, name: str) -> set:
+    try:
+        return set(_records(site, venv, folder, name))
+    except Refused:
+        inner = site.relative_to(venv).as_posix()
+        return {f"{inner}/{folder}/{e}" for e in os.listdir(site / folder)}
+
+
+def _foreign(a: Area, site: Path, plan: Plan) -> set:
+    """``(name, dist-info folder)`` of those of the packages of *plan* that are there
+    in a form that is neither the old nor the new one."""
+    found: set = set()
     inner = site.relative_to(a.base).as_posix()
     ops = {op.path: op for op in plan.ops}
-    for name, folder in _infos(site, changed & set(plan.dists)):
+    for name, folder in _infos(site, plan.dists):
         record = f"{inner}/{folder}/RECORD"
         op = ops.get(record)
         path, st = a.find(record)
@@ -551,16 +597,30 @@ def _set_aside_foreign(a: Area, site: Path, plan: Plan, changed: set, wait: Wait
                 disk.same(path, i) for i in (op.old, op.new) if i is not None):
             continue
         metadata = ops.get(f"{inner}/{folder}/METADATA")
-        if st is None and metadata is not None:
-            continue
-        try:
-            listed = set(_records(site, a.base, folder, name))
-        except Refused:
-            listed = {f"{inner}/{folder}/{e}" for e in os.listdir(site / folder)}
-        mine = [rel for rel in listed if rel not in ops and a.find(rel)[1] is not None]
+        if st is not None or metadata is None:
+            found.add((name, folder))
+    return found
+
+
+def _set_aside(a: Area, site: Path, plan: Plan, foreign: set, wait: Wait, out: Outcome) -> None:
+    inner = site.relative_to(a.base).as_posix()
+    ops = {op.path: op for op in plan.ops}
+
+    def stays(rel: str) -> bool:
+        path, st = a.find(rel)
+        op = ops.get(rel)
+        return st is None or (op is not None and (op.old is not None
+                                                  or disk.same(path, op.new)))
+    for name, folder in sorted(foreign):
+        record = f"{inner}/{folder}/RECORD"
+        mine = [rel for rel in _listed(site, a.base, folder, name) if not stays(rel)]
         last = (record, f"{inner}/{folder}/METADATA")
         for rel in sorted(mine, key=lambda rel: (rel in last, rel == last[1], rel)):
             mover.aside(a, Op(rel, REMOVE), a.find(rel)[0], wait, out)
             a.prune(a.find(rel)[0].parent)
         out.notes.append(f"The package {name} ({folder}) was installed by somebody since; it is "
                          f"in {a.kept}.")
+    for folder in os.listdir(site):
+        name = folder.removesuffix(".dist-info").partition("-")[0]
+        if folder.endswith(".dist-info") and shared.updater_components._canon(name) in plan.dists:
+            a.prune(site / folder)

@@ -24,6 +24,7 @@ Layout, all on the volume of the install::
     <root>/.localm-update/<id>/new/             the new files
     <root>/.localm-update/<id>/old/             the files they replaced
     <root>/.localm-update/<id>/plans/NN-step.json
+    <root>/.localm-update/<id>/moved-NN         what was moved of that plan
     <root>/.localm-update/<id>/state.json       the same facts as the record
     <root>/.localm-update/kept/<id>/            files of the user, never deleted here
     <root>/.venv/.localm-old/<id>/              ``stage`` and ``old`` of Python packages
