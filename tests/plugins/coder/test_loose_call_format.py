@@ -124,6 +124,16 @@ def test_an_example_beside_a_call_that_ran_does_not_end_the_run(tmp_path):
     assert not (tmp_path / "a.txt").exists()
 
 
+def test_a_second_example_with_reads_beside_it_is_the_answer(tmp_path):
+    reply = "Like this:\n" + _loose("write_file", path="a.txt", content="1") + "\nafter\n" \
+        + _loose("read_file", path="a.txt")
+    backend = _Backend([reply, reply + "\nAgain.", "unused"], check="[example]")
+    agent = _agent(tmp_path, backend)
+    assert agent.run_task("show an example of a write_file call").startswith(reply)
+    assert len(backend.calls) == 2
+    assert not (tmp_path / "a.txt").exists()
+
+
 @pytest.mark.parametrize("check", ["", "sure, go ahead", "[run] [example] maybe"])
 def test_an_answer_that_is_neither_denies_the_call(tmp_path, check):
     reply = "Writing.\n" + _loose("write_file", path="a.txt", content="1")

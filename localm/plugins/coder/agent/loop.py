@@ -907,7 +907,7 @@ class _LoopMixin:
                                              for f in self.changed_files()},
                              start_turns=start_turns,
                              budget_reminded=0, invented_count=0,
-                             question_answered=False,
+                             question_answered=False, example_replies=0,
                              unfounded_checked=False,
                              plan_submitted=False, plan_nudges=0,
                              declines_at_start=self._user_declines)
@@ -1085,11 +1085,17 @@ class _LoopMixin:
                 self._add_assistant(response)
                 loose = self._loose_calls_to_check(calls)
                 meant = self._ask_if_calls_meant(loose) if loose else None
-                if (meant is False and len(loose) == len(calls)
+                if meant is False:
+                    st.example_replies += 1
+                if (meant is False
+                        and (len(loose) == len(calls)
+                             or (st.example_replies > 1
+                                 and all(c.lenient for c in calls)))
                         and not self._change_still_owed(
                             getattr(self, "_last_user_request", "") or "", st)):
-                    # Every call in the reply was an example: the reply is the
-                    # answer, judged and recorded like any other final reply.
+                    # Every call in the reply was an example, or the second such
+                    # reply shows reads beside it: the reply is the answer, judged
+                    # and recorded like any other final reply.
                     self._messages.pop()
                     self._show_examples(response, parsed_calls, interactive)
                     should_break, fr = self._handle_no_tool_calls(
