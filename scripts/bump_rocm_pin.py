@@ -33,6 +33,8 @@ WHAT IT CHECKS BEFORE WRITING:
   * the live release still carries the digests, CPU tag and commit the receipt
     recorded;
   * the target release carries every asset the current table has;
+  * every ``tokenizer.ggml.pre`` string the upstream release of its commit accepts is
+    covered by the pre-tokenizer guard (``check_pretokenizer_redos.check_names``);
   * each edited region is found exactly once.
 
 WHAT IT LEAVES TO A PERSON, printed as the remaining checklist: the struct binding
@@ -55,6 +57,7 @@ imports this; it never runs from a user's install.
 import argparse
 import datetime as _dt
 import difflib
+import importlib.util
 import json
 import os
 import re
@@ -68,6 +71,7 @@ REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 PINS_PATH = REPO / "localm" / "setup_llama" / "pins.py"
+REDOS_SCRIPT = REPO / "scripts" / "check_pretokenizer_redos.py"
 
 COMPONENT = "rocm"
 RECEIPT_SCHEMA = 1
@@ -513,6 +517,23 @@ def _write(path: Path, text: str, newline: str) -> None:
     os.replace(tmp, path)
 
 
+def check_pretokenizer_names(tag: str) -> None:
+    """Raise Refused when llama.cpp at *tag* accepts a ``tokenizer.ggml.pre``
+    string the pre-tokenizer guard does not cover, or the check cannot be made
+    (scripts/check_pretokenizer_redos.py, ``check_names``)."""
+    spec = importlib.util.spec_from_file_location("check_pretokenizer_redos", REDOS_SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    try:
+        problems = mod.check_names(tag)
+    except (Exception, SystemExit) as e:
+        raise Refused(f"could not check the pre-tokenizer names at {tag}: "
+                      f"{type(e).__name__}: {e}") from e
+    if problems:
+        raise Refused(f"the pre-tokenizer guard does not cover llama.cpp {tag}:\n  "
+                      + "\n  ".join(problems))
+
+
 def checklist(cand: Candidate) -> str:
     return "\n".join([
         "REMAINING STEPS, not automated - each has its own check:",
@@ -562,6 +583,7 @@ def main(argv=None, *, fetch: Optional[Fetcher] = None, pins_path: Optional[Path
         if drift:
             raise Refused("the release changed after it was confirmed: " + "; ".join(drift))
         check_asset_set(view, cand)
+        check_pretokenizer_names(cand.cpu_tag)
         new_text = rewrite_pins(text, cand)
     except Refused as e:
         print(f"REFUSED: {e}")

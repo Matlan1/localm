@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Pre-load sizing of a looped model (Nanbeige4.2, ``<arch>.num_loops``).
+"""Pre-load sizing of a looped model (Nanbeige4.2, ``<arch>.num_loops``, and
+inkling2_loop, ``<arch>.loop.count/start/end``).
 
 llama.cpp expands such a stack to ``block_count * num_loops`` logical layers
 (``n_layer_all``), keeps one KV entry per logical layer, and shares the weights
 of the first loop: ``llama_model_n_layer`` reports the product after load. The
 GGUF header still states the physical ``block_count``, so every figure derived
 from it before the load has to apply the loop count itself.
+
+inkling2_loop repeats only the layers ``loop.start`` to ``loop.end - 1``, so it
+has ``block_count + (loop.count - 1) * (loop.end - loop.start)`` of them.
 """
 
 from unittest import mock
@@ -18,7 +22,8 @@ from localm.model_manager.gguf import (
     _gguf_split_layout_meta, gguf_kv_bytes_per_token, gguf_split_layout)
 from tests._bare_llama import make_bare_llama
 from tests.test_implicit_split_fit import _T_UINT32, _write_gguf
-from tests.test_kv_bytes_from_gguf import _T_ARRAY, _T_INT32, _gguf, _shape
+from tests.test_kv_bytes_from_gguf import (
+    _T_ARRAY, _T_INT32, _gguf, _hybrid_tensors, _shape)
 
 PHYS = 4
 N_EMBD, N_HEAD, N_HEAD_KV = 256, 8, 2
@@ -191,3 +196,89 @@ class TestPlacement:
         kv = inputs["fit_kw"]["layer_kv_bytes"]
         assert len(kv) == 3 * PHYS
         assert set(kv) == {self.N_CTX * PER_LAYER_F16}
+
+
+CORE_PHYS, CORE_START, CORE_END = 10, 2, 6
+
+
+def _core_loop(count, start=CORE_START, end=CORE_END, arch="inkling2_loop"):
+    return [(f"{arch}.loop.count", _T_UINT32, count),
+            (f"{arch}.loop.start", _T_UINT32, start),
+            (f"{arch}.loop.end", _T_UINT32, end)]
+
+
+def _inkling(path, count, *, start=CORE_START, end=CORE_END, tensors=(), extra=()):
+    kv = _shape("inkling2_loop", CORE_PHYS, N_EMBD, N_HEAD, N_HEAD_KV,
+                extra=_core_loop(count, start, end) + list(extra))
+    return _gguf(path, kv, tensors=tensors)
+
+
+class TestARepeatedRangeOfLayers:
+    """``n_phys + (count - 1) * (end - start)`` layers, as llama.cpp's
+    llama_model_inkling2_loop::load_arch_hparams sizes them."""
+
+    @pytest.mark.parametrize("count,slots", [(1, 10), (2, 14), (3, 18), (5, 26)])
+    def test_the_kv_bytes_count_every_run_of_the_range(self, tmp_path, count, slots):
+        assert gguf_kv_bytes_per_token(
+            _inkling(tmp_path / "m.gguf", count)) == slots * PER_LAYER_F16
+
+    def test_the_kv_bytes_of_a_convolution_model_count_them_too(self, tmp_path):
+        f = _inkling(tmp_path / "m.gguf", 3,
+                     tensors=_hybrid_tensors(CORE_PHYS, set(range(CORE_PHYS))),
+                     extra=[("inkling2_loop.shortconv.l_cache", _T_UINT32, 4)])
+        assert gguf_kv_bytes_per_token(f) == 18 * PER_LAYER_F16
+
+    def test_only_the_attending_layers_of_the_range_are_repeated(self, tmp_path):
+        f = _inkling(tmp_path / "m.gguf", 3, tensors=_hybrid_tensors(CORE_PHYS, {0, 2, 5, 9}),
+                     extra=[("inkling2_loop.shortconv.l_cache", _T_UINT32, 4)])
+        assert gguf_kv_bytes_per_token(f) == (4 + 2 * 2) * PER_LAYER_F16
+
+    def test_a_per_layer_head_array_repeats_the_range(self, tmp_path):
+        heads = [1, 1, 2, 2, 4, 4, 1, 1, 1, 1]
+        kv = [("general.architecture", 8, "inkling2_loop"),
+              ("inkling2_loop.block_count", _T_UINT32, CORE_PHYS),
+              ("inkling2_loop.embedding_length", _T_UINT32, N_EMBD),
+              ("inkling2_loop.attention.head_count", _T_UINT32, N_HEAD),
+              ("inkling2_loop.attention.head_count_kv", _T_ARRAY, (_T_INT32, heads)),
+              *_core_loop(3)]
+        f = _gguf(tmp_path / "m.gguf", kv)
+        assert gguf_kv_bytes_per_token(f) == (
+            (sum(heads) + 2 * (2 + 2 + 4 + 4)) * (N_EMBD // N_HEAD) * 2 * 2)
+
+    @pytest.mark.parametrize("start,end", [(0, 4), (4, 4), (6, 2), (2, CORE_PHYS + 1)])
+    def test_a_range_llama_cpp_refuses_changes_nothing(self, tmp_path, start, end):
+        f = _inkling(tmp_path / "m.gguf", 3, start=start, end=end)
+        assert gguf_kv_bytes_per_token(f) == CORE_PHYS * PER_LAYER_F16
+
+    def test_only_the_architecture_own_range_counts(self, tmp_path):
+        f = _gguf(tmp_path / "m.gguf", _shape("inkling2", CORE_PHYS, N_EMBD, N_HEAD, N_HEAD_KV,
+                                              extra=_core_loop(3)))
+        assert gguf_kv_bytes_per_token(f) == CORE_PHYS * PER_LAYER_F16
+
+    def _model(self, tmp_path, count, **kw):
+        loop = {"loop.count": count, "loop.start": CORE_START, "loop.end": CORE_END, **kw}
+        tensors = [("token_embd.weight", 4000)]
+        for il in range(CORE_PHYS):
+            tensors.append((f"blk.{il}.attn_k.weight", 3000))
+        tensors.append(("output.weight", 5000))
+        return _write_gguf(
+            tmp_path / f"c{count}.gguf", arch="inkling2_loop", block_count=CORE_PHYS, vocab=100,
+            tensors=tensors,
+            extra_kv=[("embedding_length", N_EMBD), ("attention.head_count", N_HEAD),
+                      ("attention.head_count_kv", N_HEAD_KV), *loop.items()])
+
+    @pytest.mark.parametrize("count,slots", [(1, 10), (2, 14), (3, 18)])
+    def test_the_layout_counts_every_run_of_the_range(self, tmp_path, count, slots):
+        assert _gguf_split_layout_meta(self._model(tmp_path, count)) == (slots, 100)
+        assert gguf_split_layout(self._model(tmp_path, count))["block_count"] == slots
+
+    def test_more_layers_than_llama_cpp_allows_is_unreadable(self, tmp_path):
+        assert _gguf_split_layout_meta(self._model(tmp_path, 126)) == (510, 100)
+        assert _gguf_split_layout_meta(self._model(tmp_path, 127)) is None
+
+    def test_every_layer_of_the_placement_carries_one_layers_kv(self, tmp_path):
+        b = GgufBackend(str(self._model(tmp_path, 3)), n_ctx=512, n_gpu_layers=99)
+        with mock.patch.object(_loader, "native_lib_loaded", return_value=False):
+            units = b._placement_units(kv_tokens=1)
+        assert units.layer_kv == [PER_LAYER_F16] * 18
+        assert units.layer_bytes[CORE_PHYS:] == [0] * 8

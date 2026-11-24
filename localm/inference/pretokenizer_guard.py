@@ -25,9 +25,9 @@ loading such a model.
 Two of the bounds prevent a CRASH and two prevent unbounded COST; they are not
 the same claim and the refusal messages say which:
 
-* ``max_run`` over ``char_class``, ``newline_run`` over ``[\r\n]`` and ``digit_run``
-  over digits sit below a length measured to THROW. A run past any of them
-  kills the worker.
+* ``max_run`` over ``char_class``, ``newline_run`` line breaks in one whitespace run
+  and ``digit_run`` over digits sit below a length measured to THROW. A run past any
+  of them kills the worker.
 * ``cost_budget``, and ``jais-2``'s whitespace ``max_run``, bound how long
   ``unicode_regex_split`` RUNS. Neither pre-tokenizer has been observed to throw
   on those inputs; they go quadratic, not fatal.
@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import bisect
 import sys
-from typing import NamedTuple, Optional
+from typing import NamedTuple, NoReturn, Optional
 
 import regex
 
@@ -113,8 +113,10 @@ class Policy(NamedTuple):
     ``max_run``      longest permitted unbroken run of that class, in characters.
     ``max_chars``    longest permitted total text, or ``None`` for no total limit.
     ``label``        the pre-tokenizer name used in the refusal message.
-    ``newline_run``  longest permitted unbroken run of ``\r``/``\n``, or ``None``
-                     when a newline run does not throw for this pre-tokenizer.
+    ``newline_run``  most ``\r``/``\n`` permitted in one whitespace run, or
+                     ``None`` when a newline run does not throw for this
+                     pre-tokenizer. Other whitespace between line breaks does
+                     not end the run, since the pattern carries on over it.
     ``digit_run``    longest permitted unbroken run of digits when they are
                      bounded beside another ``char_class``, or ``None``.
     ``cost_budget``  cap on ``len(text)`` multiplied by the longest run carrying
@@ -148,11 +150,11 @@ _DIGIT_RUN_LIMIT = 96
 # Bounding runs alone is not enough: for several of these pre-tokenizers the
 # cost also grows with total length however short the individual runs are kept.
 _TOTAL_LIMIT = 65536
-# Longest CR/LF run allowed. Every pre-tokenizer whose pattern list carries a
-# `\s*[\r\n]+` branch throws on a run far longer than this; the limit sits well
-# under that length rather than just below it, because the cost of runs SHORTER
-# than the one that throws still accumulates over the whole text. The length
-# that throws is pinned as TestCalibration.MEASURED_NEWLINE_CRASH.
+# Most CR/LF allowed in one whitespace run. Every pre-tokenizer that runs a
+# `\s*[\r\n]+` branch through std::regex throws on a run far longer than this;
+# the limit sits well under that length rather than just below it, because the
+# cost of runs SHORTER than the one that throws still accumulates over the whole
+# text. The length that throws is pinned as TestCalibration.MEASURED_NEWLINE_CRASH.
 _NEWLINE_RUN_LIMIT = 256
 _WHITESPACE_RUN_LIMIT = 1024
 _COST_BUDGET = 512 * _TOTAL_LIMIT
@@ -163,9 +165,15 @@ def _letters(label: str) -> Policy:
                   newline_run=_NEWLINE_RUN_LIMIT)
 
 
+def _newlines(label: str) -> Policy:
+    return Policy(None, None, None, label, newline_run=_NEWLINE_RUN_LIMIT)
+
+
 # Keyed by the literal `tokenizer.ggml.pre` string a GGUF declares, NOT by
 # llama.cpp's LLAMA_VOCAB_PRE_TYPE_* enum name: several distinct strings share
-# one enum value and therefore one pattern.
+# one enum value and therefore one pattern. Every string upstream maps to a
+# pattern list that a name here uses is listed: scripts/check_pretokenizer_redos.py
+# compares the two at each pin move.
 UNSAFE_PRE_TYPES: dict[str, Policy] = {
     # LLAMA_VOCAB_PRE_TYPE_EXAONE_MOE. Its run alternates letters with single
     # spaces, so a space does not end a run here as it does for the others,
@@ -179,10 +187,14 @@ UNSAFE_PRE_TYPES: dict[str, Policy] = {
     "llama4": _letters("llama4"),
     "kanana2": _letters("kanana2"),
     "talkie": _letters("talkie"),
+    "inkling2": _letters("inkling2"),
     # LLAMA_VOCAB_PRE_TYPE_MINIMAX_M2.
     "minimax-m2": _letters("minimax-m2"),
     # LLAMA_VOCAB_PRE_TYPE_TEKKEN.
     "tekken": _letters("tekken"),
+    "pixtral": _letters("pixtral"),
+    # LLAMA_VOCAB_PRE_TYPE_NEMOTRON_3_5_EMBD. The same list as tekken.
+    "nemotron-3.5-embed": _letters("nemotron-3.5-embed"),
     # LLAMA_VOCAB_PRE_TYPE_TEKKEN_NUM3. As tekken for letters, and its digit-group
     # lookahead also throws on a digit run.
     "tekken-num3": _letters("tekken-num3")._replace(digit_run=_DIGIT_RUN_LIMIT),
@@ -191,10 +203,11 @@ UNSAFE_PRE_TYPES: dict[str, Policy] = {
     # LLAMA_VOCAB_PRE_TYPE_SUPERBPE. Digits, not letters.
     "superbpe": Policy(_CLASS_DIGIT, _DIGIT_RUN_LIMIT, _TOTAL_LIMIT, "superbpe",
                        cuts="digits"),
-    # LLAMA_VOCAB_PRE_TYPE_TINY_AYA and _YOUTU.
+    # LLAMA_VOCAB_PRE_TYPE_TINY_AYA, _YOUTU and _FLINT.
     "tiny_aya": _letters("tiny_aya"),
     "cohere2moe": _letters("cohere2moe"),
     "youtu": _letters("youtu"),
+    "flint": _letters("flint"),
     # LLAMA_VOCAB_PRE_TYPE_JAIS2. Its whitespace run bounds COST, not a crash;
     # its newline run bounds a crash, and is the stricter of the two.
     "jais-2": Policy(_CLASS_WHITESPACE, _WHITESPACE_RUN_LIMIT, _TOTAL_LIMIT,
@@ -205,6 +218,18 @@ UNSAFE_PRE_TYPES: dict[str, Policy] = {
     # cost at all. The budget is the whole guard for this one.
     "deepseek-llm": Policy(None, None, _TOTAL_LIMIT, "deepseek-llm",
                            cost_budget=_COST_BUDGET, cuts="newlines"),
+    # Line breaks only: no other run throws, and neither did any text of 300000
+    # characters within this bound, so nothing else is bounded.
+    # LLAMA_VOCAB_PRE_TYPE_DEEPSEEK3_LLM, _HUNYUAN_DENSE, _JOYAI_LLM and _HY_V4.
+    "deepseek-v3": _newlines("deepseek-v3"),
+    "hunyuan-dense": _newlines("hunyuan-dense"),
+    "joyai-llm": _newlines("joyai-llm"),
+    "hy_v4": _newlines("hy_v4"),
+    # LLAMA_VOCAB_PRE_TYPE_AFMOE, _MINICPM5, _SEED_CODER and _UFAKZEKA.
+    "afmoe": _newlines("afmoe"),
+    "minicpm5": _newlines("minicpm5"),
+    "seed-coder": _newlines("seed-coder"),
+    "ufakzeka": _newlines("ufakzeka"),
 }
 
 
@@ -304,7 +329,7 @@ def _run_scanner_keys():
             if p.char_class is not None:
                 yield (p.char_class, p.max_run)
             if p.newline_run is not None:
-                yield (_CLASS_NEWLINE, p.newline_run)
+                yield (_CLASS_WHITESPACE, p.newline_run)
             if p.digit_run is not None:
                 yield (_CLASS_DIGIT, p.digit_run)
 
@@ -652,7 +677,7 @@ def check_text(pre_type: Optional[str], text: str, *, part: bool = False,
             f"{len(text)}. Send less text per request."
         )
     if policy.newline_run is not None:
-        _refuse_long_run(policy, text, _CLASS_NEWLINE, policy.newline_run)
+        _refuse_line_breaks(policy, text, policy.newline_run)
     if policy.digit_run is not None:
         _refuse_long_run(policy, text, _CLASS_DIGIT, policy.digit_run)
     # Runs at or below `cost_budget // max_chars` can never breach the budget,
@@ -676,12 +701,24 @@ def check_text(pre_type: Optional[str], text: str, *, part: bool = False,
         _refuse_long_run(policy, text, policy.char_class, policy.max_run)
 
 
+def _refuse_line_breaks(policy: Policy, text: str, limit: int) -> None:
+    """Raise if one whitespace run of *text* carries more than *limit* line
+    breaks."""
+    for hit in _SCANNERS[(_CLASS_WHITESPACE, limit)].finditer(text):
+        start, end = hit.span()
+        breaks = text.count("\n", start, end) + text.count("\r", start, end)
+        if breaks > limit:
+            _refuse_run(policy, _CLASS_NEWLINE, limit, breaks)
+
+
 def _refuse_long_run(policy: Policy, text: str, char_class: str, limit: int) -> None:
     """Raise if *text* carries a run of *char_class* longer than *limit*."""
     hit = _SCANNERS[(char_class, limit)].search(text)
-    if hit is None:
-        return
-    run = hit.end() - hit.start()
+    if hit is not None:
+        _refuse_run(policy, char_class, limit, hit.end() - hit.start())
+
+
+def _refuse_run(policy: Policy, char_class: str, limit: int, run: int) -> NoReturn:
     kind = _RUN_KIND[char_class]
     verb = ("becomes extremely slow on" if char_class in _COST_ONLY_CLASSES
             else "crashes on")

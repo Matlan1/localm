@@ -143,7 +143,7 @@ call sites need no layout awareness at all):
 | 24 | 28 | 28 | i32 | `n_threads` | 4 |
 | 36 | 40 | 40 | i32 | `rope_scaling_type` | -1 (unspecified) |
 | 48 | 52 | 52 | i32 | `flash_attn_type` | -1 (unspecified) |
-| 80 | 84 | 84 | f32 | `defrag_thold` | -1.0 |
+| 80 | 84 | 84 | f32 | `defrag_thold` | -1.0; removed upstream by b12617, where the V3 and V4 offset is padding |
 | - | - | 112 | size_t | `moe_cache_size` | 0 (disabled) |
 | 112 | 112 | 120 | ptr | `abort_callback` | NULL |
 | 128 | 128 | 136 | bool | `embeddings` | False |
@@ -264,6 +264,12 @@ A mid-struct reorder/insert exits non-zero; a purely trailing addition is a note
 provisions the real cpu prebuilt to run `verify_abi` against the actual binary,
 and checks with `scripts/confirm_llama_runtime.py` that the pinned build
 generates.
+
+The same run checks the functions localm binds: that each is still declared, and
+that the `llama.h` ones bound in `_api.py` with fixed types have the number of
+arguments, the argument types and the return type localm gives them. It sees no
+default value, no change of meaning behind an unchanged declaration, and no enum
+outside `_ENUM_BINDINGS`.
 
 ### Enum domains
 

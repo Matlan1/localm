@@ -121,7 +121,8 @@ def test_a_run_inside_one_piece_is_still_refused():
 @pytest.mark.parametrize("pre_type", sorted(guard.UNSAFE_PRE_TYPES))
 def test_every_refusal_reads_back(pre_type):
     policy = guard.UNSAFE_PRE_TYPES[pre_type]
-    cases = [(_prose(policy.max_chars + 5), False), (_prose(policy.max_chars + 5), True)]
+    cases = [(_prose(policy.max_chars + 5), False), (_prose(policy.max_chars + 5), True)
+             ] if policy.max_chars else [("\n" * (policy.newline_run + 5), False)]
     for text, part in cases:
         with pytest.raises(PretokenizerUnsafeInputError) as exc:
             guard.check_text(pre_type, text, part=part)
@@ -129,6 +130,8 @@ def test_every_refusal_reads_back(pre_type):
         assert got is not None, str(exc.value)
         if got.kind == "chars":
             assert (got.limit, got.size, got.part) == (policy.max_chars, len(text), part)
+        if not policy.max_chars:
+            assert got == guard.Refusal("run", policy.newline_run, len(text), "line breaks")
     if policy.char_class is not None and not policy.unusable:
         run = {"letters": "a", "digits": "7", "whitespace characters": " ",
                "letters and spaces": "a"}[guard._RUN_KIND[policy.char_class]]

@@ -529,6 +529,29 @@ def tree(tmp_path):
     return pins
 
 
+@pytest.fixture(autouse=True)
+def _no_live_name_check(monkeypatch):
+    """The pre-tokenizer name check fetches llama.cpp's source: it finds nothing
+    here unless a test installs its own."""
+    monkeypatch.setattr(bump, "check_pretokenizer_names", lambda tag: None)
+
+
+def test_a_tag_with_an_uncovered_pretokenizer_name_is_refused(
+        tree, tmp_path, cand, capsys, monkeypatch):
+    asked = []
+
+    def refuse(tag):
+        asked.append(tag)
+        raise bump.Refused("'brand-new' is not covered")
+
+    monkeypatch.setattr(bump, "check_pretokenizer_names", refuse)
+    before = tree.read_bytes()
+    code, out = _run(tree, tmp_path, cand, capsys, "--write")
+    assert code == 1 and "REFUSED: 'brand-new' is not covered" in out
+    assert asked == [CPU_TAG], "the upstream release of the ROCm build's commit is checked"
+    assert tree.read_bytes() == before
+
+
 def _run(tree, tmp_path, cand, capsys, *extra, tag=TAG, receipt=None, api=None):
     rp = _write(tmp_path, receipt if receipt is not None else _pass_receipt(cand, tag))
     argv = ["--tag", tag, "--receipt", str(rp), *extra]

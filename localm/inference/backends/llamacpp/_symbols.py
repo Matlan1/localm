@@ -2,22 +2,23 @@
 """Find a llama.cpp function that is exported with C++ linkage.
 
 Most of llama.cpp's public surface is `extern "C"`, so `getattr(lib, name)`
-finds it. A handful of functions are declared in the internal `src/llama-ext.h`
-without `extern "C"` and are therefore exported under a mangled name. The MTP
+finds it. Builds up to b12343 declare a handful of functions in the internal
+`src/llama-ext.h` without `extern "C"` and therefore export them under a mangled
+name. b12617 and b12676 declare them in `llama.h` as `extern "C"`. The MTP
 draft-head API is the whole of that group localm cares about:
 
     llama_set_embeddings_nextn      llama_get_embeddings_nextn
     llama_get_embeddings_nextn_ith  llama_set_nextn_layer_offset
     llama_get_ctx_other
 
-`getattr(lib, "llama_set_embeddings_nextn")` raises AttributeError for these,
+On the former `getattr(lib, "llama_set_embeddings_nextn")` raises AttributeError,
 which is indistinguishable from the runtime not having them at all. Reading that
 as absence is a real error this repo has made: it produced a written conclusion
 that driving an MTP head was impossible against the shipped runtime, when in
 fact `llama.dll` exports all five and every one of them can be called.
 
-So resolution goes: the plain name first, in case upstream promotes the API to
-`extern "C"`, then a scan of the binary's own export/symbol table for the name as
+So resolution goes: the plain name first, which an `extern "C"` build exports,
+then a scan of the binary's own export/symbol table for the name as
 each compiler spells it - MSVC `?name@@<sig>`, Itanium `_Z<len(name)><name><sig>`.
 Matching per scheme rather than by containment is load-bearing in both
 directions: containment cannot separate `llama_get_embeddings_nextn` from

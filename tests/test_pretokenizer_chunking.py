@@ -29,11 +29,12 @@ from localm.inference.backends.llamacpp.llama import _Tokenizer
 
 _LLAMA_API = "localm.inference.backends.llamacpp.llama.api"
 _AFFECTED = sorted(guard.UNSAFE_PRE_TYPES)
-_CHUNKABLE = [p for p in _AFFECTED if not guard.UNSAFE_PRE_TYPES[p].unusable]
+_CHUNKABLE = [p for p in _AFFECTED if not guard.UNSAFE_PRE_TYPES[p].unusable
+              and guard.UNSAFE_PRE_TYPES[p].max_chars]
 _CAP = guard.UNSAFE_PRE_TYPES["gpt-4o"].max_chars
 # Pre-types only a recent runtime can load. An older one skips them instead of
 # failing, so a runtime that has not been re-provisioned yet stays testable.
-_RECENT_PRE_TYPES = {"tekken-num3"}
+_RECENT_PRE_TYPES = {"tekken-num3", "inkling2"}
 
 
 @pytest.fixture(autouse=True)
@@ -647,9 +648,16 @@ class TestChunkedTokensEqualWholeTokens:
 
 
 class TestTheGuardTableStillBoundsEveryRun:
-    def test_every_affected_policy_has_a_total_limit_for_the_chunk_size(self):
-        for name, policy in guard.UNSAFE_PRE_TYPES.items():
-            assert policy.max_chars, name
+    def test_a_policy_without_a_total_limit_is_never_chunked(self):
+        unlimited = sorted(set(_AFFECTED) - set(_CHUNKABLE) - {"exaone-moe"})
+        assert unlimited
+        for name in unlimited:
+            policy = guard.UNSAFE_PRE_TYPES[name]
+            assert policy.char_class is None and policy.cost_budget is None, name
+            text = _prose(200000)
+            assert guard.plan_chunks(name, text) == [text]
+            with pytest.raises(PretokenizerUnsafeInputError, match="line breaks"):
+                guard.plan_chunks(name, text + "\n" * (policy.newline_run + 1))
 
     def test_chunks_are_never_longer_than_the_limit_measured_safe(self):
         rnd = random.Random(3)

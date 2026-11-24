@@ -1567,3 +1567,87 @@ class TestBoundFunctionsAreExportedByTheRuntime:
         missing = sorted(n for n, f in bound.items()
                          if f.required and n.startswith("mtmd_") and not hasattr(lib, n))
         assert missing == []
+
+
+_SIGNATURE_HEADER = """
+typedef struct llama_memory_i * llama_memory_t;
+typedef bool (*llama_progress_callback)(float progress, void * user_data);
+typedef int32_t llama_token;
+typedef uint32_t llama_state_seq_flags;
+typedef struct llama_batch { int32_t n_tokens; } llama_batch;
+LLAMA_API bool llama_is_eog(const struct llama_vocab * vocab, llama_token token);
+LLAMA_API llama_memory_t llama_get_memory(const struct llama_context * ctx);
+LLAMA_API enum llama_vocab_type llama_vocab_kind(const struct llama_vocab * vocab);
+LLAMA_API void llama_set_flags(struct llama_context * ctx, llama_state_seq_flags flags);
+LLAMA_API int32_t llama_decode(struct llama_context * ctx, struct llama_batch batch);
+LLAMA_API void llama_on_progress(llama_progress_callback cb);
+LLAMA_API int32_t llama_bias(llama_token biases[], size_t n);
+"""
+
+
+def _signature_result(name, restype, *argtypes):
+    return abichk.check_signatures({name: [(restype, list(argtypes), 1)]},
+                                   _SIGNATURE_HEADER, "fixture")
+
+
+def test_a_matching_signature_passes():
+    import ctypes as c
+    from localm.inference.backends.llamacpp._structs import LlamaBatch
+    for name, restype, *argtypes in (
+            ("llama_is_eog", c.c_bool, c.c_void_p, c.c_int32),
+            ("llama_get_memory", c.c_void_p, c.c_void_p),
+            ("llama_vocab_kind", c.c_int, c.c_void_p),
+            ("llama_set_flags", None, c.c_void_p, c.c_uint32),
+            ("llama_decode", c.c_int32, c.c_void_p, LlamaBatch),
+            ("llama_on_progress", None, c.c_void_p),
+            ("llama_bias", c.c_int32, c.POINTER(c.c_int32), c.c_size_t)):
+        assert _signature_result(name, restype, *argtypes) == 0, name
+
+
+def test_a_changed_signature_fails(capsys):
+    import ctypes as c
+    for name, restype, *argtypes in (
+            ("llama_is_eog", c.c_bool, c.c_void_p),
+            ("llama_is_eog", c.c_bool, c.c_void_p, c.c_int64),
+            ("llama_is_eog", c.c_int32, c.c_void_p, c.c_int32),
+            ("llama_is_eog", c.c_bool, c.c_int32, c.c_int32),
+            ("llama_is_eog", c.c_bool, c.c_void_p, c.c_float),
+            ("llama_get_memory", c.c_uint32, c.c_void_p),
+            ("llama_set_flags", None, c.c_void_p, c.c_uint64),
+            ("llama_decode", c.c_int32, c.c_void_p, c.c_void_p),
+            ("llama_on_progress", None, c.c_int32),
+            ("llama_bias", c.c_int32, c.c_int32, c.c_size_t)):
+        assert _signature_result(name, restype, *argtypes) == 1, (name, restype, argtypes)
+    assert "FAIL" in capsys.readouterr().out
+
+
+def test_one_matching_binding_of_a_name_is_enough():
+    import ctypes as c
+    old = (c.c_bool, [c.c_void_p], 1)
+    new = (c.c_bool, [c.c_void_p, c.c_int32], 2)
+    assert abichk.check_signatures({"llama_is_eog": [old, new]}, _SIGNATURE_HEADER, "x") == 0
+    assert abichk.check_signatures({"llama_is_eog": [old]}, _SIGNATURE_HEADER, "x") == 1
+
+
+def test_a_header_that_declares_none_of_the_bindings_fails():
+    import ctypes as c
+    assert abichk.check_signatures(
+        {"llama_gone": [(c.c_bool, [], 1)]}, _SIGNATURE_HEADER, "x") == 1
+
+
+def test_the_scan_reads_the_signatures_localm_binds():
+    import ctypes as c
+    found = abichk.bound_signatures()
+    assert len(found) > 60
+    assert [(r, a) for r, a, _line in found["llama_n_ctx"]] == [(c.c_uint32, [c.c_void_p])]
+    assert "llama_model_default_params" not in found, "its return type is computed"
+
+
+def test_the_context_type_values_are_checked(capsys):
+    binding = next(b for b in abichk._ENUM_BINDINGS if b.c_enum == "llama_context_type")
+    header = ("struct llama_context_params { enum llama_context_type ctx_type; };\n"
+              "enum llama_context_type { LLAMA_CONTEXT_TYPE_DEFAULT = 0, "
+              "LLAMA_CONTEXT_TYPE_MTP = %d };\n")
+    assert abichk._check_enum(binding, header % 1, []) == 0
+    assert abichk._check_enum(binding, header % 2, []) == 1
+    assert "LLAMA_CONTEXT_TYPE_MTP" in capsys.readouterr().out

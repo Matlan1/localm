@@ -965,6 +965,10 @@ _GGUF_SCALAR_FORMATS = {
     6: "<f", 7: "<?", 10: "<Q", 11: "<q", 12: "<d",
 }
 
+# The keys that make llama.cpp run a range of layers more than once
+# (inkling2_loop): the layers from start to end - 1 run count times.
+_GGUF_CORE_LOOP_SUFFIXES = (".loop.count", ".loop.start", ".loop.end")
+
 # The "<architecture>."-prefixed keys describing the attention shape, i.e. what
 # the KV cache costs per token. Stored as suffixes because llama.cpp namespaces
 # them under general.architecture ("llama.block_count",
@@ -974,6 +978,7 @@ _GGUF_KV_SHAPE_SUFFIXES = (
     ".block_count",
     ".decoder_block_count",
     ".num_loops",
+    *_GGUF_CORE_LOOP_SUFFIXES,
     ".embedding_length",
     ".attention.head_count",
     ".attention.head_count_kv",
@@ -1107,10 +1112,26 @@ def _gguf_read_int_array(buf: bytes, off: int):
             off + size * count)
 
 
-def _gguf_attending_layer_count(path: Path, n_layers: int) -> int:
-    """How many of *n_layers* blocks actually hold a KV cache, read from the
-    file's TENSOR NAMES. Returns 0 - never raises - when that cannot be
-    determined, which callers treat as 'no signal'.
+def _gguf_core_loop(n_layers: int, get: "Callable[[str], int]") -> "tuple[int, int, int]":
+    """``(start, end, extra)`` of a model that runs the layers ``start`` to
+    ``end - 1`` of its *n_layers* layers ``extra`` more times, from
+    ``<arch>.loop.count``, ``.loop.start`` and ``.loop.end``; ``(0, 0, 0)`` when
+    it declares no such loop or an invalid one. *get* returns the positive
+    integer under a key suffix, or 0.
+
+    llama.cpp expands such a stack to ``n_layers + extra * (end - start)``
+    layers. The extra ones share the weights of the layers they repeat and each
+    keeps its own KV entry."""
+    count, start, end = (get(suffix) for suffix in _GGUF_CORE_LOOP_SUFFIXES)
+    if count > 1 and 0 < start < end <= n_layers:
+        return start, end, count - 1
+    return 0, 0, 0
+
+
+def _gguf_attending_layers(path: Path, n_layers: int) -> "frozenset[int]":
+    """Which of *n_layers* blocks actually hold a KV cache, read from the
+    file's TENSOR NAMES. Returns an empty set - never raises - when that cannot
+    be determined, which callers treat as 'no signal'.
 
     A hybrid that states ONE head_count_kv for a stack whose layers differ does
     not record which layers attend anywhere in its metadata. The tensor list
@@ -1122,25 +1143,25 @@ def _gguf_attending_layer_count(path: Path, n_layers: int) -> int:
     carries blk.<i>.attn_norm.weight on every layer whether it attends or not,
     so matching the norm tensor would count the whole stack.
 
-    For a split GGUF the tensor names of every part are read; 0 when a part is
-    missing or does not parse."""
+    For a split GGUF the tensor names of every part are read; empty when a part
+    is missing or does not parse."""
     if split_gguf_parts(Path(path).name):
         parts = _gguf_all_parts_entries(path)
         if parts is None:
-            return 0
+            return frozenset()
         names = [name for entries, _size, _start in parts for name, _off in entries]
         return _attending_layers_in(names, n_layers)
     try:
         with open(path, "rb") as f:
             buf = f.read(_GGUF_TENSOR_PROBE_BYTES)
     except OSError:
-        return 0
+        return frozenset()
     try:
         if buf[:4] != b"GGUF":
-            return 0
+            return frozenset()
         tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
         if tensor_count > _GGUF_MAX_TENSOR_COUNT:
-            return 0            # a mis-parse, not a real model
+            return frozenset()  # a mis-parse, not a real model
         off = 24
         for _ in range(kv_count):           # skip the whole metadata block
             _key, off = _gguf_read_string(buf, off)
@@ -1151,7 +1172,7 @@ def _gguf_attending_layer_count(path: Path, n_layers: int) -> int:
             name, off = _gguf_read_string(buf, off)
             (n_dims,) = struct.unpack_from("<I", buf, off)
             if n_dims > _GGUF_MAX_TENSOR_DIMS:
-                return 0
+                return frozenset()
             # n_dims (u32) + dims (u64 each) + ggml type (u32) + offset (u64)
             off += 4 + 8 * n_dims + 4 + 8
             names.append(name)
@@ -1160,13 +1181,13 @@ def _gguf_attending_layer_count(path: Path, n_layers: int) -> int:
         # walk this CANNOT answer from a partial result: a truncated tensor list
         # under-counts attending layers, which would UNDER-charge the KV cache
         # and let it overflow VRAM. Refusing is the only safe partial answer.
-        return 0
+        return frozenset()
     return _attending_layers_in(names, n_layers)
 
 
-def _attending_layers_in(names, n_layers: int) -> int:
-    """How many distinct blocks among the tensor *names* carry
-    ``blk.<i>.attn_k`` or ``blk.<i>.attn_v``; 0 when a block index does not
+def _attending_layers_in(names, n_layers: int) -> "frozenset[int]":
+    """The distinct blocks among the tensor *names* that carry
+    ``blk.<i>.attn_k`` or ``blk.<i>.attn_v``; empty when a block index does not
     parse, when none does, or when there are more than *n_layers*."""
     attending = set()
     for name in names:
@@ -1177,10 +1198,10 @@ def _attending_layers_in(names, n_layers: int) -> int:
         try:
             attending.add(int(name.split(".")[1]))
         except ValueError:
-            return 0        # an unexpected layout - refuse rather than guess
+            return frozenset()  # an unexpected layout - refuse rather than guess
     # More attending layers than the stack has means the two disagree about what
     # they describe, so neither can be trusted.
-    return len(attending) if 0 < len(attending) <= n_layers else 0
+    return frozenset(attending) if len(attending) <= n_layers else frozenset()
 
 
 def gguf_kv_bytes_per_token(path: Path, kv_cache_type: Optional[str] = None) -> int:
@@ -1227,7 +1248,8 @@ def _gguf_f16_kv_bytes_per_token(path: Path) -> int:
 
     A looped model (Nanbeige4.2) runs its stack ``<arch>.num_loops`` times
     (default 1) and llama.cpp keeps one KV entry per loop and layer, so the
-    total is multiplied by it.
+    total is multiplied by it. One that repeats only a range of its layers
+    (inkling2_loop, :func:`_gguf_core_loop`) adds that range once per extra run.
 
     Returns 0 - never raises - when the file is not a readable GGUF, or the
     shape keys are absent, non-scalar, or non-positive. 0 means 'no signal', and
@@ -1299,6 +1321,7 @@ def _gguf_f16_kv_bytes_per_token(path: Path) -> int:
         # The KV cache holds the decoder stack, which defaults to block_count.
         n_layers = _get(".decoder_block_count") or n_layers
 
+    start, end, extra = _gguf_core_loop(n_layers, _get)
     # Total KV heads summed over the whole stack. Every layer contributes on a
     # uniform architecture; on a hybrid only the attending layers do.
     per_layer = per_layer_kv.get(f"{architecture}{_GGUF_KV_HEADS_SUFFIX}")
@@ -1308,7 +1331,8 @@ def _gguf_f16_kv_bytes_per_token(path: Path) -> int:
         # two is not what it appears to be, so refuse instead.
         if not n_layers or len(per_layer) != n_layers:
             return 0
-        total_kv_heads = sum(v for v in per_layer if v > 0)
+        total_kv_heads = (sum(v for v in per_layer if v > 0)
+                          + extra * sum(v for v in per_layer[start:end] if v > 0))
     else:
         n_head_kv = _get(_GGUF_KV_HEADS_SUFFIX)
         if not n_head_kv and encoder_decoder:
@@ -1321,12 +1345,13 @@ def _gguf_f16_kv_bytes_per_token(path: Path) -> int:
             # so n_layers is the wrong multiplier and the metadata block does not
             # say what the right one is. The TENSOR NAMES do, so they are read
             # instead.
-            attending = _gguf_attending_layer_count(path, n_layers)
+            attending = _gguf_attending_layers(path, n_layers)
             if not attending:
                 return 0        # could not tell - no signal, caller falls back
-            total_kv_heads = attending * n_head_kv
+            repeated = sum(1 for il in attending if start <= il < end)
+            total_kv_heads = (len(attending) + extra * repeated) * n_head_kv
         else:
-            total_kv_heads = n_layers * n_head_kv
+            total_kv_heads = (n_layers + extra * (end - start)) * n_head_kv
     if total_kv_heads <= 0:
         return 0                # e.g. a fully recurrent stack: no KV cache
     total_kv_heads *= _get(".num_loops") or 1
@@ -2133,10 +2158,11 @@ def _gguf_split_layout_meta(path: Path) -> "Optional[tuple[int, int]]":
     of the ``tokenizer.ggml.tokens`` array. Never raises.
 
     ``block_count`` is llama.cpp's LOGICAL layer count: a looped model
-    (``<arch>.num_loops`` > 1) is expanded to ``block_count * num_loops``
-    layers, each with its own KV entry, and ``llama_model_n_layer`` reports
-    that product after load. A product above llama.cpp's LLAMA_MAX_LAYERS
-    (512) is a load llama.cpp aborts, so it reads as ``None``."""
+    (``<arch>.num_loops`` > 1, or a repeated range, :func:`_gguf_core_loop`) is
+    expanded to ``block_count * num_loops`` layers, or by the range once per
+    extra run, each with its own KV entry, and ``llama_model_n_layer`` reports
+    that count after load. A count above llama.cpp's LLAMA_MAX_LAYERS (512) is
+    a load llama.cpp aborts, so it reads as ``None``."""
     try:
         with open(path, "rb") as f:
             if f.read(4) != b"GGUF":
@@ -2163,7 +2189,7 @@ def _gguf_split_layout_meta(path: Path) -> "Optional[tuple[int, int]]":
                     for _ in range(count):
                         _gguf_read_string_stream(f)
                     continue
-                if (key.endswith((".block_count", ".num_loops"))
+                if (key.endswith((".block_count", ".num_loops", *_GGUF_CORE_LOOP_SUFFIXES))
                         and vtype in _GGUF_SCALAR_FORMATS):
                     fmt = _GGUF_SCALAR_FORMATS[vtype]
                     (scalars[key],) = struct.unpack(fmt, f.read(_GGUF_FIXED_TYPE_SIZES[vtype]))
@@ -2177,12 +2203,16 @@ def _gguf_split_layout_meta(path: Path) -> "Optional[tuple[int, int]]":
     block_count = scalars.get(f"{architecture}.block_count") if architecture else None
     if not isinstance(block_count, int) or block_count <= 0 or n_vocab <= 0:
         return None
-    loops = scalars.get(f"{architecture}.num_loops")
-    if isinstance(loops, int) and loops > 1:
-        block_count *= loops
-        if block_count > _LLAMA_MAX_LAYERS:
-            return None
-    return block_count, n_vocab
+
+    def _get(suffix: str) -> int:
+        v = scalars.get(f"{architecture}{suffix}")
+        return int(v) if isinstance(v, int) and v > 0 else 0
+
+    start, end, extra = _gguf_core_loop(block_count, _get)
+    logical = (block_count + extra * (end - start)) * (_get(".num_loops") or 1)
+    if logical > block_count and logical > _LLAMA_MAX_LAYERS:
+        return None
+    return logical, n_vocab
 
 
 _VOCAB_SIGNATURE_KEYS = {
@@ -2259,9 +2289,9 @@ def gguf_split_layout(path: Path) -> Optional[dict]:
     ``tensor_bytes`` maps every tensor name to its size in bytes, summed over
     every part of a split GGUF.
 
-    ``block_count`` includes any MTP / nextn layers and is multiplied by
-    ``<arch>.num_loops`` for a looped model (llama.cpp's ``n_layer_all``):
-    the loops' extra layers share the first loop's weights, so only
+    ``block_count`` includes any MTP / nextn layers and is llama.cpp's
+    ``n_layer_all`` for a looped model (see :func:`_gguf_split_layout_meta`):
+    the loops' extra layers share the weights of the ones they repeat, so only
     ``blk.0`` to ``blk.<physical block_count - 1>`` appear in ``tensor_bytes``.
     Sizes are offset deltas, as in
     ``_gguf_tensor_offset_entries``. Returns ``None`` - never raises - when
