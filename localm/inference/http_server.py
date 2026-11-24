@@ -4679,9 +4679,9 @@ def _older_build_choice(request, presented: dict[str, str]) -> str:
     """The session id to use when *request* presents none under this install's own
     name. The other scheme's name of this install alone counts when presented.
     Otherwise older builds' cookies count: the cookie such a build would have used
-    for this port must still be live when presented; among the live ones the
-    newest session is used and the others are ended. Returns "" when the others
-    could not be ended."""
+    for this port must still be live when presented (or have been ended for the
+    session chosen here); among the live ones the newest session is used and the
+    others are ended. Returns "" when the others could not be ended."""
     _own, other = _session_cookie_names(request)
     if other in presented:
         return presented[other]
@@ -4697,16 +4697,16 @@ def _older_build_choice(request, presented: dict[str, str]) -> str:
     for value in values[:_MAX_OLDER_SESSION_COOKIES]:
         rec = _valid_session(value)
         if rec is not None:
-            live[value] = rec["issued"]
-    if not live or (judged and judged not in live):
+            live[value] = rec
+    if not live:
         return values[0] if values else ""
-    newest = max(live, key=lambda v: live[v])
     from localm import sessions
+    newest = max(live, key=lambda v: live[v]["issued"])
+    if judged and judged not in live and not sessions.is_superseded(judged, live[newest]):
+        return judged
     ended = [v for v in live if v != newest]
-    if ended:
-        if sessions.revoke_many(ended) is None:
-            return ""
-        request.state.localm_sessions_ended = tuple(ended)
+    if ended and not sessions.supersede(newest, ended):
+        return ""
     return newest
 
 
@@ -4768,12 +4768,14 @@ def move_session_to_own_name(request, response) -> None:
     presented = _presented_session_cookies(request)
     if not presented or session_cookie_name(request) in presented:
         return
+    from localm import sessions
     sid = session_cookie_value(request)
-    if not sid or _valid_session(sid) is None:
+    rec = _valid_session(sid)
+    if rec is None:
         return
-    ended = getattr(request.state, "localm_sessions_ended", ())
     _set_session_cookie(request, response, sid,
-                        [n for n, v in presented.items() if v == sid or v in ended])
+                        [n for n, v in presented.items()
+                         if v == sid or sessions.is_superseded(v, rec)])
 
 
 def end_sessions(request, response, also=()) -> bool:

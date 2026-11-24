@@ -397,8 +397,12 @@ def test_of_several_older_cookies_the_newest_counts_and_the_others_end(browser, 
     browser.jar = {f"{SESSION_COOKIE}_8791": old, f"{SESSION_COOKIE}_7777": new}
     assert browser.req("GET", "/v1/keys").status_code == 403
     assert sessions.lookup(old) is None
+    assert browser.req("GET", "/v1/keys").status_code == 403
     _is_limited(browser)
+    assert browser.jar == {_own(): new}
     auth.revoke_key(limited["id"])
+    _signed_out(browser)
+    browser.jar = {f"{SESSION_COOKIE}_8791": old, f"{SESSION_COOKIE}_7777": new}
     _signed_out(browser)
 
     b = Browser(browser.c)
@@ -410,7 +414,7 @@ def test_of_several_older_cookies_the_newest_counts_and_the_others_end(browser, 
 
 def test_older_cookies_sign_nobody_in_when_the_others_cannot_be_ended(browser, monkeypatch):
     browser.jar = {SESSION_COOKIE: _owner_session(), f"{SESSION_COOKIE}_7777": _owner_session()}
-    monkeypatch.setattr(sessions, "revoke_many", lambda sids: None)
+    monkeypatch.setattr(sessions, "_save", MagicMock(side_effect=OSError("full")))
     _signed_out(browser)
 
 

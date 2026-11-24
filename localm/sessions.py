@@ -278,6 +278,7 @@ def lookup(sid: Optional[str]) -> Optional[dict]:
                     # store, and must not read as the owner stamp.
                     "owner_key_minted": r.get("owner_key_minted") is True,
                     "issued": float(r.get("issued") or 0),
+                    "superseded": tuple(r.get("superseded") or ()),
                     "label": r.get("label", "")}
     return None
 
@@ -366,6 +367,30 @@ def revoke_many(sids) -> Optional[int]:
         logger.warning("could not revoke sessions (%s); they remain valid on the "
                        "server", e)
         return None
+
+
+def supersede(sid: str, others) -> bool:
+    """Delete the sessions with the ids in *others* and record on the session *sid*
+    that it took their place (``lookup``'s ``superseded``), in one write. False when
+    the store could not be written or holds no *sid*; nothing is changed then."""
+    kept, gone = _hash(sid), {_hash(s) for s in others}
+    try:
+        with _store_lock():
+            records = _load_for_update()
+            winner = next((r for r in records if r.get("id_hash") == kept), None)
+            if winner is None:
+                return False
+            winner["superseded"] = sorted({*winner.get("superseded", []), *gone})
+            _save([r for r in records if r.get("id_hash") not in gone])
+            return True
+    except (OSError, ValueError) as e:
+        logger.warning("could not end the older sessions of a browser (%s)", e)
+        return False
+
+
+def is_superseded(sid: str, rec: dict) -> bool:
+    """Whether *rec* (from ``lookup``) took the place of the session *sid*."""
+    return _hash(sid) in rec.get("superseded", ())
 
 
 def minted_by_owner_key(key_hash: Optional[str]) -> bool:
