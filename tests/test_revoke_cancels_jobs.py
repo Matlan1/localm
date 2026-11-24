@@ -5,6 +5,7 @@ lists the jobs."""
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import threading
 import time
@@ -81,6 +82,40 @@ def test_a_revoke_by_another_process_and_an_expiry_are_noticed(mgr, monkeypatch)
     assert live.status == "running"
     live.cancel()
     assert _wait(lambda: not mgr._watching_keys)
+
+
+def test_a_subscriber_whose_loop_is_closed_stops_nothing(mgr, monkeypatch):
+    monkeypatch.setattr(jobmanager, "_KEY_WATCH_SECONDS", 0.05)
+    a, b = (auth.create_key(n, [scopes.CHAT]) for n in "ab")
+    jobs = [_start(mgr, a["key"]), _start(mgr, a["key"]), _start(mgr, b["key"])]
+    for job in jobs:
+        async def subscribe(job=job):
+            job.subscribe()
+        asyncio.run(subscribe())
+        assert job.subscriber_count == 1
+    assert auth.revoke_key(a["id"])
+    assert [j.status for j in jobs] == ["cancelled", "cancelled", "running"]
+    auth._save_keystore([])
+    assert _wait(lambda: jobs[2].status == "cancelled")
+    assert _wait(lambda: all(j.finished_at is not None for j in jobs))
+    for job in jobs:
+        assert job.subscriber_count == 0
+        assert any("revoked" in e.get("text", "") for e in job._history)
+
+
+def test_a_job_is_cancelled_before_its_subscribers_are_told(mgr, monkeypatch):
+    a = auth.create_key("a", [scopes.CHAT])
+    job = _start(mgr, a["key"])
+    seen = []
+    real = job.push
+
+    def push(event):
+        seen.append(job.cancel_requested)
+        real(event)
+
+    monkeypatch.setattr(job, "push", push)
+    assert auth.revoke_key(a["id"])
+    assert seen and all(seen)
 
 
 def test_an_unreadable_keystore_cancels_nothing(mgr, monkeypatch):

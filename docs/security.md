@@ -51,11 +51,16 @@ A browser's login is an HttpOnly, SameSite=Strict cookie (Secure over https)
 holding a random session id, never the key. Its name carries a hash of the
 install's own id and of its data folder, so moving the server to another port keeps
 the login and two installs on one machine, a copy included, do not replace each
-other's. A browser has one login per install: signing in ends and removes every
-other login of that install the browser sends, and a login that ended (revoked,
-expired, signed out) never gives way to another one. A login cookie set by an older
-version keeps working and is moved to the new name; when there are several, the
-newest counts and the others are ended.
+other's. Moving the data folder to another path ends its logins: the key is asked
+for once, also when the folder moves back. A browser has one login per install:
+signing in ends and removes every other login of that install the browser sends,
+except one the same key made over the other of http and https, and is refused when
+they cannot be ended. A login that ended (revoked, expired, signed out) never gives
+way to another one. A login made over http also signs the browser in over https on
+the same host; ending it ends both. A login cookie set by an older version keeps
+working and is moved to the new name; when there are several, the newest counts and
+the others are ended, and when one of them is not a live login of this install,
+none counts and the key is asked for once.
 
 The owner key itself can be rolled or set from the GUI (Settings > Security)
 as well as the CLI: `POST /api/auth/key/rotate` requires the `admin` scope

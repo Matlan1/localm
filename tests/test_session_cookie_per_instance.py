@@ -5,6 +5,7 @@ and a cookie an older build set keeps working. One browser has one login per
 install: no other session it presents outlives a login, a logout, a revoke or an
 expiry."""
 
+import json
 import os
 import re
 import time
@@ -219,11 +220,11 @@ def test_the_mount_under_a_path_is_part_of_the_folders_identity(tmp_path):
         "2 1 8:1 /docker/volumes/one/_data /data rw master:1 - ext4 /dev/sda1 rw\n"
         "3 1 8:1 /docker/volumes/two/_data /data/nested rw - ext4 /dev/sda1 rw\n"
         "broken line\n", encoding="utf-8")
-    read = lambda p: hs._mount_id(p, str(info))  # noqa: E731
+    read = lambda p: sessions._mount_id(p, str(info))  # noqa: E731
     assert read("/data/home") == "/docker/volumes/one/_data|ext4"
     assert read("/data/nested/x") == "/docker/volumes/two/_data|ext4"
     assert read("/database").startswith("/|overlay|")
-    assert hs._mount_id("/x", str(tmp_path / "absent")) == ""
+    assert sessions._mount_id("/x", str(tmp_path / "absent")) == ""
 
 
 def test_https_uses_a_secure_cookie_of_its_own_name(browser):
@@ -277,6 +278,41 @@ def test_the_same_key_over_the_other_scheme_stays_signed_in(browser):
     browser.login(base=HTTPS)
     _is_owner(browser, HTTP)
     _is_owner(browser, HTTPS)
+
+
+def test_a_visit_over_the_other_scheme_keeps_both_cookies(browser, limited):
+    browser.login(base=HTTP)
+    sid = browser.jar[_own()]
+    for base in (HTTPS, HTTP, HTTPS):
+        _is_owner(browser, base)
+    assert browser.jar == {_own(): sid, _own() + "_tls": sid}
+    browser.login(base=HTTPS)
+    _is_owner(browser, HTTP)
+    browser.login(limited["key"], base=HTTPS)
+    assert sessions.lookup(sid) is None and list(browser.jar) == [_own() + "_tls"]
+    _is_limited(browser, HTTPS)
+    auth.revoke_key(limited["id"])
+    _signed_out(browser, HTTPS)
+    _signed_out(browser, HTTP)
+
+
+@pytest.mark.parametrize("first, second", [(HTTP, HTTPS), (HTTPS, HTTP)])
+def test_a_login_moved_to_the_other_scheme_ends_under_both_names(
+        browser, limited, first, second):
+    browser.login(base=HTTP)
+    _is_owner(browser, HTTPS)
+    browser.login(limited["key"], base=first)
+    auth.revoke_key(limited["id"])
+    _signed_out(browser, first)
+    _signed_out(browser, second)
+
+
+def test_logging_out_over_https_signs_out_of_http_too(browser):
+    browser.login(base=HTTP)
+    _is_owner(browser, HTTPS)
+    assert browser.logout(HTTPS).json() == {"authed": False, "warnings": []}
+    assert browser.jar == {}
+    _signed_out(browser, HTTP)
 
 
 @pytest.mark.parametrize("legacy", [SESSION_COOKIE, f"{SESSION_COOKIE}_8791",
@@ -394,15 +430,16 @@ def test_a_cookie_of_an_older_build_keeps_the_login_and_moves_to_the_new_name(
 
 def test_of_several_older_cookies_the_newest_counts_and_the_others_end(browser, limited):
     old, new = _owner_session(), _limited_session(limited["key"])
-    browser.jar = {f"{SESSION_COOKIE}_8791": old, f"{SESSION_COOKIE}_7777": new}
-    assert browser.req("GET", "/v1/keys").status_code == 403
-    assert sessions.lookup(old) is None
-    assert browser.req("GET", "/v1/keys").status_code == 403
+    jar = {f"{SESSION_COOKIE}_8791": old, f"{SESSION_COOKIE}_7777": new}
+    browser.jar = dict(jar)
+    for _ in range(2):
+        assert browser.req("GET", "/v1/keys").status_code == 403
+    assert browser.scopes() == ["chat"]
+    assert browser.jar == {_own(): new} and sessions.lookup(old) is None
     _is_limited(browser)
-    assert browser.jar == {_own(): new}
     auth.revoke_key(limited["id"])
     _signed_out(browser)
-    browser.jar = {f"{SESSION_COOKIE}_8791": old, f"{SESSION_COOKIE}_7777": new}
+    browser.jar = dict(jar)
     _signed_out(browser)
 
     b = Browser(browser.c)
@@ -413,38 +450,140 @@ def test_of_several_older_cookies_the_newest_counts_and_the_others_end(browser, 
 
 
 def test_older_cookies_sign_nobody_in_when_the_others_cannot_be_ended(browser, monkeypatch):
-    browser.jar = {SESSION_COOKIE: _owner_session(), f"{SESSION_COOKIE}_7777": _owner_session()}
-    monkeypatch.setattr(sessions, "_save", MagicMock(side_effect=OSError("full")))
-    _signed_out(browser)
-
-
-def test_the_cookie_the_older_build_used_for_this_port_must_be_live(browser, limited):
-    revoked = _limited_session(limited["key"])
-    auth.revoke_key(limited["id"])
-    for jar in ({f"{SESSION_COOKIE}_8791": revoked, SESSION_COOKIE: _owner_session()},
-                {f"{SESSION_COOKIE}_8791": "x", f"{SESSION_COOKIE}_7777": _owner_session()},
-                {SESSION_COOKIE: "x", f"{SESSION_COOKIE}_7777": _owner_session()}):
-        browser.jar = dict(jar)
-        _signed_out(browser)
-
-
-def test_a_session_whose_key_expired_does_not_hide_a_live_one(browser):
-    k = auth.create_key("p", ["chat"], expires=time.time() + 3600)
-    expired, live = _limited_session(k["key"]), _owner_session()
-    rows = auth._load_keystore()
-    rows[0]["expires"] = time.time() - 1
-    auth._save_keystore(rows)
-    browser.jar = {f"{SESSION_COOKIE}_7777": expired, f"{SESSION_COOKIE}_6666": live}
+    jar = {SESSION_COOKIE: _owner_session(), f"{SESSION_COOKIE}_7777": _owner_session()}
+    browser.jar = dict(jar)
+    with monkeypatch.context() as m:
+        m.setattr(sessions, "_save", MagicMock(side_effect=OSError("full")))
+        st = browser.state()
+        assert (st["authed"], st["scopes"], st["csrf"]) == (False, [], "")
+        assert browser.req("POST", "/v1/keys", json={
+            "name": "n", "scopes": ["admin"]}).status_code == 403
+        assert browser.jar == jar
     _is_owner(browser)
 
 
-def test_the_number_of_older_cookies_looked_up_is_bounded(monkeypatch):
+@pytest.mark.parametrize("how", ["revoked", "expired", "row-gone", "unknown", "idle"])
+@pytest.mark.parametrize("names", [
+    (SESSION_COOKIE, f"{SESSION_COOKIE}_7777"),
+    (f"{SESSION_COOKIE}_8791", SESSION_COOKIE),
+    (f"{SESSION_COOKIE}_7777", f"{SESSION_COOKIE}_8791"),
+    (f"{SESSION_COOKIE}_6666", f"{SESSION_COOKIE}_7777")])
+@pytest.mark.parametrize("base", [HTTP, "http://127.0.0.1:5555", HTTPS])
+def test_one_dead_older_cookie_signs_nobody_in_from_the_others(
+        browser, names, how, base):
+    k = auth.create_key("p", ["chat"], expires=time.time() + 3600)
+    owner, dead = _owner_session(), _limited_session(k["key"])
+    if how == "revoked":
+        auth.revoke_key(k["id"])
+    elif how == "expired":
+        rows = auth._load_keystore()
+        rows[0]["expires"] = time.time() - 1
+        auth._save_keystore(rows)
+    elif how == "row-gone":
+        sessions.revoke(dead)
+    elif how == "idle":
+        rows = sessions._load_for_update()
+        rows[-1]["last_used"] = rows[-1]["issued"] = time.time() - 40 * 86400
+        sessions._save(rows)
+    else:
+        dead = "unknown"
+    browser.jar = dict(zip(names, (owner, dead), strict=True))
+    _signed_out(browser, base)
+    browser.jar = dict(zip(reversed(names), (dead, owner), strict=True))
+    _signed_out(browser, base)
+    assert browser.req("POST", "/api/session/logout", base).status_code == 403
+    browser.login(base=base)
+    assert sessions.lookup(owner) is None
+    _is_owner(browser, base)
+
+
+def test_a_dead_older_cookie_ends_the_lookups(monkeypatch):
     seen = []
     monkeypatch.setattr(hs, "_valid_session", lambda v: seen.append(v))
     req = MagicMock(cookies={f"{SESSION_COOKIE}_{i}": f"junk{i}" for i in range(200)},
                     url=MagicMock(scheme="http", port=8791))
-    hs.session_cookie_value(req)
-    assert len(seen) == hs._MAX_OLDER_SESSION_COOKIES
+    assert hs.session_cookie_value(req) == "junk0" and seen == ["junk0"]
+
+
+# --------------------------------------------------------------------------- #
+#  A data folder that moves                                                    #
+# --------------------------------------------------------------------------- #
+
+def _restart(browser):
+    browser.c = TestClient(_app())
+    with browser.c:
+        pass
+
+
+@pytest.mark.parametrize("older_build", [False, True])
+@pytest.mark.parametrize("swept", [True, False])
+@pytest.mark.parametrize("then", ["logout", "limited-login", "nothing"])
+def test_a_login_made_before_the_folder_moved_stays_ended_when_it_moves_back(
+        browser, folder, tmp_path, monkeypatch, then, swept, older_build):
+    limited = {}
+
+    def move(src, dst):
+        folder(None)
+        (tmp_path / src).rename(tmp_path / dst)
+        folder(dst)
+        if not swept and dst == "p2":
+            return
+        _restart(browser)
+
+    folder("p1", instance_id="one")
+    browser.login()
+    if older_build:
+        rows = sessions._load_for_update()
+        for r in rows:
+            del r["folder"]
+        sessions.sessions_file().write_text(json.dumps(rows), encoding="utf-8")
+        browser.jar = {SESSION_COOKIE: next(iter(browser.jar.values()))}
+        _restart(browser)
+    _is_owner(browser)
+    move("p1", "p2")
+    _signed_out(browser)
+    if then != "nothing":
+        limited.update(auth.create_key("phone", ["chat"]))
+        browser.login(limited["key"])
+        _is_limited(browser)
+        if then == "logout":
+            browser.logout()
+        else:
+            auth.revoke_key(limited["id"])
+        _signed_out(browser)
+    if not swept and then == "nothing":
+        return
+    move("p2", "p1")
+    _signed_out(browser)
+    browser.login()
+    _is_owner(browser)
+
+
+def test_a_row_of_an_older_build_is_claimed_at_the_start_and_stays_signed_in(browser):
+    browser.login()
+    rows = sessions._load_for_update()
+    del rows[0]["folder"]
+    sessions.sessions_file().write_text(json.dumps(rows), encoding="utf-8")
+    _restart(browser)
+    assert [r["folder"] for r in sessions._load_for_update()] == [sessions.data_folder_id()]
+    _is_owner(browser)
+
+
+def test_a_row_of_another_folder_is_no_login_even_before_it_is_ended(browser):
+    browser.login()
+    rows = sessions._load_for_update()
+    rows[0]["folder"] = "elsewhere"
+    sessions._save(rows)
+    _signed_out(browser)
+    _restart(browser)
+    assert sessions._load_for_update() == []
+
+
+def test_a_row_names_the_folder_by_a_hash(browser):
+    browser.login()
+    text = sessions.sessions_file().read_text(encoding="utf-8")
+    assert re.fullmatch("[0-9a-f]{16}", json.loads(text)[0]["folder"])
+    assert cfg.HOME_DIR.name not in text
 
 
 # --------------------------------------------------------------------------- #
@@ -477,6 +616,85 @@ def test_logout_with_a_live_session_needs_the_csrf_token(browser):
     sid = browser.jar[_own()]
     assert browser.req("POST", "/api/session/logout").status_code == 403
     assert sessions.lookup(sid) is not None
+
+
+def _unreadable(monkeypatch, *, calls=None):
+    """Makes every read of the session store fail, or only the ones numbered in
+    *calls*."""
+    real, count = sessions._load, [0]
+
+    def load():
+        count[0] += 1
+        if calls is None or count[0] in calls:
+            raise PermissionError("sharing violation")
+        return real()
+
+    monkeypatch.setattr(sessions, "_load", load)
+    return count
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_logout_with_an_unreadable_store_is_no_clean_sign_out(
+        browser, monkeypatch, corrupt):
+    browser.login()
+    sid, csrf = browser.jar[_own()], browser.state()["csrf"]
+    path = sessions.sessions_file()
+    good = path.read_text(encoding="utf-8")
+    with monkeypatch.context() as m:
+        if corrupt:
+            path.write_text("{broken", encoding="utf-8")
+        else:
+            _unreadable(m)
+        assert browser.req("POST", "/api/session/logout").status_code == 403
+        assert browser.jar == {_own(): sid}
+        r = browser.req("POST", "/api/session/logout", csrf=csrf)
+        assert r.status_code == 200
+        assert r.json() == {"authed": False, "warnings": [sessions.REVOKE_FAILURE_LABEL]}
+        assert browser.jar == {}
+    path.write_text(good, encoding="utf-8")
+    sessions._CACHE["mtime"] = None
+    assert sessions.lookup(sid) is not None
+
+
+@pytest.mark.parametrize("nth", range(1, 9))
+def test_one_failed_read_never_hides_a_session_that_stays(
+        nth, limited, monkeypatch):
+    with TestClient(_app(), raise_server_exceptions=False) as c:
+        for act in ("logout", "login"):
+            b = Browser(c)
+            b.login()
+            sid, csrf = b.jar[_own()], b.state()["csrf"]
+            b.jar[f"{SESSION_COOKIE}_8791"] = older = _owner_session()
+            with monkeypatch.context() as m:
+                _unreadable(m, calls={nth})
+                if act == "logout":
+                    r = b.req("POST", "/api/session/logout", csrf=csrf)
+                    clean = r.status_code == 200 and r.json()["warnings"] == []
+                else:
+                    r = b.req("POST", "/api/session", json={"key": limited["key"]})
+                    clean = r.status_code == 200
+                    assert clean or r.status_code == 503
+            left = [v for v in (sid, older) if sessions.lookup(v) is not None]
+            assert not (clean and left), (act, r.status_code, r.text)
+            if act == "login" and not clean:
+                assert r.headers.get_list("set-cookie") == []
+                assert left in ([], [sid, older])
+            sessions.revoke_all()
+
+
+def test_a_login_whose_earlier_session_cannot_be_ended_is_refused(
+        browser, limited, monkeypatch):
+    browser.login()
+    jar = dict(browser.jar)
+    rows = sessions.sessions_file().read_text(encoding="utf-8")
+    with monkeypatch.context() as m:
+        _unreadable(m)
+        r = browser.req("POST", "/api/session", json={"key": limited["key"]})
+    assert r.status_code == 503 and "not signed in" in r.json()["detail"]
+    assert browser.jar == jar
+    assert sessions.sessions_file().read_text(encoding="utf-8") == rows
+    browser.login(limited["key"])
+    _is_limited(browser)
 
 
 def test_clearing_the_owner_key_removes_this_installs_cookies(browser):

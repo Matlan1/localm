@@ -1372,7 +1372,7 @@ carry) is a 400, and the previous key stays.
 
 `POST /api/session/logout` reports the same way: it always clears the calling
 browser's session cookies for this install, and answers `{"authed": false, "warnings": [...]}` with a
-`warnings` entry when the server-side session record could not be dropped (403
+`warnings` entry when the server-side session records could not be read or dropped (403
 for a cookie-authenticated call without a valid CSRF token).
 
 The two other session routes stay public. `POST /api/session` exchanges a key,
@@ -1380,10 +1380,11 @@ sent as `{"key": "..."}` or as a bearer token, for the HttpOnly session cookie
 (`localm_session_` and a short hash of this install's id and data folder, with
 `_tls` appended over https, so a change of port keeps the login and two installs on
 one machine keep separate ones), ends every other login of this install the browser
-sends, and answers `{"authed": true, "scopes": [...], "csrf": "..."}`, where
+sends (except one the same key made over the other of http and https), and answers `{"authed": true, "scopes": [...], "csrf": "..."}`, where
 `csrf` is the token to send as `X-CSRF-Token` on later changes; it is a 401 for
 a key that does not verify and, once past the open-mode gate above, a 400 in open
-mode, where there is nothing to log into. `GET /api/session` answers `{"authed", "scopes", "required", "csrf",
+mode, where there is nothing to log into, and a 503, with nobody signed in, when the
+other logins could not be ended or the new one not stored. `GET /api/session` answers `{"authed", "scopes", "required", "csrf",
 "session_mode"}`: `required` is true when a key is configured (or `require_auth`
 is on), `csrf` is empty unless the caller holds a cookie session, and
 `session_mode` is the mode a chat from this caller is recorded under.

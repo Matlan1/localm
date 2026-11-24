@@ -236,6 +236,8 @@ class Job:
             return len(self._subscribers)
 
     def push(self, event: dict) -> None:
+        """Record *event* and hand it to every subscriber. A subscriber whose event
+        loop is closed is dropped."""
         with self._sub_lock:
             if event.get("type") == FRAME_EVENT:
                 # A live-view frame REPLACES the last one instead of joining the
@@ -249,7 +251,10 @@ class Job:
                     self._last_progress = event
             subs = list(self._subscribers)
         for q, loop in subs:
-            loop.call_soon_threadsafe(_safe_put, q, event)
+            try:
+                loop.call_soon_threadsafe(_safe_put, q, event)
+            except RuntimeError:
+                self.unsubscribe(q)
 
     def progress(self, *, phase: Optional[str] = None,
                  done: Optional[int] = None, total: Optional[int] = None,
@@ -1101,9 +1106,9 @@ class JobManager:
                       "revoked or has expired. It runs to its end, because stopping "
                       "it half way would leave the install broken."})
             return False
+        job.cancel()
         job.push({"type": "line", "text": "Stopped: the API key that started "
                   "this was revoked or has expired."})
-        job.cancel()
         return True
 
     def cancel_jobs_of_key(self, key_hash: Optional[str]) -> list:

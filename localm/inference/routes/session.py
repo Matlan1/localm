@@ -109,10 +109,8 @@ def register(app: FastAPI, ctx) -> None:
         check as every other state-changing endpoint (the X-CSRF-Token header must
         match the token derived from the session). A bearer-header caller (CLI / SDK)
         is CSRF-exempt because it cannot be driven cross-site."""
-        token, source = _request_token(request)
-        live = (source == "cookie"
-                and await run_in_threadpool(_hs._valid_session, token) is not None)
-        if live and not _csrf_ok(request):
+        _, source = _request_token(request)
+        if source == "cookie" and not _csrf_ok(request):
             raise HTTPException(
                 403,
                 "Missing or invalid CSRF token. Send the session's csrf token "
@@ -352,8 +350,8 @@ def register(app: FastAPI, ctx) -> None:
             held = prin[0] if prin else None
             csrf = (_hs.csrf_token_for(request, token)
                     if (held is not None and source == "cookie" and token) else "")
-            if csrf:
-                _hs.move_session_to_own_name(request, response)
+            if csrf and not _hs.move_session_to_own_name(request, response):
+                held, csrf = None, ""
             return {"authed": held is not None,
                     "scopes": sorted(held) if held else [],
                     "required": configured or require_auth_enabled(),

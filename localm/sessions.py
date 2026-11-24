@@ -22,7 +22,9 @@ import contextlib
 import copy
 import hashlib
 import json
+import os
 import secrets
+import socket
 import threading
 import time
 from pathlib import Path
@@ -66,6 +68,46 @@ def _hash(sid: str) -> str:
     # surrogatepass: see auth.ct_equal - a plain utf-8 encode raises on a lone
     # surrogate. Byte-identical for every sid that encodes at all.
     return hashlib.sha256(sid.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+_data_folder_ids: dict = {}
+
+
+def data_folder_id() -> str:
+    """What tells this install's data folder apart from a copy of it on the same
+    host, as a short hash: its resolved path and, on Linux, the mount it lies on
+    (two containers can hold different volumes at one path; a container's own layer
+    is told apart by the host name)."""
+    from localm import config
+    home = config.HOME_DIR
+    known = _data_folder_ids.get(home)
+    if known is None:
+        path = os.path.normcase(os.path.realpath(home))
+        known = _data_folder_ids[home] = _hash(f"{path}|{_mount_id(path)}")[:16]
+    return known
+
+
+def _mount_id(path: str, mountinfo: str = "/proc/self/mountinfo") -> str:
+    """The part of its filesystem mounted over *path*, from *mountinfo*, with the
+    host name for an overlay; empty when that cannot be read."""
+    best, found = -1, ""
+    try:
+        with open(mountinfo, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                fields = line.split(" ")
+                if "-" not in fields[6:]:
+                    continue
+                root, point = fields[3], fields[4]
+                under = path == point or path.startswith(point.rstrip("/") + "/")
+                if under and len(point) >= best:
+                    fstype = fields[fields.index("-", 6) + 1]
+                    best = len(point)
+                    found = f"{root}|{fstype}"
+                    if fstype == "overlay":
+                        found += f"|{socket.gethostname()}"
+    except (OSError, IndexError):
+        return ""
+    return found
 
 
 def _load() -> list:
@@ -139,8 +181,11 @@ def _store_lock(*, create_dirs: bool = False, timeout: Optional[float] = None):
 
 
 def _save(records: list) -> None:
+    """Write *records*. A row that names no data folder gets this one."""
     from localm.config import ensure_dirs
     ensure_dirs()
+    for r in records:
+        r.setdefault("folder", data_folder_id())
     path = sessions_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     # The temp file is restricted rather than the destination: it already holds
@@ -170,7 +215,10 @@ def _restrict_perms(path: Path) -> bool:
 
 
 def _expired(rec: dict, now: float) -> bool:
-    """True when *rec* is past its absolute deadline or its idle window."""
+    """True when *rec* is past its absolute deadline or its idle window, or was made
+    under another data folder (``data_folder_id``)."""
+    if rec.get("folder", data_folder_id()) != data_folder_id():
+        return True
     exp = rec.get("expires")
     if exp is not None and now > float(exp):
         return True
@@ -183,7 +231,7 @@ def create(*, scopes, key_hash: Optional[str], fs_access: str = "none",
            rag_roots: Optional[list] = None,
            label: str = "", ttl: float = _ABS_TTL_S,
            idle_ttl: float = _IDLE_TTL_S,
-           owner_key_minted: bool = False, replaces=()) -> str:
+           owner_key_minted: bool = False) -> str:
     """Mint a new session, persist it, and return the opaque session id (the value
     the caller sets as the HttpOnly cookie). Stores only a HASH of the id.
 
@@ -214,11 +262,8 @@ def create(*, scopes, key_hash: Optional[str], fs_access: str = "none",
     It grants no authority on its own: it is an ATTRIBUTE OF THE SESSION, so it is
     exactly as revocable as the session carrying it (revoke / revoke_all / absolute
     and idle expiry all destroy it), and the sessions it can appear on already carry
-    the owner's ADMIN scope snapshot.
-
-    The sessions with the ids in *replaces* are deleted in the same write."""
+    the owner's ADMIN scope snapshot."""
     now = time.time()
-    ended = {_hash(s) for s in replaces}
     sid = secrets.token_urlsafe(32)
     rec = {
         "id_hash": _hash(sid),
@@ -234,7 +279,7 @@ def create(*, scopes, key_hash: Optional[str], fs_access: str = "none",
         "idle_ttl": float(idle_ttl),
     }
     with _store_lock(create_dirs=True):
-        records = [r for r in _load_for_update() if r.get("id_hash") not in ended]
+        records = _load_for_update()
         records.append(rec)
         # Opportunistically drop expired rows so the store cannot grow without
         # bound as sessions come and go.
@@ -278,7 +323,6 @@ def lookup(sid: Optional[str]) -> Optional[dict]:
                     # store, and must not read as the owner stamp.
                     "owner_key_minted": r.get("owner_key_minted") is True,
                     "issued": float(r.get("issued") or 0),
-                    "superseded": tuple(r.get("superseded") or ()),
                     "label": r.get("label", "")}
     return None
 
@@ -339,58 +383,25 @@ def revoke(sid: Optional[str]) -> Optional[bool]:
         return None
 
 
-def stored(sids) -> set:
-    """The ids in *sids* that have a row in the store, live or expired. Empty when
-    the store cannot be read. Stamps no use."""
-    try:
-        hashes = {r.get("id_hash") for r in _load()}
-    except (OSError, ValueError) as e:
-        logger.warning("session store unreadable (%s)", e)
+def revoke_many(sids) -> Optional[set]:
+    """Delete the sessions with the ids in *sids* in one write. Returns the ids that
+    had a row, live or expired, or None when the store could not be read or written
+    (see ``revoke``)."""
+    by_hash = {_hash(s): s for s in sids if s}
+    if not by_hash:
         return set()
-    return {s for s in sids if s and _hash(s) in hashes}
-
-
-def revoke_many(sids) -> Optional[int]:
-    """Delete the sessions with the ids in *sids* in one write. Returns how many
-    existed, or None when the store could not be written (see ``revoke``)."""
-    hashes = {_hash(s) for s in sids if s}
-    if not hashes:
-        return 0
     try:
         with _store_lock():
             records = _load_for_update()
-            keep = [r for r in records if r.get("id_hash") not in hashes]
-            if len(keep) != len(records):
-                _save(keep)
-            return len(records) - len(keep)
+            ended = {by_hash[r["id_hash"]] for r in records
+                     if r.get("id_hash") in by_hash}
+            if ended:
+                _save([r for r in records if r.get("id_hash") not in by_hash])
+            return ended
     except (OSError, ValueError) as e:
         logger.warning("could not revoke sessions (%s); they remain valid on the "
                        "server", e)
         return None
-
-
-def supersede(sid: str, others) -> bool:
-    """Delete the sessions with the ids in *others* and record on the session *sid*
-    that it took their place (``lookup``'s ``superseded``), in one write. False when
-    the store could not be written or holds no *sid*; nothing is changed then."""
-    kept, gone = _hash(sid), {_hash(s) for s in others}
-    try:
-        with _store_lock():
-            records = _load_for_update()
-            winner = next((r for r in records if r.get("id_hash") == kept), None)
-            if winner is None:
-                return False
-            winner["superseded"] = sorted({*winner.get("superseded", []), *gone})
-            _save([r for r in records if r.get("id_hash") not in gone])
-            return True
-    except (OSError, ValueError) as e:
-        logger.warning("could not end the older sessions of a browser (%s)", e)
-        return False
-
-
-def is_superseded(sid: str, rec: dict) -> bool:
-    """Whether *rec* (from ``lookup``) took the place of the session *sid*."""
-    return _hash(sid) in rec.get("superseded", ())
 
 
 def minted_by_owner_key(key_hash: Optional[str]) -> bool:
@@ -532,17 +543,16 @@ def revoke_all() -> Optional[int]:
 
 
 def sweep() -> int:
-    """Prune expired sessions (called on startup). Returns the count removed."""
+    """Prune the sessions that expired or were made under another data folder
+    (called on startup). Returns the count removed."""
     now = time.time()
     try:
         with _store_lock():
             records = _load_for_update()
             keep = [r for r in records if not _expired(r, now)]
-            removed = len(records) - len(keep)
-            if removed:
+            if len(keep) != len(records) or any("folder" not in r for r in keep):
                 _save(keep)
-            return removed
-    except (OSError, ValueError):
-        # A corrupt store cannot be swept safely; leave it for lookup() to fail
-        # closed on. Not fatal to startup.
+            return len(records) - len(keep)
+    except (OSError, ValueError) as e:
+        logger.warning("could not prune the session store (%s)", e)
         return 0
