@@ -261,11 +261,18 @@ class NotPutBack(OSError):
 class Unfinished(NamedTuple):
     """The record of a :func:`place_files` call that runs or was cut off: the folder in
     the models folder it works in (``""``: the models folder itself; None: the record
-    cannot be read now), the names it places there, and whether it is still placing."""
+    cannot be read now), the names it places there, whether it is still placing, the
+    process that places them (None: unknown, or it has given up) and the record's text."""
     record: Path
     folder: Optional[str]
     names: list[str]
     placing: bool
+    owner: Optional[dict] = None
+    text: str = ""
+
+
+# The tokens of the place_files calls that run in this process.
+_RUNNING: set[str] = set()
 
 
 def place_files(files: dict[str, Path], base: Path, old: dict[str, tuple | None],
@@ -287,6 +294,8 @@ def place_files(files: dict[str, Path], base: Path, old: dict[str, tuple | None]
             old.get(name) is not None for name in files):
         _place_each(files, base, old)
         return
+    from localm import instances
+
     from ..storekit import atomic_write
     rows = [{"name": name, "had": old.get(name) is not None, "from": _below(src, base),
              "new": list(_size_and_time(src) or ())} for name, src in files.items()]
@@ -297,12 +306,30 @@ def place_files(files: dict[str, Path], base: Path, old: dict[str, tuple | None]
     kept = _kept(base, token)
     record = records / f"{token}.json"
 
-    def _write(phase: str) -> None:
-        atomic_write(record, json.dumps({"phase": phase, "folder": folder, "files": rows}))
-
     records.mkdir(parents=True, exist_ok=True)
+    owner = {"pid": os.getpid(), "space": instances.pid_space_id(),
+             "host": instances.host_id(), "local": instances.path_is_local(records),
+             "start": instances.process_start_identity(os.getpid())}
+
+    def _write(phase: str, owner: Optional[dict]) -> None:
+        atomic_write(record, json.dumps({"phase": phase, "folder": folder, "files": rows,
+                                         "id": (file_id(base) or (0, None))[1],
+                                         "owner": owner}))
+
+    def _settle() -> bool:
+        try:
+            text = _read(record)
+            if text is None or _recover(record, text, models):
+                return True
+            if json.loads(text)["phase"] == _PLACING:
+                _write(_PLACING, None)
+        except OSError as e:
+            logger.warning("could not settle %s: %s", record, e)
+        return False
+
+    _RUNNING.add(token)
     try:
-        _write(_PLACING)
+        _write(_PLACING, owner)
         os.mkdir(kept)
         for i, name in reversed(list(enumerate(files))):
             final, was = base / name, old.get(name)
@@ -316,16 +343,19 @@ def place_files(files: dict[str, Path], base: Path, old: dict[str, tuple | None]
                 if (moved.st_size, moved.st_mtime_ns) != (at.st_size, at.st_mtime_ns):
                     raise _exists(final)
             put_new(files[name], final)
-        _write(_DONE)
+        _write(_DONE, owner)
     except OSError as e:
-        if not _recover(record, models):
+        if not _settle():
             raise NotPutBack(f"{e}. The files that were there are kept in {kept} and go back "
                              "with the next scan or pull that can move them") from e
         raise
     except BaseException:
-        _recover(record, models)
+        _settle()
         raise
-    _recover(record, models)
+    else:
+        _settle()
+    finally:
+        _RUNNING.discard(token)
 
 
 def _place_each(files: dict[str, Path], base: Path, old: dict[str, tuple | None]) -> None:
@@ -397,29 +427,52 @@ def _parse(models: Path, folder: object, rows: object) -> Optional[tuple]:
     return base, out
 
 
-def _recover(record: Path, models: Path) -> bool:
-    """Put right what the :func:`place_files` call of *record* left: while it was
-    placing, every old file gets its name back and the new files go back to staging;
-    when it was done, the old files are deleted. Returns False when an old file could
-    not be put back; then nothing is deleted and the record stays."""
+def _read(record: Path) -> Optional[str]:
+    """The text of *record*, or None when it is gone. A moment in which Windows refuses
+    it, because it is being replaced, is waited out; raises OSError when it stays
+    unreadable."""
+    from .. import storekit
+    for attempt in range(storekit._REPLACE_RETRIES):
+        try:
+            return record.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except PermissionError as e:
+            if (attempt == storekit._REPLACE_RETRIES - 1
+                    or not storekit._is_transient_permission_error(e)):
+                raise
+            storekit._transient_backoff(attempt)
+    return None
+
+
+def _recover(record: Path, text: str, models: Path) -> bool:
+    """Put right what the :func:`place_files` call of *record* left, by its content
+    *text*: while it was placing, every old file gets its name back and the new files go
+    back to staging; when it was done, the old files are deleted. Returns False when an
+    old file could not be put back, or the record is not *text* any more; then nothing is
+    deleted and the record stays."""
     try:
-        rec = json.loads(record.read_text(encoding="utf-8"))
+        rec = json.loads(text)
         parsed = _parse(models, rec["folder"], rec["files"])
         if parsed is None or rec["phase"] not in (_PLACING, _DONE):
             raise ValueError("it is not a record localm writes")
-    except FileNotFoundError:
-        return True
+        now = _read(record)
+        if now != text:
+            return now is None
     except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError) as e:
         _say_unusable(record, e)
         return False
     (base, rows), done = parsed, rec["phase"] == _DONE
-    if not base.is_dir():
-        if models.is_dir() and not os.path.lexists(base):
-            record.unlink(missing_ok=True)
-            return True
+    if os.path.lexists(base) and not base.is_dir() or not models.is_dir():
         _say_once(f"cannot put back the files noted in {record}: {base} cannot be reached")
         return False
     kept = _kept(base, record.stem)
+    if not os.path.lexists(kept) and (not base.is_dir() or rec.get("id") not in (
+            None, (file_id(base) or (0, None))[1])):
+        _say_once(f"the folder {base} was moved or deleted while its files were being replaced; "
+                  f"the earlier files are in {kept.name} in that folder. Delete {record} when "
+                  "they are not needed")
+        return True
     whole = True
     for i, (final, staged, had, new) in enumerate(rows):
         aside = kept / str(i)
@@ -483,14 +536,15 @@ def unfinished(records: Path) -> list[Unfinished]:
         return []
     for path in paths:
         try:
-            rec = json.loads(path.read_text(encoding="utf-8"))
+            text = _read(path)
+            if text is None:
+                continue
+            rec = json.loads(text)
             out.append(Unfinished(path, str(rec["folder"]), [str(f["name"]) for f in rec["files"]],
-                                  rec["phase"] == _PLACING))
-        except FileNotFoundError:
-            continue
+                                  rec["phase"] == _PLACING, rec.get("owner"), text))
         except OSError:
             out.append(Unfinished(path, None, [], True))
-        except (ValueError, KeyError, TypeError, RecursionError) as e:
+        except (ValueError, KeyError, TypeError, AttributeError, RecursionError) as e:
             _say_unusable(path, e)
     return out
 
@@ -499,19 +553,47 @@ def put_back(models: Path, records: Path, folder: str,
              names: Optional[Iterable[str]] = None) -> bool:
     """Put right every :func:`place_files` call in *folder* (see :class:`Unfinished`)
     that was cut off; with *names*, those that place one of them. The caller holds the
-    locks of these names, so none of them runs. Returns False when an old file could not
-    be put back: the caller places and deletes nothing there."""
+    locks of these names. Returns False when an old file could not be put back, when such
+    a call still runs, or when a record cannot be read, so it is unknown whose it is; then
+    that record's files are untouched, and the caller places and deletes nothing there."""
+    found = unfinished(records)
+    if any(u.folder is None for u in found):
+        _say_once(f"a record of an interrupted replacement in {records} cannot be read")
+        return False
+    return all([not u.placing if _runs(u) else _recover(u.record, u.text, models)
+                for u in matching(found, folder, names)])
+
+
+def matching(found: list[Unfinished], folder: str,
+             names: Optional[Iterable[str]] = None) -> list[Unfinished]:
+    """Those of *found* in *folder*; with *names*, those that place one of them."""
     wanted = None if names is None else {os.path.normcase(n) for n in names}
-    return all([_recover(u.record, models) for u in unfinished(records)
-                if u.folder is None or (u.folder.casefold() == folder.casefold() and (
-                    wanted is None or wanted & {os.path.normcase(n) for n in u.names}))])
+    return [u for u in found if u.folder is not None and u.folder.casefold() == folder.casefold()
+            and (wanted is None or wanted & {os.path.normcase(n) for n in u.names})]
+
+
+def _runs(u: Unfinished) -> bool:
+    """True when the :func:`place_files` call of *u* runs in this process, or in another
+    one that its record names and that is alive."""
+    from localm import instances
+
+    from .pull import _same_pid_space
+    if u.record.stem in _RUNNING:
+        return True
+    if not isinstance(u.owner, dict) or not _same_pid_space(u.owner, u.record.parent):
+        return False
+    pid = u.owner.get("pid")
+    return (isinstance(pid, int) and pid > 0 and pid != os.getpid() and instances.pid_alive(pid)
+            and not instances.start_identity_differs(
+                u.owner.get("start"), instances.process_start_identity(pid)))
 
 
 def being_replaced(models: Path, records: Path) -> set[str]:
     """The paths (``os.path.normcase``) whose file a replacement that runs or was cut off
     may have moved aside."""
-    return {os.path.normcase(str(models / (u.folder or "") / n))
-            for u in unfinished(records) if u.placing for n in u.names}
+    return {os.path.normcase(str(base / n)) for u in unfinished(records) if u.placing
+            for base in [models / (u.folder or "")]
+            if os.path.lexists(_kept(base, u.record.stem)) for n in u.names}
 
 
 # --------------------------------------------------------------- deleting a name

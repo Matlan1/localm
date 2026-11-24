@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -269,11 +270,22 @@ class TestAReplacementKilledAtAnyMoment:
         lib.check_settled()
         assert states > 15 and undone > 8 and done > 2
 
-    def test_a_model_folder_that_is_gone_ends_it(self, tmp_path, monkeypatch):
+    def test_a_record_stays_while_the_model_folder_is_elsewhere(
+            self, tmp_path, monkeypatch, caplog):
         lib = _Library(tmp_path)
         assert _killed_after(monkeypatch, 10, "exclusive", lib.place)
+        (kept,) = lib.base.glob(".localm-old-*")
+        lib.base.rename(lib.models / "renamed")
+        assert lib.put_back() is True
+        assert len(placing.unfinished(lib.records)) == 1 and kept.name in caplog.text
+        assert placing.being_replaced(lib.models, lib.records) == set()
+        _file(lib.base / HAD[0], "another model")
+        assert lib.put_back() is True and lib.at() == {HAD[0]: "another model"}
+        assert len(placing.unfinished(lib.records)) == 1
         shutil.rmtree(lib.base)
-        assert lib.put_back() is True and placing.unfinished(lib.records) == []
+        (lib.models / "renamed").rename(lib.base)
+        assert lib.put_back() is True
+        lib.check_settled()
 
     def test_models_that_cannot_be_reached_end_nothing(self, tmp_path, monkeypatch):
         lib = _Library(tmp_path)
@@ -524,6 +536,195 @@ class TestAReplacementOfAnotherFile:
         assert placing.unfinished(lib.records) == []
 
 
+class _Split:
+    """A split model in the models folder and its staged new version."""
+    NAMES = ("m-00001-of-00002.gguf", "m-00002-of-00002.gguf")
+
+    def __init__(self, home: Path) -> None:
+        self.models, self.records = home / "models", registry_mod.replacement_records()
+        self.held = {}
+        for n in self.NAMES:
+            _file(self.models / n, f"old {n}")
+            self.held[n] = _file(self.models / placing.FILE_STAGING / f"{n}.incomplete", f"new {n}")
+
+    def place(self) -> None:
+        placing.place_files(self.held, self.models, {
+            n: placing.stamp(self.models / n) for n in self.NAMES}, self.models, self.records)
+
+    def put_back(self, *names) -> bool:
+        return placing.put_back(self.models, self.records, "", names)
+
+    def versions(self) -> list:
+        return [(self.models / n).read_text().split()[0] if (self.models / n).exists() else None
+                for n in self.NAMES]
+
+
+@pytest.fixture
+def split(home):
+    return _Split(home)
+
+
+def _refuse_reads(monkeypatch, times: int) -> list:
+    """The next *times* reads of a record fail as while it is being replaced."""
+    real, refused = Path.read_text, []
+
+    def _read(self, *a, **k):
+        if self.parent.name == "replacing" and len(refused) < times:
+            refused.append(self)
+            raise PermissionError(13, "in use")
+        return real(self, *a, **k)
+    monkeypatch.setattr(Path, "read_text", _read)
+    return refused
+
+
+class TestAReplacementThatRuns:
+    """No recovery touches it, whatever the moment it looks at the record."""
+
+    @pytest.mark.parametrize("which, times", [
+        ("another", 1), ("another", 1000), ("the same", 0), ("the same", 1)])
+    def test_every_step_of_it_is_left_alone(self, split, monkeypatch, which, times):
+        from localm import storekit
+        monkeypatch.setattr(storekit, "_transient_backoff", lambda attempt: None)
+        names = ["another.gguf"] if which == "another" else list(split.NAMES)
+        answers = []
+
+        def _after(real):
+            def _call(*a, **k):
+                out = real(*a, **k)
+                before = split.versions()
+                with monkeypatch.context() as m:
+                    refused = _refuse_reads(m, times)
+                    answers.append(split.put_back(*names))
+                    assert bool(refused) is (times > 0)
+                assert split.versions() == before
+                return out
+            return _call
+        monkeypatch.setattr(placing, "put_new", _after(placing.put_new))
+        monkeypatch.setattr(storekit, "atomic_write", _after(storekit.atomic_write))
+        split.place()
+        assert split.versions() == ["new", "new"] and placing.unfinished(split.records) == []
+        waited = os.name == "nt" or not times
+        if which == "another":
+            assert answers == [times == 1 and waited] * 6
+        else:
+            assert answers == [False] * 5 + [waited]
+
+    def test_two_pulls_of_different_models_never_mix_the_parts(self, split, monkeypatch):
+        passed, aside, placed = threading.Event(), threading.Event(), []
+        undo, put = placing._undo_one, placing.put_new
+        first = split.models / split.NAMES[0]
+        answer: list = []
+
+        def _undo(final, *a):
+            undo(final, *a)
+            if threading.current_thread() is other and final == first:
+                passed.set()
+                aside.wait(10)
+
+        def _put(src, dest):
+            if threading.current_thread() is other:
+                return put(src, dest)
+            if Path(src) == first:
+                other.start()
+                while other.is_alive() and not passed.wait(0.02):
+                    pass
+            out = put(src, dest)
+            placed.append(dest)
+            if Path(src) == first:
+                aside.set()
+                other.join(20)
+            return out
+
+        def _other():
+            with monkeypatch.context() as m:
+                _refuse_reads(m, 1)
+                answer.append(split.put_back("another.gguf"))
+        other = threading.Thread(target=_other)
+        monkeypatch.setattr(placing, "_undo_one", _undo)
+        monkeypatch.setattr(placing, "put_new", _put)
+        split.place()
+        assert split.versions() == ["new", "new"] and answer == [os.name == "nt"]
+        assert placing.unfinished(split.records) == []
+
+    def test_a_record_that_changed_since_it_was_read_is_not_acted_on(self, split, monkeypatch):
+        assert _killed_after(monkeypatch, 9, "exclusive", split.place)
+        (found,) = placing.unfinished(split.records)
+        text = found.record.read_text(encoding="utf-8")
+        found.record.write_text(text.replace('"placing"', '"done"'), encoding="utf-8")
+        monkeypatch.setattr(placing, "unfinished", lambda records: [found])
+        before = sorted(p.read_text() for p in split.models.rglob("*") if p.is_file())
+        assert split.put_back(*split.NAMES) is False
+        assert sorted(p.read_text() for p in split.models.rglob("*") if p.is_file()) == before
+
+    @pytest.mark.parametrize("alive", [True, False])
+    def test_one_of_a_process_that_lives_is_left_alone(self, split, monkeypatch, alive):
+        from localm import instances
+        assert _killed_after(monkeypatch, 9, "exclusive", split.place)
+        (found,) = placing.unfinished(split.records)
+        rec = json.loads(found.record.read_text(encoding="utf-8"))
+        pid = os.getppid()
+        rec["owner"].update(pid=pid, start=instances.process_start_identity(pid))
+        if not alive:
+            monkeypatch.setattr(instances, "pid_alive", lambda p: False)
+        found.record.write_text(json.dumps(rec), encoding="utf-8")
+        before = split.versions()
+        assert split.put_back(*split.NAMES) is not alive
+        assert split.versions() == (before if alive else ["old", "old"])
+
+    def test_a_process_that_gave_up_on_it_leaves_it_to_others(self, split, monkeypatch):
+        real = placing.put_new
+
+        def _put(src, dest):
+            if Path(dest) == split.models / split.NAMES[0]:
+                raise PermissionError(13, "in use")
+            return real(src, dest)
+        with monkeypatch.context() as m:
+            m.setattr(placing, "put_new", _put)
+            with pytest.raises(placing.NotPutBack):
+                split.place()
+        (found,) = placing.unfinished(split.records)
+        assert found.placing and found.owner is None
+        assert split.put_back(*split.NAMES) is True and split.versions() == ["old", "old"]
+
+
+class TestRemovingAModelThatWasBeingReplaced:
+    def _killed(self, split, monkeypatch):
+        mm._register("m", split.models / split.NAMES[0])
+        assert _killed_after(monkeypatch, 9, "exclusive", split.place)
+        assert split.versions() == [None, "new"]
+
+    def test_the_replacement_is_settled_first_and_nothing_comes_back(
+            self, split, printed, monkeypatch):
+        self._killed(split, monkeypatch)
+        assert mm.remove_model("m") is True
+        assert placing.unfinished(split.records) == []
+        mm.sync_models_dir(backfill_mmproj=False)
+        assert split.versions() == [None, None] and mm.load_registry() == {}
+
+    def test_a_folder_too(self, lib, printed):
+        _really_killed(lib, _FIRST_IS_ASIDE)
+        mm._register("snap", lib.base)
+        assert mm.remove_model("snap") is True
+        assert not lib.base.exists() and placing.unfinished(lib.records) == []
+
+    def test_it_is_refused_when_that_fails_or_a_pull_runs(self, split, printed, monkeypatch):
+        self._killed(split, monkeypatch)
+        before = split.versions()
+        with pull_mod._part_lock(split.NAMES[1]):
+            assert mm.remove_model("m") is False
+        with monkeypatch.context() as m:
+            m.setattr(placing, "_undo_one", _raise_in_use)
+            assert mm.remove_model("m") is False
+        assert split.versions() == before and "m" in mm.load_registry()
+        assert any("could not be put back" in line for line in printed)
+
+    def test_another_model_is_removed_as_ever(self, split, printed, monkeypatch):
+        self._killed(split, monkeypatch)
+        mm._register("other", _gguf(split.models / "other.gguf"))
+        assert mm.remove_model("other") is True
+        assert len(placing.unfinished(split.records)) == 1
+
+
 class TestAReplacementThatIsDone:
     """What is left of it once every new file has its name is never an undo."""
 
@@ -569,6 +770,26 @@ class TestAReplacementThatIsDone:
         shutil.rmtree(next(lib.base.glob(".localm-old-*")))
         assert lib.put_back() is True
         assert lib.at(HAD) == {n: f"new {n}" for n in HAD}
+
+
+def test_a_repository_that_was_partly_replaced_is_not_called_unchanged(
+        lib, printed, monkeypatch):
+    real = placing.put_new
+    _snapshot_hub(monkeypatch, [])
+    monkeypatch.setattr(mm, "_check_disk_space", lambda *a, **k: True)
+    (lib.base / "model.safetensors").write_bytes(DAMAGED_WEIGHTS)
+    mm._register("snap", lib.base, "hf:o/r")
+
+    def _partly(src, dest):
+        if Path(src) == lib.base / "config.json" or (
+                Path(dest) == lib.base / "model.safetensors" and lib.stage not in Path(src).parents):
+            raise PermissionError(13, "in use")
+        return real(src, dest)
+    monkeypatch.setattr(placing, "put_new", _partly)
+    assert mm._pull_hf_snapshot("o/r", "snap", redownload=True) is False
+    said = " ".join(printed)
+    assert "could not all be put back" in said and ".localm-old-" in said
+    assert "Nothing was replaced" not in said and "are unchanged" not in said
 
 
 def _raise_in_use(*a):

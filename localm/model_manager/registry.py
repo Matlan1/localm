@@ -3006,21 +3006,47 @@ def _put_back_replacements() -> None:
     """Put right what pulls that were killed while replacing files left in the models
     folder or in a model folder in it (:func:`placing.put_back`), unless a pull of
     these names is running. Never raises."""
-    from .pull import PullInFlight, _part_lock, _snapshot_dest_lock
-    records = replacement_records()
-    for found in placing.unfinished(records):
-        if found.folder is None:
-            continue
+    from .pull import PullInFlight
+    for found in placing.unfinished(replacement_records()):
         try:
-            with suppress(PullInFlight), ExitStack() as locks:
-                if found.folder:
-                    locks.enter_context(_snapshot_dest_lock(found.folder))
-                else:
-                    for name in found.names:
-                        locks.enter_context(_part_lock(name))
-                placing.put_back(_mm.MODELS_DIR, records, found.folder, found.names)
+            with suppress(PullInFlight):
+                _put_back_replacement(found)
         except OSError as e:
             logger.warning("could not check the replacement noted in %s: %s", found.record, e)
+
+
+def _put_back_replacement(found: placing.Unfinished) -> bool:
+    """:func:`placing.put_back` for what *found* places, under the locks of a pull of it.
+    Raises PullInFlight when one is held."""
+    from .pull import _part_lock, _snapshot_dest_lock
+    if found.folder is None:
+        return False
+    with ExitStack() as locks:
+        if found.folder:
+            locks.enter_context(_snapshot_dest_lock(found.folder))
+        else:
+            for name in found.names:
+                locks.enter_context(_part_lock(name))
+        return placing.put_back(_mm.MODELS_DIR, replacement_records(), found.folder, found.names)
+
+
+def _removal_refused(target: Path) -> Optional[str]:
+    """Why the model *target*, a file or folder in the models folder, must not be deleted
+    now, or None: what an interrupted pull was replacing there is put right first."""
+    from .pull import _NOT_PUT_BACK, PullInFlight
+    found = placing.unfinished(replacement_records())
+    if any(u.folder is None for u in found):
+        return _NOT_PUT_BACK
+    parts = split_gguf_parts(target.name) or [target.name]
+    for u in placing.matching(found, "", parts) + placing.matching(found, target.name):
+        if target.parent != _mm.MODELS_DIR.resolve() or u.folder and not target.is_dir():
+            continue
+        try:
+            if not _put_back_replacement(u):
+                return _NOT_PUT_BACK
+        except PullInFlight as e:
+            return str(e)
+    return None
 
 
 def _being_replaced(path: Path) -> bool:
@@ -4940,6 +4966,10 @@ def remove_model(name: str) -> bool:
     # models folder that points INTO it resolves as owned, and the split-GGUF
     # branch then unlinks `path.parent / part` - siblings of the LINK, outside
     # the folder the gate just authorised.
+    refused = _removal_refused(path.resolve()) if is_owned_model_path(path) else None
+    if refused is not None:
+        console.print(f"[red]Cannot remove {escape(name)}:[/red] {escape(refused)}")
+        return False
     target = resolve_deletion_target(path)
     # is_owned_model_path is asked AGAIN here, even though a non-None target
     # already means it answered True inside the helper. A destructive sink keeps

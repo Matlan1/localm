@@ -3346,8 +3346,8 @@ def _refetch_snapshot_files(repo_id: str, dest: Path, names: list[str], repo_sib
     added to the snapshot at *dest*, into :data:`_SNAPSHOT_STAGING` and move them into
     place, together, once every one is complete and matches the listing; until then
     the files in *dest* stay as they are. Returns None, or a sentence saying why
-    nothing was replaced. A download error is raised; what was fetched stays staged
-    for the next pull."""
+    nothing was replaced. A download error and :class:`placing.NotPutBack` are raised;
+    what was fetched stays staged for the next pull."""
     import glob
     stage = dest / _SNAPSHOT_STAGING
     stamps = {n: placing.stamp(dest / n) for n in names}
@@ -3384,6 +3384,8 @@ def _refetch_snapshot_files(repo_id: str, dest: Path, names: list[str], repo_sib
     except FileExistsError as e:
         return (f"{Path(e.filename or dest).name} appeared or changed meanwhile and was left "
                 "as it is; pull again")
+    except placing.NotPutBack:
+        raise
     except OSError as e:
         return (f"the new files could not be moved into place ({e}): a running model or "
                 "another program may be using the old ones. Unload the model and pull "
@@ -4102,6 +4104,10 @@ def _pull_hf_snapshot_locked(
                     **_revision_kwargs(commit),
                 )
                 _prog.ok()
+    except placing.NotPutBack as e:
+        console.print("[red]Some files were replaced and could not all be put back:[/red] "
+                      f"{escape(str(e))}.")
+        return False
     except Exception as e:
         if _is_gated_error(e):
             console.print(f"[red]Cannot pull:[/red] {escape(_gated_sentence(repo_id))}.")
