@@ -5,12 +5,13 @@ processes of a small install: its ``localm`` package is ``__init__.py`` and
 
 from __future__ import annotations
 
-import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 from pathlib import Path
 
@@ -80,14 +81,12 @@ class Install:
         return {e.pid for e in self.list()}
 
     def files(self) -> list:
-        return sorted(p.name for p in self.folder.iterdir() if p.suffix != ".mark")
+        return sorted(p.name for p in self.folder.iterdir())
 
     def place(self) -> tuple:
-        """Where an entry of this install is written: folder, folder id, host id."""
+        """Where an entry of this install is written: the install and its id."""
         self.folder.mkdir(exist_ok=True)
-        names = os.listdir(self.folder)
-        mark = (procs._marks(names) or [procs._make_mark(str(self.folder))])[0]
-        return str(self.folder), procs._folder_id(str(self.root), mark), procs._host(mark)
+        return str(self.root), procs._here(str(self.root))
 
 
 def _kill(pid: int) -> None:
@@ -96,6 +95,10 @@ def _kill(pid: int) -> None:
         os.kill(pid, signal.SIGTERM if sys.platform == "win32" else signal.SIGKILL)
     except OSError:
         pass
+
+
+def _is_link(path: Path) -> bool:
+    return procs._is_link(os.lstat(path))
 
 
 def _until(check, seconds: float = 20.0):
@@ -114,7 +117,7 @@ def make(tmp_path):
         return made[-1]
     yield build
     for inst in made:
-        for e in inst.list():
+        for e in inst.list() if inst.folder.is_dir() and not _is_link(inst.folder) else ():
             if e.pid != os.getpid():
                 _kill(e.pid)
         for p in inst.children:
@@ -189,12 +192,10 @@ def test_a_hard_kill_leaves_one_file_that_the_next_reader_deletes(make):
     assert inst.files() == []
 
 
-def _file(inst: Install, pid: int, start: str, host: str = "", at: str = "",
-          text: str = "") -> Path:
-    place = inst.place()
-    path = inst.folder / f"{at or place[1]}-{host or place[2]}-{pid}-{start}.json"
-    path.write_text(text or json.dumps(
-        {"pid": pid, "start": start, "purpose": "gui", "parent": None}), encoding="utf-8")
+def _file(inst: Install, pid: int, start: str, here: str = "", text: str = "") -> Path:
+    own = inst.place()[1]
+    path = inst.folder / f"{here or own}-{pid}-{start}.proc"
+    path.write_text(text or f"{path.name[:-5]}\ngui\n\n", encoding="utf-8", newline="")
     return path
 
 
@@ -242,26 +243,35 @@ def test_an_ended_process_nobody_waited_for_is_not_alive(make):
     p.wait(20)
 
 
-def test_an_entry_of_another_machine_is_neither_listed_nor_deleted_for_a_week(make):
+def test_a_file_of_another_machine_or_folder_is_neither_listed_nor_deleted(make):
     inst = make()
-    path = _file(inst, os.getpid(), _me(), host="0" * 16)
-    assert inst.list() == []
-    assert path.exists() and procs.elsewhere(inst.root) == 1
-    assert procs.end_others(inst.root, timeout=0) == [procs.UNSEEN]
-    old = time.time() - 8 * 24 * 3600
-    os.utime(path, (old, old))
-    assert procs.elsewhere(inst.root) == 0
-    assert inst.list() == []
-    assert not path.exists()
+    live = _file(inst, os.getpid(), _me(), here="0" * 16)
+    gone = _file(inst, os.getpid(), f"{_me()}1", here="0" * 15 + "1")
+    old = time.time() - 400 * 24 * 3600
+    for path in (live, gone):
+        os.utime(path, (old, old))
+    assert inst.list() == [] and procs.end_others(inst.root, timeout=0) == []
+    inst.importer()
+    assert live.exists() and gone.exists()
 
 
-def test_the_files_of_a_copied_install_are_stale_and_the_original_is_left_alone(make, tmp_path):
+@pytest.mark.skipif(sys.platform == "win32", reason="the folder of a process is renamed")
+def test_a_renamed_install_still_lists_its_processes(make, tmp_path):
+    inst = make("before")
+    pid = int(inst.importer().first)
+    inst.root.rename(tmp_path / "after")
+    inst.root = tmp_path / "after"
+    assert pid in inst.pids()
+
+
+def test_a_copied_install_ignores_the_files_of_the_original(make, tmp_path):
     a = make("original")
     pid = int(a.importer().first)
     shutil.copytree(a.root, tmp_path / "copy")
     b = Install.__new__(Install)
     b.root, b.children = tmp_path / "copy", []
-    assert len(b.files()) == 1
+    copied = b.files()
+    assert len(copied) == 1
     p = b.run("""
         import localm
         from localm import procs
@@ -271,96 +281,108 @@ def test_the_files_of_a_copied_install_are_stale_and_the_original_is_left_alone(
     assert p.first == "[]"
     p.communicate(timeout=20)
     assert pid in a.pids()
-    assert b.list() == [] and b.files() == []
+    assert b.list() == [] and b.files() == copied
 
 
 @pytest.mark.parametrize("name, text", [
-    ("{at}-{host}-\u00b2-5.json", "{}"),
-    ("{at}-{host}-5-\u00b2.json", "{}"),
-    ("{at}-{host}-99999999999999999999-5.json", "{}"),
+    ("{here}-\u00b2-5.proc", "{name}\ngui\n\n"),
+    ("{here}-5-\u00b2.proc", "{name}\ngui\n\n"),
+    ("{here}-99999999999999999999-5.proc", "{name}\ngui\n\n"),
+    ("{here}-0{pid}-{start}.proc", "{name}\ngui\n\n"),
+    ("{here}-{pid}-.{start}.proc", "{name}\ngui\n\n"),
+    ("{here}-{pid}-{start}.0000.new", "{name}\ngui\n\n"),
+    ("{here}-{pid}-{start}.PROC2", "{name}\ngui\n\n"),
     ("junk", "x"),
-    ("{at}-{host}-{pid}-{start}.json", '{"pid": Infinity, "start": "1"}'),
-    ("{at}-{host}-{pid}-{start}.json", "[" * 20000),
-    ("{at}-{host}-{pid}-{start}.json", '{"pi'),
-    ("{at}-{host}-{pid}-{start}.json", '{"pid": 1, "start": "1", "purpose": "x", "parent": null}'),
-    ("{at}-{host}-{pid}-{start}.json",
-     '{"pid": {pid}, "start": "{start}", "purpose": "x", "parent": {"pid": "x"}}'),
-    ("{at}-{host}-{pid}-{start}.json", "\x00" * 70000),
+    ("thesis.odt", "x"),
+    ("{here}-{pid}-{start}.proc", ""),
+    ("{here}-{pid}-{start}.proc", "{name}"),
+    ("{here}-{pid}-{start}.proc", "{name}\ngui"),
+    ("{here}-{pid}-{start}.proc", "{name}\ngui\n"),
+    ("{here}-{pid}-{start}.proc", "{name}\ngui\n\nx\n"),
+    ("{here}-{pid}-{start}.proc", "{name}\ngui\nx\n"),
+    ("{here}-{pid}-{start}.proc", "{name}\ngu\x00i\n\n"),
+    ("{here}-{pid}-{start}.proc", "{name}\ngu\u00fci\n\n"),
+    ("{here}-{pid}-{start}.proc", "{here}-1-1\ngui\n\n"),
+    ("{here}-{pid}-{start}.proc", "0000000000000000-{pid}-{start}\ngui\n\n"),
+    ("{here}-{pid}-{start}.proc", "{name}\ngui\n\n" + "1-1\n" * 20000),
 ])
-def test_a_malformed_file_is_skipped_and_deleted(make, name, text):
+def test_a_malformed_file_is_neither_listed_nor_deleted(make, name, text):
     inst = make()
-    _, at, host = inst.place()
-    keys = {"{at}": at, "{host}": host, "{pid}": str(os.getpid()), "{start}": _me()}
-    for k, v in keys.items():
-        name, text = name.replace(k, v), text.replace(k, v)
-    (inst.folder / name).write_text(text, encoding="utf-8")
-    other = int(inst.importer().first)
-    assert inst.pids() >= {other} and os.getpid() not in inst.pids()
-    assert len(inst.files()) == 1
+    keys = {"{here}": inst.place()[1], "{pid}": str(os.getpid()), "{start}": _me()}
+    keys["{name}"] = "{here}-{pid}-{start}"
+    for text_of_key in ("{name}", "{here}", "{pid}", "{start}"):
+        name = name.replace(text_of_key, keys[text_of_key])
+        text = text.replace(text_of_key, keys[text_of_key])
+    (inst.folder / name).write_text(text, encoding="utf-8", newline="")
+    assert inst.list() == []
+    procs._sweep(*inst.place())
+    assert (inst.folder / name).exists() and len(inst.files()) == 1
 
 
-@pytest.mark.parametrize("part", range(4))
+def test_the_control_of_the_malformed_files_is_believed(make):
+    inst = make()
+    path = _file(inst, os.getpid(), _me())
+    assert os.getpid() in inst.pids()
+    path.write_text(f"{path.name[:-5]}\ngui\n1-1\n2-2\n", newline="")
+    entry = next(e for e in inst.list() if e.recorded)
+    assert entry.parent == (1, "1") and entry.users == {(2, "2")}
+
+
+@pytest.mark.parametrize("part", range(3))
 @pytest.mark.parametrize("value", [
     "../x", "..\\x", "/etc/x", "C:\\x", "", ".", "..", "x", "1/2", "1\x002", " 5", "+5", "-5", "1_0",
     "5\n", "\u0665", "0x5", "f" * 15, "f" * 17, "F" * 16, "f" * 31 + ".5", "f" * 32 + "./5",
     "f" * 32 + ".", ".5/", "9" * 30, -1, 0, 1 << 32, True, 5.0, None, b"5"])
 def test_nothing_from_outside_shapes_the_name_of_a_file(make, part, value):
     inst = make()
-    folder, at, host = inst.place()
-    parts = [at, host, 5, "5"]
-    assert procs._name(*parts) == f"{at}-{host}-5-5.json"
+    install, here = inst.place()
+    parts = [here, 5, "5"]
+    assert procs._name(*parts) == f"{here}-5-5.proc"
     parts[part] = value
     with pytest.raises((ValueError, TypeError, AttributeError)):
         procs._name(*parts)
     with pytest.raises((ValueError, TypeError, AttributeError)):
-        procs._write((folder, parts[0], parts[1]), procs.Entry(parts[2], parts[3], "gui"))
+        procs._write((install, parts[0]), procs.Entry(parts[1], parts[2], "gui"))
     assert inst.files() == []
 
 
 def test_a_folder_or_a_pipe_in_the_record_harms_nothing(make):
     inst = make()
-    _, at, host = inst.place()
-    (inst.folder / f"{at}-{host}-{os.getpid()}-{_me()}.json").mkdir()
+    here = inst.place()[1]
+    (inst.folder / f"{here}-{os.getpid()}-{_me()}.proc").mkdir()
     if hasattr(os, "mkfifo"):
-        os.mkfifo(inst.folder / f"{at}-{host}-{os.getppid()}-"
-                  f"{procs._text(procs._process(os.getppid())[1])}.json")
+        os.mkfifo(inst.folder / f"{here}-{os.getppid()}-"
+                  f"{procs._text(procs._process(os.getppid())[1])}.proc")
     other = int(inst.importer().first)
     assert inst.pids() == {other}
 
 
 @pytest.mark.parametrize("count", [0, 20, 500])
-def test_a_start_looks_at_few_files_and_reads_the_table_once(make, monkeypatch, count):
+@pytest.mark.parametrize("here", ["", "0" * 16])
+def test_a_start_looks_at_few_files_and_reads_no_table(make, monkeypatch, count, here):
     inst = make()
+    place = inst.place()
     for i in range(count):
-        _file(inst, 4294967000 - 4 * i if sys.platform == "win32" else 4200000 + i, f"{i + 1}"
-              if not procs._boot() else f"{procs._boot()}.{i + 1}")
-    tables: list = []
-    real = procs._table
-    monkeypatch.setattr(procs, "_table", lambda: tables.append(1) or real())
-    if sys.platform == "win32":
-        win = procs._win_table
-        monkeypatch.setattr(procs, "_win_table", lambda: tables.append(1) or win())
-    names = os.listdir(inst.folder) if count else []
-    procs._sweep(str(inst.root), names, procs._marks(names))
-    assert len(tables) <= 2 and (count > 0 or not tables)
-    if count:
-        assert len(names) - len(os.listdir(inst.folder)) in (
-            min(procs._SWEEP, count), min(procs._SWEEP, count) - 1)
+        _file(inst, 4294967000 - 4 * i if sys.platform == "win32" else 4200000 + i,
+              procs._text(i + 1), here=here)
+    looked: list = []
+    real = procs._believed
+    with monkeypatch.context() as m:
+        m.setattr(procs, "_believed", lambda *a: looked.append(1) or real(*a))
+        for name in ("_table", "_win_table"):
+            m.setattr(procs, name, lambda: pytest.fail("the table was read"))
+        procs._sweep(*place)
+    few = 0 if here else min(procs._SWEEP, count)
+    assert len(looked) == few and len(inst.files()) == count - few
 
 
-def test_a_running_process_that_cannot_be_opened_costs_one_table(make, monkeypatch):
+def test_a_start_leaves_the_file_of_a_process_that_cannot_be_opened(make, monkeypatch):
     inst = make()
-    for i in range(6):
-        _file(inst, os.getpid(), f"{procs._boot()}.{i + 1}" if procs._boot() else f"{i + 1}")
-    tables: list = []
-    real = procs._table
-    monkeypatch.setattr(procs, "_table", lambda: tables.append(1) or real())
-    monkeypatch.setattr(procs, "_process", lambda pid, table=None: (table or {}).get(pid))
-    monkeypatch.setattr(procs, "_gone", lambda pid: False)
-    names = os.listdir(inst.folder)
-    procs._sweep(str(inst.root), names, procs._marks(names))
-    assert len(tables) == 1
-    assert inst.files() == []
+    _file(inst, os.getpid(), procs._text(1))
+    with monkeypatch.context() as m:
+        m.setattr(procs, "_process", lambda pid, table=None: procs._UNKNOWN)
+        procs._sweep(*inst.place())
+    assert len(inst.files()) == 1
 
 
 def test_two_installs_do_not_see_each_other(make):
@@ -458,18 +480,18 @@ def test_the_entry_is_written_before_anything_else_of_localm(make):
     assert p.first == "['localm', 'localm.procs'] True"
 
 
-def test_the_file_holds_four_fields_and_no_command_line(make):
+def test_the_file_holds_four_lines_and_no_command_line(make):
     inst = make()
     secret = "a-model-name-nobody-may-read"
     p = inst.popen([sys.executable, "-c", "import localm, time; print(1, flush=True); time.sleep(120)",
                     secret, "gui"])
     assert p.first == "1"
     (name,) = inst.files()
-    text = (inst.folder / name).read_text(encoding="ascii")
-    assert secret not in text and "import" not in text and str(inst.root) not in text
-    data = json.loads(text)
-    assert sorted(data) == ["parent", "pid", "purpose", "start"]
-    assert data["purpose"] == "script"
+    text = (inst.folder / name).read_bytes().decode("ascii")
+    entry = next(e for e in inst.list() if e.recorded)
+    parent = "%d-%s" % entry.parent if entry.parent else ""
+    assert text == f"{name[:-5]}\nscript\n{parent}\n"
+    assert name == f"{inst.place()[1]}-{entry.pid}-{entry.start}.proc"
 
 
 @pytest.mark.parametrize("argv, purpose", [
@@ -502,7 +524,7 @@ def test_a_pip_install_keeps_no_record(make):
     inst = make("site-packages")
     p = inst.run("import localm; from localm import procs\n"
                  "print(procs.current(), bool(procs.problem()), procs.end_others(), flush=True)")
-    assert p.first == "None True [<others may run unseen>]"
+    assert p.first == "None True []"
     assert not inst.folder.exists()
     assert p.communicate(timeout=20)[1] == ""
 
@@ -539,7 +561,7 @@ def test_the_record_lies_in_the_install_wherever_the_data_folder_is(make, tmp_pa
 def test_a_read_only_install_keeps_no_record_and_says_nothing(make):
     inst = make()
     if sys.platform == "win32":
-        _icacls(inst.root, "/deny", f"*{procs._win_account(os.getpid())}:(WD,AD)")
+        _icacls(inst.root, "/deny", "*S-1-1-0:(WD,AD)")
     else:
         if os.getuid() == 0:
             pytest.skip("root may write anywhere")
@@ -552,7 +574,7 @@ def test_a_read_only_install_keeps_no_record_and_says_nothing(make):
         assert not inst.folder.exists()
     finally:
         if sys.platform == "win32":
-            _icacls(inst.root, "/remove:d", f"*{procs._win_account(os.getpid())}")
+            _icacls(inst.root, "/remove:d", "*S-1-1-0")
         else:
             os.chmod(inst.root, 0o700)
 
@@ -566,19 +588,10 @@ def test_many_processes_at_once_are_all_listed(make):
     inst.children += started
     pids = {int(p.stdout.readline()) for p in started}
     assert pids <= inst.pids() and len(inst.files()) == 8
-    assert len([n for n in os.listdir(inst.folder) if n.endswith(".mark")]) >= 1
     for p in started:
         p.communicate("\n", timeout=30)
     _until(lambda: inst.list() == [])
     assert inst.files() == []
-
-
-def test_a_number_made_after_the_files_were_listed_is_still_this_folders(make):
-    inst = make()
-    path = _file(inst, os.getpid(), _me())
-    record = procs._Record(str(inst.root), [])
-    assert record.kind(path.name)[0] == "entry"
-    assert record.kind("0" * 16 + path.name[16:])[0] == "stale"
 
 
 def test_git_does_not_see_the_record():
@@ -587,60 +600,221 @@ def test_git_does_not_see_the_record():
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="file modes")
-@pytest.mark.parametrize("install, record", [(0o755, 0o1777), (0o700, 0o700), (0o750, 0o1770)])
-def test_whoever_may_run_the_install_may_write_the_record(make, install, record):
+@pytest.mark.parametrize("mode", [0o755, 0o700])
+def test_the_record_is_the_users_own_whatever_the_install_is(make, mode):
     inst = make()
-    os.chmod(inst.root, install)
+    os.chmod(inst.root, mode)
     inst.importer()
-    assert os.stat(inst.folder).st_mode & 0o7777 == record
-    assert not procs._others_kept_out(str(inst.root))
-    os.chmod(inst.folder, 0o700)
-    assert procs._others_kept_out(str(inst.root)) is (install != 0o700)
+    assert os.stat(inst.folder).st_mode & 0o7777 == 0o700
+    (name,) = inst.files()
+    assert os.stat(inst.folder / name).st_mode & 0o7777 == 0o600
 
 
-def _icacls(path, *args) -> None:
-    subprocess.run([os.path.join(os.environ["SystemRoot"], "System32", "icacls.exe"),
-                    str(path), *args], check=True, capture_output=True, **HIDDEN)
+@pytest.mark.skipif(sys.platform == "win32", reason="file modes")
+@pytest.mark.parametrize("mode", [0o755, 0o775, 0o777, 0o1777, 0o700])
+def test_a_record_with_other_rights_works(make, mode):
+    inst = make()
+    inst.folder.mkdir()
+    os.chmod(inst.folder, mode)
+    pid = int(inst.importer().first)
+    assert inst.pids() == {pid}
+    left = inst.run("import localm\nfrom localm import procs\n"
+                    "print(procs.end_others(timeout=30), procs.problem() == '', flush=True)")
+    assert left.first == "[] True"
+    assert pid not in inst.pids()
+    assert os.stat(inst.folder).st_mode & 0o7777 == mode
+
+
+def _icacls(path, *args) -> str:
+    done = subprocess.run([os.path.join(os.environ["SystemRoot"], "System32", "icacls.exe"),
+                           str(path), *args], check=True, capture_output=True, **HIDDEN)
+    return done.stdout.decode("utf-8", "replace")
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows rights")
-def test_whoever_may_run_the_install_may_write_the_record_on_windows(make):
+def test_the_record_inherits_the_rights_of_the_install(make):
     inst = make()
-    me = procs._win_account(os.getpid())
-    _icacls(inst.root, "/inheritance:r", "/grant", f"*{me}:(OI)(CI)F",
-            "/grant", "*S-1-5-32-545:(OI)(CI)RX")
     inst.importer()
-    assert procs._win_kept_out(str(inst.root), str(inst.folder)) == []
-    users = procs._WinSecurity(str(inst.folder))
-    assert users.mask("S-1-5-32-545") & 0x43 == 0x3
-    users.close()
-    _icacls(inst.folder, "/remove:g", "*S-1-5-32-545", "*S-1-5-11")
-    _icacls(inst.folder, "/inheritance:r", "/grant", f"*{me}:(OI)(CI)F")
-    assert "S-1-5-32-545" in procs._win_kept_out(str(inst.root), str(inst.folder))
-    assert procs.end_others(inst.root, timeout=0)[-1] is procs.UNSEEN
+    rights = re.findall(r":((?:\([A-Z,]+\))+)", _icacls(inst.folder))
+    assert rights and all("(I)" in r for r in rights)
 
 
-def test_an_entry_another_account_wrote_is_not_believed(make, monkeypatch):
+def _planted(inst: Install) -> subprocess.Popen:
+    """A process that is not localm's."""
+    return inst.popen(SLEEP)
+
+
+def _key_of(pid: int) -> tuple:
+    return pid, procs._text(procs._process(pid)[1])
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows rights")
+def test_a_file_that_cannot_be_read_is_not_believed_on_windows(make):
+    inst = make()
+    other = _planted(inst)
+    path = _file(inst, *_key_of(other.pid))
+    assert other.pid in inst.pids()
+    _icacls(path, "/deny", "*S-1-1-0:(RD)")
+    assert inst.pids() == set() and procs.end_others(inst.root, timeout=0) == []
+    _icacls(path, "/remove:d", "*S-1-1-0")
+    assert path.exists() and other.poll() is None
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="files another program has open")
+def test_a_file_another_program_has_for_a_moment_is_still_believed(make):
+    import _winapi
+    inst = make()
+    path = _file(inst, os.getpid(), _me())
+    handle = _winapi.CreateFile(str(path), 0x80000000, 0, 0, 3, 0, 0)
+    closing = threading.Timer(0.1, _winapi.CloseHandle, [handle])
+    closing.start()
+    assert os.getpid() in inst.pids()
+    closing.join()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="file modes")
+def test_a_file_that_cannot_be_read_is_not_believed(make):
+    if os.geteuid() == 0:
+        pytest.skip("root may read anything")
+    inst = make()
+    other = _planted(inst)
+    path = _file(inst, *_key_of(other.pid))
+    assert inst.pids() == {other.pid}
+    os.chmod(path, 0)
+    assert inst.pids() == set() and procs.end_others(inst.root, timeout=0) == []
+    assert path.exists() and other.poll() is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="owners")
+def test_a_file_of_another_user_is_neither_believed_nor_deleted(make, monkeypatch):
+    inst = make()
+    live = _file(inst, os.getpid(), _me())
+    gone = _file(inst, os.getpid(), procs._text(1))
+    place = inst.place()
+    with monkeypatch.context() as m:
+        m.setattr(procs, "_folder", lambda install: (str(inst.folder), {os.getuid() + 1}))
+        assert inst.list() == []
+        procs._sweep(*place)
+    assert live.exists() and gone.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="owners")
+def test_a_record_of_another_user_is_not_used(make, monkeypatch):
+    inst = make()
+    path = _file(inst, os.getpid(), procs._text(1))
+    place = inst.place()
+    with monkeypatch.context() as m:
+        m.setattr(os, "geteuid", lambda: os.getuid() + 1)
+        with pytest.raises(OSError, match="another user"):
+            inst.list()
+        with pytest.raises(OSError, match="another user"):
+            procs._write(place, procs.Entry(os.getpid(), _me(), "gui"))
+    assert inst.files() == [path.name]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="owners")
+def test_root_uses_the_record_of_the_owner(make, monkeypatch):
+    inst = make()
+    _file(inst, os.getpid(), _me())
+    with monkeypatch.context() as m:
+        m.setattr(os, "geteuid", lambda: 0)
+        assert procs._folder(str(inst.root))[1] == {0, os.stat(inst.root).st_uid}
+        assert os.getpid() in inst.pids()
+
+
+def _link(to: Path, at: Path) -> None:
+    if sys.platform == "win32":
+        import _winapi
+        _winapi.CreateJunction(str(to), str(at))
+    else:
+        at.symlink_to(to, target_is_directory=True)
+
+
+@pytest.mark.parametrize("kind", ["link", "broken link", "file"])
+def test_a_record_that_is_not_a_folder_is_not_used(make, tmp_path, kind):
+    inst = make()
+    here = inst.place()[1]
+    inst.folder.rmdir()
+    to = tmp_path / "documents"
+    to.mkdir()
+    for name in ("letter.txt", "thesis.odt", f"{here}-{os.getpid()}-{procs._text(1)}.proc"):
+        (to / name).write_text(f"{name[:-5]}\ngui\n\n", newline="")
+    before = {p.name: p.read_bytes() for p in to.iterdir()}
+    if kind == "file":
+        inst.folder.write_text("in the way", encoding="utf-8")
+    else:
+        _link(to, inst.folder)
+    if kind == "broken link":
+        to.rename(tmp_path / "moved")
+    p = inst.run("import localm; from localm import procs\n"
+                 "print(procs.current(), procs.problem(), flush=True)\n"
+                 "import sys; procs.start([sys.executable, '-c', ''], purpose='tool').wait()")
+    assert p.first == "None .localm-run is a link or not a folder"
+    assert p.communicate(timeout=20) == ("", "")
+    for look in (inst.list, lambda: procs.end_others(inst.root, timeout=0)):
+        with pytest.raises(OSError, match="is a link or not a folder"):
+            look()
+    if kind == "broken link":
+        (tmp_path / "moved").rename(to)
+    assert {p.name: p.read_bytes() for p in to.iterdir()} == before
+    if kind != "file":
+        (os.rmdir if sys.platform == "win32" else os.unlink)(inst.folder)
+
+
+def test_a_file_that_is_a_link_is_not_believed(make, tmp_path):
     inst = make()
     path = _file(inst, os.getpid(), _me())
     assert os.getpid() in inst.pids()
-    if sys.platform == "win32":
-        class Other:
-            def __init__(self, at):
-                self.owner = "S-1-5-21-1" if str(at).endswith(".json") else "S-1-5-21-2"
+    path.rename(tmp_path / "elsewhere")
+    try:
+        path.symlink_to(tmp_path / "elsewhere")
+    except OSError:
+        pytest.skip("this account may not make symbolic links")
+    gone = inst.folder / procs._name(inst.place()[1], os.getpid(), procs._text(1))
+    gone.symlink_to(tmp_path / "elsewhere")
+    assert inst.list() == []
+    procs._sweep(*inst.place())
+    assert path.is_symlink() and gone.is_symlink() and (tmp_path / "elsewhere").exists()
 
-            def close(self):
-                pass
-        monkeypatch.setattr(procs, "_WinSecurity", Other)
-    else:
-        real = os.stat
-        monkeypatch.setattr(procs, "_account", lambda pid: os.getuid() + 1)
-        monkeypatch.setattr(procs.os, "stat", lambda p, **k: os.stat_result(
-            [0] * 4 + [os.getuid() + 2] + [0] * 5) if str(p) == str(inst.folder) else real(p, **k))
-        if os.getuid() == 0:
-            pytest.skip("root may say what any process is")
-    assert os.getpid() not in inst.pids()
-    assert path.exists()
+
+def test_a_hard_link_to_the_file_of_another_install_is_not_believed(make):
+    a, b = make("a"), make("b")
+    pid = int(a.importer().first)
+    (name,) = a.files()
+    os.link(a.folder / name, b.folder.parent / "x")
+    here = b.place()[1]
+    (b.root / "x").rename(b.folder / (here + name[16:]))
+    assert b.list() == [] and len(b.files()) == 1
+    assert pid in a.pids()
+
+
+def test_start_does_not_replace_the_file_a_process_wrote_itself(make):
+    inst = make()
+    path = _file(inst, os.getpid(), _me(), text="")
+    procs._write(inst.place(), procs.Entry(os.getpid(), _me(), "launcher window"), replace=False)
+    assert [e.purpose for e in inst.list() if e.recorded] == ["gui"]
+    procs._write(inst.place(), procs.Entry(os.getpid(), _me(), "run"))
+    assert [e.purpose for e in inst.list() if e.recorded] == ["run"] and inst.files() == [path.name]
+
+
+def test_a_file_that_cannot_be_written_leaves_nothing(make, monkeypatch):
+    inst = make()
+    place = inst.place()
+
+    def full(*a):
+        raise OSError(28, "no space left")
+    with monkeypatch.context() as m:
+        m.setattr(os, "write", full)
+        with pytest.raises(OSError):
+            procs._write(place, procs.Entry(os.getpid(), _me(), "gui"))
+    assert inst.files() == []
+
+
+def test_an_install_at_the_top_of_a_drive_has_not_every_program_in_it(tmp_path):
+    top = tmp_path.anchor
+    assert not procs._within(os.path.join(top, "Programs", "browser.exe"), top)
+    assert procs._within(str(tmp_path / "a" / "b"), str(tmp_path / "a"))
+    assert not procs._within(str(tmp_path / "ab"), str(tmp_path / "a"))
 
 
 def test_a_child_that_the_clock_says_started_first_is_still_a_child(monkeypatch):
@@ -833,7 +1007,9 @@ depth = int(sys.argv[1])
 if depth:
     print(os.getpid(), flush=True)
     sys.exit(subprocess.call([sys.executable, __file__, str(depth - 1)]))
-print(procs.end_others(timeout=30), flush=True)
+left = procs.end_others(timeout=30)
+print(left, flush=True)
+print("listed", *(e.pid for e in procs.list()), flush=True)
 sys.exit(7)
 """
 
@@ -843,8 +1019,9 @@ def test_end_others_spares_every_localm_process_that_waits_for_it(make):
     other = int(inst.importer().first)
     (inst.root / "chain.py").write_text(CHAIN, encoding="utf-8")
     p = inst.popen([sys.executable, str(inst.root / "chain.py"), "2"])
-    out = p.communicate(timeout=90)[0]
-    assert p.returncode == 7 and "[]" in out
+    out = p.communicate(timeout=90)[0].splitlines()
+    assert p.returncode == 7 and out[1] == "[]"
+    assert {p.first, out[0]} <= set(out[2].split()) and str(other) not in out[2].split()
     assert other not in inst.pids()
 
 

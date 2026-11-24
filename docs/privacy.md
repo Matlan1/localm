@@ -145,12 +145,11 @@ In every session mode each running localm process, and each long-lived program i
 starts (ComfyUI, a coder shell, an MCP server), has one small file in `.localm-run/`
 in the install folder: its process id, when it started, what kind of process it is,
 the process that started it and the process ids of programs it opened for you (a web
-browser), never a command line, an environment or any content; the file's name also
-holds two numbers that stand for this folder and for this machine, made from the
-folder's and the machine's ids together with a random number, so they mean nothing
-outside this folder; the file stays when the process ends and is deleted by the next
-localm process that starts (one written by another machine that uses the same folder
-after a week).
+browser), never a command line, an environment or any content; the file also holds one
+number made from the ids of this machine and this folder, which is the same for no
+other folder; the file stays when the process ends and is deleted by a localm process
+that starts later, or that asks which processes run (one written by another machine,
+or copied here with the folder, is left alone).
 
 ---
 

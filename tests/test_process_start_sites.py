@@ -82,6 +82,9 @@ USERS_DEFAULT = {
 }
 #: Started without the record only where localm cannot be imported at all.
 NO_LOCALM = {"launcher.pyw:_spawn_detached:Popen": "a window of the launcher"}
+#: A program of the user that may hold other windows and stays open: not recorded, and in
+#: a session of its own. The localm in it records itself.
+TERMINAL = {"launcher.pyw:_open_terminal:Popen": "terminal program"}
 RECORDED = "localm/procs.py:start:Popen"
 #: Every place that starts a long-lived or detached program that does not import localm.
 STARTED = {
@@ -231,7 +234,8 @@ def found() -> dict:
 
 
 def test_every_start_site_is_recorded_or_named():
-    known = {RECORDED, *LOCALM, *LOCALM_ELSEWHERE, *TOOLS, *USERS, *USERS_DEFAULT, *NO_LOCALM}
+    known = {RECORDED, *LOCALM, *LOCALM_ELSEWHERE, *TOOLS, *USERS, *USERS_DEFAULT, *NO_LOCALM,
+             *TERMINAL}
     now = found()
     assert set(now) - known == set(), (
         "These places start a program that localm would not know of. Start a long-lived or "
@@ -280,6 +284,12 @@ def test_a_start_without_the_record_needs_a_missing_localm():
         guarded = [h for t in ast.walk(fn) if isinstance(t, ast.Try) for h in t.handlers
                    if _dotted(h.type) == "ImportError" and "subprocess.Popen" in ast.unparse(h)]
         assert len(guarded) == 1 and ast.unparse(fn).count("subprocess.Popen") == 1, key
+
+
+def test_the_terminal_is_started_in_a_session_of_its_own():
+    for key in TERMINAL:
+        path, where, _ = _split(key)
+        assert "start_new_session=True" in ast.unparse(_function(path, where)), key
 
 
 def test_a_tool_is_not_detached():

@@ -226,7 +226,7 @@ def test_the_record_of_processes_is_the_only_thing_allowed_beside_the_data_folde
     assert PROCESS_RECORD.name == procs.FOLDER
     log = sandbox["log"]
     log.write_text("".join(f"write\t{p}\n" for p in (
-        PROCESS_RECORD / "x.json", ROOT / "stray.txt", ROOT / ".localm-running" / "x")),
+        PROCESS_RECORD / "x.proc", ROOT / "stray.txt", ROOT / ".localm-running" / "x")),
         encoding="utf-8")
     bad = _violations(log, [sandbox["home"], PROCESS_RECORD])
     assert [Path(p).name for _k, p in bad] == ["stray.txt", "x"]
