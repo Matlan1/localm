@@ -43,7 +43,8 @@ mint one too (see *Capability scopes* below). A named key can also carry an
 expiry (`--expires-in` / `expires_in` on `POST /v1/keys`); `verify()` rejects it
 once it has passed. A key is only minted with localm's own scopes and those of
 installed plugins; a misspelled scope is refused. Revoking a named key, or its
-expiry, ends its browser sessions, coder sessions, open streams and running jobs.
+expiry, ends its browser sessions, coder sessions, open streams and running jobs,
+except that an embedding or speech model download already in progress runs to its end.
 
 A browser's login is an HttpOnly, SameSite=Strict cookie (Secure over https)
 holding a random session id, never the key. Its name carries a hash of the
