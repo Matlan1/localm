@@ -791,7 +791,8 @@ def test_the_probe_stages_get_the_runtime_and_model_and_the_cpu_stage_hides_the_
     assert calls["probe-cpu"][1] == {"HIP_VISIBLE_DEVICES": "-1", "ROCR_VISIBLE_DEVICES": "-1"}
 
 
-def test_the_receipt_of_a_passing_candidate_run_is_accepted_by_the_bump(world, tmp_path):
+def test_the_receipt_of_a_passing_candidate_run_is_accepted_by_the_bump(world, tmp_path, monkeypatch):
+    monkeypatch.setattr(bump, "check_pretokenizer_names", lambda tag: None)
     fake = fake_api.FakeApi(families=_families(world.pins))
     stages = Stages(world.work, bump.fetch_candidate(fake_api.TAG, fake))
     code, r = world.go("--tag", fake_api.TAG, stages=stages, fetch=fake)
