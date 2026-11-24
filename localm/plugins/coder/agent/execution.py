@@ -879,6 +879,19 @@ class _ExecutionMixin:
             session_allowed = self._session_allowed = set()
         if needs_confirm and session_allowable and allow_key in session_allowed:
             needs_confirm = False
+        # A call certain to fail is answered, not put to a person. Never for one
+        # that reaches localm's own data: the answer quotes the file.
+        if (needs_confirm and data_hit is None
+                and call.name in ("edit_file", "edit_files")):
+            from ..tools.files import edit_call_refusal
+            doomed = edit_call_refusal(self.cwd, call.name, call.args)
+            if doomed is not None:
+                result = self._track_tool_failure(call, ToolResult.error(doomed))
+                if interactive:
+                    print_tool_error(call.name, result.output)
+                self._emit("tool_result", tool=call.name, ok=False,
+                           summary="not run: the call cannot succeed")
+                return result
         if needs_confirm and data_hit is not None:
             note = (f"{call.name} reaches {data_hit}, so it needs your approval "
                     "for this exact call.")

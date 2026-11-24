@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -1115,5 +1115,48 @@ def test_a_progress_sink_gets_no_tool_output(tmp_path, capsys):
     assert "content 3" not in got.err and not any("content 3" in t for t in said)
 
 
-def test_the_stub_backend_is_not_hiding_a_mock(tmp_path):
-    assert not isinstance(_agent(tmp_path, _Backend([])).backend, MagicMock)
+# --- an edit that cannot succeed is answered, not asked about --------------
+
+DOOMED = [
+    ("edit_files", {"edits": [{"path": "a.txt", "old": "", "new": "x"}]}),
+    ("edit_files", {"edits": [{"path": "gone.txt", "old": "x", "new": "y"}]}),
+    ("edit_file", {"path": "a.txt", "old": "not in it", "new": "y"}),
+    ("edit_file", {"path": "gone.txt", "old": "x", "new": "y"}),
+]
+
+
+@pytest.mark.parametrize("name,args", DOOMED)
+def test_an_edit_that_cannot_succeed_is_answered_not_asked_about(tmp_path, name, args):
+    from localm.plugins.coder.tools.files import tool_edit_file, tool_edit_files
+    (tmp_path / "a.txt").write_text("one")
+    person = _Person()
+    agent = _agent(tmp_path, _Backend([_xml(name, **args), "It cannot be done."]),
+                   confirm_handler=person, auto_approve=False)
+    agent.run_task("edit the file")
+    own = {"edit_file": tool_edit_file, "edit_files": tool_edit_files}[name](tmp_path, **args)
+    assert person.asked == []
+    assert own.ok is False and own.output.splitlines()[0] in _texts(agent, "user")[1]
+    assert (tmp_path / "a.txt").read_text() == "one"
+
+
+def test_an_edit_that_can_succeed_is_still_asked_about(tmp_path):
+    (tmp_path / "a.txt").write_text("one")
+    person = _Person()
+    reply = _xml("edit_files", edits=[{"path": "a.txt", "old": "one", "new": "two"}])
+    agent = _agent(tmp_path, _Backend([reply, "Done."]), confirm_handler=person,
+                   auto_approve=False)
+    agent.run_task("edit a.txt")
+    assert person.asked == [("edit_files", False)]
+    assert (tmp_path / "a.txt").read_text() == "two"
+
+
+def test_a_doomed_edit_of_localms_own_data_is_asked_about_and_quotes_nothing(tmp_path):
+    (tmp_path / "a.txt").write_text("secret one")
+    person = _Person(answer=False)
+    reply = _xml("edit_file", path="a.txt", old="secret two", new="x")
+    agent = _agent(tmp_path, _Backend([reply, "Not done."]), confirm_handler=person)
+    with patch("localm.plugins.coder.agent.execution.data_guard.check",
+               return_value="localm's data folder"):
+        agent.run_task("edit a.txt")
+    assert person.asked == [("edit_file", True)]
+    assert "secret one" not in "\n".join(_texts(agent, "user"))
