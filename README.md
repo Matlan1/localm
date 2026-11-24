@@ -455,6 +455,8 @@ See [docs/llamacpp-binding.md](docs/llamacpp-binding.md) for the binding interna
 | [docs/memory.md](docs/memory.md) | Durable memory: recall across chats, consolidation, privacy, `/api/memory` |
 | [docs/network.md](docs/network.md) | Internet access for coder and chat: modes, domain rules, SSRF guard |
 | [docs/tls.md](docs/tls.md) | API keys, TLS, and reverse proxies for LAN serving |
+| [docs/security.md](docs/security.md) | The security model: authentication, scopes, trust boundaries, updates, verifying a release |
+| [docs/development.md](docs/development.md) | Setting up a development checkout and running the checks |
 | [docs/docker.md](docs/docker.md) | Running the API server in Docker: images, first-run key, volume, certificate, GPU |
 | [docs/privacy.md](docs/privacy.md) | Privacy modes and diagnostics: what localm saves, what it never does, the two independent dials that control it, and how the update check respects network policy |
 | [docs/naming.md](docs/naming.md) | Reaching localm by name on your LAN: the localm.local mDNS address |

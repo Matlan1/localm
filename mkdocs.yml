@@ -80,6 +80,7 @@ nav:
       - API reference: api-reference.md
       - MCP support: mcp.md
       - TLS and reverse proxies: tls.md
+      - Security model: security.md
   - Extending:
       - Plugins: plugins.md
       - Plugin interop: plugin-interop.md
@@ -87,3 +88,4 @@ nav:
       - Architecture: architecture.md
       - llama.cpp binding: llamacpp-binding.md
       - GUI design standard: gui-design.md
+      - Development: development.md
