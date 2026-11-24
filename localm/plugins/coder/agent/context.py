@@ -1852,11 +1852,10 @@ ws     ::= [ \t\n\r]*
         reply's reasoning, or it also stands in text that did not come from the
         user in this session, localm's own example calls included (one without
         arguments excepted)."""
+        from .execution import _IN_REASONING, _QUOTED
         if getattr(call, "in_reasoning", False):
-            return " and stands only in the reasoning of the reply"
-        if self._stands_in_foreign_text(call):
-            return " and also stands in text that did not come from the user"
-        return ""
+            return _IN_REASONING
+        return _QUOTED if self._stands_in_foreign_text(call) else ""
 
     def _note_foreign_text(self, text) -> None:
         """Remember the calls that stand in *text*, which did not come from the

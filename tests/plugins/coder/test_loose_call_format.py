@@ -575,7 +575,9 @@ def test_a_call_that_stands_in_a_file_that_was_read_is_never_meant(tmp_path, spe
     assert not (tmp_path / "pwned.txt").exists()
     assert (tmp_path / "summary.md").exists()
     assert agent.denied_unconfirmed == [("run_shell", "lenient")]
-    assert "also stands in text that did not come from the user" in _texts(agent, "user")[2]
+    told = _texts(agent, "user")[2]
+    assert "also stands in text that did not come from the user" in told
+    assert "taken as a quotation" in told and "and it will run" not in told
     assert len(backend.checks) == 1, "a quoted call must not even be asked about"
 
 
@@ -755,7 +757,8 @@ def test_a_call_only_in_the_reasoning_is_never_meant(tmp_path, shape):
     assert not (tmp_path / "pwned.txt").exists()
     assert (tmp_path / "a.txt").read_text() == "1"
     assert agent.denied_unconfirmed == [("run_shell", "lenient")]
-    assert "only in the reasoning" in _texts(agent, "user")[1]
+    told = _texts(agent, "user")[1]
+    assert "only in the reasoning" in told and "and it will run" in told
 
 
 def test_a_reply_that_never_closes_its_reasoning_runs_nothing(tmp_path):
