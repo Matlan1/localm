@@ -528,7 +528,7 @@ class Journal:
             path = self.paths.get(fd)
             rel = self._rel(path) if path is not None else None
             if rel is not None and os.path.isfile(path):
-                self.log.append(("content", rel, Path(path).read_bytes()))
+                self.log.append(("content", rel, Path(path).read_bytes(), os.stat(path).st_mode))
         return call
 
 
@@ -592,6 +592,8 @@ def replay(template: Path, dest: Path, log: list, *, lost: int | None = None,
         elif kind == "content":
             if folder(path.parent):
                 path.write_bytes(entry[2])
+                if os.name != "nt":
+                    path.chmod(stat.S_IMODE(entry[3]))
                 dirty.discard(path)
     for path in dirty:
         if path.is_file():

@@ -379,8 +379,11 @@ def copy_whole(src: Path, dst: Path, wait: Wait) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst.with_name(dst.name + ".tmp")
     patient(wait, src, lambda: shutil.copyfile(src, tmp, follow_symlinks=False))
+    if os.name != "nt":
+        shutil.copystat(src, tmp, follow_symlinks=False)
     patient(wait, tmp, lambda: _flush(tmp))
-    shutil.copystat(src, tmp, follow_symlinks=False)
+    if os.name == "nt":   # a read-only file cannot be flushed there
+        shutil.copystat(src, tmp, follow_symlinks=False)
     patient(wait, dst, lambda: replace_through(tmp, dst))
 
 
