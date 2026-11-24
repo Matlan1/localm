@@ -75,11 +75,10 @@ def test_a_privacy_mode_memory_job_loads_no_model(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "HOME_DIR", tmp_path)
     monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "config.json")
     monkeypatch.setattr(config, "REGISTRY_FILE", tmp_path / "registry.json")
-    (tmp_path / "config.json").write_text(json.dumps({"mode": "privacy"}), encoding="utf-8")
+    (tmp_path / "config.json").write_text(json.dumps(
+        {"mode": "privacy", "plugins_enabled": ["memory", "jobs"]}), encoding="utf-8")
     from localm.plugins.builtin.jobs import runner
     from localm.plugins.builtin.jobs.store import Job
-    import localm.plugins.builtin.memory.plug as plug
-    monkeypatch.setattr(plug, "_persist_enabled", lambda: False)
     monkeypatch.setattr(runner, "_register_live_run", lambda job: None)
     monkeypatch.setattr(runner, "_creator_refusal", lambda job: None)
     called = []

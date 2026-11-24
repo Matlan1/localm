@@ -626,7 +626,7 @@ def _fill_vectors_later(store) -> None:
 
     from localm.config import home_bound
     _threading.Thread(target=home_bound(_run, name="memory vector fill"),
-                      daemon=True).start()
+                      name="memory vector fill", daemon=True).start()
 
 
 @_router.post("/api/memory/append")

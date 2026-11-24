@@ -135,6 +135,9 @@ def test_memory_append_resolves_embedder_off_the_loop(tmp_path, monkeypatch):
 
     res = asyncio.run(_main())
     assert res["status"] == "appended"
+    for t in threading.enumerate():
+        if t.name == "memory vector fill":
+            t.join(10)
     assert embed_thread.get("id") is not None, "embed_fn was never invoked by the write"
     assert embed_thread["id"] != loop_thread["id"], (
         "get_embedder()/embed ran ON the event-loop thread "
