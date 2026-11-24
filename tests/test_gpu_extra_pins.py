@@ -175,3 +175,12 @@ def test_grammar_extra_pairs_xgrammar_with_a_loadable_tvm_ffi():
         assert packaging_version.Version(tvm_ffi) >= tvm_ffi_floor, (
             f"uv.lock pairs xgrammar {xgrammar} with apache-tvm-ffi {tvm_ffi}, "
             "which it cannot load")
+
+
+def test_grammar_extra_brings_triton_windows_only_to_windows():
+    packaging_requirements = pytest.importorskip("packaging.requirements")
+    markers = {r.name: r.marker for r in
+               map(packaging_requirements.Requirement, _extra_requirements("grammar"))}
+    assert "triton-windows" in markers, "[grammar] must declare triton-windows"
+    assert markers["triton-windows"].evaluate({"sys_platform": "win32"})
+    assert not markers["triton-windows"].evaluate({"sys_platform": "linux"})

@@ -14,6 +14,7 @@ from localm.rag import store as _st
 from ..collection_lock import (CollectionLockedError, collection_write_lock,
                                lock_path_for)
 from .cache import _files_changing
+from .commit import finish_save, read_current
 from .confine import _path_within
 from .files import _STATS_CACHE_KEY
 
@@ -24,6 +25,11 @@ if TYPE_CHECKING:
 class _CollectionIntrospection:
     """Mixin of ``Collection``: stats, documents, roots, the meta.json-only path and
     confinement checks."""
+
+    if TYPE_CHECKING:
+        def exists(self) -> bool:
+            """Provided by ``Collection`` (store.py)."""
+            ...
 
     def roots(self) -> list:
         """The folders indexed into this collection, resolved and sorted.
@@ -133,7 +139,8 @@ class _CollectionIntrospection:
         if not meta_path.is_file():
             return None
         try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            meta = json.loads(read_current(
+                coll_dir, "meta.json", lambda p: p.read_text(encoding="utf-8")))
         except (ValueError, OSError, RecursionError):
             return None
         if not isinstance(meta, dict):
@@ -306,9 +313,14 @@ class _CollectionIntrospection:
             with collection_write_lock(
                     lock_path_for(coll_dir), collection=checked_name,
                     op="a stats-cache backfill", timeout=0):
+                try:
+                    finish_save(coll_dir)
+                    finished = True
+                except OSError:
+                    finished = False
                 # _load() runs INSIDE the lock, from disk.
                 coll = cls(checked_name, base, cache=False)
-                if coll.exists():
+                if finished and coll.exists():
                     coll._meta[_STATS_CACHE_KEY] = coll._stats_cache_block()
                     with _files_changing(coll.dir):
                         coll._atomic_write("meta.json", _st.meta_json(coll._meta))

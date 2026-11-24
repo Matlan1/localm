@@ -445,7 +445,12 @@ CENSUS_PACKAGES = {"tiktoken": "tiktoken", "sentencepiece": "sentencepiece",
                    "protobuf": "google", "einops": "einops", "peft": "peft",
                    "librosa": "librosa", "scipy": "scipy",
                    "scikit-learn": "sklearn", "opencv-python-headless": "cv2",
-                   "datasets": "datasets", "matplotlib": "matplotlib"}
+                   "datasets": "datasets", "matplotlib": "matplotlib",
+                   "addict": "addict", "easydict": "easydict", "decord": "decord",
+                   "backoff": "backoff", "lmdb": "lmdb", "pretty-midi": "pretty_midi",
+                   "mir-eval": "mir_eval", "monai": "monai", "onnxruntime": "onnxruntime",
+                   "x-transformers": "x_transformers", "nltk": "nltk", "g2p-en": "g2p_en",
+                   "lightning": "lightning", "ftfy": "ftfy", "icecream": "icecream", "av": "av"}
 
 
 def _census_module():

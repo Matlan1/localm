@@ -43,7 +43,10 @@ Re-adding a file skips it when its content is unchanged, even if its modified
 time moved. `rag add --force` re-indexes regardless; on a collection that has
 embeddings, without `--embed`, that would drop them for every re-indexed
 document, so it asks first, as `rag repair` does (`--yes` accepts the drop, and
-with no terminal to answer the embeddings are kept by re-embedding).
+with no terminal to answer the embeddings are kept by re-embedding). When they
+cannot be re-embedded (no embedder reachable, or one that fails part way) the
+command stops with exit 1 and changes nothing: the collection keeps every
+embedding it had. Only `--yes` without `--embed`, or an answered yes, drops them.
 
 `rag repair` and `rag resync` say so when a document's source file is gone:
 `repair` lists the vanished sources and leaves their chunks in the index,
@@ -317,7 +320,8 @@ A document whose source file has vanished is **flagged, not deleted**
 (`missing` in the collection's document list, counted as `n_missing` in its
 stats): its chunks stay searchable and the flag clears by itself if the file
 returns, so a moved file or an unplugged drive cannot silently destroy part of
-an index. Pass `--prune-missing` to actually remove those entries. A folder that
+an index. A scheduled re-sync lists the missing documents on every run, not only
+the run that flagged them, until the file returns or they are removed. Pass `--prune-missing` to actually remove those entries. A folder that
 is not reachable at run time is reported and skipped whole - nothing under it is
 indexed, flagged, or pruned. A document whose source lies under a credential
 folder (for example one indexed before that folder was refused) is removed from
@@ -385,8 +389,10 @@ policy as an interactive add. Full details in
   reporting a false "0 re-indexed" success. A mixed collection repairs
   whatever has a real source and names the uploaded documents it left alone;
   re-upload those, or remove them with `rag rm-doc`.
-- **Indexing failed.** Indexing is atomic, so a failed index leaves the previous
-  snapshot intact. Check the error in the GUI/CLI and `--debug` log; common causes
+- **Indexing failed.** An index is saved as one change: a run that fails, or a
+  process killed in the middle of it, even while the files are being written,
+  leaves the collection as it was before or as it was saved, never a mix of the
+  two. Check the error in the GUI/CLI and `--debug` log; common causes
   are an unreadable or encrypted file.
 - **"Collection X is being written by another localm process".** Something else
   is indexing that collection right now, most often a scheduled re-sync or an add

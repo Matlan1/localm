@@ -56,6 +56,21 @@ from localm.textguard import neutralise
 _router = APIRouter()
 
 
+def _counted(n: int, noun: str) -> str:
+    from localm.rag._store.types import count_noun
+    return count_noun(n, noun)
+
+
+def _loss_hint(e: Exception) -> str:
+    """The way out a refused re-index offers, for a job's error line."""
+    from localm.rag import EmbeddingLossRefused
+    if isinstance(e, EmbeddingLossRefused):
+        return (" Start an embedding model and run it again, or send "
+                "confirm: true with embed false to re-index without the "
+                "embeddings.")
+    return ""
+
+
 def _neutralise_hits(hits: list) -> list:
     """Defang chat control / frame tokens in each retrieved chunk's text before it
     leaves the retrieval boundary (indirect prompt injection).
@@ -81,6 +96,9 @@ class RagAddRequest(BaseModel):
     paths: list[str]
     embed: bool = True            # try embeddings; degrades to lexical-only
     reindex: bool = False         # force re-index even unchanged files (repair)
+    # A re-index that would remove the embeddings the collection has (no
+    # embedder, or embed false) is a 409 until this is true.
+    confirm: bool = False
 
 
 class RagQueryRequest(BaseModel):
@@ -117,6 +135,7 @@ class RagUploadRequest(BaseModel):
     files: list[RagUploadItem]
     embed: bool = True            # try embeddings; degrades to lexical-only
     reindex: bool = False         # force re-index of an unchanged upload
+    confirm: bool = False         # as RagAddRequest.confirm
 
 
 class EmbeddingModelRequest(BaseModel):
@@ -733,6 +752,29 @@ async def rag_delete(name: str, request: Request):
     return {"status": "deleted", "name": name}
 
 
+async def _unconfirmed_vector_loss(name: str, req, embed_fn):
+    """The 409 ``needs_confirm`` answer when *req* re-indexes (``reindex``) a
+    collection that has embeddings without being able to recompute them and the
+    caller has not sent ``confirm: true``; None otherwise. The store refuses
+    the same re-index on its own, so this only answers early and says how to
+    proceed."""
+    if not req.reindex or req.confirm or embed_fn is not None:
+        return None
+    coll = await _get_collection_off_loop(name)
+    if not coll.stats().get("has_vectors"):
+        return None
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=409, content={
+        "needs_confirm": True,
+        "reason": "drops_embeddings",
+        "detail": (f"'{name}' currently has semantic (hybrid) search. "
+                   + ("Re-indexing without an embedding model available "
+                      if req.embed else "Re-indexing without embeddings ")
+                   + "will remove the existing embeddings for every "
+                     "re-indexed document (it goes back to BM25/lexical-only "
+                     "until re-embedded). Send confirm: true to do it.")})
+
+
 @_router.post("/api/rag/collections/{name}/add")
 async def rag_add(name: str, req: RagAddRequest, request: Request):
     from localm.rag import CollectionLockedError
@@ -796,6 +838,9 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
     embed = req.embed
     self_embed, self_classify, self_describe = _self_services(request)
     embed_fn = self_embed if embed else None
+    unconfirmed = await _unconfirmed_vector_loss(name, req, embed_fn)
+    if unconfirmed is not None:
+        return unconfirmed
     # The same configured-name lookup _make_self_embed sends over the wire, recorded
     # so the collection has embedding_model() on record. None (embed off) is never
     # reached without embed_fn.
@@ -815,12 +860,12 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
                 paths, embed_fn=embed_fn, classify_fn=self_classify,
                 model_name=model_name,
                 describe_image_fn=self_describe,
-                policy=policy, force=req.reindex,
+                policy=policy, force=req.reindex, allow_vector_loss=req.confirm,
                 on_progress=_job_progress(job))
         except (ValueError, CollectionLockedError) as e:
             # e.g. an embedding-model dimension change, or another process still
             # writing this collection: report on the stream rather than crash.
-            job.push({"type": "line", "text": f"error: {e}"})
+            job.push({"type": "line", "text": f"error: {e}{_loss_hint(e)}"})
             return False
         # The indexing work itself is done: mark the outcome before the reporting
         # tail below, so a failure there cannot misreport a completed index.
@@ -829,7 +874,7 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
                    f"{result['updated']} updated, "
                    f"{result['skipped']} unchanged, "
                    f"{len(result['failed'])} failed - "
-                   f"{result['chunks']} chunks total")
+                   f"{_counted(result['chunks'], 'chunk')} total")
         job.push({"type": "line", "text": summary})
         for f in result["failed"][:10]:
             job.push({"type": "line",
@@ -890,6 +935,9 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
     embed = req.embed
     self_embed, self_classify, self_describe = _self_services(request)
     embed_fn = self_embed if embed else None
+    unconfirmed = await _unconfirmed_vector_loss(name, req, embed_fn)
+    if unconfirmed is not None:
+        return unconfirmed
     # Record which model this upload embeds with.
     model_name = None
     if embed:
@@ -908,12 +956,12 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
                 uploads, embed_fn=embed_fn, classify_fn=self_classify,
                 model_name=model_name,
                 describe_image_fn=self_describe,
-                force=req.reindex,
+                force=req.reindex, allow_vector_loss=req.confirm,
                 on_progress=_job_progress(job))
         except (ValueError, CollectionLockedError) as e:
             # A dimension change, or another process still writing this collection:
             # reported on the stream rather than a crash.
-            job.push({"type": "line", "text": f"error: {e}"})
+            job.push({"type": "line", "text": f"error: {e}{_loss_hint(e)}"})
             return False
         # The upload work itself is done: mark the outcome before the reporting
         # tail below.
@@ -922,7 +970,7 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
                    f"{result['updated']} updated, "
                    f"{result['skipped']} unchanged, "
                    f"{len(result['failed'])} failed - "
-                   f"{result['chunks']} chunks total")
+                   f"{_counted(result['chunks'], 'chunk')} total")
         job.push({"type": "line", "text": summary})
         for f in result["failed"][:10]:
             job.push({"type": "line",
@@ -1048,7 +1096,7 @@ async def rag_reembed(name: str, request: Request):
         # below.
         job.mark_outcome("done")
         job.push({"type": "line",
-                  "text": (f"done: {result['chunks']} chunks re-embedded at "
+                  "text": (f"done: {_counted(result['chunks'], 'chunk')} re-embedded at "
                            f"{result['dim']} dimensions with {model}")})
         return True
 
@@ -1167,14 +1215,27 @@ async def rag_repair(name: str, req: RagRepairRequest, request: Request):
                 sources, force=True, embed_fn=embed_fn,
                 classify_fn=self_classify, describe_image_fn=self_describe,
                 model_name=model_name, policy=policy,
+                allow_vector_loss=req.confirm,
                 on_progress=_job_progress(job))
         except (ValueError, CollectionLockedError) as e:
-            job.push({"type": "line", "text": f"error: {e}"})
+            job.push({"type": "line", "text": f"error: {e}{_loss_hint(e)}"})
             return False
         job.mark_outcome("done")
         summary = (f"repaired: {result['updated']} re-indexed, "
-                   f"{result['added']} added - {result['chunks']} chunks total")
+                   f"{result['added']} added - "
+                   f"{_counted(result['chunks'], 'chunk')} total")
         job.push({"type": "line", "text": summary})
+        gone = result.get("not_found") or []
+        if gone:
+            job.push({"type": "line", "text": (
+                f"{len(gone)} source(s) no longer exist on disk and were not "
+                f"re-indexed; anything already indexed from them is still in "
+                f"'{name}'. Remove a document you no longer want from the "
+                "collection's document list.")})
+            for g in gone[:10]:
+                job.push({"type": "line", "text": f"  gone: {g}"})
+            if len(gone) > 10:
+                job.push({"type": "line", "text": f"  ... and {len(gone) - 10} more"})
         for f in result["failed"][:10]:
             job.push({"type": "line",
                       "text": f"  failed: {f['path']}: {f['error']}"})
@@ -1497,7 +1558,8 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
         degrades, unknown = report["degrades"], report["unknown"]
         if degrades:
             shown = degrades[:_MAX_NAMED]
-            detail = ", ".join(f"{c['name']} ({c['dim']}-dim, {c['n_chunks']} chunks)"
+            detail = ", ".join(f"{c['name']} ({c['dim']}-dim, "
+                               f"{_counted(c['n_chunks'], 'chunk')})"
                                for c in shown)
             if len(degrades) > _MAX_NAMED:
                 detail += f", and {len(degrades) - _MAX_NAMED} more"
