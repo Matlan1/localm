@@ -297,6 +297,26 @@ def test_a_read_only_swapped_file_is_replaced_and_put_back(root, tmp_path):
     launcher.chmod(stat.S_IWRITE)
 
 
+@pytest.mark.parametrize("tail", [b"\x1a", b"\x1a\x1a", b"\r\n\x1a", b"\r\n"])
+def test_flushing_and_locking_leave_every_byte_of_a_file(tmp_path, tail):
+    path = tmp_path / "file.bin"
+    data = b"binary\0" + tail
+    path.write_bytes(data)
+    disk.flush_files([path])
+    assert path.read_bytes() == data
+    fd = disk.open_lock(path)
+    disk.lock_file(fd)
+    os.close(fd)
+    assert path.read_bytes() == data
+
+
+def test_a_release_file_that_ends_in_ctrl_z_is_moved_whole(root):
+    new = {**um.NEW, "localm/changed.py": "ends with \x1a"}
+    plan = planned(root, new=new)
+    mover.forward(root, ID, plan)
+    assert (root / "localm" / "changed.py").read_bytes() == b"ends with \x1a"
+
+
 # --------------------------------------------------------- held for a moment
 
 @windows_only

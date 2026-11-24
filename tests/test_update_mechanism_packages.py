@@ -899,7 +899,7 @@ def test_a_kill_at_every_operation_of_the_package_step_leads_back(template, worl
         killed = um.drive(run_dir, spec(root), n)
         assert killed.returncode != 0 and "POINTS" not in killed.stdout, (n, killed.stderr)
         reached = um.phase(root)
-        ended = "FINISH" in killed.stdout and reached in (job.DONE, None)
+        ended = "FINISH" in killed.stdout and (um.done(root) or reached in (job.DONE, None))
         again = um.restore(run_dir, root)
         assert again.returncode == 0, (n, reached, again.stderr)
         if ended:

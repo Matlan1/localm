@@ -4,6 +4,7 @@ when the call returns."""
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import shutil
@@ -25,6 +26,8 @@ _REPLACE_WAIT_S = 10.0
 #: Seconds a read of a record or plan is tried again while it fails.
 READ_WAIT_S = 10.0
 _NAME_SURROGATE = 0x20000000
+# Without it, opening a file for reading and writing on Windows removes a Ctrl-Z at its end.
+_BINARY = getattr(os, "O_BINARY", 0)
 PYCACHE = "__pycache__"
 _T = TypeVar("_T")
 
@@ -219,7 +222,7 @@ def sync_disk() -> None:
 
 
 def _flush(path) -> None:
-    fd = os.open(path, os.O_RDWR if os.name == "nt" else os.O_RDONLY)
+    fd = os.open(path, os.O_RDWR | _BINARY if os.name == "nt" else os.O_RDONLY)
     try:
         os.fsync(fd)
     finally:
@@ -246,12 +249,14 @@ def flush_files(paths: Iterable, wait: Optional[Wait] = None) -> None:
 def replace_through(src: Path, dst: Path) -> None:
     """Rename *src* over *dst*; the rename is on disk when this returns. Raises
     OSError."""
-    if sys.platform == "win32":
+    if os.name == "nt":
         import ctypes
         replace_existing, write_through = 0x1, 0x8
-        if not ctypes.windll.kernel32.MoveFileExW(str(src), str(dst),
-                                                  replace_existing | write_through):
-            raise ctypes.WinError()
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        if not kernel32.MoveFileExW(ctypes.c_wchar_p(str(src)), ctypes.c_wchar_p(str(dst)),
+                                    replace_existing | write_through):
+            code = ctypes.get_last_error()  # type: ignore[attr-defined]
+            raise ctypes.WinError(code)  # type: ignore[attr-defined]
     else:
         os.replace(src, dst)
         sync_folder(dst.parent)
@@ -327,14 +332,14 @@ def open_lock(path: Path) -> int:
     st = lstat(path)
     if st is not None and is_link(st):
         raise Unsafe(f"{path} is a link")
-    return os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o666)
+    return os.open(path, os.O_RDWR | os.O_CREAT | _BINARY | getattr(os, "O_NOFOLLOW", 0), 0o666)
 
 
 def lock_file(fd: int) -> None:
     """Lock *fd* until it is closed. Raises PermissionError or BlockingIOError when
     another holder has it."""
-    if sys.platform == "win32":
-        import msvcrt
+    if os.name == "nt":
+        msvcrt = importlib.import_module("msvcrt")
         msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
     else:
         import fcntl
