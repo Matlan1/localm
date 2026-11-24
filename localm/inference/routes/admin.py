@@ -74,20 +74,20 @@ def _strip_unreleased(markdown: str) -> str:
     return "".join(ln for ln in kept if not _UNRELEASED_LINKDEF.match(ln))
 
 
-async def _saved_report_response(save, show) -> dict:
+async def _saved_report_response(save, show, what: str) -> dict:
     """Run *save* (blocking; returns the saved path or None) off the event loop and
     return the save routes' response: the file's name, path and text, with the
     digest the send route checks. When the file cannot be read back, its text and
     digest are left out. HTTPException 500 when nothing was saved, 504 when saving
-    took too long."""
+    took too long, both naming *what* was being saved."""
     from localm import bugreport
     try:
         path = await run_in_threadpool_bounded(save, timeout=_BUG_REPORT_SAVE_TIMEOUT_S)
     except ThreadCallTimeout as e:
-        raise HTTPException(504, f"Saving the bug report timed out: {e}") from e
+        raise HTTPException(504, f"Saving the {what} timed out: {e}") from e
     if path is None:
         # A failed save must not report success.
-        raise HTTPException(500, "Could not save the bug report to disk.")
+        raise HTTPException(500, f"Could not save the {what} to disk.")
     result = {"saved": True, "filename": path.name,
               "path": show(path),
               "maintainer": bugreport.MAINTAINER_EMAIL}
@@ -186,7 +186,7 @@ def register(app: FastAPI, ctx) -> None:
                 stall_stacks=recent_stall_stacks(),
                 scrub=None if show is str else show)
 
-        return await _saved_report_response(_save, show)
+        return await _saved_report_response(_save, show, "bug report")
 
     @app.post("/api/feedback",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
@@ -214,7 +214,7 @@ def register(app: FastAPI, ctx) -> None:
         def _save():
             return bugreport.save_feedback(text, kind, scrub=None if show is str else show)
 
-        return await _saved_report_response(_save, show)
+        return await _saved_report_response(_save, show, kind)
 
     @app.post("/api/bug-report/send",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])

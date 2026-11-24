@@ -169,12 +169,36 @@ def test_a_caller_other_than_the_operator_gets_the_text_path_scrubbed(open_mode,
     assert path.read_text(encoding="utf-8") == _expected("Why <path>?", "Why <path>?\n<path> again")
 
 
-def test_a_failed_save_is_not_reported_as_success(open_mode, monkeypatch):
+_SAVES = [
+    ("/api/feedback", {"kind": "feedback", "text": "x"}, "feedback"),
+    ("/api/feedback", {"kind": "suggestion", "text": "x"}, "suggestion"),
+    ("/api/bug-report", {"description": "x"}, "bug report"),
+]
+
+
+@pytest.mark.parametrize("path, body, what", _SAVES)
+def test_a_failed_save_names_what_was_not_saved(open_mode, monkeypatch, path, body, what):
     monkeypatch.setattr(bugreport, "save_report", lambda *a, **k: None)
     app = create_app(_engine())
     with TestClient(app) as c:
-        r = _post(c, app, {"kind": "feedback", "text": "x"})
+        r = _post(c, app, body, path=path)
     assert r.status_code == 500
+    assert r.json()["detail"] == f"Could not save the {what} to disk."
+
+
+@pytest.mark.parametrize("path, body, what", _SAVES)
+def test_a_slow_save_names_what_timed_out(open_mode, monkeypatch, path, body, what):
+    from localm.inference.routes import admin
+
+    async def too_slow(*a, **k):
+        raise admin.ThreadCallTimeout("save")
+
+    monkeypatch.setattr(admin, "run_in_threadpool_bounded", too_slow)
+    app = create_app(_engine())
+    with TestClient(app) as c:
+        r = _post(c, app, body, path=path)
+    assert r.status_code == 504
+    assert r.json()["detail"].startswith(f"Saving the {what} timed out: ")
 
 
 # --- sending --------------------------------------------------------------
