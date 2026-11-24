@@ -236,6 +236,12 @@ def job_output_path(job, media_kind: str, name: str, kept: bool) -> Optional[Pat
         return None
 
 
+def file_headers(path: Path) -> dict:
+    """Extra response headers for serving the media file *path*: a held file is
+    not to be stored by the browser."""
+    return {"Cache-Control": "no-store"} if _held.is_held(path) else {}
+
+
 def held_items(request: Request, media_kind: str, show_path) -> list[dict]:
     """The held files of *media_kind* the caller may see, newest first, in the
     history item shape with no settings. *show_path* formats a path for the

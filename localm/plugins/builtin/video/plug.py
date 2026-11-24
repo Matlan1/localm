@@ -338,7 +338,7 @@ async def video_file(name: str):
     media = {".mp4": "video/mp4", ".webm": "video/webm",
              ".gif": "image/gif"}.get(path.suffix.lower(),
                                       "application/octet-stream")
-    return FileResponse(str(path), media_type=media)
+    return FileResponse(str(path), media_type=media, headers=gallery.file_headers(path))
 
 
 @_router.delete("/api/video/file/{name}",

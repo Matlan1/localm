@@ -88,7 +88,8 @@ In privacy mode a generated image, track or clip is not kept unless you choose t
   process runs it can be seen, played, downloaded, renamed, moved to a folder, used as
   an input and upscaled; the Images, Music and Video pages list such results under the
   page's result, not in History, and **Remove all now** deletes them at once. No
-  sidecar, owner index or other record of them is written. The folder is deleted when
+  sidecar, owner index or other record of them is written, and the browser is told not
+  to store them. The folder is deleted when
   localm stops or restarts. After a crash or a killed process it is deleted at the next
   start (`localm gui`, `serve`, `run` or `mcp`). A file another program holds open at
   that moment is reported in the log and tried again at the next start. Files are

@@ -761,7 +761,8 @@ async def create_image(req: ImageGenerationRequest, request: Request):
 @_router.get("/api/imagine/file/{name}",
              dependencies=[Depends(gallery.require_owner("image"))])
 async def imagine_file(name: str):
-    return FileResponse(str(_image_path(name)), media_type="image/png")
+    path = _image_path(name)
+    return FileResponse(str(path), media_type="image/png", headers=gallery.file_headers(path))
 
 
 @_router.delete("/api/imagine/file/{name}",

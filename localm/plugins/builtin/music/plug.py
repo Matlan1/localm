@@ -317,7 +317,8 @@ async def music_backend():
              dependencies=[Depends(gallery.require_owner("music"))])
 async def music_file(name: str):
     path = _music_path(name)
-    return FileResponse(str(path), media_type=_AUDIO_TYPES.get(path.suffix.lower(), "audio/flac"))
+    return FileResponse(str(path), media_type=_AUDIO_TYPES.get(path.suffix.lower(), "audio/flac"),
+                        headers=gallery.file_headers(path))
 
 
 @_router.delete("/api/music/file/{name}",

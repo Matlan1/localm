@@ -263,7 +263,8 @@ def test_privacy_mode_shows_the_result_and_keeps_nothing(server, kind):
     job, (out, kwargs) = _generate(server, kind)
     assert held.is_held(out) and kwargs["write_sidecar"] is False
     assert any(e.get("type") == "held" for e in job._history)
-    assert client.get(f"{path}/file/{job.result}").status_code == 200
+    shown = client.get(f"{path}/file/{job.result}")
+    assert shown.status_code == 200 and shown.headers["cache-control"] == "no-store"
     listing = client.get(f"{path}/history").json()
     assert listing[key] == []
     assert [i["name"] for i in listing["held"]] == [job.result]
@@ -294,6 +295,7 @@ def test_outside_privacy_mode_nothing_changes(server, kind, monkeypatch):
     assert out.parent == _home() / folder and kwargs["write_sidecar"] is True
     listing = client.get(f"{path}/history").json()
     assert [i["name"] for i in listing[key]] == [job.result] and listing["held"] == []
+    assert "cache-control" not in client.get(f"{path}/file/{job.result}").headers
 
 
 def test_a_held_result_can_be_renamed_moved_and_deleted(server, tmp_path):
