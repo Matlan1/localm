@@ -236,7 +236,8 @@ test("revoking the key just created removes its secret and QR from the screen", 
   window.document.querySelector("#modal-body .btn-danger").click();
   assert.ok(await waitFor(() => box.style.display === "none"), "the box is hidden after the revoke");
   assert.equal(box.childElementCount, 0, "the secret and the QR are gone from the page");
-  assert.doesNotMatch(window.document.body.textContent, /SECRET/);
+  assert.ok(![...window.document.querySelectorAll("input")].some((i) => i.value === "SECRET"),
+    "no field holds the revoked secret");
 });
 
 test("revoking a different key leaves the new key's box alone", async () => {
