@@ -893,6 +893,7 @@ def test_a_path_longer_than_260_characters_is_moved_and_put_back(tmp_path):
                    old_files=um.stated({"VERSION": "1", deep: "old"}))
     live = long_root.joinpath(*deep.split("/"))
     assert len(str(root / deep)) > 260
+    assert str(mover.area(root, ID, mover.FILES).base).startswith("\\\\?\\")
     mover.forward(root, ID, plan)
     assert live.read_bytes() == b"new"
     assert undo(root).state == "old"
