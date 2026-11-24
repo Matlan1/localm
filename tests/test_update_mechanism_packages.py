@@ -480,10 +480,11 @@ def test_a_dry_run_that_makes_another_venv_is_refused(text):
 
 def test_the_lines_of_a_dry_run_are_read():
     text = ("Would use project environment at: .venv\nWould download 1 package\n"
-            "Would uninstall 2 packages\nWould install 2 packages\n - Alpha_X==1.0\n"
-            " + alpha-x==2.0 (from file:///w)\n ~ beta==1.0\n")
-    assert packages.changes(text) == ([("alpha-x", "1.0"), ("beta", "1.0")],
-                                      [("alpha-x", "2.0"), ("beta", "1.0")])
+            "Would uninstall 2 packages\nWould install 3 packages\n - Alpha_X==1.0\n"
+            " + alpha-x==2.0 (from file:///w)\n ~ beta==1.0\n + localm @ file:///a b/c\n")
+    assert packages.changes(text) == (
+        [("alpha-x", "1.0"), ("beta", "1.0")],
+        [("alpha-x", "2.0"), ("beta", "1.0"), ("localm", "")])
 
 
 # ------------------------------------------------------- uv does something else

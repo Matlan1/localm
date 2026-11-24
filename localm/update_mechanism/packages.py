@@ -27,7 +27,7 @@ from .mover import PACKAGES, REMOVE, Area, Op, Plan, Refused, StepFailed
 #: Seconds the way back waits for a uv that is still working in the venv.
 UV_WAIT_S = 120.0
 _OWN = "localm"
-_LINE = re.compile(r" ([-+~]) ([A-Za-z0-9][A-Za-z0-9._-]*)==(\S+)(?: \(.*\))?")
+_LINE = re.compile(r" ([-+~]) ([A-Za-z0-9][A-Za-z0-9._-]*)(?:==(\S+)(?: \(.*\))?| @ .+)")
 _COUNT = re.compile(r"Would (uninstall|install) (\d+) packages?")
 _OTHER_VENV = re.compile(r"Would (?:replace|create|remove)\b.*\benvironment\b")
 
@@ -69,8 +69,9 @@ def _last(output: str) -> str:
 
 def changes(output: str) -> tuple:
     """``(removed, installed)`` from the output of a uv dry run, each a list of
-    ``(canonical name, version)``. Raises :class:`Refused` when uv would make or
-    replace a venv, or when its counts do not match the packages it names."""
+    ``(canonical name, version)``, the version empty for a package from a folder.
+    Raises :class:`Refused` when uv would make or replace a venv, or when its counts
+    do not match the packages it names."""
     canon = shared.updater_components._canon
     removed, installed = [], []
     counts = {"uninstall": 0, "install": 0}
@@ -82,7 +83,7 @@ def changes(output: str) -> tuple:
             counts[count[1]] += int(count[2])
         found = _LINE.fullmatch(line.rstrip())
         if found:
-            entry = (canon(found[2]), found[3])
+            entry = (canon(found[2]), found[3] or "")
             if found[1] in "-~":
                 removed.append(entry)
             if found[1] in "+~":

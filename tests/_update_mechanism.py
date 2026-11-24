@@ -77,7 +77,7 @@ def stated(files: dict) -> dict:
 
 
 def statement(files: dict) -> str:
-    return json.dumps({"files": sorted(files)})
+    return json.dumps({"files": sorted(set(files) - set(USER))})
 
 
 def install(root: Path, old: dict = OLD) -> Path:
