@@ -166,6 +166,27 @@ def test_logout_with_a_live_session_still_needs_the_csrf_token():
         assert sessions.lookup(sid) is not None
 
 
+@pytest.mark.parametrize("bearer", [False, True])
+def test_an_api_key_is_never_set_as_a_cookie(bearer):
+    from localm import auth
+    scoped = auth.create_key("k", ["chat"])["key"]
+    with _client() as a:
+        name, sid = _login(a)
+        for key in (SECRET, scoped):
+            headers = {"Authorization": f"Bearer {key}"} if bearer else {}
+            for jar in ({SESSION_COOKIE: key}, {f"{SESSION_COOKIE}_8791": key},
+                        {name: key}, {SESSION_COOKIE: sid, f"{SESSION_COOKIE}_1": key},
+                        {f"{SESSION_COOKIE}_1": key, SESSION_COOKIE: sid}):
+                for method, path in (("GET", "/api/session"),
+                                     ("POST", "/api/session/logout"), ("GET", "/")):
+                    _with_cookies(a, jar)
+                    r = a.request(method, path, headers=headers)
+                    assert key not in " ".join(r.headers.get_list("set-cookie"))
+                if not bearer and list(jar.values()) == [key]:
+                    _with_cookies(a, jar)
+                    assert a.get("/api/session").json()["authed"] is False
+
+
 def test_https_uses_a_secure_cookie_of_its_own_name():
     with _client() as a:
         plain, _ = _login(a)

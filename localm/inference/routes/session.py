@@ -363,7 +363,9 @@ def register(app: FastAPI, ctx) -> None:
             csrf = (_hs.csrf_token_for(request, token)
                     if (held is not None and source == "cookie" and token) else "")
             if csrf and _hs.session_cookie_name(request) not in request.cookies:
-                _hs.set_session_cookie(request, response, token)
+                sid = next(iter(_hs.own_session_cookies(request).values()), None)
+                if sid is not None:
+                    _hs.set_session_cookie(request, response, sid)
             return {"authed": held is not None,
                     "scopes": sorted(held) if held else [],
                     "required": configured or require_auth_enabled(),

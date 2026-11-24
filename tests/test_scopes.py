@@ -105,15 +105,10 @@ def test_unknown_scope_refusal_has_no_hint_without_a_close_known_scope():
 def test_unknown_scope_refusal_passes_localm_and_installed_plugin_scopes():
     assert scopes.unknown_scope_refusal(sorted(scopes.all_known_scopes())) is None
     assert scopes.unknown_scope_refusal([]) is None
+    assert scopes.unknown_scope_refusal(None) is None
     assert scopes.unknown_scope_refusal(["qzxjvk"], installed=["qzxjvk"]) is None
     assert scopes.unknown_scope_refusal(["qzxjvk"], installed=None) == (
         "Unknown scope(s): qzxjvk." + _TAIL)
-
-
-def test_unknown_scope_warnings_of_known_or_empty_scopes_is_an_empty_list():
-    assert scopes.unknown_scope_warnings(sorted(scopes.all_known_scopes())) == []
-    assert scopes.unknown_scope_warnings([]) == []
-    assert scopes.unknown_scope_warnings(None) == []
 
 
 def test_normalize():

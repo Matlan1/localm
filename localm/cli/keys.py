@@ -498,9 +498,11 @@ def key_create(name, scopes, fs_access, rag_roots, expires_in, allow_privileged)
         console.print(f"[yellow]Note:[/yellow] {why}  [bold]localm key generate[/bold]")
     # Catch at grant: if this key unlocks a plugin the host cannot serve yet
     # (not installed, or missing its pip extras), say so right here.
+    warns, fixes = [], []
     try:
-        warns = mgr.scope_deps_warnings(list(scopes)) if mgr is not None else []
-        fixes = mgr.scope_fix_commands(list(scopes)) if warns else []
+        if mgr is not None:
+            warns = mgr.scope_deps_warnings(list(scopes))
+            fixes = mgr.scope_fix_commands(list(scopes))
     except Exception:
         warns, fixes = [], []
     for w in warns:
