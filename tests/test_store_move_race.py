@@ -168,26 +168,31 @@ class TestTheRegistryUpdateAfterAMove:
             return real(fn)
         monkeypatch.setattr(mm, "update_registry", _update)
 
-    def test_a_failure_is_printed_and_never_raised(self, home, tmp_path, printed, monkeypatch):
+    def test_a_failure_is_printed_and_puts_the_folder_back(
+            self, home, tmp_path, printed, monkeypatch):
         src = _hf(tmp_path / "pile")
         mm._register("model", src)
+        before = load_registry()
         self._lock_timeout(monkeypatch)
-        _registry._repoint_directory_references(src, home / "models" / "model")
-        assert any("could not be updated" in line and "registry.json.lock is held" in line
-                   for line in printed), printed
+        assert mm.add_local(str(src), store="move") is False
+        assert (src / "model.safetensors").is_file() and load_registry() == before
+        assert not (home / "models" / "model").exists()
+        assert any("registry.json.lock is held" in line for line in printed), printed
 
-    def test_the_rest_of_a_multi_folder_import_goes_on(
+    def test_each_folder_of_a_multi_folder_import_is_tried_and_put_back(
             self, home, tmp_path, printed, monkeypatch):
         pile = tmp_path / "pile"
         _hf(pile, "one")
         _hf(pile, "two", payload=b"y" * 64)
         assert mm.add_local(str(pile)) is True
+        before = load_registry()
         self._lock_timeout(monkeypatch)
         mm.add_local(str(pile), store="move")
-        assert (home / "models" / "one" / "model.safetensors").read_bytes() == b"x" * 64
-        assert (home / "models" / "two" / "model.safetensors").read_bytes() == b"y" * 64
-        assert not (pile / "one").exists() and not (pile / "two").exists()
-        assert sum("could not be updated" in line for line in printed) == 2, printed
+        assert (pile / "one" / "model.safetensors").read_bytes() == b"x" * 64
+        assert (pile / "two" / "model.safetensors").read_bytes() == b"y" * 64
+        assert not (home / "models" / "one").exists() and not (home / "models" / "two").exists()
+        assert load_registry() == before
+        assert sum("registry.json.lock is held" in line for line in printed) == 2, printed
 
 
 class TestMovingAFolderRegisteredUnderAnotherName:

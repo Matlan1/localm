@@ -4,6 +4,8 @@ registers with that type instead of crashing after the download, and no media
 type a tensor probe can return is missing its console wording. Only the
 network is faked; the typing and registration run for real."""
 
+import hashlib
+
 import pytest
 
 import localm.model_manager as mm
@@ -36,9 +38,11 @@ def test_an_auto_typed_pull_registers_the_addon_type(hf_network, spec, filename,
 
 @pytest.mark.parametrize("spec,filename,shapes,want", CASES)
 def test_a_re_pull_of_an_already_downloaded_addon_registers_it(
-        hf_network, spec, filename, shapes, want):  # noqa: F811
+        hf_network, monkeypatch, spec, filename, shapes, want):  # noqa: F811
     hf_network["body"] = _safetensors_bytes(shapes)
     (hf_network["models"] / filename).write_bytes(hf_network["body"])
+    digest = hashlib.sha256(hf_network["body"]).hexdigest()
+    monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo, fn: digest)
     assert mm.pull_model(spec) is True
     assert hf_network["downloads"] == 0
     assert _entry(filename)["model_type"] == want

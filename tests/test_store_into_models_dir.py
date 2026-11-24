@@ -501,7 +501,7 @@ class TestProjectorTravel:
         assert dest.is_file() and not proj.exists()
         assert mm.get_model_mmproj("gemma-3-4b-it-Q8_0") == str(dest.resolve())
 
-    def test_recorded_projector_is_repointed_even_when_a_later_transfer_fails(
+    def test_a_later_transfer_that_fails_puts_the_recorded_projector_back(
             self, tmp_path, isolated_home, monkeypatch):
         other = _text_model(tmp_path / "elsewhere" / "gemma-3-4b-it-Q8_0.gguf", 2560)
         src = tmp_path / "downloads"
@@ -525,43 +525,26 @@ class TestProjectorTravel:
         except RuntimeError as e:
             error = e
 
-        dest = _models_dir() / "mmproj-F16.gguf"
-        assert dest.is_file() and not mine.exists()
-        assert load_registry()["gemma-3-4b-it-Q8_0"]["mmproj"] == str(dest.resolve())
+        assert mine.is_file() and model.is_file() and list(_models_dir().iterdir()) == []
+        assert load_registry()["gemma-3-4b-it-Q8_0"]["mmproj"] == str(mine.resolve())
         assert error is not None and "Copy verification failed" in str(error)
 
-    def test_repoint_failure_does_not_replace_the_transfer_error(
-            self, tmp_path, isolated_home, monkeypatch, wide_console, capsys):
+    def test_a_registry_that_cannot_be_updated_moves_neither_model_nor_projector(
+            self, tmp_path, isolated_home, monkeypatch):
         other = _text_model(tmp_path / "elsewhere" / "gemma-3-4b-it-Q8_0.gguf", 2560)
         src = tmp_path / "downloads"
         model = _text_model(src / "gemma-3-4b-it-Q4_K_M.gguf", 2560)
-        _text_model(src / "qwen2.5-vl-7b-instruct-Q4_K_M.gguf", 3584, arch="qwen2")
         mine = _projector(src / "mmproj-F16.gguf", 2560)
-        _gguf(src, "mmproj-model-f16.gguf")          # unknown width: copied, shared
         assert add_local(str(other)) is True
         assert mm.persist_cli_mmproj("gemma-3-4b-it-Q8_0", str(mine)) is not None
-        real_sha = mm._sha256_file
-
-        def _sha(path, progress=None):
-            if Path(path).name == "mmproj-model-f16.gguf":
-                return "source" if Path(path).parent == src else "corrupted copy"
-            return real_sha(path, progress)
 
         def _registry_locked(mutator):
             raise OSError("registry is locked")
 
-        monkeypatch.setattr(mm, "_sha256_file", _sha)
         monkeypatch.setattr(mm, "update_registry", _registry_locked)
-        error = None
-        try:
+        with pytest.raises(OSError, match="registry is locked"):
             mm._store_into_models_dir(model, "move")
-        except Exception as e:
-            error = e
-
-        out = capsys.readouterr().out
-        assert isinstance(error, RuntimeError), f"the transfer error was replaced: {error!r}"
-        assert "Copy verification failed" in str(error)
-        assert "Could not update the registry entries that record mmproj-F16.gguf" in out
+        assert mine.is_file() and model.is_file() and list(_models_dir().iterdir()) == []
 
     def test_storing_a_projector_file_repoints_entries_that_record_it(
             self, tmp_path, isolated_home):

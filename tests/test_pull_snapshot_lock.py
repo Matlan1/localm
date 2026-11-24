@@ -162,8 +162,10 @@ class TestTheHolderLeaving:
 class TestTheLockOfAPull:
     def test_a_sequential_repull_works(self, hub):  # noqa: F811
         assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is True
-        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm", redownload=True) is True
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is True
         assert hub.snapshots == [("o/r", COMMIT)]
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm", redownload=True) is True
+        assert hub.snapshots == [("o/r", COMMIT)] * 2
 
     def test_a_failed_pull_releases_the_folder(self, hub):  # noqa: F811
         hub.snapshot_error = OSError("disk full")

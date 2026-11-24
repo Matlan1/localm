@@ -13,7 +13,6 @@ import os
 import re
 import shutil
 import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -43,10 +42,12 @@ from ._transfer import meter_tqdm_class
 from .gguf import _safe_models_filename
 from .gguf import first_split_part
 from .gguf import gguf_n_embd
+from .gguf import TRANSFER_TEMP_PREFIX
 from .gguf import logical_model_path
 from .gguf import split_gguf_parts
 from .registry import _detect_local_model_type, _media_component_type, _sanitize_name
 from .registry import find_aliases_by_path
+from .registry import SNAPSHOT_CLAIM as _SNAPSHOT_CLAIM
 
 # HF_ENDPOINT / HF_HUB_ENDPOINT are ambient env vars localm never exposes as a
 # setting anywhere (no settings_schema.py key, no CLI flag, no docs). Pinned
@@ -555,14 +556,17 @@ def _etag_from_head(resp: Any) -> "str | None":
 
 
 
-def _progress_file_info(target_parts: list[Path]) -> "tuple[str | None, int, int]":
-    """(current-file name, 1-based index, count) for a multi-part download, derived
-    from which parts have already landed at their final path - the first one not yet
-    present is the file currently downloading. Cheap existence checks only. Returns
+def _progress_file_info(target_parts: list[Path], finished: Optional[int] = None
+                        ) -> "tuple[str | None, int, int]":
+    """(current-file name, 1-based index, count) for a multi-part download: the
+    part after the *finished* ones (fetched in order), or, without that count, the
+    first part not yet present at its path. Cheap existence checks only. Returns
     (None, 0, 0) for a single-file download (nothing to disambiguate)."""
     n = len(target_parts)
     if n <= 1:
         return (None, 0, 0)
+    if finished is not None:
+        return (target_parts[min(finished, n - 1)].name, min(finished + 1, n), n)
     done = sum(1 for p in target_parts if p.exists())
     cur = next((p for p in target_parts if not p.exists()), target_parts[-1])
     return (cur.name, min(done + 1, n), n)
@@ -753,10 +757,11 @@ class _ProgressRun:
     few seconds. Does nothing when none of them is wanted."""
 
     def __init__(self, measure, total: int, *, parts: "list[Path] | None" = None,
-                 label: str = "") -> None:
+                 label: str = "", finished: "Callable[[], int] | None" = None) -> None:
         self._measure = measure
         self._total = total
         self._parts = parts or []
+        self._finished = finished
         self._label = label
         self._gui = os.environ.get("LOCALM_PROGRESS_JSON") == "1"
         self._listener = _PROGRESS_LISTENER
@@ -800,6 +805,11 @@ class _ProgressRun:
                     logger.warning("download progress reporting stopped: %s", e)
                 return
 
+    def _file_info(self) -> "tuple[str | None, int, int]":
+        if self._finished is None:
+            return _progress_file_info(self._parts)
+        return _progress_file_info(self._parts, self._finished())
+
     def _tick(self) -> None:
         tracker = self._tracker
         if tracker is None:
@@ -809,7 +819,7 @@ class _ProgressRun:
             key = (downloaded, None if rate is None else int(rate // 1000))
             if key != self._last_key:
                 self._last_key = key
-                fn, fi, fc = _progress_file_info(self._parts)
+                fn, fi, fc = self._file_info()
                 _emit_progress(downloaded, self._total, name=fn, index=fi, count=fc,
                                zero_is_unknown=True, rate=rate, eta=eta,
                                saved=tracker.saved)
@@ -838,7 +848,7 @@ class _ProgressRun:
         if self._bar is not None:
             self._bar.stop()
         if self._gui:
-            fn, fi, fc = _progress_file_info(self._parts)
+            fn, fi, fc = self._file_info()
             final = self._total if (succeeded and self._total) else self._measure()
             _emit_progress(final, self._total, name=fn, index=fi, count=fc)
 
@@ -937,7 +947,8 @@ def _job_bytes_measure(target_parts: list[Path], total_size: int, *,
 def _download_progress(target_parts: list[Path], total_size: int, *,
                        base_dir: "Path | None" = None,
                        rel_parts: "list[str] | None" = None,
-                       etags: "dict[str, str | None] | None" = None):
+                       etags: "dict[str, str | None] | None" = None,
+                       finished: "Callable[[], int] | None" = None):
     """Report progress while files land under *base_dir*: JSON frames in GUI
     mode (LOCALM_PROGRESS_JSON=1), a bar on a terminal, and lines for a
     progress listener. A total of 0 means the size could not be determined:
@@ -965,7 +976,8 @@ def _download_progress(target_parts: list[Path], total_size: int, *,
     label = target_parts[0].name if target_parts else ""
     if len(target_parts) > 1:
         label += f" (+{len(target_parts) - 1} more)"
-    run = _ProgressRun(_downloaded_bytes, total_size, parts=target_parts, label=label)
+    run = _ProgressRun(_downloaded_bytes, total_size, parts=target_parts, label=label,
+                       finished=finished)
     run.start()
     try:
         with _record_stop(_downloaded_bytes, total_size):
@@ -1289,7 +1301,8 @@ def _pull_remote(model_spec: str, spec: str, name: Optional[str],
     if spec.startswith("http://") or spec.startswith("https://"):
         res = _pull_url(spec, _sanitize_name(name or _stem_from_url(spec)),
                          expected_sha256=expected_sha256, redownload=redownload,
-                         model_type=detected_type, type_user_set=type_user_set)
+                         model_type=detected_type, type_user_set=type_user_set,
+                         type_is_auto=type_is_auto)
     elif "/" in spec:
         if ":" in spec or spec.rsplit("/", 1)[-1].endswith(".gguf"):
             # owner/repo:file.gguf  or  owner/repo/file.gguf  -> single GGUF file
@@ -1580,7 +1593,6 @@ def _revision_record_differs(model_name: str, revision: "Optional[HfRevision]") 
         (entry.get("revision") or None) != (revision.ref if revision else None))
 
 
-_SNAPSHOT_CLAIM = ".localm-revision.json"
 
 
 def _snapshot_claim_held_by_other(dest: Path, repo_id: str,
@@ -1879,8 +1891,8 @@ def _mmproj_download_dest(base_dir: Path, candidate: str, repo_id: str,
     one comparison or written to; it may be another entry's own correctly
     recorded projector. When the occupied file differs from the digest the repo
     publishes and the origin recorded beside it says it came from *repo_id* as
-    *candidate*, it is that repo's own damaged or outdated copy: it is deleted and the plain name is
-    returned for a fresh download. A numbered name that already holds this
+    *candidate*, it is that repo's own damaged or outdated copy: the plain name is
+    returned for a fresh download, which replaces it once verified. A numbered name that already holds this
     repo's own *candidate* (origin recorded, digest confirmed) is returned with
     the download skipped. Returns ``(None, False)`` when every
     numbered name up to ``_MAX_MMPROJ_COLLISION_SUFFIX`` is also taken."""
@@ -1892,18 +1904,11 @@ def _mmproj_download_dest(base_dir: Path, candidate: str, repo_id: str,
         return dest, True
     if _mm._hf_file_sha256(repo_id, candidate) and _mmproj_origin_is(dest, repo_id, candidate):
         from rich.markup import escape
-        try:
-            dest.unlink(missing_ok=True)
-        except OSError as e:
-            logger.warning("could not delete the damaged %s: %s", dest, e)
-        else:
-            console.print(
-                f"[yellow]{escape(dest.name)} does not match the digest {escape(repo_id)} "
-                "publishes - deleted, fetching it again.[/yellow]")
-            return dest, False
-    stem, suffix = Path(candidate).stem, Path(candidate).suffix
-    for n in range(2, _MAX_MMPROJ_COLLISION_SUFFIX + 1):
-        free = base_dir / f"{stem}-{n}{suffix}"
+        console.print(
+            f"[yellow]{escape(dest.name)} does not match the digest {escape(repo_id)} "
+            "publishes - fetching it again.[/yellow]")
+        return dest, False
+    for free in _numbered_mmproj_names(base_dir / candidate):
         if not free.exists():
             return free, False
         if (_mmproj_origin_is(free, repo_id, candidate)
@@ -1912,53 +1917,97 @@ def _mmproj_download_dest(base_dir: Path, candidate: str, repo_id: str,
     return None, False
 
 
-def _download_mmproj_file(repo_id: str, remote_name: str, dest: Path, base_dir: Path) -> None:
-    """Download *remote_name* from *repo_id* to *dest*. May raise; every call
-    site wraps this in its own try/except.
+def _download_mmproj_file(repo_id: str, remote_name: str, dest: Path, base_dir: Path) -> Path:
+    """Download *remote_name* from *repo_id* to *dest* and return where it is. May
+    raise; every call site wraps this in its own try/except.
 
-    When *dest* is the plain *base_dir* / *remote_name*, downloads straight
-    there. Otherwise - the plain name is occupied by a confirmed-different
-    file - downloads into a private scratch directory under *base_dir* first
-    and moves the result to *dest*: huggingface_hub's local-dir download mode
-    names the downloaded file after *remote_name* alone, so downloading
-    straight into *base_dir* would land on the occupied name instead of
-    *dest*."""
+    Downloads into the hidden staging folder under *base_dir* and verifies there;
+    *dest* is written, or replaced, only with a verified file. An existing *dest*
+    that cannot be replaced (in use) stays, and the file takes a free numbered
+    name. The name is locked
+    for the whole download (:func:`_part_lock`): while another pull fetches the
+    same projector this one waits, then uses that file."""
     from huggingface_hub import hf_hub_download
     _ensure_hf_resumable_download()
-    expected = _mm._hf_file_sha256(repo_id, remote_name)
-    extra = _at_commit(expected)
-    plain = base_dir / remote_name
-    token = _hf_token()
-    if dest == plain:
-        with _record_stop(_job_bytes_measure([dest], 0, base_dir=base_dir,
-                                             rel_parts=[remote_name]), 0):
-            local = hf_hub_download(repo_id=repo_id, filename=remote_name,
-                                     local_dir=str(base_dir), endpoint=_HF_ENDPOINT,
-                                     token=token, tqdm_class=meter_tqdm_class(), **extra)
-        if Path(local) != dest:
-            shutil.move(local, dest)
-    else:
-        scratches: list[Path] = []
-        with _record_stop(lambda: sum(_job_bytes_measure([], 0, base_dir=d)()
-                                      for d in scratches if d.is_dir()), 0):
-            with tempfile.TemporaryDirectory(dir=base_dir, prefix=".mmproj-") as scratch:
-                scratches.append(Path(scratch))
+    stage_dir = base_dir / _REPO_FOLDER_STAGING
+    before = _mmproj_stamp(dest)
+    with _part_lock_waiting(remote_name):
+        if before != _mmproj_stamp(dest) and _mmproj_origin_is(dest, repo_id, remote_name):
+            return dest
+        expected = _mm._hf_file_sha256(repo_id, remote_name)
+        _take_over_partials(base_dir, stage_dir, remote_name)
+        with _HeldDownloads(stage_dir) as held:
+            with _record_stop(_job_bytes_measure([stage_dir / remote_name], 0,
+                                                 base_dir=stage_dir,
+                                                 rel_parts=[remote_name]), 0):
                 local = hf_hub_download(repo_id=repo_id, filename=remote_name,
-                                         local_dir=scratch, endpoint=_HF_ENDPOINT,
-                                         token=token, tqdm_class=meter_tqdm_class(),
-                                         **extra)
-                shutil.move(local, dest)
-    if expected is None:
-        _note_unverified(repo_id, [remote_name])
-        _record_mmproj_origin(dest, repo_id, remote_name, None)
-        return
-    actual = _verify_digest(dest, purpose="to check the vision projector").lower()
-    if actual != expected:
-        dest.unlink(missing_ok=True)
-        raise RuntimeError(
-            f"sha256 mismatch for {remote_name}: expected {expected[:16]}..., "
-            f"got {actual[:16]}... - the file was deleted")
-    _record_mmproj_origin(dest, repo_id, remote_name, actual)
+                                        local_dir=str(stage_dir), endpoint=_HF_ENDPOINT,
+                                        token=_hf_token(), tqdm_class=meter_tqdm_class(),
+                                        **_at_commit(expected))
+                held.hold(remote_name, remote_name, Path(local), expected)
+            path = held.files[remote_name]
+            actual: Optional[str] = None
+            if expected is None:
+                _note_unverified(repo_id, [remote_name])
+            else:
+                actual = _verify_digest(path, purpose="to check the vision projector").lower()
+                if actual != expected:
+                    held.discard()
+                    raise RuntimeError(
+                        f"sha256 mismatch for {remote_name}: expected {expected[:16]}..., "
+                        f"got {actual[:16]}... - the file was deleted")
+            os.utime(path)
+            try:
+                os.replace(path, dest)
+            except OSError:
+                free = next((f for f in _numbered_mmproj_names(dest) if not f.exists()), None)
+                if free is None or not os.path.lexists(dest):
+                    raise
+                logger.warning("%s could not be replaced; the new file is %s", dest, free)
+                os.replace(path, free)
+                dest = free
+        _record_mmproj_origin(dest, repo_id, remote_name, actual)
+        return dest
+
+
+def _numbered_mmproj_names(plain: Path) -> "list[Path]":
+    """The names ``<stem>-2`` to ``<stem>-N`` a projector may take beside *plain*."""
+    return [plain.with_name(f"{plain.stem}-{n}{plain.suffix}")
+            for n in range(2, _MAX_MMPROJ_COLLISION_SUFFIX + 1)]
+
+
+def _mmproj_stamp(dest: Path) -> "tuple[int, int] | None":
+    """``(size, mtime)`` of *dest*, or None when it does not exist."""
+    try:
+        st = dest.stat()
+    except OSError:
+        return None
+    return st.st_size, st.st_mtime_ns
+
+
+@contextlib.contextmanager
+def _part_lock_waiting(filename: str):
+    """:func:`_part_lock`, waiting for another download of *filename* to finish.
+    Raises :class:`PullLockUnavailable` when the lock cannot be taken at all."""
+    said = False
+    with contextlib.ExitStack() as held:
+        while True:
+            try:
+                held.enter_context(_part_lock(filename))
+                break
+            except PullLockUnavailable:
+                raise
+            except PullInFlight:
+                if not said:
+                    from rich.markup import escape
+                    console.print(f"[dim]Waiting for another download of {escape(filename)} "
+                                  "to finish...[/dim]")
+                    said = True
+                time.sleep(_LOCK_WAIT_POLL_SECONDS)
+        yield
+
+
+_LOCK_WAIT_POLL_SECONDS = 0.5
 
 
 def _repoint_unrecorded_projector(model_path: Path, plain: Path, fetched: Path,
@@ -2056,7 +2105,7 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path, *,
     if not reuse_ok:
         console.print(f"Pulling projector (mmproj): {escape(candidate)}")
         try:
-            _download_mmproj_file(repo_id, candidate, dest, base_dir)
+            dest = _download_mmproj_file(repo_id, candidate, dest, base_dir)
         except Exception as e:
             console.print(
                 f"[yellow]Found a vision projector ({escape(candidate)}) in "
@@ -2189,7 +2238,7 @@ def _fetch_explicit_mmproj(mmproj_spec: str, base_dir: Path,
     if not reuse_ok:
         console.print(f"Pulling mmproj: {escape(mmproj_spec)}")
         try:
-            _download_mmproj_file(m_repo, safe, dest, base_dir)
+            dest = _download_mmproj_file(m_repo, safe, dest, base_dir)
         except Exception as e:
             console.print(f"[red]mmproj download failed:[/red] {escape(str(e))}")
             return None
@@ -2258,6 +2307,43 @@ def _content_media_type(path: Path, reg_type: Optional[str]) -> Optional[str]:
     return media_type
 
 
+def _detected_file_type(path: Path, model_type: str, type_is_auto: bool,
+                        architecture: Optional[str]) -> str:
+    """The registry type of the single downloaded file *path*: *model_type* when
+    it was given (*type_is_auto* False), else what the file's own content says.
+    *architecture* is its GGUF ``general.architecture``. Prints a note when the
+    content decides."""
+    if not type_is_auto:
+        return model_type
+    if not path.name.lower().endswith(".gguf"):
+        return _content_media_type(path, model_type) or model_type
+    if model_type != "llm":
+        return model_type
+    if _mm.gguf_adapter_kind(path) is not None:
+        console.print("[dim]Detected as a LoRA adapter (GGUF metadata). "
+                      "Attach it with 'localm adapter attach'.[/dim]")
+        return "lora"
+    if _mm.gguf_is_mmproj(path):
+        console.print("[dim]Detected as a vision projector (GGUF metadata).[/dim]")
+        return "mmproj"
+    if _mm.gguf_decision_signal(path):
+        console.print(_DECISION_DETECTION_NOTE)
+        return "decision"
+    if _mm.gguf_embedding_signal(path):
+        console.print(_embedding_detection_note(path))
+        return "embedding"
+    non_chat = _mm.gguf_non_chat_model_type(architecture)
+    if non_chat:
+        console.print(_non_chat_detection_note(architecture))
+        return non_chat
+    media_type = _mm.gguf_media_component_type(path)
+    if media_type is not None:
+        console.print(f"[dim]Detected as {_media_type_phrase(media_type)} (tensor names "
+                      "in the GGUF).[/dim]")
+        return media_type
+    return model_type
+
+
 def _mmproj_for_registration(
     reg_type: str,
     repo_id: str,
@@ -2282,6 +2368,136 @@ def _mmproj_for_registration(
     if pinned_revision:
         return None
     return _maybe_fetch_repo_mmproj(repo_id, filename, base_dir, speech=reg_type == "tts")
+
+
+class _HeldDownloads:
+    """The finished files of one pull that have not been verified yet.
+
+    :meth:`hold` renames a finished download to a temp-file name of that same
+    download (see :func:`_hf_incomplete_path`), owned by this process. Until it is
+    verified and placed it therefore counts as partial data: no scan takes it for
+    a model, and a pull that is stopped now is listed as interrupted and goes on
+    from it. Used as a context manager; on exit a file still held is left as the
+    partial data of the download."""
+
+    def __init__(self, stage_dir: Path) -> None:
+        self._stage_dir = stage_dir
+        self.files: dict[str, Path] = {}
+
+    def __enter__(self) -> "_HeldDownloads":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        for held in self.files.values():
+            with _INFLIGHT_LOCK:
+                _INFLIGHT_PARTIALS.discard(str(held))
+            if not os.path.lexists(held):
+                _unlink_quiet(_partial_owner_path(held))
+
+    def hold(self, part: str, rel: str, staged: Path, etag: Optional[str]) -> None:
+        """Take over *staged*, the finished download of the repo file *rel*."""
+        inc = _hf_incomplete_path(self._stage_dir, rel, etag or "unverified")
+        if inc is None:
+            inc = staged.with_name(staged.name + ".incomplete")
+        held = inc.with_name(f"{inc.stem}.{uuid.uuid4().hex[:8]}.incomplete")
+        held.parent.mkdir(parents=True, exist_ok=True)
+        with _INFLIGHT_LOCK:
+            _INFLIGHT_PARTIALS.add(str(held))
+        self.files[part] = held
+        _write_partial_owner(held)
+        os.replace(staged, held)
+
+    def discard(self) -> None:
+        """Delete every held file."""
+        for held in self.files.values():
+            _unlink_quiet(held)
+
+
+def _second_name(path: Path) -> Path:
+    """Keep the bytes of *path* under a hidden name beside it and return that name.
+    Where hard links work, *path* itself stays; elsewhere it is renamed."""
+    tag = uuid.uuid4().hex[:8]
+    linked = path.with_name(f"{TRANSFER_TEMP_PREFIX}{path.name}.{os.getpid()}.{tag}")
+    try:
+        os.link(path, linked)
+        return linked
+    except OSError as e:
+        logger.debug("cannot link %s (%s); renaming it", path, e)
+    renamed = path.with_name(f".{path.name}.{tag}.old")
+    os.rename(path, renamed)
+    return renamed
+
+
+def _place_downloads(held: "dict[str, Path]", base_dir: Path) -> None:
+    """Move the verified files *held* (name to temp file) into *base_dir* under
+    their names, replacing what is there. All or nothing: when one cannot be
+    placed, the ones already placed and the files they replaced go back and
+    OSError is raised. The first part of a split model is placed last, so a scan
+    never sees it without the others."""
+    if len(held) == 1:
+        (name, src), = held.items()
+        (base_dir / name).parent.mkdir(parents=True, exist_ok=True)
+        os.utime(src)
+        os.replace(src, base_dir / name)
+        return
+    placed: list[tuple[Path, Path]] = []
+    aside: list[tuple[Path, Path]] = []
+    try:
+        for name, src in reversed(list(held.items())):
+            final = base_dir / name
+            if os.path.lexists(final):
+                aside.append((_second_name(final), final))
+            final.parent.mkdir(parents=True, exist_ok=True)
+            os.utime(src)
+            os.replace(src, final)
+            placed.append((src, final))
+    except BaseException:
+        for src, final in reversed(placed):
+            with contextlib.suppress(OSError):
+                try:
+                    os.link(final, src)
+                except OSError:
+                    os.replace(final, src)
+                else:
+                    if not any(f == final for _old, f in aside):
+                        os.unlink(final)
+        for old, final in reversed(aside):
+            try:
+                if os.path.lexists(final) and os.path.samefile(old, final):
+                    os.unlink(old)
+                else:
+                    os.replace(old, final)
+            except OSError as e:
+                logger.error("could not put %s back to %s: %s", old, final, e)
+                from rich.markup import escape
+                console.print(f"[red]{escape(str(final))} could not be put back; it is "
+                              f"at {escape(str(old))}.[/red]")
+        raise
+    for old, _final in aside:
+        _unlink_quiet(old)
+
+
+def _take_over_partials(old_base: Path, new_base: Path, rel: str) -> None:
+    """Move the temp files of *rel* that a localm which staged it in *old_base* left
+    there to *new_base*, so a pull continues from them. Only temp files whose
+    owner is proven gone are moved, while the download lock of *old_base* is
+    held; a failure leaves them where they are."""
+    try:
+        from huggingface_hub._local_folder import _short_hash, get_local_download_paths
+        metadata = old_base / ".cache" / "huggingface" / "download" / (rel + ".metadata")
+        prefix = _short_hash(metadata.name) + "."
+        found = [f for f in metadata.parent.glob("*.incomplete") if f.name.startswith(prefix)]
+        if not found:
+            return
+        target = get_local_download_paths(new_base, rel).metadata_path.parent
+        with _hold_download_lock(get_local_download_paths(old_base, rel).lock_path):
+            for f in found:
+                if not _partial_owner_is_gone(f, lock_held=True):
+                    continue
+                os.replace(f, target / f.name)
+                _unlink_quiet(_partial_owner_path(f))
+    except (OSError, PullInFlight, ImportError, AttributeError) as e:
+        logger.debug("not taking over the partial data of %s in %s: %s", rel, old_base, e)
 
 
 def _record_url(hf_hub_url, repo_id: str, rel: str, **kw) -> Optional[str]:
@@ -2339,6 +2555,13 @@ def _pull_gguf_file(
     plain 'llm', the HF repo's own file listing is checked for a
     vision-projector (mmproj) sibling and, if found, fetched and recorded on
     the registry entry.
+
+    The files are downloaded into a hidden staging folder under the destination
+    and verified there (:class:`_HeldDownloads`); they get their own names only
+    then, together. ``redownload`` fetches files that are already there again and
+    replaces them, unless a registry entry from another source would change what
+    it loads. Every part's name is locked for the whole pull
+    (:func:`_part_lock`).
     """
     # spec (and repo_id/filename/parts derived from it), the resolved
     # `part`/`want`/`expected` values below, and every exception's text are all
@@ -2348,7 +2571,7 @@ def _pull_gguf_file(
     # unescaped value is markup-TAG-INJECTION.
     from rich.markup import escape
     try:
-        from huggingface_hub import hf_hub_download, hf_hub_url
+        import huggingface_hub  # noqa: F401
     except ImportError:
         console.print("[red]Missing:[/red] huggingface-hub  (run: uv pip install huggingface-hub)")
         return False
@@ -2362,12 +2585,11 @@ def _pull_gguf_file(
         parts = spec.rsplit("/", 1)
         repo_id, remote = parts[0], parts[1]
     # "owner/repo:sub/dir/file" names a file inside a repo folder. huggingface_hub
-    # writes it to <stage_dir>/sub/dir/file, which is then moved to
-    # base_dir/file; stage_dir is under base_dir's hidden .cache so no folder of
-    # the repo's layout appears in base_dir. A root-level file stages in
-    # base_dir itself.
+    # writes it to <stage_dir>/sub/dir/file, which is moved to base_dir/file once
+    # it is verified; stage_dir is under base_dir's hidden .cache so no folder of
+    # the repo's layout and no unverified file appears in base_dir.
     remote_dir, in_folder, filename = remote.rpartition("/")
-    stage_dir = base_dir / _REPO_FOLDER_STAGING if in_folder else base_dir
+    stage_dir = base_dir / _REPO_FOLDER_STAGING
     if in_folder and not _safe_repo_subdir(remote_dir, stage_dir):
         console.print(
             f"[red]Unsafe repository path:[/red] {escape(remote)}\n"
@@ -2375,9 +2597,6 @@ def _pull_gguf_file(
             "'._+-', with no '.' or '..' parts."
         )
         return False
-
-    def _remote(part: str) -> str:
-        return f"{remote_dir}/{part}" if remote_dir else part
 
     # Split GGUF: normalise to the full ordered part list. llama.cpp loads
     # the model from the first part, so that's what gets registered. A
@@ -2403,6 +2622,100 @@ def _pull_gguf_file(
 
     if register and _refuse_name_held_by_external_file(model_name, dest):
         return False
+
+    try:
+        with contextlib.ExitStack() as locks:
+            for part in all_parts:
+                locks.enter_context(_part_lock(part))
+            return _pull_gguf_file_locked(
+                repo_id, all_parts, remote_dir, model_name, base_dir, stage_dir,
+                expected_sha256=expected_sha256, redownload=redownload, register=register,
+                model_type=model_type, dest_dir=dest_dir, type_is_auto=type_is_auto,
+                mmproj_spec=mmproj_spec, pinned_starter=pinned_starter, revision=revision,
+                type_user_set=type_user_set)
+    except PullInFlight as e:
+        console.print(f"[red]Download already in progress:[/red] {escape(str(e))}")
+        return False
+
+
+def _replace_blockers(dest: Path, repo_id: str, revision: Optional[HfRevision],
+                      model_name: str) -> "list[tuple[str, str]]":
+    """``(name, source)`` of every registry entry that would load other bytes if
+    the file *dest* were replaced by *repo_id*'s at *revision*: one pulled from
+    somewhere else, or from another revision under another name than
+    *model_name*."""
+    reg = _mm.load_registry()
+    wanted = revision.ref if revision else None
+    out = []
+    for name in find_aliases_by_path(dest, reg):
+        source = str(reg[name].get("source") or "")
+        recorded = reg[name].get("revision") or None
+        if source != f"hf:{repo_id}" or (recorded != wanted and name != model_name):
+            out.append((name, source + (f"@{recorded}" if recorded else "")))
+    return out
+
+
+def _redownload_refused(parts: "list[str]", base_dir: Path, repo_id: str,
+                        digests: "dict[str, str]", revision: Optional[HfRevision],
+                        model_name: str) -> bool:
+    """True, after saying why, when ``--redownload`` must not replace one of the
+    files *parts* in *base_dir*: the registry cannot be read, or an entry from
+    another source points at it and its bytes are not the published ones."""
+    from rich.markup import escape
+    for part in parts:
+        dest = base_dir / part
+        if _civitai_registry_unreadable():
+            console.print(
+                f"[red]Refusing to replace {escape(part)}:[/red] localm's model registry "
+                "(registry.json) could not be read, so it cannot tell which model owns "
+                "this file. Nothing was changed.")
+            console.print(f"[dim]{_CIVITAI_REGISTRY_STEP}[/dim]")
+            return True
+        taken = _replace_blockers(dest, repo_id, revision, model_name)
+        if not taken:
+            continue
+        published = digests.get(part)
+        if published and _verify_digest(
+                dest, purpose="to check the file already here").lower() == published.lower():
+            continue
+        console.print(
+            f"[red]Refusing to replace {escape(part)}:[/red] it is registered as "
+            f"{_civitai_registered_as(taken)}, and replacing it would change what that "
+            "loads. Nothing was changed.")
+        console.print(f"[dim]{_civitai_next_step(taken)}[/dim]")
+        return True
+    return False
+
+
+def _pull_gguf_file_locked(
+    repo_id: str,
+    all_parts: "list[str]",
+    remote_dir: str,
+    model_name: str,
+    base_dir: Path,
+    stage_dir: Path,
+    *,
+    expected_sha256: Optional[str],
+    redownload: bool,
+    register: bool,
+    model_type: str,
+    dest_dir: Optional[Path],
+    type_is_auto: bool,
+    mmproj_spec: Optional[str],
+    pinned_starter: bool,
+    revision: Optional[HfRevision],
+    type_user_set: bool,
+) -> bool:
+    """The body of :func:`_pull_gguf_file`, run holding the part lock of every
+    file in *all_parts* (the repo files, found under *remote_dir* there)."""
+    from huggingface_hub import hf_hub_download, hf_hub_url
+    from rich.markup import escape
+
+    filename = all_parts[0]
+    dest = base_dir / filename
+
+    def _remote(part: str) -> str:
+        return f"{remote_dir}/{part}" if remote_dir else part
 
     # Expected digest from HF metadata - free, no download needed. Each file is
     # downloaded at the commit its digest was read at.
@@ -2443,11 +2756,15 @@ def _pull_gguf_file(
     if unchecked:
         _note_unverified(repo_id, unchecked)
 
+    present = [p for p in all_parts if os.path.lexists(base_dir / p)]
+    if redownload and present and _redownload_refused(
+            present, base_dir, repo_id, digests, revision, model_name):
+        return False
     missing = [p for p in all_parts
-               if not (base_dir / p).exists()
+               if redownload or not (base_dir / p).exists()
                or (revision is not None and p not in digests)]
     for part in all_parts:
-        if part in digests or not (base_dir / part).exists():
+        if redownload or part in digests or not (base_dir / part).exists():
             continue
         taken, own = _undigested_file_held_by_other_pull(
             base_dir / part, repo_id, revision, model_name)
@@ -2480,20 +2797,27 @@ def _pull_gguf_file(
             if on_disk.lower() != expected_digest.lower():
                 _print_digest_name_in_use(part, on_disk, expected_digest, repo_id, taken)
                 return False
+        # A file that stays while others are fetched must be the right one too.
+        for part in all_parts:
+            if part in missing or part not in digests:
+                continue
+            on_disk = _verify_digest(base_dir / part, purpose="to check the file already here")
+            if on_disk.lower() != digests[part].lower():
+                _print_present_file_differs(
+                    part, on_disk, f"the digest expected for it ({digests[part][:16]}…)",
+                    _replace_blockers(base_dir / part, repo_id, revision, model_name))
+                return False
     if not missing:
         # If the user asserted a hash, verify the file actually on disk before
         # treating it as the requested model.
         if want:
             on_disk = _verify_digest(dest, purpose="to check the file already here")
             if on_disk.lower() != want:
-                console.print(
-                    f"[red]SHA256 mismatch![/red] The file already at "
-                    f"{escape(filename)} ({escape(on_disk[:16])}…) does not "
-                    + (f"match the digest localm pins for this starter model ({escape(want[:16])}…). "
-                       "Delete it and pull again."
-                       if pinned_starter else
-                       f"match --sha256 ({escape(want[:16])}…).")
-                )
+                _print_present_file_differs(
+                    filename, on_disk,
+                    f"the digest localm pins for this starter model ({want[:16]}…)"
+                    if pinned_starter else f"--sha256 ({want[:16]}…)",
+                    _replace_blockers(dest, repo_id, revision, model_name))
                 return False
         # A digest read from Hugging Face is registered as the file's own, so
         # the file on disk has to match it first.
@@ -2507,48 +2831,33 @@ def _pull_gguf_file(
                 if taken:
                     _print_digest_name_in_use(part, on_disk, published, repo_id, taken)
                     return False
-                console.print(
-                    f"[red]SHA256 mismatch![/red] The file already at "
-                    f"{escape(part)} ({escape(on_disk[:16])}…) does not match the "
-                    f"digest Hugging Face publishes ({escape(published[:16])}…): it is "
-                    "incomplete, damaged or another version. Delete it and pull again."
-                )
+                _print_present_file_differs(
+                    part, on_disk, f"the digest Hugging Face publishes ({published[:16]}…)",
+                    _replace_blockers(base_dir / part, repo_id, revision, model_name),
+                    ": it is incomplete, damaged or another version")
                 return False
+        if register and not verify_digest and not any(
+                source == f"hf:{repo_id}" for _n, source in _civitai_owners(dest)):
+            owners = _replace_blockers(dest, repo_id, revision, model_name)
+            held_by = (f"It is registered as {_civitai_registered_as(owners)}. "
+                       if owners else "")
+            console.print(
+                f"[red]File name already in use:[/red] {escape(filename)} is already in "
+                f"{escape(str(base_dir))} and nothing shows that it came from "
+                f"{escape(repo_id)}. It was left as it is.")
+            console.print(f"[dim]{held_by}{_replace_step(owners)} Or pass --sha256 with the "
+                          "expected digest to check the file already here.[/dim]")
+            return False
         console.print(f"[yellow]Already downloaded:[/yellow] {escape(filename)}")
         if register:
             unusable = _mm.gguf_unusable_reason(dest)
             if unusable is not None:
                 console.print(f"[red]Not registered:[/red] {escape(filename)}\n{escape(unusable)}")
                 return False
-            reg_type = model_type
-            # One shared header probe backs the mmproj/embedding refinement
-            # below AND the persisted architecture/expert_count. Captured
-            # regardless of type_is_auto: it is a fact about the file, not
-            # about which type label this call chooses.
+            # A fact about the file, captured whatever type this call chooses.
             gguf_meta = _mm.gguf_registry_metadata(dest)
-            if type_is_auto and reg_type == "llm":
-                if _mm.gguf_adapter_kind(dest) is not None:
-                    console.print("[dim]Detected as a LoRA adapter (GGUF metadata). "
-                                  "Attach it with 'localm adapter attach'.[/dim]")
-                    reg_type = "lora"
-                elif _mm.gguf_is_mmproj(dest):
-                    console.print("[dim]Detected as a vision projector (GGUF metadata).[/dim]")
-                    reg_type = "mmproj"
-                elif _mm.gguf_decision_signal(dest):
-                    console.print(_DECISION_DETECTION_NOTE)
-                    reg_type = "decision"
-                elif _mm.gguf_embedding_signal(dest):
-                    console.print(_embedding_detection_note(dest))
-                    reg_type = "embedding"
-                elif _mm.gguf_non_chat_model_type(gguf_meta.get("architecture")):
-                    console.print(_non_chat_detection_note(gguf_meta.get("architecture")))
-                    reg_type = _mm.gguf_non_chat_model_type(gguf_meta.get("architecture"))
-                elif (media_type := _mm.gguf_media_component_type(dest)) is not None:
-                    reg_type = media_type
-                    console.print(f"[dim]Detected as {_media_type_phrase(reg_type)} (tensor names "
-                                  "in the GGUF).[/dim]")
-            if type_is_auto and not filename.lower().endswith(".gguf"):
-                reg_type = _content_media_type(dest, reg_type)
+            reg_type = _detected_file_type(dest, model_type, type_is_auto,
+                                           gguf_meta.get("architecture"))
             mmproj_path = _mmproj_for_registration(
                 reg_type, repo_id, filename, base_dir, dest_dir, mmproj_spec,
                 pinned_revision=revision is not None)
@@ -2556,7 +2865,9 @@ def _pull_gguf_file(
                                  digest=verify_digest, model_type=reg_type,
                                  mmproj=mmproj_path, architecture=gguf_meta.get("architecture"),
                                  expert_count=gguf_meta.get("expert_count"),
-                                 refresh=_revision_record_differs(model_name, revision),
+                                 refresh=_revision_record_differs(model_name, revision)
+                                 or (bool(verify_digest)
+                                     and _entry_has_no_source(model_name, dest)),
                                  type_user_set=type_user_set,
                                  **_register_revision(revision))
             return _kept_user_type(registered, type_user_set)
@@ -2642,6 +2953,9 @@ def _pull_gguf_file(
 
     # Only bytes a resume will actually reuse count: a partial of the current
     # etag whose owner is proven gone. An unknown etag counts nothing.
+    if not remote_dir:
+        for part in missing:
+            _take_over_partials(base_dir, stage_dir, part)
     already_have = 0
     for part in missing:
         etag = etags.get(part)
@@ -2701,47 +3015,51 @@ def _pull_gguf_file(
                                  **({"revision": revision.ref} if revision else {})),
         "size": part_sizes.get(p), "etag": etags.get(p)} for p in missing])
 
-    with _download_progress([base_dir / p for p in missing], total_size,
-                            base_dir=stage_dir,
-                            rel_parts=[_remote(p) for p in missing],
-                            etags={_remote(p): e for p, e in etags.items()}) as _prog:
-        for part in missing:
-            try:
-                local = hf_hub_download(
-                    repo_id=repo_id,
-                    filename=_remote(part),
-                    local_dir=str(stage_dir),
-                    endpoint=_HF_ENDPOINT,
-                    token=_hf_token(),
-                    tqdm_class=meter_tqdm_class(),
-                    **_file_revision(published.get(part), revision),
-                )
-                final = base_dir / part
-                if Path(local) != final:
-                    shutil.move(local, final)
-            except Exception as e:
-                if _is_gated_error(e):
-                    console.print(f"[red]Cannot pull:[/red] "
-                                  f"{escape(_gated_sentence(repo_id))}.")
+    replaced = [p for p in missing if os.path.lexists(base_dir / p)]
+    # A --redownload never takes the bytes from another copy on this machine.
+    fresh: dict[str, Any] = ({"cache_dir": str(stage_dir / ".no-cache")} if redownload else {})
+    with _HeldDownloads(stage_dir) as held:
+        with _download_progress([stage_dir / _remote(p) for p in missing], total_size,
+                                base_dir=stage_dir,
+                                rel_parts=[_remote(p) for p in missing],
+                                etags={_remote(p): e for p, e in etags.items()},
+                                finished=lambda: len(held.files)) as _prog:
+            for part in missing:
+                try:
+                    local = hf_hub_download(
+                        repo_id=repo_id,
+                        filename=_remote(part),
+                        local_dir=str(stage_dir),
+                        endpoint=_HF_ENDPOINT,
+                        token=_hf_token(),
+                        tqdm_class=meter_tqdm_class(),
+                        **fresh,
+                        **_file_revision(published.get(part), revision),
+                    )
+                    held.hold(part, _remote(part), Path(local),
+                              etags.get(part) or digests.get(part))
+                except Exception as e:
+                    if _is_gated_error(e):
+                        console.print(f"[red]Cannot pull:[/red] "
+                                      f"{escape(_gated_sentence(repo_id))}.")
+                        return False
+                    console.print(f"[red]Download failed[/red] ({escape(part)}): "
+                                  f"{escape(str(e))}")
+                    # WITHOUT _prog.ok(): this return unwinds the context manager
+                    # cleanly, and only the absence of ok() stops it announcing 100%
+                    # for a download that failed.
                     return False
-                console.print(f"[red]Download failed[/red] ({escape(part)}): "
-                              f"{escape(str(e))}")
-                # WITHOUT _prog.ok(): this return unwinds the context manager
-                # cleanly, and only the absence of ok() stops it announcing 100%
-                # for a download that failed.
-                return False
-        _prog.ok()
+            _prog.ok()
 
-    # Verify the downloaded first part against the digest we will register it
-    # under: HF's LFS metadata when known, else the user's --sha256. On
-    # mismatch, delete the part(s) and fail.
-    if digests:
-        actual_digests = {}
-        for part in all_parts:
+        # Verify the downloaded files against the digests they are registered
+        # under (HF's LFS metadata when known, else the user's --sha256) before
+        # they get their own names. A mismatch deletes what this pull downloaded.
+        shown: Optional[str] = None
+        for part, path in held.files.items():
             if part not in digests:
                 continue
-            actual = _verify_digest(base_dir / part).lower()
-            actual_digests[part] = actual
+            actual = _verify_digest(path).lower()
+            shown = shown or actual
             if actual != digests[part].lower():
                 console.print(
                     f"[red]SHA256 mismatch![/red] Expected "
@@ -2749,56 +3067,60 @@ def _pull_gguf_file(
                     f"{escape(actual[:16])}… - deleting downloaded file(s)"
                     + (f" ({escape(part)})" if part != filename else "")
                 )
-                for each in all_parts:
-                    p = base_dir / each
-                    if p.exists():
-                        p.unlink()
+                held.discard()
                 return False
-        shown = actual_digests.get(filename) or next(iter(actual_digests.values()))
-        _report_success(f"[green]✓[/green] SHA256 verified: {escape(shown[:16])}…",
-                        f"[green]OK[/green] SHA256 verified: {escape(shown[:16])}…")
+        if shown:
+            _report_success(f"[green]✓[/green] SHA256 verified: {escape(shown[:16])}…",
+                            f"[green]OK[/green] SHA256 verified: {escape(shown[:16])}…")
+        if register and filename in held.files:
+            unusable = _mm.gguf_unusable_reason(held.files[filename])
+            if unusable is not None and replaced:
+                console.print(f"[red]Not replaced:[/red] {escape(filename)}\n{escape(unusable)}")
+                held.discard()
+                return False
+        if not redownload and any(os.path.lexists(base_dir / p) and p not in replaced
+                                  for p in held.files):
+            console.print(
+                f"[red]Download kept aside:[/red] a file named {escape(filename)} appeared in "
+                f"{escape(str(base_dir))} meanwhile and was left as it is. Pull again to "
+                "compare the two.")
+            return False
+        try:
+            _place_downloads(held.files, base_dir)
+        except OSError as e:
+            console.print(
+                f"[red]Could not move the download into place:[/red] {escape(str(e))}\n"
+                + ("The file that was there is unchanged; if a running model or another "
+                   "program uses it, unload the model and pull again. "
+                   if replaced else "")
+                + "The download is kept and continues from there.")
+            return False
+        if filename in replaced:
+            _note_replaced_bytes(dest, verify_digest)
 
     if register:
         unusable = _mm.gguf_unusable_reason(base_dir / filename)
         if unusable is not None:
             console.print(f"[red]Not registered:[/red] {escape(filename)}\n{escape(unusable)}")
             return False
-        reg_type = model_type
-        # One shared header probe, as in the "already downloaded" branch above,
-        # for the freshly-downloaded case.
-        gguf_meta = _mm.gguf_registry_metadata(base_dir / filename)
-        if type_is_auto and reg_type == "llm":
-            if _mm.gguf_adapter_kind(base_dir / filename) is not None:
-                console.print("[dim]Detected as a LoRA adapter (GGUF metadata). "
-                              "Attach it with 'localm adapter attach'.[/dim]")
-                reg_type = "lora"
-            elif _mm.gguf_is_mmproj(base_dir / filename):
-                console.print("[dim]Detected as a vision projector (GGUF metadata).[/dim]")
-                reg_type = "mmproj"
-            elif _mm.gguf_decision_signal(base_dir / filename):
-                console.print(_DECISION_DETECTION_NOTE)
-                reg_type = "decision"
-            elif _mm.gguf_embedding_signal(base_dir / filename):
-                console.print(_embedding_detection_note(base_dir / filename))
-                reg_type = "embedding"
-            elif _mm.gguf_non_chat_model_type(gguf_meta.get("architecture")):
-                console.print(_non_chat_detection_note(gguf_meta.get("architecture")))
-                reg_type = _mm.gguf_non_chat_model_type(gguf_meta.get("architecture"))
-            elif (media_type := _mm.gguf_media_component_type(base_dir / filename)) is not None:
-                reg_type = media_type
-                console.print(f"[dim]Detected as {_media_type_phrase(reg_type)} (tensor names "
-                              "in the GGUF).[/dim]")
-        if type_is_auto and not filename.lower().endswith(".gguf"):
-            reg_type = _content_media_type(base_dir / filename, reg_type)
+        gguf_meta = _mm.gguf_registry_metadata(dest)
+        reg_type = _detected_file_type(dest, model_type, type_is_auto,
+                                       gguf_meta.get("architecture"))
+        # Registered before the projector is fetched, so stopping that download
+        # leaves a registered model. See
+        # test_stopping_the_projector_download_leaves_the_model_registered.
+        _register_download(model_name, dest, f"hf:{repo_id}", verify_digest, reg_type,
+                           gguf_meta, type_user_set, **_register_revision(revision))
         mmproj_path = _mmproj_for_registration(
             reg_type, repo_id, filename, base_dir, dest_dir, mmproj_spec,
             pinned_revision=revision is not None)
-        _mm._register(model_name, base_dir / filename, f"hf:{repo_id}",
-                  sha256=verify_digest, model_type=reg_type, mmproj=mmproj_path,
-                  architecture=gguf_meta.get("architecture"),
-                  expert_count=gguf_meta.get("expert_count"),
-                  type_user_set=type_user_set,
-                  **_register_revision(revision))
+        if mmproj_path is not None:
+            mmproj_value = str(logical_model_path(mmproj_path))
+
+            def _attach(reg: dict) -> None:
+                if isinstance(reg.get(model_name), dict):
+                    reg[model_name].setdefault("mmproj", mmproj_value)
+            _mm.update_registry(_attach)
         # model_name is _sanitize_name()-derived (A-Za-z0-9._- only) and is
         # escaped anyway.
         _report_success(f"[green]✓[/green] [bold]{escape(model_name)}[/bold] is ready",
@@ -2983,18 +3305,81 @@ def _snapshot_matches_listing(dest: Path, repo_siblings) -> bool:
     return True
 
 
-def _delete_snapshot_files(dest: Path, names: list[str]) -> list[str]:
-    """Delete the files *names* of the snapshot at *dest*; the names of those
-    that could not be deleted (in use, no permission) are returned."""
+# Where a full-repo pull fetches files that are already in its folder: inside
+# huggingface_hub's own download folder, so what is measured, resumed and deleted
+# there as partial data covers it.
+_SNAPSHOT_STAGING = Path(".cache") / "huggingface" / "download" / "localm-staging"
+
+
+def _folder_has_files(folder: Path) -> bool:
+    """True when *folder* is a directory holding anything besides ``.cache``. A
+    folder that cannot be listed counts as holding files."""
+    try:
+        return folder.is_dir() and any(p.name != ".cache" for p in folder.iterdir())
+    except OSError:
+        return True
+
+
+def _snapshot_names_present(dest: Path, names) -> list[str]:
+    """Those of the repo file *names* that exist in the snapshot at *dest*."""
     from localm import pathsafe
-    stuck = []
+    out = []
     for name in names:
-        try:
-            pathsafe.confined_under(dest, name).unlink(missing_ok=True)
-        except (OSError, ValueError) as e:
-            logger.warning("could not delete the damaged %s: %s", name, e)
-            stuck.append(name)
-    return stuck
+        with contextlib.suppress(ValueError):
+            if pathsafe.confined_under(dest, name).is_file():
+                out.append(name)
+    return out
+
+
+def _refetch_snapshot_files(repo_id: str, dest: Path, names: list[str], repo_siblings,
+                            commit: Optional[str], snapshot_download,
+                            cache: "dict[str, Any]") -> Optional[str]:
+    """Fetch the files *names* of the snapshot at *dest* again and replace them,
+    all together, once every one is complete and matches the listing; until then
+    the files in *dest* stay as they are. Returns None, or a sentence saying why
+    nothing was replaced. A download error is raised; what was fetched stays in
+    :data:`_SNAPSHOT_STAGING` for the next pull."""
+    import glob
+    stage = dest / _SNAPSHOT_STAGING
+    wanted = set(names)
+    listed = [s for s in repo_siblings or [] if str(s.rfilename) in wanted]
+    total = sum(getattr(s, "size", None) or 0 for s in listed)
+    with _snapshot_progress(lambda: _snapshot_bytes_on_disk(stage), total,
+                            label=repo_id) as _prog:
+        snapshot_download(
+            repo_id=repo_id,
+            local_dir=str(stage),
+            endpoint=_HF_ENDPOINT,
+            token=_hf_token(),
+            tqdm_class=meter_tqdm_class(),
+            allow_patterns=[glob.escape(n) for n in names],
+            **cache,
+            **_revision_kwargs(commit),
+        )
+        _prog.ok()
+    absent = [n for n in names if not (stage / n).is_file()]
+    if absent:
+        return f"Hugging Face did not deliver {', '.join(absent[:3])}"
+    wrong = _snapshot_files_failing_digest(stage, listed, repo_id)
+    wrong += [n for n in _snapshot_files_damaged(stage, listed, repo_id) if n not in wrong]
+    if wrong:
+        for n in wrong:
+            _unlink_quiet(stage / n)
+        return (f"{', '.join(wrong[:3])} of {repo_id} did not arrive as Hugging Face "
+                "publishes it (wrong size or digest); pull again to fetch it")
+    try:
+        _place_downloads({n: stage / n for n in names}, dest)
+    except OSError as e:
+        return (f"the new files could not be moved into place ({e}): a running model or "
+                "another program may be using the old ones. Unload the model and pull "
+                "again; the download is kept")
+    for n in names:
+        rel = Path(".cache") / "huggingface" / "download" / f"{n}.metadata"
+        with contextlib.suppress(OSError):
+            (dest / rel).parent.mkdir(parents=True, exist_ok=True)
+            os.replace(stage / rel, dest / rel)
+    shutil.rmtree(stage, ignore_errors=True)
+    return None
 
 
 def _snapshot_bytes_on_disk(dest: Path) -> int:
@@ -3009,7 +3394,7 @@ def _snapshot_bytes_on_disk(dest: Path) -> int:
         return 0
     pending = dest / ".cache" / "huggingface" / "download"
     for f in files:
-        in_cache = ".cache" in f.parts
+        in_cache = ".cache" in f.relative_to(dest).parts
         if in_cache and not (pending in f.parents and f.name.endswith(".incomplete")):
             continue
         try:
@@ -3032,9 +3417,14 @@ def _delete_hf_temp_files(base_dir: Path, rels: "list[str] | None") -> int:
     if rels is None:
         if not root.is_dir():
             return 0
-        return _unlink_temp_files(
+        freed = _unlink_temp_files(
             [f for f in root.rglob("*.incomplete")
              if _partial_owner_is_gone(f, lock_held=False)])
+        stage = Path(base_dir) / _SNAPSHOT_STAGING
+        if stage.is_dir() and not any(stage.rglob("*.incomplete")):
+            freed += _snapshot_bytes_on_disk(stage)
+            shutil.rmtree(stage, ignore_errors=True)
+        return freed
     from huggingface_hub._local_folder import _short_hash
     from huggingface_hub._local_folder import get_local_download_paths
     with contextlib.ExitStack() as held:
@@ -3171,14 +3561,21 @@ def discard_partial_download(spec: str, name: Optional[str] = None) -> int:
         else:
             remote = spec.rsplit("/", 1)[1]
         remote_dir, in_folder, filename = remote.rpartition("/")
-        base_dir = _mm.MODELS_DIR / _REPO_FOLDER_STAGING if in_folder else _mm.MODELS_DIR
-        if in_folder and not _safe_repo_subdir(remote_dir, base_dir):
+        stage_dir = _mm.MODELS_DIR / _REPO_FOLDER_STAGING
+        if in_folder and not _safe_repo_subdir(remote_dir, stage_dir):
             return 0
         parts = split_gguf_parts(filename) or [filename]
-        if any(_safe_models_filename(p, base_dir) is None for p in parts):
+        if any(_safe_models_filename(p, stage_dir) is None for p in parts):
             return 0
         rels = [f"{remote_dir}/{p}" if remote_dir else p for p in parts]
-        return _delete_hf_temp_files(base_dir, rels)
+        with contextlib.ExitStack() as locks:
+            for p in parts:
+                locks.enter_context(_part_lock(p))
+            freed = _delete_hf_temp_files(stage_dir, rels)
+            if not in_folder:
+                # Where an earlier localm kept the partial data of such a file.
+                freed += _delete_hf_temp_files(_mm.MODELS_DIR, rels)
+        return freed
     model_name = _sanitize_name(
         name or spec.split("/")[-1] + (f"@{ref}" if ref else ""))
     with _snapshot_dest_lock(model_name):
@@ -3448,6 +3845,7 @@ def _pull_hf_snapshot_locked(
     claimed = _snapshot_claim_held_by_other(dest, repo_id, revision) if dest.exists() else None
     adopted = (claimed == ("", None) and not damaged and repo_siblings is not None
                and _snapshot_matches_listing(dest, repo_siblings))
+    ours = dest.exists() and (dest / _SNAPSHOT_CLAIM).is_file() and claimed is None
     if adopted:
         claimed = None
     if claimed == ("", None) and redownload:
@@ -3469,7 +3867,14 @@ def _pull_hf_snapshot_locked(
             + f"{what}. Pull with "
             "[bold]-n <a-different-name>[/bold], or delete the folder first.")
         return False
-    if (dest.exists() and not damaged
+    if redownload and repo_siblings is None and _folder_has_files(dest):
+        console.print(
+            f"[red]Refusing to replace the files in {escape(str(dest))}:[/red] the file "
+            f"list of {escape(repo_id)} could not be read from Hugging Face, so a new "
+            "download could not be checked before it replaced them. Nothing was changed. "
+            "Pull again when Hugging Face answers.")
+        return False
+    if (dest.exists() and not damaged and not redownload
             and not _holds_other_revision(dest, repo_id, revision)
             and (adopted or _snapshot_is_complete(dest, repo_siblings, repo_id))):
         console.print(f"[yellow]Already downloaded:[/yellow] {escape(model_name)}")
@@ -3479,7 +3884,7 @@ def _pull_hf_snapshot_locked(
         registered = _mm._register_with_dedup(
             model_name, dest, f"hf:{repo_id}",
             model_type=model_type if type_user_set else _resolve_snapshot_type(dest, model_type),
-            type_user_set=type_user_set, **_register_revision(revision))
+            type_user_set=type_user_set, refresh=ours, **_register_revision(revision))
         if not registered:
             console.print(
                 f"[yellow]{escape(repo_id)} is in {escape(str(dest))}, but could not "
@@ -3569,27 +3974,25 @@ def _pull_hf_snapshot_locked(
 
     if damaged:
         shown = ", ".join(escape(n) for n in damaged[:3]) + (" ..." if len(damaged) > 3 else "")
-        stuck = _delete_snapshot_files(dest, damaged)
-        if stuck:
-            console.print(
-                f"[red]Could not delete {len(stuck)} damaged file(s) of {escape(model_name)}"
-                f"[/red] ({escape(', '.join(stuck[:3]))}): a running model or another program "
-                "may be using them. Unload the model and pull again.")
-            return False
         console.print(
             f"[yellow]{len(damaged)} file(s) of {escape(model_name)} do not match the size or "
-            f"digest Hugging Face publishes ({shown}) - deleted, fetching them again."
-            "[/yellow]")
+            f"digest Hugging Face publishes ({shown}) - fetching them again.[/yellow]")
 
     def _disk_bytes() -> int:
         return _snapshot_bytes_on_disk(dest)
+
+    def _again_bytes() -> int:
+        again = set(damaged) | (set(_snapshot_names_present(
+            dest, [str(s.rfilename) for s in repo_siblings or []])) if redownload else set())
+        return sum(getattr(s, "size", None) or 0 for s in repo_siblings or []
+                   if str(s.rfilename) in again)
 
     # Only the bytes still MISSING need room: snapshot_download resumes on top
     # of whatever already landed in dest. _pull_gguf_file sums only the
     # `missing` parts and _pull_url uses (total - already_have); this matches
     # them.
     if not _mm._check_disk_space(_mm.MODELS_DIR,
-                                 max(0, total_size - _disk_bytes())):
+                                 max(0, total_size + _again_bytes() - _disk_bytes())):
         return False
 
     names, listed_at = _snapshot_listing_names(repo_id, repo_siblings, commit)
@@ -3636,25 +4039,36 @@ def _pull_hf_snapshot_locked(
                               revision=revision.ref if revision else None,
                               commit=commit)
     pending_pulls.note_snapshot(dest, model_name, created, total_size)
+    again = _snapshot_names_present(dest, names) if redownload else damaged
+    # A --redownload never takes the bytes from another copy on this machine.
+    cache: dict[str, Any] = (
+        {"cache_dir": str(dest / _SNAPSHOT_STAGING / ".no-cache")} if redownload else {})
     try:
         _ensure_hf_resumable_download()
-        with _snapshot_progress(_disk_bytes, total_size, label=repo_id) as _prog:
-            snapshot_download(
-                repo_id=repo_id,
-                local_dir=str(dest),
-                endpoint=_HF_ENDPOINT,
-                token=_hf_token(),
-                tqdm_class=meter_tqdm_class(),
-                **_revision_kwargs(commit),
-            )
-            _prog.ok()
+        if again:
+            problem = _refetch_snapshot_files(repo_id, dest, again, repo_siblings, commit,
+                                              snapshot_download, cache)
+            if problem is not None:
+                console.print(f"[red]Nothing was replaced:[/red] {escape(problem)}.")
+                return False
+        if not again or not _snapshot_is_complete(dest, repo_siblings, repo_id):
+            with _snapshot_progress(_disk_bytes, total_size, label=repo_id) as _prog:
+                snapshot_download(
+                    repo_id=repo_id,
+                    local_dir=str(dest),
+                    endpoint=_HF_ENDPOINT,
+                    token=_hf_token(),
+                    tqdm_class=meter_tqdm_class(),
+                    **_revision_kwargs(commit),
+                )
+                _prog.ok()
     except Exception as e:
         if _is_gated_error(e):
             console.print(f"[red]Cannot pull:[/red] {escape(_gated_sentence(repo_id))}.")
             return False
         console.print(f"[red]Download failed:[/red] {escape(str(e))}")
-        if damaged:
-            console.print("The damaged files were deleted; pull again to fetch them.")
+        if again:
+            console.print("The files that were there are unchanged.")
         return False
 
     if repo_siblings is None:
@@ -4242,6 +4656,7 @@ def _pull_url(
     redownload: bool = False,
     model_type: str = "llm",
     type_user_set: bool = False,
+    type_is_auto: bool = False,
 ) -> bool:
     """Download a model from a direct URL with resumable .part file support.
 
@@ -4282,7 +4697,7 @@ def _pull_url(
     try:
         with _part_lock(filename):
             return _pull_url_locked(url, name, filename, expected_sha256,
-                                    redownload, model_type, type_user_set)
+                                    redownload, model_type, type_user_set, type_is_auto)
     except PullInFlight as e:
         console.print(f"[red]Download already in progress:[/red] {escape(str(e))}")
         return False
@@ -4308,6 +4723,7 @@ def _pull_url_locked(
     redownload: bool = False,
     model_type: str = "llm",
     type_user_set: bool = False,
+    type_is_auto: bool = False,
 ) -> bool:
     """The body of :func:`_pull_url`, run holding the lock on *filename*.
 
@@ -4318,8 +4734,16 @@ def _pull_url_locked(
     records which URL, digest and size that partial holds (see
     :func:`_url_part_identity`). A partial is appended to only when its record
     matches this pull, and is truncated otherwise. A transfer that stops early
-    keeps both for the next pull; the record is removed once the partial is
-    moved into place or discarded.
+    keeps both for the next pull. The finished partial is hashed, and checked
+    against *expected_sha256*, before it gets its own name; the record then holds
+    its digest until the file is registered, so a pull that is killed in between
+    is finished by the next one.
+
+    A file already named *filename* counts as this URL's only when its SHA256 is
+    *expected_sha256*, or when the registry or that record says it was downloaded
+    from this URL; any other file is left as it is and the pull stops.
+    *redownload* fetches it again and replaces it once the new file is complete
+    and verified, unless a registry entry from another source points at it.
     """
     import requests
     from localm.netpolicy import NetworkPolicyError
@@ -4333,36 +4757,12 @@ def _pull_url_locked(
     dest      = _mm.MODELS_DIR / filename
     part_file = _mm.MODELS_DIR / (filename + ".part")
 
-    if dest.exists():
-        # A file with this derived name is already here. It only counts as the
-        # requested model when the caller's --sha256, if given, matches its
-        # bytes, so a new name is never aliased onto unrelated existing bytes.
-        if expected_sha256:
-            on_disk = _verify_digest(dest, purpose="to check the file already here")
-            if on_disk.lower() != expected_sha256.lower():
-                console.print(
-                    f"[red]SHA256 mismatch![/red] A different file already "
-                    f"occupies {escape(filename)} ({escape(on_disk[:16])}…); "
-                    f"it does not match --sha256 "
-                    f"({escape(expected_sha256.lower()[:16])}…). Refusing to "
-                    "alias onto unrelated bytes - use --redownload or a "
-                    "different -n name."
-                )
-                return False
-            console.print(
-                f"[yellow]Already downloaded:[/yellow] {escape(filename)} "
-                f"[dim](sha256 verified)[/dim]"
-            )
-        else:
-            console.print(f"[yellow]Already downloaded:[/yellow] {escape(filename)}")
-        unusable = _mm.gguf_unusable_reason(dest)
-        if unusable is not None:
-            console.print(f"[red]Not registered:[/red] {escape(filename)}\n{escape(unusable)}")
-            return False
-        return _kept_user_type(
-            _mm._register_with_dedup(name, dest, url, model_type=model_type,
-                                     type_user_set=type_user_set),
-            type_user_set)
+    present = os.path.lexists(dest)
+    if present and not redownload:
+        return _register_present_url_file(url, name, dest, expected_sha256, model_type,
+                                          type_user_set, type_is_auto)
+    if present and _url_redownload_refused(dest, url):
+        return False
 
     if _refuse_name_held_by_external_file(name, dest):
         return False
@@ -4420,6 +4820,12 @@ def _pull_url_locked(
     if not _mm._check_disk_space(_mm.MODELS_DIR, remaining):
         return False
 
+    if total and already_have == total:
+        console.print(f"Every byte of [bold cyan]{escape(url)}[/bold cyan] is already here; "
+                      "checking the file.")
+        return _finish_url_pull(url, name, dest, part_file, identity, expected_sha256,
+                                redownload, model_type, type_user_set, type_is_auto)
+
     from . import pending_pulls
     pending_pulls.note_source(source="url", url=url,
                               sha256=expected_sha256.lower() if expected_sha256 else None)
@@ -4446,6 +4852,10 @@ def _pull_url_locked(
                                      timeout=30, allow_redirects=False,
             allow_when_off=netpolicy.downloads_allowed_when_off())
         if already_have and r.status_code == 416:
+            if _is_whole_file(r, already_have):
+                return _finish_url_pull(url, name, dest, part_file, identity,
+                                        expected_sha256, redownload, model_type,
+                                        type_user_set, type_is_auto)
             already_have = 0
             headers.pop("Range", None)
             _discard_part(part_file)
@@ -4534,14 +4944,114 @@ def _pull_url_locked(
             "The partial download is kept; pull the same URL again to continue.")
         return False
 
-    # Atomically rename on successful completion
-    part_file.rename(dest)
-    _unlink_quiet(_part_record_path(part_file))
+    return _finish_url_pull(url, name, dest, part_file, identity, expected_sha256,
+                            redownload, model_type, type_user_set, type_is_auto)
 
+
+def _url_owners(dest: Path, url: str) -> "list[tuple[str, str]]":
+    """``(name, source)`` of every registry entry whose path is *dest* and whose
+    source is not *url*."""
+    return [o for o in _civitai_owners(dest) if o[1] != url]
+
+
+def _url_redownload_refused(dest: Path, url: str) -> bool:
+    """True, after saying why, when ``--redownload`` must not replace *dest*: the
+    registry cannot be read, or an entry from another source points at it."""
+    from rich.markup import escape
+    if _civitai_registry_unreadable():
+        console.print(
+            f"[red]Refusing to replace {escape(dest.name)}:[/red] localm's model registry "
+            "(registry.json) could not be read, so it cannot tell which model owns "
+            "this file. Nothing was changed.")
+        console.print(f"[dim]{_CIVITAI_REGISTRY_STEP}[/dim]")
+        return True
+    others = _url_owners(dest, url)
+    if not others:
+        return False
+    console.print(
+        f"[red]Refusing to replace {escape(dest.name)}:[/red] it is registered as "
+        f"{_civitai_registered_as(others)}, and {escape(url)} would change what that "
+        "loads. Nothing was changed.")
+    console.print(f"[dim]{_civitai_next_step(others)}[/dim]")
+    return True
+
+
+def _register_present_url_file(url: str, name: str, dest: Path,
+                               expected_sha256: Optional[str], model_type: str,
+                               type_user_set: bool, type_is_auto: bool) -> bool:
+    """Register *dest*, a file already in the models folder, as the download of
+    *url* when it is shown to be that (see :func:`_pull_url_locked`); otherwise
+    say how to go on and change nothing."""
+    from rich.markup import escape
+    part_file = dest.with_name(dest.name + ".part")
+    recorded = _finished_record(part_file, url)
+    digest: Optional[str] = None
+    others = _url_owners(dest, url)
+    if expected_sha256 or recorded:
+        digest = _verify_digest(dest, purpose="to check the file already here").lower()
+        if expected_sha256 and digest != expected_sha256.lower():
+            _print_present_file_differs(
+                dest.name, digest, f"--sha256 ({expected_sha256.lower()[:16]}…)", others)
+            return False
+        if recorded and digest != recorded:
+            recorded = None
+    if not (expected_sha256 or recorded) and not any(
+            source == url for _n, source in _civitai_owners(dest)):
+        console.print(
+            f"[red]File name already in use:[/red] {escape(dest.name)} is already in the "
+            f"models folder and nothing shows that it came from {escape(url)}. It was left "
+            "as it is.")
+        held = f"It is registered as {_civitai_registered_as(others)}. " if others else ""
+        console.print(f"[dim]{held}{_replace_step(others)} Or pass --sha256 with the "
+                      "expected digest to check the file already here.[/dim]")
+        return False
+    console.print(f"[yellow]Already downloaded:[/yellow] {escape(dest.name)}"
+                  + (" [dim](sha256 verified)[/dim]" if digest else ""))
+    unusable = _mm.gguf_unusable_reason(dest)
+    if unusable is not None:
+        console.print(f"[red]Not registered:[/red] {escape(dest.name)}\n{escape(unusable)}")
+        return False
+    meta = _mm.gguf_registry_metadata(dest)
+    reg_type = _detected_file_type(dest, model_type, type_is_auto, meta.get("architecture"))
+    registered = _mm._register_with_dedup(
+        name, dest, url, digest=digest, model_type=reg_type, type_user_set=type_user_set,
+        architecture=meta.get("architecture"), expert_count=meta.get("expert_count"),
+        refresh=bool(recorded) and _entry_has_no_source(name, dest))
+    if registered:
+        _unlink_quiet(_part_record_path(part_file))
+    return _kept_user_type(registered, type_user_set)
+
+
+def _finished_record(part_file: Path, url: str) -> Optional[str]:
+    """The SHA256 a pull of *url* recorded for the file it finished and moved into
+    place, when it was stopped before registering it; else None."""
+    if part_file.exists():
+        return None
+    try:
+        rec = json.loads(_part_record_path(part_file).read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    if not isinstance(rec, dict) or rec.get("url_sha256") != hashlib.sha256(
+            url.encode("utf-8")).hexdigest():
+        return None
+    digest = rec.get("finished_sha256")
+    return digest if isinstance(digest, str) and digest else None
+
+
+def _finish_url_pull(url: str, name: str, dest: Path, part_file: Path, identity: dict,
+                     expected_sha256: Optional[str], redownload: bool, model_type: str,
+                     type_user_set: bool, type_is_auto: bool) -> bool:
+    """Verify the complete partial *part_file* of *url*, move it to *dest* and
+    register it. A partial that fails the check is deleted; anything else that
+    fails keeps it and leaves *dest* as it was."""
+    from rich.markup import escape
+
+    from ..storekit import atomic_write
+    replacing = os.path.lexists(dest)
     # SHA256 verification. `actual` is a hashlib hexdigest; expected_sha256 is
     # the raw --sha256 value, with no charset validation upstream. Both are
     # escaped.
-    actual = _verify_digest(dest)
+    actual = _verify_digest(part_file)
     if expected_sha256:
         if actual.lower() == expected_sha256.lower():
             _report_success(f"[green]✓[/green] SHA256 verified: {escape(actual[:16])}…",
@@ -4552,7 +5062,7 @@ def _pull_url_locked(
                 f"{escape(expected_sha256[:16])}…, got {escape(actual[:16])}… "
                 "- deleting corrupted file"
             )
-            dest.unlink()
+            _discard_part(part_file)
             return False
     else:
         console.print(f"[dim]SHA256: {escape(actual)}[/dim]")
@@ -4591,19 +5101,52 @@ def _pull_url_locked(
                         "malformed - keeping both copies rather than deleting "
                         "a file on the strength of an unreadable path.[/yellow]"
                     )
+                elif not Path(epath).is_file():
+                    console.print(
+                        f"[yellow]The file of '{escape(dups[0])}' is missing - keeping "
+                        "the one just downloaded.[/yellow]")
                 else:
-                    existing_path = Path(epath)
-                    if dest.resolve() != existing_path.resolve():
-                        dest.unlink()
-                    return _mm._alias_duplicate(dups, name,
-                                                model_type if type_user_set else None)
+                    if not _mm._alias_duplicate(dups, name,
+                                                model_type if type_user_set else None):
+                        return False
+                    _discard_part(part_file)
+                    return True
 
-    unusable = _mm.gguf_unusable_reason(dest)
-    if unusable is not None:
-        console.print(f"[red]Not registered:[/red] {escape(filename)}\n{escape(unusable)}")
+    unusable = _mm.gguf_unusable_reason(part_file)
+    if unusable is not None and replacing:
+        console.print(f"[red]Not replaced:[/red] {escape(dest.name)}\n{escape(unusable)}")
+        _discard_part(part_file)
         return False
-    _mm._register(name, dest, url, sha256=actual, model_type=model_type,
-                  type_user_set=type_user_set)
+    if not redownload and os.path.lexists(dest):
+        console.print(
+            f"[red]Download kept aside:[/red] a file named {escape(dest.name)} appeared in "
+            "the models folder meanwhile and was left as it is. Pull again to compare "
+            "the two.")
+        return False
+    record = _part_record_path(part_file)
+    try:
+        atomic_write(record, json.dumps({**identity, "finished_sha256": actual.lower()}))
+        os.utime(part_file)
+        os.replace(part_file, dest)
+    except OSError as e:
+        with contextlib.suppress(OSError):
+            atomic_write(record, json.dumps(identity))
+        console.print(
+            f"[red]Could not move the download into place:[/red] {escape(str(e))}\n"
+            + ("The file that was there is unchanged; if a running model or another "
+               "program uses it, unload the model and pull again. " if replacing else "")
+            + "The download is kept and continues from there.")
+        return False
+    if replacing:
+        _note_replaced_bytes(dest, actual)
+    if unusable is not None:
+        _unlink_quiet(record)
+        console.print(f"[red]Not registered:[/red] {escape(dest.name)}\n{escape(unusable)}")
+        return False
+    meta = _mm.gguf_registry_metadata(dest)
+    reg_type = _detected_file_type(dest, model_type, type_is_auto, meta.get("architecture"))
+    _register_download(name, dest, url, actual, reg_type, meta, type_user_set)
+    _unlink_quiet(record)
     # name is always _sanitize_name()-derived by pull_model() before reaching
     # here, and is escaped anyway; it sits in a TAG-INJECTION position.
     _report_success(f"[green]✓[/green] [bold]{escape(name)}[/bold] is ready",
@@ -4739,6 +5282,9 @@ def _pull_civitai_file_locked(
         r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
                                      timeout=30, allow_redirects=False,
             allow_when_off=netpolicy.downloads_allowed_when_off())
+        if already_have and r.status_code == 416 and _is_whole_file(r, already_have):
+            return _finish_civitai_pull(part_file, dest, verify_digest, register,
+                                        model_name, reg_type, resolved, type_user_set)
         if already_have and r.status_code == 416:
             already_have = 0
             headers.pop("Range", None)
@@ -4791,6 +5337,24 @@ def _pull_civitai_file_locked(
             return False
         _prog.ok()
 
+    return _finish_civitai_pull(part_file, dest, verify_digest, register, model_name,
+                                reg_type, resolved, type_user_set)
+
+
+def _is_whole_file(resp: Any, have: int) -> bool:
+    """True when *resp*, a 416 answer to a request for the bytes after *have*, says
+    the file has exactly *have* bytes."""
+    unit, _, total = str(resp.headers.get("content-range") or "").partition("*/")
+    return unit.strip() == "bytes" and total.strip() == str(have)
+
+
+def _finish_civitai_pull(part_file: Path, dest: Path, verify_digest: Optional[str],
+                         register: bool, model_name: str, reg_type: str, resolved: Any,
+                         type_user_set: bool) -> bool:
+    """Verify the complete CivitAI partial *part_file*, move it to *dest* and
+    register it; see :func:`_pull_civitai_file_locked`."""
+    from rich.markup import escape
+    filename = dest.name
     actual = _verify_digest(part_file)
     if verify_digest and actual.lower() != verify_digest.lower():
         console.print(
@@ -4888,6 +5452,75 @@ def _hf_file_name_taken_by(dest: Path, repo_id: str) -> "list[tuple[str, str]]":
     return [(n, s) for n, s in _civitai_owners(dest) if s != f"hf:{repo_id}"]
 
 
+def _register_download(model_name: str, dest: Path, source: str, digest: Optional[str],
+                       model_type: str, gguf_meta: dict, type_user_set: bool,
+                       **revision: Any) -> None:
+    """Register the file *dest* a pull has just written. An entry of that name
+    already holding *dest* takes the new source and digest and keeps its other
+    keys; any other entry of that name is replaced."""
+    if model_name in find_aliases_by_path(dest, _mm.load_registry()):
+        _mm._register_with_dedup(model_name, dest, source, digest=digest,
+                                 model_type=model_type, refresh=True,
+                                 architecture=gguf_meta.get("architecture"),
+                                 expert_count=gguf_meta.get("expert_count"),
+                                 type_user_set=type_user_set, **revision)
+        return
+    _mm._register(model_name, dest, source, sha256=digest, model_type=model_type,
+                  architecture=gguf_meta.get("architecture"),
+                  expert_count=gguf_meta.get("expert_count"),
+                  type_user_set=type_user_set, **revision)
+
+
+def _print_present_file_differs(part: str, on_disk: str, expected: str,
+                                owners: "list[tuple[str, str]]", why: str = "") -> None:
+    """Print why a pull stops: the file *part* that is already there hashes to
+    *on_disk* and does not match *expected*. *owners* are the registry entries
+    (``(name, source)``) that keep ``--redownload`` from replacing it."""
+    from rich.markup import escape
+    console.print(
+        f"[red]SHA256 mismatch![/red] The file already at {escape(part)} "
+        f"({escape(on_disk[:16])}…) does not match {escape(expected)}{escape(why)}. "
+        "It was left as it is.")
+    held = f"It is registered as {_civitai_registered_as(owners)}. " if owners else ""
+    console.print(f"[dim]{held}{_replace_step(owners)}[/dim]")
+
+
+def _replace_step(owners: "list[tuple[str, str]]") -> str:
+    """How to get the wanted file when another one holds its name: through
+    ``--redownload``, after removing the registry entries *owners* when there are
+    any, or by moving the file away."""
+    step = _civitai_next_step(owners)
+    return step if owners else (
+        step + " To keep it, move it out of this folder first, then pull again.")
+
+
+def _entry_has_no_source(model_name: str, dest: Path) -> bool:
+    """True when *model_name* is registered for the file *dest* without a download
+    source (``local``), as the models-folder scan registers a file."""
+    reg = _mm.load_registry()
+    entry = reg.get(model_name)
+    return (isinstance(entry, dict) and (entry.get("source") or "local") == "local"
+            and model_name in find_aliases_by_path(dest, reg))
+
+
+def _note_replaced_bytes(dest: Path, digest: Optional[str]) -> None:
+    """Record *digest* (None: unknown) on every registry entry of the file *dest*,
+    whose bytes a pull has just replaced."""
+    names = find_aliases_by_path(dest, _mm.load_registry())
+    if not names:
+        return
+
+    def _store(reg: dict) -> None:
+        for name in names:
+            if not isinstance(reg.get(name), dict):
+                continue
+            if digest:
+                reg[name]["sha256"] = digest.lower()
+            else:
+                reg[name].pop("sha256", None)
+    _mm.update_registry(_store)
+
+
 def _print_digest_name_in_use(part: str, on_disk: str, published: str,
                               repo_id: str, taken: "list[tuple[str, str]]") -> None:
     """Print why a pull stops: the file *part* in the models folder hashes to
@@ -4965,8 +5598,9 @@ def _civitai_next_step(others: "list[tuple[str, str]]") -> str:
     if not others:
         return "Pull again with --redownload to replace it."
     removals = " and ".join(f"localm rm {escape(n)}" for n, _ in others)
-    return (f"Remove it from the registry first ({removals}), then pull again "
-            "with --redownload to replace the file.")
+    return (f"Remove it from the registry first ({removals}, which deletes that file "
+            "unless you move it out of the folder before), then pull again with "
+            "--redownload to replace the file.")
 
 
 def _civitai_unproven_reason(dest: Path, resolved: Any,
