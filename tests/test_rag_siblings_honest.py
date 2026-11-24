@@ -151,8 +151,8 @@ class TestStoreKeepsVectors:
             self, home, docs):
         c = Collection("plain")
         c.create()
-        r = c.add_paths([docs], force=True, embed_fn=None)
-        assert r["added"] == 3
+        assert c.add_paths([docs], force=True, embed_fn=None)["added"] == 3
+        assert c.add_paths([docs], force=True, embed_fn=None)["updated"] == 3
         assert _disk("plain") == (3, 0, False)
 
     def test_a_changed_document_without_force_still_degrades_not_refuses(
