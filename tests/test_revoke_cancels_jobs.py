@@ -86,9 +86,12 @@ def test_a_revoke_by_another_process_and_an_expiry_are_noticed(mgr, monkeypatch)
 def test_an_unreadable_keystore_cancels_nothing(mgr, monkeypatch):
     a = auth.create_key("a", [scopes.CHAT])
     job = _start(mgr, a["key"])
-    monkeypatch.setattr(auth, "key_hash_live_checked", lambda h: None)
-    mgr._cancel_jobs_of_dead_keys()
-    assert job.status == "running"
+    with monkeypatch.context() as m:
+        m.setattr(auth, "key_hash_live_checked", lambda h: None)
+        mgr._check_keys_of_jobs()
+        assert job.status == "running"
+    assert auth.revoke_key(a["id"])
+    assert job.status == "cancelled"
 
 
 def test_a_job_registered_after_its_key_was_revoked_is_cancelled(mgr):
@@ -98,14 +101,132 @@ def test_a_job_registered_after_its_key_was_revoked_is_cancelled(mgr):
     assert job.status == "cancelled"
 
 
-def test_a_revoke_ends_the_child_process_of_a_command_job(mgr, monkeypatch):
-    a = auth.create_key("a", [scopes.CHAT])
+@pytest.fixture
+def child(monkeypatch):
+    """Every command job runs a child that sleeps. Yields the Popen objects and an
+    event a test can clear to hold the start of the child back."""
     real = jobmanager.subprocess.Popen
-    monkeypatch.setattr(
-        jobmanager.subprocess, "Popen",
-        lambda argv, **kw: real([sys.executable, "-c", "import time; time.sleep(60)"],
-                                creationflags=getattr(jobmanager.subprocess,
-                                                      "CREATE_NO_WINDOW", 0), **kw))
+    made, go = [], threading.Event()
+    go.set()
+
+    def popen(argv, **kw):
+        assert go.wait(20)
+        made.append(real([sys.executable, "-c", "import time; time.sleep(60)"],
+                         creationflags=getattr(jobmanager.subprocess,
+                                               "CREATE_NO_WINDOW", 0), **kw))
+        return made[-1]
+
+    class _Subprocess:
+        Popen = staticmethod(popen)
+
+        def __getattr__(self, name):
+            import subprocess
+            return getattr(subprocess, name)
+
+    monkeypatch.setattr(jobmanager, "subprocess", _Subprocess())
+    yield made, go
+    go.set()
+    for p in made:
+        p.kill()
+        p.wait(10)
+
+
+def test_a_command_job_registered_after_the_revoke_starts_no_process(mgr, child):
+    made, _go = child
+    a = auth.create_key("a", [scopes.CHAT])
+    assert auth.revoke_key(a["id"])
+    for kind in ("pull", "runtime-update"):
+        job = mgr.start_cli(kind, ["x"], owner=auth._hash_key(a["key"]))
+        assert _wait(lambda: job.finished_at is not None)  # noqa: B023
+        assert job.status == "cancelled"
+    assert made == []
+
+
+def test_a_revoke_between_registration_and_the_process_start_ends_it(mgr, child):
+    made, go = child
+    a = auth.create_key("a", [scopes.CHAT])
+    go.clear()
+    job = mgr.start_cli("pull", ["x"], owner=auth._hash_key(a["key"]))
+    time.sleep(0.2)
+    assert auth.revoke_key(a["id"]) and job.status == "cancelled"
+    go.set()
+    assert _wait(lambda: made and made[0].poll() is not None)
+    assert _wait(lambda: job.finished_at is not None) and job.status == "cancelled"
+
+
+def test_the_watch_stops_a_cancelled_job_whose_process_still_lives(mgr, child, monkeypatch):
+    monkeypatch.setattr(jobmanager, "_KEY_WATCH_SECONDS", 0.05)
+    made, _go = child
+    a = auth.create_key("a", [scopes.CHAT])
+    mgr.start_cli("pull", ["x"], owner=auth._hash_key(a["key"]))
+    assert _wait(lambda: made and mgr._watched_jobs()[0].process_alive)
+    stop, calls = made[0].terminate, []
+
+    def terminate():
+        calls.append(1)
+        if len(calls) > 2:
+            stop()
+
+    made[0].terminate = terminate
+    assert auth.revoke_key(a["id"])
+    assert _wait(lambda: made[0].poll() is not None) and len(calls) >= 3
+    assert _wait(lambda: not mgr._watching_keys)
+
+
+@pytest.mark.parametrize("kind", sorted(jobmanager._FINISHES_AFTER_REVOKE))
+def test_a_job_that_would_break_the_install_runs_to_its_end(mgr, child, kind):
+    made, _go = child
+    a = auth.create_key("a", [scopes.CHAT])
+    job = mgr.start_cli(kind, ["x"], owner=auth._hash_key(a["key"]))
+    assert _wait(lambda: made and job._proc is not None)
+    assert auth.revoke_key(a["id"])
+    assert job.status == "running" and made[0].poll() is None
+    [row] = mgr.jobs_of_revoked_key(auth._hash_key(a["key"]), wait_s=5)
+    assert row["cancelled"] is False and row["ended"] is False
+    mgr._check_keys_of_jobs()
+    assert job.status == "running"
+    assert any("runs to its end" in e.get("text", "") for e in job._history)
+
+
+def test_a_job_whose_key_is_already_gone_at_registration_is_cancelled(mgr, monkeypatch):
+    monkeypatch.setattr(jobmanager, "_KEY_WATCH_SECONDS", 0.05)
+    a = auth.create_key("a", [scopes.CHAT])
+    auth._save_keystore([])
+    job = _start(mgr, a["key"])
+    assert _wait(lambda: job.status == "cancelled")
+
+
+def test_a_job_registered_while_the_keystore_cannot_be_read_stays_revocable(
+        mgr, monkeypatch):
+    a = auth.create_key("a", [scopes.CHAT])
+    with monkeypatch.context() as m:
+        m.setattr(auth, "key_hash_live_checked", lambda h: None)
+        job = _start(mgr, a["key"])
+        mgr._check_keys_of_jobs()
+        assert job.status == "running"
+    mgr._check_keys_of_jobs()
+    assert job.status == "running"
+    assert auth.revoke_key(a["id"]) and job.status == "cancelled"
+
+
+def test_an_owner_session_from_before_a_key_roll_is_the_owner(mgr, monkeypatch):
+    from localm import sessions
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    auth.set_api_key(OWNER)
+    before = auth._hash_key(OWNER)
+    sessions.create(scopes={"admin"}, key_hash=before, owner_key_minted=True)
+    auth.set_api_key("another-owner-key-9876")
+    job = mgr.start_fn("test", _blocking, owner=before)
+    assert job.key_hash is None
+    mgr._check_keys_of_jobs()
+    assert job.status == "running"
+    stranger = mgr.start_fn("test", _blocking, owner="f" * 64)
+    mgr._check_keys_of_jobs()
+    assert stranger.status == "cancelled"
+
+
+def test_a_revoke_ends_the_child_process_of_a_command_job(mgr, child):
+    a = auth.create_key("a", [scopes.CHAT])
     job = mgr.start_cli("pull", ["pull", "x"], owner=auth._hash_key(a["key"]))
     assert _wait(lambda: job._proc is not None)
     assert auth.revoke_key(a["id"])
@@ -166,7 +287,7 @@ def test_an_indexing_jobs_progress_stops_a_cancelled_run(mgr, tmp_path):
     assert len(Collection("c", base=base, cache=False).documents()) == 3
 
 
-def test_the_reply_lists_the_cancelled_jobs(monkeypatch, tmp_path):
+def test_the_reply_lists_the_keys_jobs(monkeypatch, tmp_path):
     monkeypatch.setenv("LOCALM_API_KEY", OWNER)
     monkeypatch.setattr("localm.inference.routes.keys._JOB_END_WAIT_S", 5.0)
     app = create_app(None)
@@ -179,8 +300,9 @@ def test_the_reply_lists_the_cancelled_jobs(monkeypatch, tmp_path):
         a = auth.create_key("a", [scopes.CHAT])
         quick = _start(m, a["key"], kind="pull")
         body = c.delete(f"/v1/keys/{a['id']}", headers=own).json()
-        assert body == {"status": "revoked", "id": a["id"], "cancelled_jobs": [
-            {"id": quick.id, "kind": "pull", "label": "the label", "ended": True}]}
+        assert body == {"status": "revoked", "id": a["id"], "jobs": [
+            {"id": quick.id, "kind": "pull", "label": "the label",
+             "cancelled": True, "ended": True}]}
 
         monkeypatch.setattr("localm.inference.routes.keys._JOB_END_WAIT_S", 0.1)
         admin = auth.create_key("admin", [scopes.KEYS_ADMIN], allow_privileged=True)
@@ -189,13 +311,13 @@ def test_the_reply_lists_the_cancelled_jobs(monkeypatch, tmp_path):
                            owner=auth._hash_key(b["key"]), label="secret label")
         body = c.delete(f"/v1/keys/{b['id']}",
                         headers={"Authorization": f"Bearer {admin['key']}"}).json()
-        assert body["cancelled_jobs"] == [
+        assert body["jobs"] == [
             {"id": stuck.id, "kind": "voice-model-download", "label": None,
-             "ended": False}]
+             "cancelled": True, "ended": False}]
         release.set()
         assert _wait(lambda: stuck.finished_at is not None)
         d = auth.create_key("d", [scopes.CHAT])
-        assert c.delete(f"/v1/keys/{d['id']}", headers=own).json()["cancelled_jobs"] == []
+        assert c.delete(f"/v1/keys/{d['id']}", headers=own).json()["jobs"] == []
         assert c.delete(f"/v1/keys/{d['id']}", headers=own).status_code == 404
 
 

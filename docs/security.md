@@ -44,13 +44,18 @@ expiry (`--expires-in` / `expires_in` on `POST /v1/keys`); `verify()` rejects it
 once it has passed. A key is only minted with localm's own scopes and those of
 installed plugins; a misspelled scope is refused. Revoking a named key, or its
 expiry, ends its browser sessions, coder sessions, open streams and running jobs,
-except that an embedding or speech model download already in progress runs to its end.
+except that these run to their end: an embedding or speech model download, a
+llama.cpp runtime or ComfyUI update, and a model removal already in progress.
 
 A browser's login is an HttpOnly, SameSite=Strict cookie (Secure over https)
 holding a random session id, never the key. Its name carries a hash of the
-install's own id, so moving the server to another port keeps the login and two
-installs on one machine do not replace each other's. A login cookie set by an
-older version keeps working.
+install's own id and of its data folder, so moving the server to another port keeps
+the login and two installs on one machine, a copy included, do not replace each
+other's. A browser has one login per install: signing in ends and removes every
+other login of that install the browser sends, and a login that ended (revoked,
+expired, signed out) never gives way to another one. A login cookie set by an older
+version keeps working and is moved to the new name; when there are several, the
+newest counts and the others are ended.
 
 The owner key itself can be rolled or set from the GUI (Settings > Security)
 as well as the CLI: `POST /api/auth/key/rotate` requires the `admin` scope

@@ -22,7 +22,9 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
+import socket
 import sys
 import threading
 import time
@@ -4596,67 +4598,198 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 SESSION_COOKIE = "localm_session"
 
 
+# An unqualified or port-named session cookie, as older builds set them.
+_OLDER_SESSION_COOKIE = re.compile(rf"{SESSION_COOKIE}(_[0-9]{{1,5}})?")
+
+#: Most older-build session cookies looked up for one request.
+_MAX_OLDER_SESSION_COOKIES = 16
+
+_data_folder_ids: dict = {}
+
+
+def _data_folder_id() -> str:
+    """What tells this install's data folder apart from a copy of it on the same
+    host: its resolved path and, on Linux, the mount it lies on (two containers
+    can hold different volumes at one path; a container's own layer is told apart
+    by the host name)."""
+    from localm import config
+    home = config.HOME_DIR
+    known = _data_folder_ids.get(home)
+    if known is None:
+        path = os.path.normcase(os.path.realpath(home))
+        known = _data_folder_ids[home] = f"{path}|{_mount_id(path)}"
+    return known
+
+
+def _mount_id(path: str, mountinfo: str = "/proc/self/mountinfo") -> str:
+    """The part of its filesystem mounted over *path*, from *mountinfo*, with the
+    host name for an overlay; empty when that cannot be read."""
+    best, found = -1, ""
+    try:
+        with open(mountinfo, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                fields = line.split(" ")
+                if "-" not in fields[6:]:
+                    continue
+                root, point = fields[3], fields[4]
+                under = path == point or path.startswith(point.rstrip("/") + "/")
+                if under and len(point) >= best:
+                    fstype = fields[fields.index("-", 6) + 1]
+                    best = len(point)
+                    found = f"{root}|{fstype}"
+                    if fstype == "overlay":
+                        found += f"|{socket.gethostname()}"
+    except (OSError, IndexError):
+        return ""
+    return found
+
+
+def _session_cookie_names(request) -> tuple[str, str]:
+    """This install's session cookie name for *request*'s scheme, and the one for
+    the other scheme (http, https)."""
+    from localm.config import instance_id
+    tag = hashlib.sha256(
+        f"localm-session-cookie:{instance_id()}:{_data_folder_id()}".encode(
+            "utf-8", "surrogatepass")).hexdigest()[:12]
+    plain = f"{SESSION_COOKIE}_{tag}"
+    tls = f"{plain}_tls"
+    return (tls, plain) if request.url.scheme == "https" else (plain, tls)
+
+
 def session_cookie_name(request) -> str:
     """This install's session cookie name: ``SESSION_COOKIE`` plus a short hash
-    of ``config.instance_id()``, with ``_tls`` appended over https. Browsers
-    share cookies across the ports of one host, so the name is the install's
-    and not the port's; http and https use two names because a browser does not
-    let an http response replace a Secure cookie of the same name."""
-    from localm.config import instance_id
-    tag = hashlib.sha256(f"localm-session-cookie:{instance_id()}".encode()).hexdigest()[:12]
-    return f"{SESSION_COOKIE}_{tag}{'_tls' if request.url.scheme == 'https' else ''}"
-
-
-#: Most session cookies looked up for one request.
-_MAX_SESSION_COOKIES = 16
+    of ``config.instance_id()`` and the data folder (``_data_folder_id``), with
+    ``_tls`` appended over https. Browsers share cookies across the ports of one
+    host, so the name is the install's and not the port's; http and https use two
+    names because a browser does not let an http response replace a Secure cookie
+    of the same name."""
+    return _session_cookie_names(request)[0]
 
 
 def _presented_session_cookies(request) -> dict[str, str]:
-    """The non-empty session cookies *request* presents, this install's own name
-    first, at most ``_MAX_SESSION_COOKIES``."""
-    presented = {n: v.strip() for n, v in request.cookies.items()
-                 if (n == SESSION_COOKIE or n.startswith(SESSION_COOKIE + "_"))
-                 and v.strip()}
-    if len(presented) < 2:
-        return presented
-    own = session_cookie_name(request)
-    names = sorted(presented, key=lambda n: n != own)[:_MAX_SESSION_COOKIES]
-    return {n: presented[n] for n in names}
+    """The non-empty cookies in *request* under a session cookie name of this
+    install (either scheme) or of an older build. A cookie of another install with
+    its own name is never among them."""
+    names = set(_session_cookie_names(request))
+    return {n: v.strip() for n, v in request.cookies.items()
+            if (n in names or _OLDER_SESSION_COOKIE.fullmatch(n)) and v.strip()}
 
 
-def own_session_cookies(request) -> dict[str, str]:
-    """The session cookies *request* presents that this install's session store
-    knows, as ``{name: session id}``, this install's own name first: that one,
-    and the ones older builds set (``localm_session``, ``localm_session_<port>``).
-    A cookie of another install on this host is never among them."""
+def _older_build_choice(request, presented: dict[str, str]) -> str:
+    """The session id to use when *request* presents none under this install's own
+    name. The other scheme's name of this install alone counts when presented.
+    Otherwise older builds' cookies count: the cookie such a build would have used
+    for this port must still be live when presented; among the live ones the
+    newest session is used and the others are ended. Returns "" when the others
+    could not be ended."""
+    _own, other = _session_cookie_names(request)
+    if other in presented:
+        return presented[other]
+    try:
+        port = request.url.port
+    except ValueError:
+        port = None
+    older = {n: v for n, v in presented.items() if n != other}
+    judged = older.get(f"{SESSION_COOKIE}_{port}", "") if port else ""
+    judged = judged or older.get(SESSION_COOKIE, "")
+    values = list(dict.fromkeys(v for v in (judged, *older.values()) if v))
+    live = {}
+    for value in values[:_MAX_OLDER_SESSION_COOKIES]:
+        rec = _valid_session(value)
+        if rec is not None:
+            live[value] = rec["issued"]
+    if not live or (judged and judged not in live):
+        return values[0] if values else ""
+    newest = max(live, key=lambda v: live[v])
     from localm import sessions
-    return {n: v for n, v in _presented_session_cookies(request).items()
-            if sessions.lookup(v) is not None}
+    ended = [v for v in live if v != newest]
+    if ended:
+        if sessions.revoke_many(ended) is None:
+            return ""
+        request.state.localm_sessions_ended = tuple(ended)
+    return newest
 
 
 def session_cookie_value(request) -> str:
-    """The session id presented by *request*: the first one this install's
-    session store knows (``own_session_cookies``), else the first presented, else
-    ""."""
+    """The session id presented by *request*. Under this install's own cookie name
+    only that one counts, live or not. Without it: ``_older_build_choice``. ""
+    when none is presented. Decided once per request."""
+    chosen = getattr(request.state, "localm_session_id", None)
+    if isinstance(chosen, str):
+        return chosen
     presented = _presented_session_cookies(request)
-    known = own_session_cookies(request) if len(presented) > 1 else presented
-    return next(iter((known or presented).values()), "")
+    chosen = presented.get(session_cookie_name(request), "") if presented else ""
+    if presented and not chosen:
+        chosen = _older_build_choice(request, presented)
+    request.state.localm_session_id = chosen
+    return chosen
 
 
-def set_session_cookie(request, response, sid: str) -> None:
-    """Set the session cookie holding *sid* on *response*: HttpOnly,
-    SameSite=Strict, Secure over https, kept for ``SESSION_MAX_AGE``."""
-    response.set_cookie(session_cookie_name(request), sid, httponly=True,
-                        secure=request.url.scheme == "https", samesite="strict",
+def _set_session_cookie(request, response, sid: str, others) -> None:
+    """Set this install's session cookie to *sid* on *response* (HttpOnly,
+    SameSite=Strict, Secure over https, kept for ``SESSION_MAX_AGE``) and delete
+    the cookies named in *others*."""
+    secure = request.url.scheme == "https"
+    own = session_cookie_name(request)
+    response.set_cookie(own, sid, httponly=True, secure=secure, samesite="strict",
                         path="/", max_age=SESSION_MAX_AGE)
+    for name in others:
+        if name != own:
+            response.delete_cookie(name, path="/", httponly=True, secure=secure,
+                                   samesite="strict")
 
 
-def clear_session_cookies(request, response, names) -> None:
-    """Delete this install's session cookie and the cookies in *names* (from
-    ``own_session_cookies``, read before the sessions were revoked)."""
-    for name in {session_cookie_name(request), *names}:
-        response.delete_cookie(name, path="/", httponly=True,
-                               secure=request.url.scheme == "https", samesite="strict")
+def start_session(request, response, *, key_hash: Optional[str], **snapshot) -> str:
+    """Log this browser in: mint a session (``sessions.create`` with *key_hash* and
+    *snapshot*) and set its cookie on *response*. Every other session of this
+    install the request presents is ended in the same write and its cookie
+    deleted, except one under the other scheme's name that the same key minted.
+    Returns the session id; raises what ``sessions.create`` raises, with nothing
+    changed. Blocking."""
+    from localm import sessions
+    presented = _presented_session_cookies(request)
+    _own, other = _session_cookie_names(request)
+    if other in presented and key_hash:
+        rec = sessions.lookup(presented[other])
+        if rec is not None and rec["key_hash"] == key_hash:
+            presented.pop(other)
+    mine = sessions.stored(presented.values())
+    sid = sessions.create(key_hash=key_hash, replaces=mine, **snapshot)
+    _set_session_cookie(request, response, sid,
+                        [n for n, v in presented.items() if v in mine])
+    return sid
+
+
+def move_session_to_own_name(request, response) -> None:
+    """When the session *request* is signed in with came under another name (an
+    older build's, or the other scheme's), set it under this install's own name
+    on *response* and delete the cookies it and the sessions ended for it came
+    under. Blocking."""
+    presented = _presented_session_cookies(request)
+    if not presented or session_cookie_name(request) in presented:
+        return
+    sid = session_cookie_value(request)
+    if not sid or _valid_session(sid) is None:
+        return
+    ended = getattr(request.state, "localm_sessions_ended", ())
+    _set_session_cookie(request, response, sid,
+                        [n for n, v in presented.items() if v == sid or v in ended])
+
+
+def end_sessions(request, response, also=()) -> bool:
+    """Sign this browser out: end every session of this install *request* presents
+    and those in *also*, and delete this install's cookie and theirs on
+    *response*. False when the store could not be written. Blocking."""
+    from localm import sessions
+    presented = _presented_session_cookies(request)
+    mine = sessions.stored(presented.values())
+    done = sessions.revoke_many({*mine, *also}) is not None
+    secure = request.url.scheme == "https"
+    for name in {session_cookie_name(request),
+                 *(n for n, v in presented.items() if v in mine)}:
+        response.delete_cookie(name, path="/", httponly=True, secure=secure,
+                               samesite="strict")
+    return done
 
 
 CSRF_HEADER = "X-CSRF-Token"

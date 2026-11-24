@@ -165,6 +165,7 @@ def _relay_once_with_failing_hops(monkeypatch, failures):
                 raise OSError(10055, "no buffer space")
             return await real(*a, **kw)
 
+        monkeypatch.setattr(portmux, "_UPSTREAM_RETRY_DELAYS", (0.01, 0.01))
         monkeypatch.setattr(portmux.asyncio, "open_connection", hop)
 
         async def on_client(reader, writer):
@@ -186,24 +187,64 @@ def _relay_once_with_failing_hops(monkeypatch, failures):
             finally:
                 writer.close()
         finally:
+            asyncio.open_connection = real
             front.close()
             echo_server.close()
     return asyncio.run(go())
 
 
-def test_a_connection_survives_a_failed_hop_to_the_internal_server(monkeypatch, caplog):
-    monkeypatch.setattr(portmux, "_UPSTREAM_RETRY_DELAYS", (0.01, 0.01))
-    assert _relay_once_with_failing_hops(monkeypatch, 2) == b"hello"
-    assert "could not be handed" not in caplog.text
-
-
-def test_a_connection_that_cannot_be_handed_over_is_logged(monkeypatch, caplog):
-    monkeypatch.setattr(portmux, "_UPSTREAM_RETRY_DELAYS", (0.01, 0.01))
+@pytest.fixture
+def portmux_log(monkeypatch):
+    """Every record portmux logs, as ``(level, text)``, with no outage pending."""
+    import logging
+    records = []
+    monkeypatch.setattr(portmux, "_upstream_down", False)
     monkeypatch.setattr(portmux, "stopping", lambda: False)
-    with caplog.at_level("WARNING", logger="localm.portmux"):
-        assert _relay_once_with_failing_hops(monkeypatch, 3) == b""
-    assert "could not be handed to the server" in caplog.text
-    assert "no buffer space" in caplog.text
+    monkeypatch.setattr(portmux._log, "log",
+                        lambda lv, msg, *a: records.append((lv, msg % a)))
+    monkeypatch.setattr(portmux._log, "info",
+                        lambda msg, *a: records.append((logging.INFO, msg % a)))
+    return records
+
+
+def test_a_connection_survives_a_failed_hop_to_the_internal_server(
+        monkeypatch, portmux_log):
+    assert _relay_once_with_failing_hops(monkeypatch, 2) == b"hello"
+    assert portmux_log == []
+
+
+def test_an_outage_is_warned_about_once_and_its_end_is_logged(monkeypatch, portmux_log):
+    import logging
+    for _ in range(3):
+        assert _relay_once_with_failing_hops(monkeypatch, 99) == b""
+    levels = [lv for lv, _ in portmux_log]
+    assert levels == [logging.WARNING, logging.DEBUG, logging.DEBUG]
+    assert "no buffer space" in portmux_log[0][1]
+    assert _relay_once_with_failing_hops(monkeypatch, 0) == b"hello"
+    assert portmux_log[-1][0] == logging.INFO
+
+
+def test_handing_a_connection_over_takes_a_bounded_time(monkeypatch, portmux_log):
+    async def never(*a, **kw):
+        await asyncio.sleep(60)
+
+    async def go():
+        monkeypatch.setattr(portmux.asyncio, "open_connection", never)
+        begun = asyncio.get_running_loop().time()
+        assert await portmux._open_upstream(9) is None
+        return asyncio.get_running_loop().time() - begun
+
+    assert asyncio.run(go()) < portmux._UPSTREAM_BUDGET_S + 1.0
+    assert "TimeoutError" in portmux_log[0][1]
+
+
+def test_a_refused_port_is_given_up_within_the_budget(portmux_log):
+    async def go():
+        begun = asyncio.get_running_loop().time()
+        assert await portmux._open_upstream(_free_port()) is None
+        return asyncio.get_running_loop().time() - begun
+
+    assert asyncio.run(go()) < portmux._UPSTREAM_BUDGET_S + 1.0
 
 
 # --------------------------------------------------------------------------- #

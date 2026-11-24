@@ -1314,6 +1314,17 @@ def create_key(name: str, scope_list, *, allow_privileged: bool = False,
             "key": key}
 
 
+def is_owner_identity(key_hash: Optional[str]) -> bool:
+    """True when *key_hash* is the identity of the owner key in force
+    (``_hash_key``, or the unsalted one a session or job from before the salted
+    derivation carries)."""
+    owner = get_api_key()
+    if not owner or not key_hash:
+        return False
+    return (ct_equal(key_hash, _hash_key(owner))
+            or ct_equal(key_hash, _legacy_owner_identity(owner)))
+
+
 def key_hash_of(key_id: str) -> Optional[str]:
     """The sha256 stored for the named key *key_id*, or None when there is none."""
     return next((r.get("hash") for r in _load_keystore() if r.get("id") == key_id),

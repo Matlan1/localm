@@ -71,9 +71,12 @@ _PATH_RE = re.compile(r"^/[!-~]*$")
 
 _READ_CHUNK = 65536
 
-# Waits, in seconds, before each further try to connect to the internal uvicorn
-# for an accepted connection.
-_UPSTREAM_RETRY_DELAYS = (0.05, 0.25, 1.0)
+# Seconds all tries together may take to connect to the internal uvicorn for an
+# accepted connection, and the waits before each further try.
+_UPSTREAM_BUDGET_S = 1.0
+_UPSTREAM_RETRY_DELAYS = (0.05, 0.25)
+# True since the last accepted connection could not be handed to the server.
+_upstream_down = False
 
 # Signals routed to a graceful stop of run_server() (see route_stop_signals).
 # Names this platform does not define are skipped.
@@ -750,22 +753,54 @@ async def _handle_conn(reader, writer, internal_port, public_port) -> None:
         _safe_close(writer)
 
 
+async def _connect_within(internal_port, seconds):
+    """``asyncio.open_connection`` to the internal uvicorn, or TimeoutError when
+    it is not open after *seconds*. A connect the event loop already completed
+    counts even when the loop itself was late."""
+    task = asyncio.ensure_future(asyncio.open_connection("127.0.0.1", internal_port))
+    try:
+        await asyncio.wait({task}, timeout=seconds)
+        for _ in range(20):
+            if task.done():
+                return task.result()
+            await asyncio.sleep(0)
+        raise TimeoutError(f"not open after {seconds:.2g} s")
+    finally:
+        if not task.done():
+            task.cancel()
+
+
 async def _open_upstream(internal_port):
     """A connection to the internal uvicorn as ``(reader, writer)``, tried again
-    after each of ``_UPSTREAM_RETRY_DELAYS`` when it cannot be opened. None, with
-    a warning logged (DEBUG while the server stops), when every try failed; the
-    caller's client is then closed without an answer."""
+    while ``_UPSTREAM_BUDGET_S`` lasts when it cannot be opened. None when every
+    try failed; the caller's client is then closed without an answer. The first
+    failure of an outage is logged at WARNING, later ones and those while the
+    server stops at DEBUG."""
+    global _upstream_down
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _UPSTREAM_BUDGET_S
+    error: Exception = TimeoutError("no time to connect")
     for delay in (*_UPSTREAM_RETRY_DELAYS, None):
+        left = deadline - loop.time()
+        if left <= 0:
+            break
         try:
-            return await asyncio.open_connection("127.0.0.1", internal_port)
+            opened = await _connect_within(internal_port, left)
         except OSError as e:
-            if delay is None or stopping():
-                _log.log(logging.DEBUG if stopping() else logging.WARNING,
-                         "portmux: an accepted connection could not be handed to "
-                         "the server (%s: %s) and was closed unanswered",
-                         type(e).__name__, e)
-                return None
+            error = e
+        else:
+            if _upstream_down:
+                _upstream_down = False
+                _log.info("portmux: connections reach the server again")
+            return opened
+        if delay is None or stopping() or loop.time() + delay >= deadline:
+            break
         await asyncio.sleep(delay)
+    quiet = _upstream_down or stopping()
+    _upstream_down = _upstream_down or not stopping()
+    _log.log(logging.DEBUG if quiet else logging.WARNING,
+             "portmux: an accepted connection could not be handed to the server "
+             "(%s: %s) and was closed unanswered", type(error).__name__, error)
     return None
 
 

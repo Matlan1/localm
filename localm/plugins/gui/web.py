@@ -386,10 +386,10 @@ def _set_session_cookies(request, response, key: str) -> None:
     if *key* is not a valid key. The CSRF token is DERIVED from the session and
     fetched by the client from GET /api/session, so there is no separate CSRF
     cookie to set or to fall out of sync with the session."""
-    from localm import scopes as S, sessions
+    from localm import scopes as S
     from localm.auth import (_hash_key, _is_owner_key, fs_access_for,
                              rag_roots_for, verify)
-    from localm.inference.http_server import set_session_cookie
+    from localm.inference.http_server import start_session
     held = verify(key)
     if held is None:
         return
@@ -399,9 +399,9 @@ def _set_session_cookies(request, response, key: str) -> None:
         # owner_key_minted is asked here, of the key actually presented, rather than
         # assumed from the call sites, so a session seeded from a scoped key answers
         # False.
-        sid = sessions.create(scopes=held, key_hash=_hash_key(key), fs_access=fs,
-                              rag_roots=rag_roots,
-                              owner_key_minted=_is_owner_key(key))
+        start_session(request, response, scopes=held, key_hash=_hash_key(key),
+                      fs_access=fs, rag_roots=rag_roots,
+                      owner_key_minted=_is_owner_key(key))
     except Exception as e:
         # The session store could not be written (e.g. a corrupt or unreadable
         # sessions.json). Serve the shell WITHOUT a session cookie so the client falls
@@ -409,8 +409,6 @@ def _set_session_cookies(request, response, key: str) -> None:
         from localm.debuglog import logger as _dbg
         _dbg.warning("could not establish a browser session (auto-seed): %s; "
                      "serving the shell unauthenticated (the key gate will show)", e)
-        return
-    set_session_cookie(request, response, sid)
 
 
 class LoadModelRequest(BaseModel):

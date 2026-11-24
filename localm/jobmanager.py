@@ -126,10 +126,11 @@ class Job:
     # its work runs inside one, and the activity record keeps no finished row of
     # it unless diagnostics are kept on purpose.
     private: bool = False
-    # The sha256 of the keystore key that created this job, or None for the owner
-    # key, open mode and a restored record. Set when the job is registered.
+    # The sha256 of the key that created this job, or None for a job the owner key
+    # or open mode started and for a restored record. Set when the job is
+    # registered.
     key_hash: Optional[str] = None
-    # True once this job was cancelled because its key was revoked or expired.
+    # True once this job's key was revoked or expired while the job ran.
     key_revoked: bool = False
 
     # ---- durable record -------------------------------------------------- #
@@ -222,6 +223,12 @@ class Job:
         callback to call where its work can stop; the job then ends cancelled."""
         if self.cancel_event.is_set():
             raise JobCancelled(f"job {self.id} was cancelled")
+
+    @property
+    def process_alive(self) -> bool:
+        """Whether this job has a child process that still runs."""
+        proc = self._proc
+        return proc is not None and proc.poll() is None
 
     @property
     def subscriber_count(self) -> int:
@@ -865,6 +872,9 @@ _MANAGERS: weakref.WeakSet = weakref.WeakSet()
 # Seconds between re-checks of the keys of running key-created jobs.
 _KEY_WATCH_SECONDS = 5.0
 
+# Kinds of job a revoked key does not stop once their command runs.
+_FINISHES_AFTER_REVOKE = frozenset({"comfy-update", "runtime-update", "remove"})
+
 # The sha256 hashes of the keystore keys revoked in this process.
 _revoked_hashes: set[str] = set()
 
@@ -1064,73 +1074,96 @@ class JobManager:
             self._persist_locked()
         if job.key_hash is not None:
             if job.key_hash in _revoked_hashes:
-                self.cancel_jobs_of_key(job.key_hash)
-            else:
-                self._start_key_watch()
+                self._end_for_key(job)
+            self._start_key_watch()
         _livefeed.kick("job registered")
 
     # ---- the creating key ------------------------------------------------- #
     @staticmethod
     def _revocable_key(owner: Optional[str]) -> Optional[str]:
-        """*owner* when it is the hash of a keystore key (live, or revoked in
-        this process), else None: the owner key, open mode."""
+        """*owner*, unless it is proven to be the owner's: no key (open mode), the
+        owner key's identity, or that of an owner session from before the owner
+        key was rolled."""
         if owner is None:
             return None
-        from localm import auth
-        if owner in _revoked_hashes or auth.key_hash_live_checked(owner):
-            return owner
-        return None
+        from localm import auth, sessions
+        if auth.is_owner_identity(owner) or sessions.minted_by_owner_key(owner):
+            return None
+        return owner
+
+    def _end_for_key(self, job: Job) -> bool:
+        """End running *job* because its key is gone: cancel it, or let it finish
+        when its command runs and its kind is in ``_FINISHES_AFTER_REVOKE``.
+        Returns whether it was cancelled."""
+        job.key_revoked = True
+        if job.kind in _FINISHES_AFTER_REVOKE and job._proc is not None:
+            job.push({"type": "line", "text": "The API key that started this was "
+                      "revoked or has expired. It runs to its end, because stopping "
+                      "it half way would leave the install broken."})
+            return False
+        job.push({"type": "line", "text": "Stopped: the API key that started "
+                  "this was revoked or has expired."})
+        job.cancel()
+        return True
 
     def cancel_jobs_of_key(self, key_hash: Optional[str]) -> list:
-        """Cancel every running job created by the keystore key with sha256
-        *key_hash*, or by any keystore key when *key_hash* is None. Returns the
-        jobs cancelled."""
+        """End every running job created by the key with sha256 *key_hash*, or by
+        any key but the owner's when *key_hash* is None (``_end_for_key``). Returns
+        the jobs cancelled."""
         with self._lock:
             jobs = [j for j in self._jobs.values()
-                    if j.status == "running" and j.key_hash
+                    if j.status == "running" and j.key_hash and not j.key_revoked
                     and (key_hash is None or j.key_hash == key_hash)]
-        for job in jobs:
-            job.key_revoked = True
-            job.push({"type": "line", "text": "Stopped: the API key that started "
-                      "this was revoked or has expired."})
-            job.cancel()
-        if jobs:
+        cancelled = [j for j in jobs if self._end_for_key(j)]
+        if cancelled:
             from localm.debuglog import logger
             logger.info("cancelled %d job(s) whose key was revoked or expired",
-                        len(jobs))
-        return jobs
+                        len(cancelled))
+        return cancelled
 
-    def jobs_cancelled_with_key(self, key_hash: str, *, wait_s: float = 0.0) -> list:
-        """The jobs cancelled because the key with sha256 *key_hash* was revoked
-        or expired, as ``{"id", "kind", "label", "ended"}``. ``ended`` is False
-        while the job's work has not stopped yet; up to *wait_s* seconds are
-        spent waiting for that."""
+    def jobs_of_revoked_key(self, key_hash: str, *, wait_s: float = 0.0) -> list:
+        """The jobs that ran when the key with sha256 *key_hash* was revoked or
+        expired, as ``{"id", "kind", "label", "cancelled", "ended"}``.
+        ``cancelled`` is False for one that runs to its end
+        (``_FINISHES_AFTER_REVOKE``); ``ended`` is False while the job's work has
+        not stopped yet, and up to *wait_s* seconds are spent waiting for the
+        cancelled ones."""
         with self._lock:
             jobs = [j for j in self._jobs.values()
                     if j.key_revoked and j.key_hash == key_hash]
         deadline = time.monotonic() + wait_s
-        while (any(j.finished_at is None for j in jobs)
+        while (any(j.finished_at is None and j.cancel_requested for j in jobs)
                and time.monotonic() < deadline):
             time.sleep(0.05)
         return [{"id": j.id, "kind": j.kind, "label": j.label,
+                 "cancelled": j.cancel_requested,
                  "ended": j.finished_at is not None} for j in jobs]
 
-    def _cancel_jobs_of_dead_keys(self) -> None:
-        """Cancel every running job whose creating keystore key is no longer
-        live (``auth.key_hash_live_checked``). A keystore that cannot be read
-        cancels nothing."""
-        from localm import auth
+    def _watched_jobs(self) -> list:
+        """The jobs the key watch still has work with: running ones whose key was
+        not found revoked yet, and cancelled ones whose process still lives."""
         with self._lock:
-            hashes = {j.key_hash for j in self._jobs.values()
-                      if j.key_hash and j.status == "running"}
-        for h in hashes:
+            return [j for j in self._jobs.values() if j.key_hash
+                    and (j.process_alive if j.cancel_requested
+                         else j.status == "running" and not j.key_revoked)]
+
+    def _check_keys_of_jobs(self) -> None:
+        """Cancel every running job whose key is not live in the keystore
+        (``auth.key_hash_live_checked``; a keystore that cannot be read cancels
+        nothing), and stop again the process of a job already cancelled."""
+        from localm import auth
+        watched = self._watched_jobs()
+        for job in watched:
+            if job.cancel_requested:
+                job.cancel()
+        for h in {j.key_hash for j in watched if not j.cancel_requested}:
             if auth.key_hash_live_checked(h) is False:
                 self.cancel_jobs_of_key(h)
 
     def _start_key_watch(self) -> None:
-        """Start the daemon thread that runs :meth:`_cancel_jobs_of_dead_keys`
-        every ``_KEY_WATCH_SECONDS`` while a key-created job runs; it exits when
-        none does. Does nothing when it already runs."""
+        """Start the daemon thread that runs :meth:`_check_keys_of_jobs` every
+        ``_KEY_WATCH_SECONDS`` while there are ``_watched_jobs``; it exits when
+        there are none. Does nothing when it already runs."""
         with self._lock:
             if self._watching_keys:
                 return
@@ -1141,19 +1174,19 @@ class JobManager:
             while True:
                 time.sleep(_KEY_WATCH_SECONDS)
                 try:
-                    self._cancel_jobs_of_dead_keys()
+                    self._check_keys_of_jobs()
                 except Exception:
                     logger.warning("checking the keys of running jobs failed",
                                    exc_info=True)
                 with self._lock:
-                    if not any(j.key_hash and j.status == "running"
-                               for j in self._jobs.values()):
+                    if not self._watched_jobs():
                         self._watching_keys = False
                         return
 
         from localm.config import home_bound
         try:
-            threading.Thread(target=home_bound(_watch, name="job key watch"),
+            threading.Thread(target=home_bound(_watch, name="job key watch",
+                                               track=False),
                              name="job-key-watch", daemon=True).start()
         except RuntimeError:
             with self._lock:
@@ -1353,6 +1386,7 @@ class JobManager:
                 if extra_env:
                     env = os.environ.copy()
                     env.update(extra_env)
+                job.raise_if_cancelled()
                 job._proc = subprocess.Popen(
                     job.argv,
                     stdin=subprocess.DEVNULL,   # no inherited TTY, so interactive
@@ -1365,6 +1399,8 @@ class JobManager:
                     bufsize=1,
                     env=env,
                 )
+                if job.cancel_requested:
+                    job._proc.terminate()
                 # Re-persist now that the child EXISTS, so the record carries its
                 # pid; the create-time write ran ahead of the Popen.
                 self._persist()
@@ -1407,6 +1443,8 @@ class JobManager:
                         job.status = reported_outcome
                     else:
                         job.status = "done" if job.returncode == 0 else "failed"
+            except JobCancelled:
+                job.status = "cancelled"
             except Exception as e:
                 job.status = "failed"
                 job.push({"type": "line", "text": f"job error: {e}"})

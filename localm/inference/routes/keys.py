@@ -158,16 +158,15 @@ def register(app: FastAPI, ctx) -> None:
         if owner is not None:
             # An OPAQUE owner session (id in the cookie, never the key), so this
             # browser keeps full access across a later key roll.
-            from localm import sessions
             # owner_key_minted: see sessions.create. _is_owner_key re-compares
             # against the live value, so a seed that did not take reports False.
             from fastapi.concurrency import run_in_threadpool
             seeded: str = owner
-            sid = await run_in_threadpool(
-                lambda: sessions.create(scopes={scopes.ADMIN},
-                                        key_hash=auth._hash_key(seeded), fs_access="host",
-                                        owner_key_minted=auth._is_owner_key(seeded)))
-            _hs.set_session_cookie(request, response, sid)
+            await run_in_threadpool(
+                lambda: _hs.start_session(request, response, scopes={scopes.ADMIN},
+                                          key_hash=auth._hash_key(seeded),
+                                          fs_access="host",
+                                          owner_key_minted=auth._is_owner_key(seeded)))
             # CSRF is derived from the session (client fetches it from
             # GET /api/session); no separate CSRF cookie to set.
         # The plaintext key is returned exactly once - it is never recoverable.
@@ -177,9 +176,10 @@ def register(app: FastAPI, ctx) -> None:
     async def revoke_key_ep(key_id: str, request: Request):
         """Revoke a named key and end what runs under it: its browser sessions,
         the coder sessions it created, its running jobs and its open streams.
-        ``cancelled_jobs`` in the reply lists the jobs (``{"id", "kind",
-        "label", "ended"}``); ``ended`` is False for one whose work has not
-        stopped yet, and ``label`` is null for a caller other than the operator.
+        ``jobs`` in the reply lists those jobs (``{"id", "kind", "label",
+        "cancelled", "ended"}``); ``cancelled`` is False for one that runs to its
+        end, ``ended`` is False for one whose work has not stopped yet, and
+        ``label`` is null for a caller other than the operator.
         Answers 409 when the server is reachable from the network, must hold a
         key, and this is its last one."""
         from fastapi.concurrency import run_in_threadpool
@@ -197,10 +197,10 @@ def register(app: FastAPI, ctx) -> None:
             jobs = getattr(request.app.state, "jobs", None)
             if not done or key_hash is None or jobs is None:
                 return done, []
-            return True, jobs.jobs_cancelled_with_key(key_hash, wait_s=_JOB_END_WAIT_S)
+            return True, jobs.jobs_of_revoked_key(key_hash, wait_s=_JOB_END_WAIT_S)
 
         try:
-            revoked, cancelled = await run_in_threadpool(_revoke)
+            revoked, ran = await run_in_threadpool(_revoke)
         except ConfigUnreadable as e:
             raise HTTPException(409, str(e)) from e
         if revoked is None:
@@ -208,5 +208,5 @@ def register(app: FastAPI, ctx) -> None:
         if not revoked:
             raise HTTPException(404, f"No such key: {key_id}")
         if not _hs.caller_is_operator(request):
-            cancelled = [{**row, "label": None} for row in cancelled]
-        return {"status": "revoked", "id": key_id, "cancelled_jobs": cancelled}
+            ran = [{**row, "label": None} for row in ran]
+        return {"status": "revoked", "id": key_id, "jobs": ran}

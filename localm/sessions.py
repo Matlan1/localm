@@ -183,7 +183,7 @@ def create(*, scopes, key_hash: Optional[str], fs_access: str = "none",
            rag_roots: Optional[list] = None,
            label: str = "", ttl: float = _ABS_TTL_S,
            idle_ttl: float = _IDLE_TTL_S,
-           owner_key_minted: bool = False) -> str:
+           owner_key_minted: bool = False, replaces=()) -> str:
     """Mint a new session, persist it, and return the opaque session id (the value
     the caller sets as the HttpOnly cookie). Stores only a HASH of the id.
 
@@ -214,8 +214,11 @@ def create(*, scopes, key_hash: Optional[str], fs_access: str = "none",
     It grants no authority on its own: it is an ATTRIBUTE OF THE SESSION, so it is
     exactly as revocable as the session carrying it (revoke / revoke_all / absolute
     and idle expiry all destroy it), and the sessions it can appear on already carry
-    the owner's ADMIN scope snapshot."""
+    the owner's ADMIN scope snapshot.
+
+    The sessions with the ids in *replaces* are deleted in the same write."""
     now = time.time()
+    ended = {_hash(s) for s in replaces}
     sid = secrets.token_urlsafe(32)
     rec = {
         "id_hash": _hash(sid),
@@ -231,7 +234,7 @@ def create(*, scopes, key_hash: Optional[str], fs_access: str = "none",
         "idle_ttl": float(idle_ttl),
     }
     with _store_lock(create_dirs=True):
-        records = _load_for_update()
+        records = [r for r in _load_for_update() if r.get("id_hash") not in ended]
         records.append(rec)
         # Opportunistically drop expired rows so the store cannot grow without
         # bound as sessions come and go.
@@ -274,6 +277,7 @@ def lookup(sid: Optional[str]) -> Optional[dict]:
                     # other value is a record predating this field or a corrupted
                     # store, and must not read as the owner stamp.
                     "owner_key_minted": r.get("owner_key_minted") is True,
+                    "issued": float(r.get("issued") or 0),
                     "label": r.get("label", "")}
     return None
 
@@ -332,6 +336,50 @@ def revoke(sid: Optional[str]) -> Optional[bool]:
         logger.warning("could not revoke session (%s); the store may be unreadable; "
                        "the session id remains valid on the server", e)
         return None
+
+
+def stored(sids) -> set:
+    """The ids in *sids* that have a row in the store, live or expired. Empty when
+    the store cannot be read. Stamps no use."""
+    try:
+        hashes = {r.get("id_hash") for r in _load()}
+    except (OSError, ValueError) as e:
+        logger.warning("session store unreadable (%s)", e)
+        return set()
+    return {s for s in sids if s and _hash(s) in hashes}
+
+
+def revoke_many(sids) -> Optional[int]:
+    """Delete the sessions with the ids in *sids* in one write. Returns how many
+    existed, or None when the store could not be written (see ``revoke``)."""
+    hashes = {_hash(s) for s in sids if s}
+    if not hashes:
+        return 0
+    try:
+        with _store_lock():
+            records = _load_for_update()
+            keep = [r for r in records if r.get("id_hash") not in hashes]
+            if len(keep) != len(records):
+                _save(keep)
+            return len(records) - len(keep)
+    except (OSError, ValueError) as e:
+        logger.warning("could not revoke sessions (%s); they remain valid on the "
+                       "server", e)
+        return None
+
+
+def minted_by_owner_key(key_hash: Optional[str]) -> bool:
+    """True when a session in the store was minted by the owner key while that key
+    had the identity *key_hash* (its stamp, see ``create``). An owner session keeps
+    this identity after the owner key is rolled."""
+    if not key_hash:
+        return False
+    try:
+        return any(r.get("key_hash") == key_hash and r.get("owner_key_minted") is True
+                   for r in _load())
+    except (OSError, ValueError) as e:
+        logger.warning("session store unreadable (%s)", e)
+        return False
 
 
 def revoke_by_key_hash(key_hash: Optional[str]) -> Optional[int]:
