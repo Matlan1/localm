@@ -102,6 +102,25 @@ def _refuse_risky(cwd: Path, name: str) -> Optional[ToolResult]:
     return None
 
 
+_PATH_UNKNOWN = ("Path not found: {path} is not in the working tree and git has "
+                 "no record of it, so there is nothing to show for it.")
+
+
+def _path_unknown(cwd: Path, path: str) -> bool:
+    """True when *path* is not on disk, not tracked and in no commit's history,
+    so an empty answer for it means "no such path", not "no changes"."""
+    try:
+        if (cwd / path).exists():
+            return False
+    except (OSError, ValueError):
+        return False
+    _, tracked = _git(cwd, "ls-files", "--error-unmatch", "--", path)
+    if tracked:
+        return False
+    out, ok = _git(cwd, "log", "-1", "--all", "--format=%h", "--", path)
+    return ok and out == "(no output)"
+
+
 def tool_git_status(cwd: Path) -> ToolResult:
     """Return the output of `git status --short` in the working directory."""
     refused = _refuse_risky(cwd, "git status")
@@ -129,6 +148,8 @@ def tool_git_diff(cwd: Path, path: str = "", staged: bool = False) -> ToolResult
     if path:
         args += ["--", path]
     out, ok = _git(cwd, *args, timeout=15)
+    if ok and path and out == "(no output)" and _path_unknown(cwd, path):
+        return ToolResult.error(_PATH_UNKNOWN.format(path=path))
     out, trunc = _truncate(out)
     return ToolResult(ok=ok, output=out, summary="git diff" + (" --cached" if staged else ""), truncated=trunc)
 
@@ -142,6 +163,8 @@ def tool_git_log(cwd: Path, n: int = 10, path: str = "") -> ToolResult:
     if path:
         args += ["--", path]
     out, ok = _git(cwd, *args)
+    if ok and path and out == "(no output)" and _path_unknown(cwd, path):
+        return ToolResult.error(_PATH_UNKNOWN.format(path=path))
     return ToolResult(ok=ok, output=out, summary=f"git log -{n}")
 
 
@@ -233,16 +256,85 @@ def tool_git_commit(
     return ToolResult.success(out, summary=f"git commit: {message[:60]}")
 
 
+_REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+_PUSH_REFUSED_REF_RE = re.compile(r"^ ! \[", re.MULTILINE)
+_PUSH_ACCEPTED_REF_RE = re.compile(r"^ [ +*-] \S", re.MULTILINE)
+_PUSH_BEHIND_RE = re.compile(
+    r"^ ! \[(?:remote )?rejected\] .*\((?:non-fast-forward|fetch first)\)\s*$",
+    re.MULTILINE)
+
+
+def _push_failure(out: str) -> str:
+    """The answer to a failed push whose git output is *out*.
+
+    The remote is called ahead only where git refused a ref as
+    ``(non-fast-forward)`` or ``(fetch first)``, and unchanged only where git
+    refused a ref and accepted none. Every other failure is git's own text."""
+    unchanged = (" Nothing was changed on the remote."
+                 if _PUSH_REFUSED_REF_RE.search(out)
+                 and not _PUSH_ACCEPTED_REF_RE.search(out) else "")
+    if _PUSH_BEHIND_RE.search(out):
+        return ("git push was rejected: the remote has commits the rejected branch "
+                f"does not have, or that branch moved there.{unchanged} Fetch and "
+                f"merge or rebase, then push again.\n{out}")
+    return f"git push failed.{unchanged}\n{out}"
+
+
+def _current_branch_name(cwd: Path) -> str:
+    """The branch HEAD is on, also when it has no commit yet; "" when HEAD is detached."""
+    out, ok = _git(cwd, "symbolic-ref", "--short", "-q", "HEAD")
+    if not ok:
+        return ""
+    return out.splitlines()[0].strip() if out and out != "(no output)" else ""
+
+
+def _has_upstream(cwd: Path, branch: str) -> bool:
+    _, ok = _git(cwd, "rev-parse", "--abbrev-ref", "--symbolic-full-name",
+                 f"{branch}@{{upstream}}")
+    return ok
+
+
+def _remote_names(cwd: Path) -> Optional[list[str]]:
+    out, ok = _git(cwd, "remote")
+    if not ok:
+        return None
+    return [] if out == "(no output)" else [n.strip() for n in out.splitlines() if n.strip()]
+
+
+def git_push_refusal(cwd: Path, remote: str, branch: str) -> Optional[str]:
+    """Why a ``git_push`` of *branch* (empty for the current branch) to *remote* is
+    certain to fail, as a plain sentence, or None when it can be tried.
+
+    Covers a repository with no remote, a remote name this repository does not
+    have, and a detached HEAD with no branch named. Reads git's configuration
+    only."""
+    names = _remote_names(cwd)
+    if names is None:
+        return None
+    if not names:
+        return ("This repository has no remote, so there is nowhere to push. Add "
+                "one with `git remote add <name> <url>`.")
+    if _REMOTE_NAME_RE.match(remote) and remote not in names:
+        return (f"This repository has no remote named '{remote}'. Its remotes: "
+                f"{', '.join(names)}. Pass remote=<name> to choose one.")
+    if not branch and not _current_branch_name(cwd):
+        return ("HEAD is detached, so there is no current branch to push. Name "
+                "the branch with branch=<name>, or check a branch out first.")
+    return None
+
+
 def tool_git_push(
     cwd: Path,
     remote: str = "origin",
     branch: str = "",
 ) -> ToolResult:
-    """Push the current branch to a remote.
+    """Push a branch to a remote: the named *branch*, else the current one.
 
     A *remote* that is empty after stripping, or a *remote* or *branch* that
     begins with ``-``, is refused; the two are passed after ``--`` so git never
-    reads either as an option."""
+    reads either as an option. With no *branch* given, a current branch that has
+    no upstream yet is pushed with ``--set-upstream`` and the answer says so."""
     remote = (remote or "origin").strip()
     branch = (branch or "").strip()
     for label, value in (("remote", remote), ("branch", branch)):
@@ -252,12 +344,26 @@ def tool_git_push(
                 "git would read as an option.")
     if not remote:
         return ToolResult.error("git push refused: the remote is empty.")
-    args = ["push", "--", remote]
+    refusal = git_push_refusal(cwd, remote, branch)
+    if refusal is not None:
+        return ToolResult.error(f"git push refused: {refusal}")
+    args = ["push"]
+    sets_upstream = False
+    if not branch:
+        current = _current_branch_name(cwd)
+        if current and not _has_upstream(cwd, current):
+            args.append("--set-upstream")
+            sets_upstream = True
+            branch = current
+    args += ["--", remote]
     if branch:
         args.append(branch)
     out, ok = _git(cwd, *args, timeout=60)
     if not ok:
-        return ToolResult.error(f"git push failed: {out}")
+        return ToolResult.error(_push_failure(out))
+    if sets_upstream:
+        out += (f"\nUpstream set: '{branch}' had none, so it now tracks "
+                f"{remote}/{branch}.")
     return ToolResult.success(out, summary=f"git push {remote}")
 
 
