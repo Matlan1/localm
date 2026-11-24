@@ -1843,6 +1843,12 @@ function storeHeader(tag) {
   return tag && tag.inst && tag.prin ? { "X-LocaLM-Chat-Store": tag.inst + " " + tag.prin } : {};
 }
 
+// Set while this page is going away.
+let _leaving = false;
+for (const [event, value] of [["beforeunload", true], ["pagehide", true], ["pageshow", false], ["focus", false]]) {
+  window.addEventListener(event, () => { _leaving = value; });
+}
+
 /** Deletes *conv* from the server store. The server refuses a save of it that
  *  arrives later. The request outlives the page. */
 export async function deleteConversationRemote(conv) {
@@ -1855,6 +1861,8 @@ export async function deleteConversationRemote(conv) {
     });
     if (!r.ok) throw new Error("HTTP " + r.status);
   } catch (e) {
+    // A page that goes away never learns the answer; the request goes on.
+    if (_leaving) return;
     // Deleting is privacy-relevant and the UI copy is already gone: a failed
     // server delete must not pass silently - the server copy would resurrect
     // on the next load while the user believes it was deleted.

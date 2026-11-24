@@ -1218,6 +1218,20 @@ test("a chat deleted while its first save is on its way is not stored", async ()
   assert.deepEqual(plain(win.__toasts), []);
 });
 
+test("a delete whose answer never comes is said, but not by a page that is going away", async () => {
+  const server = makeServer();
+  for (const id of ["c1", "c2"]) server.put(id, { title: id, messages: [user("a")] });
+  const win = await boot(server);
+  runScript(win, "window.del = (x) => deleteConversationRemote(x)");
+  server.hold = (method) => { if (method === "DELETE") throw new TypeError("Failed to fetch"); };
+  win.dispatchEvent(new win.Event("pagehide"));
+  await win.del(conv(win, "c1"));
+  assert.deepEqual(plain(win.__toasts), []);
+  win.dispatchEvent(new win.Event("pageshow"));
+  await win.del(conv(win, "c2"));
+  assert.equal(win.__toasts.length, 1);
+});
+
 test("clearing all chats does not wait for a save, and a first save on its way is not stored", async () => {
   const server = makeServer();
   server.put("c1", { title: "One", messages: [user("a")] });
@@ -1358,13 +1372,18 @@ test("messages deleted in another browser do not make a copy", async () => {
   const server = makeServer();
   server.put("c1", { title: "One", updated_at: 10, messages: [user("a"), reply("b")] });
   const win = await boot(server);
-  await open(win, "One");
+  const c = await open(win, "One");
   await drain();
   server.put("c1", { title: "One", updated_at: 20, messages: [user("a")] });
   const again = await boot(server, { cached: cache(win) });
   await settle(900);
   assert.equal(server.files.size, 1);
   assert.ok(conv(again, "One"));
+  c.title = "Renamed";
+  win.saveConversations(c);
+  assert.ok(await waitFor(() => server.files.get("c1").title === "Renamed"));
+  assert.equal(server.files.size, 1);
+  assert.deepEqual(texts(server.files.get("c1")), ["a"]);
 });
 
 test("a queued message of a chat past the listed rows is kept and its chat listed", async () => {
