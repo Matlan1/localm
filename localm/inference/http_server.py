@@ -8851,7 +8851,8 @@ def _memory_used_header(ctx) -> dict:
     for this turn (plugin disabled, privacy mode, recall off). The value is
     compact ASCII JSON, header-safe: ``{"n":<int>,"degrade":<reason|null>,"items":
     [{"id","text","source","kind"}...],"saved":{"text","status"}}`` (``saved`` only
-    when the message asked to remember something) - json.dumps(ensure_ascii=True)
+    when the message asked to remember something; with several facts it also holds
+    ``"facts":[{"text","status"}...]``) - json.dumps(ensure_ascii=True)
     escapes newlines and non-ASCII, so the blob is a single header-legal line."""
     if ctx is None:
         return {}

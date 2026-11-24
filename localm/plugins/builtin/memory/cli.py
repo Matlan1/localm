@@ -258,7 +258,7 @@ def memory_add(text: str, kind: str, importance: float) -> None:
     if status == "exists":
         _safe_echo(f"Already in memory as {rec.id}: {_short(rec.text)}")
         return
-    click.echo(f"Remembered {rec.id}: {_short(rec.text)}")
+    _safe_echo(f"Remembered {rec.id}: {_short(rec.text)}")
 
 
 @main.command("forget")

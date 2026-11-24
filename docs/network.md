@@ -37,7 +37,9 @@ request is handled.
 A download nobody asked for is different. When a background task (memory
 consolidation after a chat, memory recall, a scheduled job, Knowledge search)
 needs the embedding model or the Whisper model and it is missing, it is
-downloaded automatically only under `allow`. Under `ask` the task does not
+downloaded automatically only under `allow`; the default embedding model, when
+you never chose one, not even then while another embedding model localm could use
+is registered. Under `ask` the task does not
 download it: it carries on without it (memory and Knowledge fall back to
 keyword search) and says once in the debug log which model is missing and how
 to get it, and the memory dialog and Knowledge page offer the one-time
@@ -323,7 +325,9 @@ coding agent's shell access, so you can grant one without the other.
   deployments.
 - **Embedding-model and Whisper downloads.** These respect `net_mode`
   (including `off`). The embedding model that memory and Knowledge need is
-  fetched automatically on first use only under `allow`; under `ask` it is
+  fetched automatically on first use only under `allow` (the default one, when
+  you never chose a model, only while no other usable embedding model is
+  registered); under `ask` it is
   fetched only by the one-time download you start (see
   [the one rule](#the-one-rule)). Both check the
   Hugging Face endpoint against the policy (the domain lists and the address

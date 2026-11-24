@@ -224,6 +224,8 @@ export const I18N_EN = {
   "chat.memory": "Memory - remind the model what it knows about you",
   "chat.memory.exists": "Already in memory: {text}",
   "chat.memory.full": "Memory is full, so this was not saved. Delete a fact in Memory first.",
+  "chat.memory.fullFact": "Not stored, memory is full: {text}",
+  "chat.memory.failedFact": "Not stored, saving failed: {text}",
   "chat.memory.off": "Not saved: memory is off (privacy mode, or Memory recall in Settings is off).",
   "chat.memory.saveFailed": "Could not save this to memory.",
   "chat.memory.saved": "Saved to memory: {text}",
@@ -1877,6 +1879,7 @@ export const I18N_EN = {
   "chat.conv.moveToFolder": "Move to a folder",
   "chat.conv.folderPrompt": "Folder name (empty removes it from the folder):",
   "chat.memoryChip.noEmbedder": "keyword match only - no embedding model installed",
+  "chat.memoryChip.embedderFailed": "keyword match only - the embedding model could not be loaded",
   "chat.memoryChip.noVectors": "keyword match only - memories not embedded yet",
   "chat.memoryChip.lowCoverage": "partial semantic match - some memories not embedded yet",
   "chat.memoryChip.dimMismatch": "keyword match only - the embedding model changed",
@@ -2123,7 +2126,7 @@ export const I18N_EN = {
 
   // Settings > schema fields: Embeddings
   "settings.field.embeddingModel.label": "Embedding model",
-  "settings.field.embeddingModel.help": "A known key, registered name or GGUF path. Fetched on first use only when network access is allow; else use Download on the Knowledge or memory page. Until then search is by keyword.",
+  "settings.field.embeddingModel.help": "A known key, registered name or GGUF path. A missing key is fetched on first use under network allow (never set: only if no embedding model is registered), else with Download on Knowledge or memory.",
   "settings.field.embeddingPooling.label": "Embedding pooling",
   "settings.field.embeddingPooling.help": "Changing this invalidates document collections and memory vectors: re-index after. A loaded embedder keeps the old value until unloaded. mean suits bge/nomic; a decoder-based one needs last or auto.",
   "settings.field.embeddingGpuLayers.label": "Embedder GPU layers",

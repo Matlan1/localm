@@ -18,9 +18,10 @@ Provisioning (``resolve_embedding_model_path``): the ``embedding_model`` config 
 is either a filesystem path, a registered model name, or a known key (default
 ``bge-small-en-v1.5``). A known model missing from ``<home>/models/embeddings/`` is
 downloaded on demand, gated by the network policy: automatically only under
-``net_mode=allow`` and only while no embedding model is registered; otherwise (``ask``,
-``off``, or a registered embedding model) the user runs ``localm setup-embeddings`` or
-the GUI's download action, which ``off`` allows only with ``net_allow_model_downloads``.
+``net_mode=allow``, and the default one, when ``embedding_model`` was never set, only
+while no usable embedding model is registered; otherwise the user runs
+``localm setup-embeddings`` or the GUI's download action, which ``off`` allows only with
+``net_allow_model_downloads``.
 When no embedding model can be resolved, callers degrade to lexical-only retrieval;
 the reason is recorded for ``last_error()`` (what the GUI's RAG-embedding status
 reads) on every resolve attempt, not only when a load is actually attempted. A
@@ -468,7 +469,8 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None,
     (downloaded into <home>/models/embeddings if missing and the net policy allows).
     ``allow_download`` overrides the policy (used by ``localm setup-embeddings`` to
     force the fetch); the default downloads only under net_mode 'allow'
-    (``netpolicy.automatic_download_allowed``).
+    (``netpolicy.automatic_download_allowed``), and a never-set ``embedding_model``
+    not while a usable embedding model is registered.
     ``allow_download=True`` also re-hashes an already-present known model file
     against its pin and fetches it again when it differs; every other call
     trusts a present file without reading it.
@@ -729,38 +731,68 @@ def _registered_known_file(repo: str, filename: str,
 
 
 def embedding_download_refusal() -> Optional[str]:
-    """None when the Download button for the embedding model would be accepted by
-    the network policy (net_mode, net_deny, net_allow, the address check), else
-    the reason it would be refused. Resolves DNS: call it off the event loop."""
-    from localm.netpolicy import download_refusal
-    return download_refusal(_HF_ENDPOINT)
+    """None when the network policy (net_mode, net_deny, net_allow) lets the
+    Download button for the embedding model be offered, else the reason it does not.
+    Looks nothing up; pressing the button runs the full check."""
+    from localm.netpolicy import download_offer_refusal
+    return download_offer_refusal(_HF_ENDPOINT)
 
 
-def registered_embedding_models() -> list[str]:
-    """Names of the registered embedding models whose file is on disk (a reranker
-    is not one). Reads the registry only; never raises."""
+def usable_registered_embedding_models() -> list[str]:
+    """Names of the registered models this embedder could load: a GGUF file with a
+    readable header, recorded as an embedding model (or, with no recorded type or
+    type ``unknown``, typed as one by its header) and no reranker
+    (``entry_is_reranker``). Reads the registry and model file headers; never
+    raises."""
+    names: list[str] = []
     try:
         from localm.config import load_registry
-        from localm.pathsafe import is_unc_or_device_path
         entries = list(load_registry().items())
     except Exception:
         logger.debug("could not read the registry for embedding models", exc_info=True)
         return []
-    names: list[str] = []
     for name, entry in entries:
-        if not isinstance(entry, dict) or entry.get("model_type") != "embedding":
-            continue
-        if entry.get("reranker") is True:
-            continue
-        raw = entry.get("path")
-        if not isinstance(raw, str) or not raw or is_unc_or_device_path(raw):
-            continue
         try:
-            if Path(raw).exists():
+            if isinstance(entry, dict) and _usable_as_embedder(str(name), entry):
                 names.append(str(name))
-        except OSError:
-            continue
+        except Exception:
+            logger.debug("could not inspect the registered model %s", name, exc_info=True)
     return names
+
+
+def _usable_as_embedder(name: str, entry: dict) -> bool:
+    from localm.model_manager import has_recorded_model_type
+    from localm.model_manager.registry import (entry_is_reranker, gguf_file_model_type,
+                                               gguf_reranker_state)
+    from localm.pathsafe import is_unc_or_device_path
+    kind = entry.get("model_type") if has_recorded_model_type(entry) else "unknown"
+    raw = entry.get("path")
+    if kind not in ("embedding", "unknown") or not isinstance(raw, str) or not raw \
+            or is_unc_or_device_path(raw):
+        return False
+    path = Path(raw)
+    if not path.is_file():
+        return False
+    header = gguf_file_model_type(path)
+    if header is None:
+        return False
+    if kind == "embedding":
+        return not entry_is_reranker(name, entry)
+    return header == "embedding" and gguf_reranker_state(path) is not True
+
+
+def _embedding_model_chosen(spec: str) -> bool:
+    """Whether somebody set ``embedding_model`` (Settings, the Knowledge picker,
+    ``localm setup-embeddings``, ``localm config``, config.json), as opposed to the
+    default applying."""
+    from localm.config import config_key_stored
+    return spec != DEFAULT_EMBEDDING_MODEL or config_key_stored("embedding_model")
+
+
+def _blocks_default_download(spec: str) -> list[str]:
+    """The usable registered embedding models on account of which the unset default
+    *spec* is not downloaded unasked; [] when it may be."""
+    return [] if _embedding_model_chosen(spec) else usable_registered_embedding_models()
 
 
 def _pin_mismatch(path: Path, pin: Optional[tuple]) -> Optional[str]:
@@ -824,13 +856,14 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
     mode = network_mode()
     probe_only = allow_download is False
     automatic = automatic_download_allowed()
-    registered = registered_embedding_models() if allow_download is None else []
+    registered = (_blocks_default_download(name)
+                  if allow_download is None and automatic else [])
     if allow_download is None:
         allow_download = automatic and not registered
-    if registered and automatic and not probe_only:
+    if registered:
         reason = (
-            f"embedding model {name!r} not present, and not downloaded because an "
-            f"embedding model is registered ({', '.join(registered[:3])}); pick it "
+            f"embedding model {name!r} not present, and not downloaded because another "
+            f"embedding model is registered ({', '.join(registered[:3])}); pick that one "
             "as the embedding model in Settings, or download "
             f"{name!r} with the Download button or localm setup-embeddings. Memory "
             "and Knowledge use keyword (BM25) search until then")
@@ -2257,18 +2290,18 @@ def _note_download_skipped() -> None:
 def will_download_on_first_use() -> bool:
     """True when the next ``get_embedder()`` call will download the configured
     model first: nothing is loaded yet, no download was attempted, net_mode is
-    ``allow``, the model is a known key, and its file is not on disk.
+    ``allow``, the model is a known key, its file is neither on disk nor registered,
+    and it is not the unset default while a usable embedding model is registered.
     Does no network I/O."""
     if _EMBEDDER is not None or _TRIED_DOWNLOAD:
         return False
     from localm.netpolicy import automatic_download_allowed
-    if not automatic_download_allowed() or registered_embedding_models():
+    if not automatic_download_allowed():
         return False
     spec = _current_spec()
-    if spec not in KNOWN_EMBEDDING_MODELS:
+    if spec not in KNOWN_EMBEDDING_MODELS or configured_model_path():
         return False
-    _repo, filename = KNOWN_EMBEDDING_MODELS[spec]
-    return not (_embeddings_dir() / filename).is_file()
+    return not _blocks_default_download(spec)
 
 
 def last_error() -> Optional[str]:

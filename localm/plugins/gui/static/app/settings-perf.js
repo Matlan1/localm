@@ -2303,8 +2303,8 @@ export async function rememberFact(fact) {
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
-    await refreshMemory();
     toast(t("memory.remembered"));
+    refreshMemory();
   } catch (e) {
     toast(t("memory.couldNotSave", { message: e.message }), true);
   }
@@ -3329,7 +3329,9 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // show a "used N memories" chip (survives reload; opens the memory modal).
   if (memUsed && (memUsed.n > 0 || memUsed.saved)) reply.memory = memUsed;
   if (memUsed && memUsed.saved) {
-    toast(memorySavedText(memUsed.saved), memUsed.saved.status !== "saved" && memUsed.saved.status !== "exists");
+    const unsaved = (memUsed.saved.facts || [memUsed.saved])
+      .some((f) => f.status !== "saved" && f.status !== "exists");
+    toast(memorySavedText(memUsed.saved), unsaved);
     if (memUsed.saved.status === "saved") refreshMemory();
   }
   // Save usage on the reply itself, not just the DOM, so tok/s and the context

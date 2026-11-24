@@ -94,6 +94,21 @@ class DeferredEmbed:
             raise EmbedderUnavailable("no embedding model is available")
         return fn(texts)
 
+
+class EmbeddedAhead:
+    """Vectors computed before the namespace lock was taken, as an embed callable.
+    A text it holds no vector for raises EmbedderUnavailable, so a writer stores
+    that record without one and the next vector fill adds it."""
+
+    def __init__(self, vectors: dict):
+        self._vectors = vectors
+
+    def __call__(self, texts: list[str]) -> list[list[float]]:
+        if any(t not in self._vectors for t in texts):
+            raise EmbedderUnavailable("no vector was computed ahead for this text")
+        return [self._vectors[t] for t in texts]
+
+
 # ---- on-disk format -------------------------------------------------------- #
 # Stamped on every JSONL line at save ("v"). Load tolerates lines without it
 # (files written before versioning are format 1). Bump this on a breaking
@@ -169,7 +184,8 @@ def _content_tokens(text: str) -> set:
 #
 # A HEURISTIC, not relevance: "is the metric system better?" is about the user's
 # stored preference but carries no pronoun, so it still misses.
-_SELF_REF = frozenset({"i", "me", "my", "mine", "myself"})
+_SELF_REF = frozenset({"i", "me", "my", "mine", "myself", "ich", "mir", "mich", "mein",
+                       "meine", "meinen", "meinem", "meiner", "meines"})
 
 # "my" does NOT mean "about me" when it introduces ANOTHER PERSON: a possessive
 # naming a RELATIONSHIP is about that other person, so it must not open the
@@ -184,8 +200,14 @@ _OTHER_PERSON = frozenset({
     "cousin", "uncle", "aunt", "nephew", "niece", "grandma", "grandmother",
     "grandpa", "grandfather", "family", "mate", "buddy", "pal", "team",
     "guest", "visitor", "client", "customer", "student", "teacher", "doctor",
+    "freund", "freundin", "freunde", "kollege", "kollegin", "kollegen", "chef", "chefin",
+    "nachbar", "nachbarin", "nachbarn", "frau", "mann", "partnerin", "mutter", "mama",
+    "vater", "papa", "eltern", "bruder", "schwester", "geschwister", "sohn", "tochter",
+    "kind", "kinder", "cousine", "onkel", "tante", "neffe", "nichte", "oma", "opa",
+    "familie", "kunde", "kundin", "lehrer", "lehrerin", "arzt", "ärztin",
 })
-_POSSESSIVE = frozenset({"my", "mine"})
+_POSSESSIVE = frozenset({"my", "mine", "mein", "meine", "meinen", "meinem", "meiner",
+                         "meines"})
 
 
 def _is_self_referential(text: str) -> bool:
@@ -438,6 +460,7 @@ class MemoryStore:
         self._ns_hash = namespace_hash(self.principal, agent, self.scope_key)
         self._records: list[MemoryRecord] = []
         self._vectors: dict = {}        # id -> vector (present only when embedded)
+        self._vec_fp: dict = {}         # id -> fingerprint of the text its vector was made of
         self._dim: Optional[int] = None
         self._bm25: Optional[BM25] = None
         # User/import records evicted by the most recent prune (size cap), so a
@@ -480,6 +503,7 @@ class MemoryStore:
         obj._ns_hash = path.stem
         obj._records = []
         obj._vectors = {}
+        obj._vec_fp = {}
         obj._dim = None
         obj._bm25 = None
         obj.last_evicted_user = []
@@ -512,6 +536,31 @@ class MemoryStore:
         """This namespace's write lock: in-process AND cross-process, reentrant."""
         return _namespace_write_lock(self._ns_hash, self._file, op,
                                      timeout=timeout)
+
+    def _lock_held(self) -> bool:
+        """True while this thread holds this namespace's write lock."""
+        return bool((getattr(_XPROC_DEPTH, "depth", None) or {}).get(self._ns_hash))
+
+    def embed_ahead(self, embed_fn: Optional[EmbedFn], texts) -> Optional[EmbeddedAhead]:
+        """The vectors of *texts*, computed now, for a write that takes the lock
+        afterwards. Every writer that embeds goes through here before it locks, and a
+        batch under ``lock()`` calls it first: an embedder can take minutes, and no
+        lock a request waits for is held that long. Called while this thread holds
+        the lock it computes nothing (the records get their vector from the next
+        fill). An ``EmbeddedAhead`` is returned as it is; no *embed_fn* gives None."""
+        if embed_fn is None or isinstance(embed_fn, EmbeddedAhead):
+            return embed_fn
+        if self._lock_held():
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("memory: nothing embedded under the namespace lock; the records "
+                       "are left for the vector fill")
+            return None
+        vectors = {}
+        for text in dict.fromkeys(texts):
+            vec = self._embed_one(text, embed_fn)
+            if vec is not None:
+                vectors[text] = vec
+        return EmbeddedAhead(vectors)
 
     def _vec_file(self) -> Path:
         return self._file.with_suffix(".vec.json")
@@ -551,6 +600,7 @@ class MemoryStore:
                 "memory store %s: %d unparseable line(s) kept unchanged and "
                 "written back on save", self._file, len(self._carried))
         self._vectors = {}
+        self._vec_fp = {}
         self._dim = None
         vf = self._vec_file()
         if vf.is_file():
@@ -566,9 +616,8 @@ class MemoryStore:
                 self._vectors = {k: v for k, v in vecs.items() if k in ids and v}
                 fps = data.get("fp") if isinstance(data, dict) else None
                 if isinstance(fps, dict):
-                    texts = {r.id: r.text for r in self._records}
-                    self._vectors = {k: v for k, v in self._vectors.items()
-                                     if fps.get(k) in (None, _text_fp(texts[k]))}
+                    self._vec_fp = {k: fps[k] for k in self._vectors if fps.get(k)}
+                self._drop_stale_vectors()
                 self._dim = data.get("dim") or _first_dim(self._vectors)
             except (json.JSONDecodeError, OSError, ValueError, RecursionError) as exc:
                 # The sidecar EXISTS but is corrupt/unreadable: degrade to no
@@ -577,6 +626,7 @@ class MemoryStore:
                 # gate), a present-yet-unparseable one is an unexpected fault the
                 # operator should see. The next _save() rewrites a clean file.
                 self._vectors = {}
+                self._vec_fp = {}
                 self._dim = None
                 from localm.debuglog import logger as _dbg
                 _dbg.warning(
@@ -598,14 +648,37 @@ class MemoryStore:
         _storekit_atomic_write(self._file, body + ("\n" if body else ""),
                                errors="surrogateescape")
         vf = self._vec_file()
+        self._drop_stale_vectors()
         if self._vectors:
-            texts = {r.id: r.text for r in self._records}
             self._atomic_write(vf, json.dumps({
-                "dim": self._dim, "vectors": self._vectors,
-                "fp": {k: _text_fp(texts[k]) for k in self._vectors if k in texts}}))
+                "dim": self._dim, "vectors": self._vectors, "fp": self._vec_fp}))
         else:
             vf.unlink(missing_ok=True)
         self._bm25 = None
+
+    def _drop_stale_vectors(self) -> None:
+        """Keep only the vectors whose fingerprint is that of their record's text,
+        so a vector of an earlier text is neither used nor saved beside the new one.
+        A vector without a fingerprint (an older sidecar) is taken as current."""
+        texts = {r.id: _text_fp(r.text) for r in self._records}
+        self._vectors = {k: v for k, v in self._vectors.items()
+                         if k in texts and self._vec_fp.get(k, texts[k]) == texts[k]}
+        self._vec_fp = {k: texts[k] for k in self._vectors}
+
+    def _put_vector(self, record: MemoryRecord, embed_fn: Optional[EmbedFn]) -> bool:
+        """Give *record* the vector *embed_fn* (an ``embed_ahead`` result or None)
+        holds for its text. False, leaving it without one, when there is none or its
+        dimension is not the store's."""
+        vec = self._embed_one(record.text, embed_fn)
+        if vec is None:
+            return False
+        self._vectors[record.id] = vec
+        self._vec_fp[record.id] = _text_fp(record.text)
+        return True
+
+    def _drop_vector(self, mem_id: str) -> None:
+        self._vectors.pop(mem_id, None)
+        self._vec_fp.pop(mem_id, None)
 
     @staticmethod
     def _atomic_write(path: Path, content: str) -> None:
@@ -672,15 +745,14 @@ class MemoryStore:
         # mutations, e.g. plug.py's _migrate_legacy) skips the reload - the caller
         # already loaded fresh once via store.lock() and must not have that
         # in-progress batch wiped.
+        record.text = record.text[:MAX_TEXT_LEN]
+        embed_fn = self.embed_ahead(embed_fn, [record.text])
         with self._wlock('an add'):
             if save:
                 self._load()
-            record.text = record.text[:MAX_TEXT_LEN]
             self._records.append(record)
             self._bm25 = None
-            vec = self._embed_one(record.text, embed_fn)
-            if vec is not None:
-                self._vectors[record.id] = vec
+            self._put_vector(record, embed_fn)
             if save:
                 self._save()
             return record
@@ -688,10 +760,18 @@ class MemoryStore:
     def update(self, mem_id: str, *, embed_fn: Optional[EmbedFn] = None,
                save: bool = True, **fields) -> Optional[MemoryRecord]:
         """Apply *fields* to the record *mem_id* and return it, or None when
-        there is no such record. Raises ValueError when ``text`` is given and is
+        there is no such record. A changed ``text`` drops the record's vector; it
+        gets one of the new text when *embed_fn* has one. Raises ValueError when ``text`` is given and is
         empty after stripping; nothing is changed then."""
         if isinstance(fields.get("text"), str) and not fields["text"].strip():
             raise ValueError("a memory cannot be empty")
+        if isinstance(fields.get("text"), str):
+            wanted = fields["text"].strip()[:MAX_TEXT_LEN]
+            known = self.get(mem_id)
+            if known is None or known.text != wanted:
+                embed_fn = self.embed_ahead(embed_fn, [wanted])
+            else:
+                embed_fn = None
         with self._wlock('an update'):
             if save:
                 self._load()
@@ -711,12 +791,9 @@ class MemoryStore:
                 elif key in ("last_used", "created", "uses", "kind", "source", "meta"):
                     setattr(rec, key, val)
             rec.updated = time.time()
-            if text_changed and embed_fn is not None:
-                vec = self._embed_one(rec.text, embed_fn)
-                if vec is not None:
-                    self._vectors[rec.id] = vec
-                else:
-                    self._vectors.pop(rec.id, None)
+            if text_changed:
+                self._drop_vector(rec.id)
+                self._put_vector(rec, embed_fn)
             if save:
                 self._save()
             return rec
@@ -728,7 +805,7 @@ class MemoryStore:
             before = len(self._records)
             self._records = [r for r in self._records if r.id != mem_id]
             self._bm25 = None
-            self._vectors.pop(mem_id, None)
+            self._drop_vector(mem_id)
             removed = len(self._records) != before
             if removed and save:
                 self._save()
@@ -755,6 +832,7 @@ class MemoryStore:
             self._records = []
             self._carried = []
             self._vectors = {}
+            self._vec_fp = {}
             self._dim = None
             self._save()
             if include_forgotten:
@@ -795,7 +873,7 @@ class MemoryStore:
         a text change would otherwise keep serving the old text's vector
         forever. No save here; the caller's replace/save persists the result."""
         for mem_id in ids:
-            self._vectors.pop(mem_id, None)
+            self._drop_vector(mem_id)
 
     def semantic_nearest(self, text: str, records: list,
                          embed_fn: Optional[EmbedFn]) -> tuple:
@@ -835,9 +913,10 @@ class MemoryStore:
         return any(r.id not in self._vectors
                    for r in (self._records if records is None else records))
 
-    def backfill_vectors(self, embed_fn: EmbedFn, *, limit: int = 64) -> int:
-        """Embed records that have no vector yet, up to *limit* per call, and
-        save. Returns the number embedded.
+    def backfill_vectors(self, embed_fn: EmbedFn, *, limit: int = 64,
+                         allowed: Optional[Callable[[], bool]] = None) -> int:
+        """Embed records that have no vector yet, newest first, up to *limit* per
+        call, and save. Returns the number that got a vector.
 
         This is how semantic recall turns on RETROACTIVELY: a user who chats
         before installing an embedding model has memories with no vectors, and
@@ -848,23 +927,40 @@ class MemoryStore:
         with ``memory.backfill.backfill_all``, which is what setup-embeddings
         uses. Best-effort: an embed failure for one record is skipped, not fatal.
 
-        Locked and re-loaded like the other mutating methods, so a backfill pass
-        started from a stale snapshot cannot silently clobber a concurrent
-        add/update/delete's save."""
+        The embedding runs with no lock held. The vectors are written under the lock
+        onto a fresh reload, each only when its record is still there, still has that
+        text and still has no vector, so a concurrent add/update/delete is neither
+        blocked nor clobbered. *allowed*, when given, is asked before each embedding
+        and again before the write; a False answer ends the pass with nothing more
+        written."""
         if embed_fn is None:
             return 0
+        with _namespace_lock(self._ns_hash):
+            self._load()
+        pending = sorted((r for r in self._records if r.id not in self._vectors),
+                         key=lambda r: r.created, reverse=True)
+        vectors: dict = {}
+        ready: list = []
+        for r in pending:
+            if len(ready) >= limit:
+                break
+            if allowed is not None and not allowed():
+                return 0
+            vec = self._embed_one(r.text, embed_fn)
+            if vec is not None:
+                vectors[r.text] = vec
+                ready.append((r.id, r.text))
+        if not ready:
+            return 0
         with self._wlock('a vector backfill'):
+            if allowed is not None and not allowed():
+                return 0
             self._load()
             done = 0
-            for r in self._records:
-                if done >= limit:
-                    break
-                if r.id in self._vectors:
-                    continue
-                vec = self._embed_one(r.text, embed_fn)
-                if vec is not None:
-                    self._vectors[r.id] = vec
-                    done += 1
+            for mem_id, text in ready:
+                rec = self.get(mem_id)
+                if rec is not None and rec.text == text and mem_id not in self._vectors:
+                    done += self._put_vector(rec, EmbeddedAhead(vectors))
             if done:
                 self._save()
             return done
@@ -889,22 +985,33 @@ class MemoryStore:
         UPDATE decisions). This must be applied AFTER the reload above, or a
         reload would silently restore the stale vector straight from disk and
         undo the caller's invalidation - so it is a parameter here, not a
-        separate ``invalidate_vectors()`` call the caller makes beforehand."""
+        separate ``invalidate_vectors()`` call the caller makes beforehand. A record
+        whose text differs from the one its vector was made of loses that vector
+        whether it is named there or not.
+
+        A caller that holds ``lock()`` across the replace passes an ``embed_ahead``
+        result made before it took the lock."""
+        for r in records:
+            r.text = (r.text or "").strip()[:MAX_TEXT_LEN]
+        embed_fn = self.embed_ahead(embed_fn, self.texts_to_embed(records, invalidate_ids))
         with self._wlock('a replace'):
             self._load()
             if invalidate_ids:
                 self.invalidate_vectors(invalidate_ids)
-            keep_ids = {r.id for r in records}
-            self._vectors = {k: v for k, v in self._vectors.items() if k in keep_ids}
-            self._records = []
-            for r in records:
-                r.text = (r.text or "").strip()[:MAX_TEXT_LEN]
-                self._records.append(r)
+            self._records = list(records)
+            self._drop_stale_vectors()
+            for r in self._records:
                 if embed_fn is not None and r.id not in self._vectors:
-                    vec = self._embed_one(r.text, embed_fn)
-                    if vec is not None:
-                        self._vectors[r.id] = vec
+                    self._put_vector(r, embed_fn)
             self._save()
+
+    def texts_to_embed(self, records, changed_ids=()) -> list[str]:
+        """The texts of *records* that a ``replace`` with them will need a vector
+        for: those without one here, with another text than here, or in
+        *changed_ids*."""
+        return [r.text for r in records
+                if r.id not in self._vectors or r.id in (changed_ids or ())
+                or self._vec_fp.get(r.id) != _text_fp(r.text)]
 
     # --------------------------------------------------------- retrieval -- #
     def _vector_status(self, embed_fn: Optional[EmbedFn]) -> tuple[bool, Optional[str]]:
@@ -1312,6 +1419,10 @@ class MemoryStore:
         add/delete/restore cannot race the read-decide-write sequence below. The
         applied entry is removed from the archive on success (the archive is a
         recovery queue, not an immutable audit log)."""
+        if embed_fn is not None:
+            archived = [e for e in self.forgotten() if e.get("id") == mem_id]
+            embed_fn = self.embed_ahead(
+                embed_fn, [MemoryRecord.from_dict(e).text for e in archived[:1]])
         with self._wlock('a restore'):
             self._load()
             entries = self._load_forgotten()
@@ -1332,10 +1443,8 @@ class MemoryStore:
                 live.updated = time.time()
                 live.last_used = live.updated
                 record = live
-            self._vectors.pop(record.id, None)
-            vec = self._embed_one(record.text, embed_fn)
-            if vec is not None:
-                self._vectors[record.id] = vec
+            self._drop_vector(record.id)
+            self._put_vector(record, embed_fn)
             self._save()
             remaining = [e for e in entries if e is not entry]
             try:
@@ -1591,6 +1700,17 @@ class MemoryStore:
             self._save_corrections(live)          # drop stale entries
         return live
 
+    def _correction_texts(self, correction_id: str) -> list[str]:
+        """The text accepting *correction_id* gives its record, as a list of one, or
+        [] when there is none to embed."""
+        with _namespace_lock(self._ns_hash):
+            try:
+                corrs = self._load_corrections()
+            except OSError:
+                return []
+        return [c.proposed_text.strip()[:MAX_TEXT_LEN] for c in corrs
+                if c.id == correction_id and c.action != "delete" and c.proposed_text]
+
     def resolve_correction(self, correction_id: str, accept: bool, *,
                            embed_fn: Optional[EmbedFn] = None,
                            now: Optional[float] = None) -> Optional[dict]:
@@ -1604,6 +1724,9 @@ class MemoryStore:
         consolidation does not re-propose it (see ``_load_dismissed``). In BOTH
         cases the pending entry is removed. Atomic. If the target vanished
         meanwhile, the entry is simply dropped (nothing to apply)."""
+        if embed_fn is not None:
+            embed_fn = self.embed_ahead(
+                embed_fn, self._correction_texts(correction_id) if accept else [])
         with self._wlock('a correction'):
             self._load()
             try:
@@ -1635,7 +1758,7 @@ class MemoryStore:
                             "target_id": corr.target_id, "action": corr.action}
                 if corr.action == "delete":
                     self._records = [r for r in self._records if r.id != target.id]
-                    self._vectors.pop(target.id, None)
+                    self._drop_vector(target.id)
                     outcome = "deleted"
                 else:
                     target.text = (corr.proposed_text or "").strip()[:MAX_TEXT_LEN]
@@ -1643,10 +1766,8 @@ class MemoryStore:
                     target.last_used = now
                     # Re-embed so semantic recall tracks the new text; if no embedder
                     # is available, invalidate the stale vector (backfill re-embeds).
-                    self._vectors.pop(target.id, None)
-                    vec = self._embed_one(target.text, embed_fn)
-                    if vec is not None:
-                        self._vectors[target.id] = vec
+                    self._drop_vector(target.id)
+                    self._put_vector(target, embed_fn)
                     outcome = "updated"
                 self._save()
             elif target is not None and not accept:
@@ -1683,7 +1804,6 @@ def _text_fp(text: str) -> str:
     """A short fingerprint of a record's text, stored beside its vector, so a vector
     left over from an earlier text (a save cut between the two files) is dropped on
     load and re-embedded instead of being used for the new text."""
-    import hashlib
     return hashlib.sha1((text or "").encode("utf-8", "surrogatepass")).hexdigest()[:16]
 
 

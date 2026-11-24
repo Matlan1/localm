@@ -782,9 +782,9 @@ CORE_FIELDS: list = [
     # A small on-device model, loaded separately from the chat model. The known
     # keys are bge-small-en-v1.5 and nomic-embed-text-v1.5.
     SettingField("embedding_model", Widget.TEXT, "Embedding model",
-                 "A known key, registered name or GGUF path. Fetched on first use only "
-                 "when network access is allow; else use Download on the Knowledge or "
-                 "memory page. Until then search is by keyword.",
+                 "A known key, registered name or GGUF path. A missing key is fetched on "
+                 "first use under network allow (never set: only if no embedding model is "
+                 "registered), else with Download on Knowledge or memory.",
                  # Owner-only because branch 1 of resolve_embedding_model_path()
                  # returns a CALLER-CHOSEN filesystem path with no confined_*
                  # check, and that path is then handed to llama.cpp's native GGUF

@@ -33,6 +33,7 @@ from typing import Callable, Optional
 
 from localm.textnorm import strip_think
 
+from .clauses import STEM_CHARS, self_statement_stems, stems
 from .corrections import PendingCorrection
 from .gating import writes_allowed
 from .record import MemoryRecord
@@ -221,7 +222,8 @@ def extract(complete: Complete, session_text: str, *,
         raise ConsolidationReplyError(_unreadable_reason(raw))
     from localm.debuglog import logger
     user_text = _user_turn_text(session_text)
-    user_stems = None if user_text is None else _first_person_stems(user_text)
+    user_stems = None if user_text is None else self_statement_stems(user_text)
+    reply_stems = (stems(_assistant_turn_text(session_text)) - stems(user_text or ""))
     out: list[dict] = []
     for item in facts:
         text, confidence = _fact_item(item)
@@ -235,7 +237,7 @@ def extract(complete: Complete, session_text: str, *,
         conf = 0.0 if conf < 0 else 1.0 if conf > 1 else conf
         if conf < CONFIDENCE_FLOOR:
             continue
-        if user_stems is not None and not _is_grounded(text, user_stems):
+        if user_stems is not None and not _is_grounded(text, user_stems, reply_stems):
             logger.info("memory consolidation: dropped a candidate fact that "
                         "the user's own words do not support")
             continue
@@ -247,11 +249,10 @@ def extract(complete: Complete, session_text: str, *,
     return out
 
 
-# A candidate fact must be about the user and share a content word with a
-# sentence in which the user speaks of themselves (first person); one that does
+# A candidate fact must be about the user and share a content word with a clause
+# in which the user states something about themselves (clauses.py); one that does
 # not is about the world, taken from a request or from the assistant's reply.
-_STEM_CHARS = 4
-_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
+_USER_WORDS = frozenset({"user", "nutzer", "nutzerin", "benutzer", "benutzerin"})
 
 
 def _user_turn_text(session_text: str) -> Optional[str]:
@@ -271,59 +272,33 @@ def _user_turn_text(session_text: str) -> Optional[str]:
     return "\n".join(lines) if seen else None
 
 
-_REQUEST_VERBS = frozenset({
-    "tell", "give", "show", "explain", "write", "help", "send", "describe",
-    "teach", "translate", "summarize", "summarise", "generate", "create", "draw",
-    "erzähl", "erzähle", "gib", "zeig", "zeige", "erkläre", "erklär", "schreib",
-    "schreibe", "hilf", "übersetze", "beschreibe", "nenne"})
-_ASK_AUXILIARIES = frozenset({"can", "could", "would", "kannst", "könntest", "würdest"})
-_ADDRESS = frozenset({"you", "du"})
-_WORD = re.compile(r"[a-zäöüß']+")
+def _assistant_turn_text(session_text: str) -> str:
+    """The text of the ``Assistant:`` turns of a transcript."""
+    lines: list[str] = []
+    in_assistant = False
+    for line in session_text.splitlines():
+        if line.startswith("Assistant: "):
+            in_assistant = True
+            line = line[len("Assistant: "):]
+        elif line.startswith("User: "):
+            in_assistant = False
+        if in_assistant:
+            lines.append(line)
+    return "\n".join(lines)
 
 
-def _is_request(sentence: str) -> bool:
-    """True when *sentence* is a question or an instruction to the assistant
-    ("Tell me one fact about apples.", "Erzähl mir etwas über Äpfel."), where "me"
-    is the object of the request and the user states nothing about themselves.
-    "please" or "bitte" only introduces a request when an instruction follows
-    ("Please tell me ..."), so "Please note that I am allergic to nuts" is a
-    statement; "Will is my son's name" opens with a name, not a request."""
-    text = sentence.strip()
-    if text.endswith("?"):
-        return True
-    words = _WORD.findall(text.lower())
-    if words and words[0] in ("please", "bitte"):
-        words = words[1:]
-    if not words:
-        return False
-    if words[0] in _REQUEST_VERBS:
-        return True
-    return words[0] in _ASK_AUXILIARIES and len(words) > 1 and words[1] in _ADDRESS
-
-
-def _first_person_stems(user_text: str) -> set:
-    """The first letters of every content word in the sentences of *user_text*
-    where the user speaks of themselves (store._is_self_referential)."""
-    from .store import _content_tokens, _is_self_referential
-    stems: set = set()
-    for sentence in _SENTENCE_SPLIT.split(user_text):
-        if _is_request(sentence):
-            continue
-        if _is_self_referential(sentence):
-            stems |= {w[:_STEM_CHARS] for w in _content_tokens(sentence) if len(w) > 1}
-    return stems
-
-
-def _is_grounded(fact: str, user_stems: set) -> bool:
+def _is_grounded(fact: str, user_stems: set, reply_stems: set = frozenset()) -> bool:
     """True when *fact* is written about the user (it says "user" or speaks in
-    the first person) and shares a content word, by its first letters, with
-    *user_stems*."""
-    from .store import _SELF_REF, _content_tokens, _tokenize
+    the first person), shares a content word, by its first letters, with
+    *user_stems* (what the user stated about themselves), and takes no more of its
+    words from *reply_stems*, which only the assistant said."""
+    from .store import _SELF_REF, _tokenize
     toks = set(_tokenize(fact))
-    if "user" not in toks and not (_SELF_REF & toks):
+    if not (_USER_WORDS & toks) and not (_SELF_REF & toks):
         return False
-    words = _content_tokens(fact) - {"user"}
-    return any(w[:_STEM_CHARS] in user_stems for w in words)
+    words = stems(fact) - {w[:STEM_CHARS] for w in _USER_WORDS}
+    own = len(words & user_stems)
+    return own > 0 and len(words & reply_stems) <= own
 
 
 def _fact_item(item) -> tuple:
@@ -571,9 +546,12 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
     except ConsolidationModelError as e:
         return _model_failed({**counts, "added": 0, "updated": 0, "deleted": 0,
                               "noop": 0}, e)
-    if isinstance(embed_fn, DeferredEmbed) and (
-            updated_ids or store.lacks_vector(working)):
-        embed_fn.ensure()
+    if updated_ids or store.lacks_vector(working):
+        if isinstance(embed_fn, DeferredEmbed):
+            embed_fn.ensure()
+        embed_fn = store.embed_ahead(embed_fn, store.texts_to_embed(working, updated_ids))
+    else:
+        embed_fn = None
     # APPLY UNDER LOCK (brief, no LLM): reload fresh and MERGE the decided deltas by
     # id onto the CURRENT on-disk state, so a write another thread committed during
     # the lock-free decide window survives instead of being clobbered by a
