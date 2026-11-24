@@ -908,6 +908,7 @@ class _LoopMixin:
                              start_turns=start_turns,
                              budget_reminded=0, invented_count=0,
                              question_answered=False, example_replies=0,
+                             cut_off_count=0,
                              unfounded_checked=False,
                              plan_submitted=False, plan_nudges=0,
                              declines_at_start=self._user_declines)
@@ -1473,8 +1474,17 @@ class _LoopMixin:
         # Repair turn: the response looks like a tool call that failed to parse
         # (a marker/fence, or a name+args object the lenient parser could not
         # recover). Re-prompt once with the exact format.
+        # A call the reply ends in the middle of has its own count: it needs
+        # smaller steps, not another format.
+        cut_off = unfinished_call(response, tool_names) if attempt else ""
+        if cut_off and st.cut_off_count < _MAX_TOOL_REPAIRS and self._task_turns_left():
+            st.cut_off_count += 1
+            self._add_assistant(response)
+            self._add_user(self._cut_off_note(cut_off, interactive))
+            return (False, "")
         if (
-            st.repair_count < _MAX_TOOL_REPAIRS
+            not cut_off
+            and st.repair_count < _MAX_TOOL_REPAIRS
             and self._task_turns_left()
             and (attempt
                  or (not examples and invented < 0
@@ -1483,10 +1493,6 @@ class _LoopMixin:
         ):
             st.repair_count += 1
             self._add_assistant(response)
-            cut_off = unfinished_call(response, tool_names)
-            if cut_off:
-                self._add_user(self._cut_off_note(cut_off, interactive))
-                return (False, "")
             if st.repair_count > 1 and self.can_force_tool_calls() and (
                     self._change_still_owed(request, st)
                     or self._tool_demanded(request, st)):
@@ -1516,9 +1522,8 @@ class _LoopMixin:
         if attempt:
             self._emit("info", text=(
                 "the model tried to call a tool but emitted invalid output "
-                f"{st.repair_count + 1} times - surfacing its raw attempt "
-                "(nothing was run or written)"))
-            cut_off = unfinished_call(response, tool_names)
+                f"{st.repair_count + st.cut_off_count + 1} times - surfacing its "
+                "raw attempt (nothing was run or written)"))
             notice = (
                 f"[I tried to call {cut_off}, but each attempt ended before the "
                 "call was complete, so it was not run. My last attempt was:]"

@@ -703,6 +703,17 @@ def test_a_cut_off_call_is_reported_as_cut_off_with_the_limit(tmp_path):
     assert (tmp_path / "big.py").exists()
 
 
+def test_a_cut_off_call_after_broken_ones_still_gets_its_chance(tmp_path):
+    broken = FENCE + 'json\n{"name": "write_file", "args": {"path": "b", "content": "a".join(x)}}\n' + FENCE
+    backend = _Backend([broken, broken + " ", HALF_XML,
+                        _xml("write_file", path="big.py", content="x = 1"), "Done."])
+    agent = _agent(tmp_path, backend, max_tokens=100, max_tokens_explicit=False)
+    agent.run_task("write big.py")
+    assert (tmp_path / "big.py").exists()
+    assert sum("ended in the middle of" in t for t in _texts(agent, "user")) == 1
+    assert backend.calls[-1][1]["max_tokens"] == 200
+
+
 def test_the_limit_is_raised_once_and_only_for_the_run(tmp_path):
     backend = _Backend([HALF_XML, HALF_XML, "I could not write it.", "Hello."])
     agent = _agent(tmp_path, backend, max_tokens=100, max_tokens_explicit=False)
