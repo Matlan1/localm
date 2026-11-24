@@ -217,7 +217,7 @@ def test_the_download_button_state_follows_the_refusal(monkeypatch):
                         lambda: "huggingface.co is on the deny list")
     refused = plug._embedder_download_status(request)
     assert refused["can_download_embedder"] is False
-    assert refused["embedder_missing"] == "bge-small-en-v1.5"
+    assert refused["embedder_missing"] is None
     monkeypatch.setattr(embedder, "embedding_download_refusal", lambda: None)
     offered = plug._embedder_download_status(request)
     assert offered["can_download_embedder"] is True
