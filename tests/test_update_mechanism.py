@@ -155,6 +155,27 @@ def test_an_edited_file_is_kept_after_the_update(root):
     assert str(ID) in result.notes[0] and um.left(root) == ["kept"]
 
 
+@windows_only
+def test_an_edited_file_that_cannot_be_kept_is_not_deleted(root):
+    (root / "localm" / "changed.py").write_bytes(b"my version")
+    plan = planned(root)
+    mover.forward(root, ID, plan)
+    old = root / ".localm-update" / ID / "old" / "localm" / "changed.py"
+    with job.Lock(root) as lock, held(old):
+        job.advance(lock, job.STEPS)
+        job.advance(lock, job.STARTING)
+        wait, disk.HELD_WAIT_S = disk.HELD_WAIT_S, 0.2
+        try:
+            result = job.finish(lock)
+        finally:
+            disk.HELD_WAIT_S = wait
+    assert result.state == "new" and any("stays in" in note for note in result.notes)
+    assert old.read_bytes() == b"my version" and um.phase(root) is None
+    with job.Lock(root) as lock:
+        assert job.restore(lock).state == "none"
+    assert old.read_bytes() == b"my version"
+
+
 def test_a_file_in_the_place_of_a_new_folder_is_refused(root):
     files = um.stage(root, {**um.NEW, "localm/user.txt/x.py": "x"})
     before = um.tree(root)

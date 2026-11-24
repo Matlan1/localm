@@ -180,27 +180,25 @@ class Result:
 def finish(lock: Lock) -> Result:
     """End the update of *lock*'s install as done: the new version stays, files the
     user had edited go to ``kept``, everything else of the update is deleted. When
-    a plan cannot be read nothing is deleted and a note names the folder. Only from
-    phase STARTING, or DONE when this was interrupted. Raises ValueError for another
-    phase, :class:`Unreadable` for the record, :class:`Unsafe` or OSError."""
+    a plan cannot be read or an edited file cannot be moved nothing is deleted and a
+    note names the folder. Only from phase STARTING, or DONE when this was
+    interrupted. Raises ValueError for another phase, :class:`Unreadable` for the
+    record, :class:`Unsafe` or OSError."""
     record = read(lock.root)
     if record is None or record.phase not in (STARTING, DONE):
         raise ValueError("there is no started update to finish")
-    if record.phase != DONE:
-        disk.sync_disk()
-        record.phase = DONE
-        _write(lock, record)
+    disk.sync_disk()
+    _set_phase(lock, record, DONE)
     result = Result("new")
     try:
-        plans = mover.read_plans(lock.root, record.id)
-    except Unreadable as e:
+        for plan in mover.read_plans(lock.root, record.id):
+            if plan.step == mover.FILES:
+                _keep_edited(lock.root, record.id, plan, result)
+    except (Unreadable, Unsafe, disk.Held, OSError) as e:
         disk.unlink(record_path(lock.root))
-        result.notes.append(f"What the update replaced stays in "
-                            f"{mover.work_folder(lock.root, record.id)}: {e}")
+        result.notes.append("What the update replaced stays in "
+                            f"{mover.update_folder(lock.root) / record.id}: {e}")
         return result
-    for plan in plans:
-        if plan.step == mover.FILES:
-            _keep_edited(lock.root, record.id, plan, result)
     _close(lock, record, result)
     return result
 
@@ -230,7 +228,7 @@ def restore(lock: Lock, *, wait_s: Optional[float] = None) -> Result:
     result = Result("old")
     if record.phase != ENDING:
         plans = mover.read_plans(lock.root, record.id)
-        _say_restoring(lock, record)
+        _set_phase(lock, record, RESTORING)
         for plan in reversed(plans):
             result.errors += _back(lock, record, plan, wait_s)
     if result.errors:
@@ -239,8 +237,8 @@ def restore(lock: Lock, *, wait_s: Optional[float] = None) -> Result:
     disk.sync_disk()
     _close(lock, record, result)
     if record.phase != ENDING:
-        result.notes.insert(0, f"The update to {record.new} was undone. "
-                               f"localm {record.old} is in place.")
+        result.notes.insert(0, f"The update to {record.new} was undone. localm {record.old} is "
+                               "in place." if record.new else "The unfinished update was undone.")
     return result
 
 
@@ -250,16 +248,17 @@ def _back(lock: Lock, record: Record, plan: mover.Plan, wait_s: Optional[float])
     return mover.back(lock.root, record.id, plan, wait_s=wait_s)
 
 
-def _say_restoring(lock: Lock, record: Record) -> None:
-    if record.phase == RESTORING:
+def _set_phase(lock: Lock, record: Record, phase: str) -> None:
+    """Write *phase* into the record, with the space of the reserve file when the
+    disk is full."""
+    if record.phase == phase:
         return
-    was, record.phase = record.phase, RESTORING
+    record.phase = phase
     try:
         _write(lock, record)
     except OSError:
         reserve = mover.work_folder(lock.root, record.id) / _RESERVE
         if disk.lstat(reserve) is None:
-            record.phase = was
             raise
         disk.unlink(reserve)
         _write(lock, record)
@@ -275,7 +274,7 @@ def _only_unfinished(root) -> Optional[Record]:
             found.append(update_id)
     if len(found) != 1:
         return None
-    return Record(found[0], MOVING, "the previous version", "the new version")
+    return Record(found[0], MOVING, "", "")
 
 
 def _ids(root) -> list:
@@ -300,10 +299,14 @@ def _keep_edited(root, update_id: str, plan: mover.Plan, result: Result) -> None
 
 
 def _close(lock: Lock, record: Record, result: Result) -> None:
-    """Mark the update as ended, remove its record, then delete its folders."""
+    """Mark the update as ended, remove its record, then delete its folders. When it
+    cannot be marked its folders stay and a note names them."""
     work = mover.work_folder(lock.root, record.id)
     if disk.lstat(work) is not None:
-        disk.write_json(work / _FINISHED, {})
+        try:
+            disk.write_json(work / _FINISHED, {})
+        except OSError as e:
+            result.notes.append(f"What the update left stays in {work}: {e}")
     disk.unlink(record_path(lock.root))
     cleanup(lock)
     kept = mover.update_folder(lock.root) / "kept" / record.id
