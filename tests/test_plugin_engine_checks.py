@@ -345,7 +345,7 @@ def test_the_trust_sentence_is_at_every_install_site():
         "Third-party plugins run unsandboxed in-process, so install only code you trust.")
     assert "run unsandboxed in-process, so install only code you trust" in _flat(
         _install_route_doc())
-    for rel in ("SECURITY.md", "docs/plugins.md", "docs/architecture.md"):
+    for rel in ("SECURITY.md", "docs/security.md", "docs/plugins.md", "docs/architecture.md"):
         text = _flat((ROOT / rel).read_text(encoding="utf-8"))
         assert "unsandboxed in-process, so install only code you trust" in text, rel
     cli = _flat((ROOT / "localm" / "cli" / "plugins.py").read_text(encoding="utf-8"))

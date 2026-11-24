@@ -3,6 +3,3 @@ contact_links:
   - name: Feedback and questions
     url: https://github.com/Matlan1/localm/discussions
     about: Feedback, setup questions, GPU help (AMD, NVIDIA, Intel), or anything that confused you. One line is enough.
-  - name: Report a security vulnerability
-    url: https://github.com/Matlan1/localm/blob/master/SECURITY.md
-    about: Report vulnerabilities privately as described in SECURITY.md. Do not open a public issue.
