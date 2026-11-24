@@ -1635,13 +1635,9 @@ export async function initServerConversations() {
         // another backend at the same origin. It is shown unless the backend is
         // a confirmed mismatch, and uploaded only for a confirmed match.
         if (chat.instanceState === "mismatched") continue;
-        if (local.rev && index.complete && chat.instanceMatch &&
-            !index.unreadable.has(local.id)) {
-          if (local.unsaved && !local._meta) keep();
-          gone.push(local);
-          continue;
-        }
         keep();
+        if (local.rev && index.complete && chat.instanceMatch &&
+            !index.unreadable.has(local.id)) gone.push(local);
         if (!local.rev && chat.instanceMatch && !index.unreadable.has(local.id)) {
           pushConversation(local);
         }
@@ -1675,7 +1671,10 @@ export async function initServerConversations() {
     }
     chat.conversations = [...byId.values()]
       .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
-    for (const conv of gone) dropDeletedElsewhere(conv, { quiet: boot });
+    // One saved since the index was read is stored after all.
+    for (const conv of gone) {
+      if (await isNotStored(conv)) dropDeletedElsewhere(conv, { quiet: boot });
+    }
     if (!chat.conversations.some((c) => c.id === chat.activeId)) {
       chat.activeId = chat.conversations[0]?.id || null;
     }
@@ -1688,6 +1687,15 @@ export async function initServerConversations() {
     }
     _updateUnsavedIndicator();
   } catch { /* store unavailable - localStorage keeps working */ }
+}
+
+/** Whether the server says that *conv* is not stored. */
+async function isNotStored(conv) {
+  try {
+    const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id),
+                          { headers: authHeaders() });
+    return r.status === 404 && convPersistable(conv);
+  } catch { return false; }
 }
 
 /** A fingerprint of the listed conversations. */

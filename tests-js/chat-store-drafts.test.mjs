@@ -314,6 +314,25 @@ test("a turn added to a chat deleted elsewhere stays in this tab and is not stor
   assert.equal(server.puts.length, 1);
 });
 
+test("a chat stored while the index was being read is not taken for deleted", async () => {
+  const server = makeServer();
+  server.put("c1", { title: "One", messages: [user("a")] });
+  const win = await boot(server);
+  const c = await open(win, "One");
+  const stored = server.files.get("c1");
+  const real = win.fetch;
+  win.fetch = async (url, opts) => {
+    if (!String(url).startsWith("/api/conversations?")) return real(url, opts);
+    server.files.delete("c1");
+    const answer = await real(url, opts);
+    server.files.set("c1", stored);
+    return answer;
+  };
+  await win.syncConversations();
+  assert.ok(win.chat.conversations.includes(c));
+  assert.deepEqual(texts(c), ["a"]);
+});
+
 test("an open page drops a chat deleted elsewhere when it comes back to the front", async () => {
   const server = makeServer();
   server.put("c1", { title: "One", messages: [user("a")] });
