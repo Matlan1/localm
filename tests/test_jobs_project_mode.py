@@ -59,6 +59,23 @@ def _job(cwd):
                schedule_kind="interval", schedule=60)
 
 
+@pytest.mark.parametrize("ok,denied,named", [
+    (True, (), None), (False, (), "ran"), (True, (("run_shell", "lenient"),), "run_shell")])
+def test_a_coder_run_that_did_not_finish_is_an_error(home, tmp_path, agent_spy, monkeypatch,
+                                                     ok, denied, named):
+    runner, _built = agent_spy
+    import localm.plugins.coder.agent as agent_mod
+    monkeypatch.setattr(agent_mod.Agent, "last_run_ok", ok, raising=False)
+    monkeypatch.setattr(agent_mod.Agent, "denied_unconfirmed", denied, raising=False)
+    result = runner.run_job(_job(_project(tmp_path, None)))
+    if named is None:
+        assert result["status"] == "ok" and result["output"] == "ran"
+    else:
+        assert result["status"] == "error"
+        assert "did not finish" in result["error"] and named in result["error"]
+        assert "ran" in result["error"]
+
+
 @pytest.mark.parametrize("line", ['mode = "bogus"', 'mode = "privcy"', "mode = 3"])
 def test_an_invalid_project_mode_is_refused(home, tmp_path, agent_spy, line):
     runner, built = agent_spy

@@ -2336,6 +2336,78 @@ class TestRunCoderTaskInProcess:
         assert resp["result"]["isError"] is False, resp["result"]
         assert [a.server_side for a in built] == [True]
 
+    def _over_stdio(self, server, cwd, meta):
+        """The tools/call sent over the stdio transport; every stdout line is
+        parsed as JSON."""
+        params = {"name": "run_coder_task",
+                  "arguments": {"task": "write big.py", "cwd": str(cwd)}}
+        if meta is not None:
+            params["_meta"] = meta
+        req = json.dumps({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                          "params": params}) + "\n"
+        out = io.StringIO()
+        with patch("localm.plugins.coder.agent.ProjectMap") as MockPM, \
+             patch("localm.plugins.coder.agent.make_audit_log"), \
+             patch("localm.plugins.coder.agent.load_memory", return_value=""), \
+             patch("localm.plugins.coder.agent.context._CALL_PROGRESS_INTERVAL_S", 0):
+            MockPM.build.return_value.file_count.return_value = 0
+            server.run_stdio(stdin=io.StringIO(req), stdout=out)
+        return [json.loads(line) for line in out.getvalue().splitlines()]
+
+    def _char_engine_factory(self):
+        body = "\n".join(f"x = {i}" for i in range(50))
+        inner = _scripted_engine_factory(
+            [_tool_call("write_file", path="big.py", content=body), "Written."])
+
+        def factory(name):
+            engine = inner(name)
+            whole = engine.chat_stream.side_effect
+
+            def in_pieces(messages, **kw):
+                text = "".join(whole(messages, **kw))
+                for i in range(0, len(text), 8):
+                    yield text[i:i + 8]
+            engine.chat_stream.side_effect = in_pieces
+            return engine
+        return factory
+
+    def test_a_coder_task_reports_progress_to_a_client_that_asked(
+            self, coder_env, tmp_path, capfd):
+        server, _ = _coder_server(self._char_engine_factory())
+        project = _project(tmp_path)
+        msgs = self._over_stdio(server, project, {"progressToken": "tok-9"})
+        notes = [m["params"] for m in msgs if m.get("method") == "notifications/progress"]
+        assert {n["progressToken"] for n in notes} == {"tok-9"}
+        assert any(n["message"].startswith("Preparing write_file - big.py") for n in notes)
+        assert [m["id"] for m in msgs if "result" in m] == [5]
+        assert (project / "big.py").exists()
+        assert capfd.readouterr().out == ""
+
+    @pytest.mark.parametrize("meta", [None, {}])
+    def test_a_coder_task_without_a_progress_token_sends_only_its_result(
+            self, coder_env, tmp_path, capfd, meta):
+        server, _ = _coder_server(self._char_engine_factory())
+        msgs = self._over_stdio(server, _project(tmp_path), meta)
+        assert len(msgs) == 1 and msgs[0]["id"] == 5
+        assert msgs[0]["result"]["isError"] is False
+        assert capfd.readouterr().out == ""
+
+    def test_a_run_abandoned_at_its_timeout_reports_nothing_into_a_later_call(
+            self, coder_env, tmp_path, monkeypatch):
+        from localm.plugins.coder import runner as coder_runner
+        from localm.plugins.mcpserver import server as srv
+        built = []
+        real = coder_runner.build_agent
+        server, _ = _coder_server(_scripted_engine_factory(["done"]))
+        with patch.object(coder_runner, "build_agent",
+                          lambda *a, **k: built.append(real(*a, **k)) or built[-1]):
+            _run_task(server, _project(tmp_path))
+        later: list = []
+        monkeypatch.setattr(srv, "_progress_sink", later.append)
+        assert built[0].report_progress is True
+        built[0].progress_sink("still running")
+        assert later == []
+
     def test_three_projects_share_one_model_load(self, coder_env, tmp_path):
         factory = _scripted_engine_factory(["done"])
         server, engines = _coder_server(factory)

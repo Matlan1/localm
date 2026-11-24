@@ -478,6 +478,13 @@ def build(engines: EngineCache, coder_shell: bool = False,
         except Exception as e:
             _release()
             return _text_result(f"coder task failed to start: {e}", is_error=True)
+        # Progress goes to this call's client, and only while the call is open: a
+        # run abandoned at its timeout must not report into a later call.
+        call_open = threading.Event()
+        call_open.set()
+        agent.report_progress = True
+        agent.progress_sink = (
+            lambda text: _srv.report_progress(text) if call_open.is_set() else None)
         remaining = timeout - (time.monotonic() - started)
         if remaining <= 0:
             try:
@@ -496,6 +503,8 @@ def build(engines: EngineCache, coder_shell: bool = False,
                     requested_timeout=timeout)
         except Exception as e:
             return _text_result(f"coder task failed to run: {e}", is_error=True)
+        finally:
+            call_open.clear()
 
         denied = coder_runner.describe_denied(result.denied)
         meta = (f"\n\n[turns={result.turns} tokens={result.total_tokens} "
