@@ -146,8 +146,10 @@ served by another instance and the configured `embedding_model` count as registe
 - `POST /api/show` takes `model` (or `name`; `verbose` is accepted and ignored)
   and returns `details`, `model_info` (`general.architecture` and
   `<architecture>.context_length` when recorded), `modified_at`, `capabilities`
-  (`completion` and `tools` for a chat model, `embedding` for an embedding
-  model, plus `vision` and `thinking` when known) and empty `modelfile`,
+  (`completion` for a chat model, plus `tools` when its chat template renders
+  tool calls and `thinking` when its chat template is built for a reasoning
+  model, both read from the model file itself and never from its name; `vision`
+  when a projector is present; `embedding` for an embedding model) and empty `modelfile`,
   `parameters` and `template`. A missing model name is a 400 and an unknown
   model a 404.
 - `GET /api/version` returns `{"version": "<localm's own version>"}`.

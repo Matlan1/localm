@@ -15,8 +15,10 @@ and ``maximum`` (and the exclusive forms) on integers, ``format`` ``date``,
 ``time``, ``date-time`` and ``uuid``, ``anyOf``, ``oneOf``, ``allOf`` of
 objects, and local ``$ref`` (recursive schemas included). Annotations
 (``title``, ``description``, ``default``, ``examples``) and ``uniqueItems``
-are accepted and not enforced. Any other keyword is refused with a
-``SchemaGrammarError`` naming it, rather than dropped."""
+are accepted and not enforced. Whitespace is allowed between tokens inside
+objects and arrays only: the root value is the whole reply, with nothing before
+or after it, so generation ends where the value ends. Any other keyword is
+refused with a ``SchemaGrammarError`` naming it, rather than dropped."""
 
 from __future__ import annotations
 
@@ -64,20 +66,20 @@ _DIGIT = "[0-9]"
 _PRIMITIVES: dict[str, str] = {
     "ws": '| " " | "\\n" [ \\t]{0,20}',
     "char": '[^"\\\\\\x7F\\x00-\\x1F] | "\\\\" (["\\\\bfnrt] | "u" [0-9a-fA-F]{4})',
-    "string": '"\\"" char* "\\"" ws',
-    "boolean": '("true" | "false") ws',
-    "null": '"null" ws',
-    "integer": '("-"? ([0-9] | [1-9] [0-9]{0,15})) ws',
-    "number": ('("-"? ([0-9] | [1-9] [0-9]{0,15})) ("." [0-9]+)? '
-               '([eE] [-+]? [0-9]{1,3})? ws'),
+    "string": '"\\"" char* "\\""',
+    "boolean": '"true" | "false"',
+    "null": '"null"',
+    "integer": '"-"? ([0-9] | [1-9] [0-9]{0,15})',
+    "number": ('"-"? ([0-9] | [1-9] [0-9]{0,15}) ("." [0-9]+)? '
+               '([eE] [-+]? [0-9]{1,3})?'),
     "value": "object-any | array-any | string | number | boolean | null",
-    "object-any": '"{" ws (string ":" ws value ("," ws string ":" ws value)*)? "}" ws',
-    "array-any": '"[" ws (value ("," ws value)*)? "]" ws',
+    "object-any": ('"{" ws (string ws ":" ws value ws '
+                   '("," ws string ws ":" ws value ws)*)? "}"'),
+    "array-any": '"[" ws (value ws ("," ws value ws)*)? "]"',
 }
 
 _PRIMITIVE_DEPS: dict[str, tuple[str, ...]] = {
-    "string": ("char", "ws"),
-    "boolean": ("ws",), "null": ("ws",), "integer": ("ws",), "number": ("ws",),
+    "string": ("char",),
     "value": ("object-any", "array-any", "string", "number", "boolean", "null"),
     "object-any": ("string", "value", "ws"),
     "array-any": ("value", "ws"),
@@ -85,16 +87,16 @@ _PRIMITIVE_DEPS: dict[str, tuple[str, ...]] = {
 
 _FORMATS: dict[str, str] = {
     "date": ('"\\"" [0-9]{4} "-" ("0" [1-9] | "1" [0-2]) "-" '
-             '("0" [1-9] | [12] [0-9] | "3" [01]) "\\"" ws'),
+             '("0" [1-9] | [12] [0-9] | "3" [01]) "\\""'),
     "time": ('"\\"" ([01] [0-9] | "2" [0-3]) ":" [0-5] [0-9] ":" [0-5] [0-9] '
              '("." [0-9]{1,9})? ("Z" | ("+" | "-") ([01] [0-9] | "2" [0-3]) ":" '
-             '[0-5] [0-9]) "\\"" ws'),
+             '[0-5] [0-9]) "\\""'),
     "date-time": ('"\\"" [0-9]{4} "-" ("0" [1-9] | "1" [0-2]) "-" '
                   '("0" [1-9] | [12] [0-9] | "3" [01]) "T" ([01] [0-9] | "2" [0-3]) '
                   '":" [0-5] [0-9] ":" [0-5] [0-9] ("." [0-9]{1,9})? ("Z" | '
-                  '("+" | "-") ([01] [0-9] | "2" [0-3]) ":" [0-5] [0-9]) "\\"" ws'),
+                  '("+" | "-") ([01] [0-9] | "2" [0-3]) ":" [0-5] [0-9]) "\\""'),
     "uuid": ('"\\"" [0-9a-fA-F]{8} "-" [0-9a-fA-F]{4} "-" [0-9a-fA-F]{4} "-" '
-             '[0-9a-fA-F]{4} "-" [0-9a-fA-F]{12} "\\"" ws'),
+             '[0-9a-fA-F]{4} "-" [0-9a-fA-F]{12} "\\""'),
 }
 
 
@@ -255,8 +257,7 @@ class _Compiler:
 
     def _literals(self, values: list, hint: str) -> str:
         texts = [json.dumps(v, ensure_ascii=False, separators=(",", ":")) for v in values]
-        body = "(" + " | ".join(literal(t) for t in texts) + ") ws"
-        self.prim("ws")
+        body = "(" + " | ".join(literal(t) for t in texts) + ")"
         return self.add(hint, body)
 
     def _any_of(self, schema: dict, key: str, hint: str) -> str:
@@ -358,8 +359,7 @@ class _Compiler:
             return self.prim("integer")
         if lo is not None and hi is not None and lo > hi:
             raise SchemaGrammarError("the integer bounds leave no value")
-        self.prim("ws")
-        return self.add(hint, f"({self._int_range(lo, hi, hint)}) ws")
+        return self.add(hint, f"({self._int_range(lo, hi, hint)})")
 
     @staticmethod
     def _integer_bounds(schema: dict) -> tuple[int | None, int | None]:
@@ -449,7 +449,6 @@ class _Compiler:
     def _string(self, schema: dict, hint: str) -> str:
         fmt = schema.get("format")
         if fmt in _FORMATS:
-            self.prim("ws")
             return self.add(hint, _FORMATS[fmt])
         lo = schema.get("minLength", 0)
         hi = schema.get("maxLength")
@@ -463,9 +462,8 @@ class _Compiler:
         if lo == 0 and hi is None:
             return self.prim("string")
         self.prim("char")
-        self.prim("ws")
         count = f"{{{lo},}}" if hi is None else f"{{{lo},{hi}}}"
-        return self.add(hint, f'"\\"" char{count} "\\"" ws')
+        return self.add(hint, f'"\\"" char{count} "\\""')
 
     # ------------------------------------------------------------ array
 
@@ -489,18 +487,18 @@ class _Compiler:
                 raise SchemaGrammarError(
                     "prefixItems with minItems, maxItems or items is not supported")
             seq = ' "," ws '.join(
-                self.visit(p, f"{hint}-{i}") for i, p in enumerate(prefix))
-            return self.add(hint, f'"[" ws {seq} "]" ws')
+                self.visit(p, f"{hint}-{i}") + " ws" for i, p in enumerate(prefix))
+            return self.add(hint, f'"[" ws {seq} "]"')
         if items is False or hi == 0:
-            return self.add(hint, '"[" ws "]" ws')
+            return self.add(hint, '"[" ws "]"')
         item = self.visit(True if items is None else items, f"{hint}-item")
-        more = f'("," ws {item})' + _repeat(max(lo - 1, 0), None if hi is None else hi - 1)
+        more = f'("," ws {item} ws)' + _repeat(max(lo - 1, 0), None if hi is None else hi - 1)
         if hi is not None and hi - 1 == 0:
             more = ""
-        inner = f"{item} {more}".rstrip()
+        inner = f"{item} ws {more}".rstrip()
         if lo == 0:
             inner = f"({inner})?"
-        return self.add(hint, f'"[" ws {inner} "]" ws')
+        return self.add(hint, f'"[" ws {inner} "]"')
 
     # ------------------------------------------------------------ object
 
@@ -521,17 +519,17 @@ class _Compiler:
         members: list[tuple[str, bool, bool]] = []
         for name, sub in props.items():
             value = self.visit(sub, f"{hint}-{name}")
-            kv = self.add(f"{hint}-{name}-kv", f'{literal(json.dumps(name, ensure_ascii=False))} ws ":" ws {value}')
+            kv = self.add(f"{hint}-{name}-kv", f'{literal(json.dumps(name, ensure_ascii=False))} ws ":" ws {value} ws')
             members.append((kv, name in required, False))
         if extra is True or isinstance(extra, dict) or (extra is None and not props):
             value = self.visit(True if extra in (None, True) else extra, f"{hint}-extra")
             key = self.prim("string")
-            kv = self.add(f"{hint}-extra-kv", f'{key} ":" ws {value}')
+            kv = self.add(f"{hint}-extra-kv", f'{key} ws ":" ws {value} ws')
             members.append((kv, False, True))
         elif extra is not None and extra is not False:
             raise SchemaGrammarError("additionalProperties must be a boolean or a schema")
         if not members:
-            return self.add(hint, '"{" ws "}" ws')
+            return self.add(hint, '"{" ws "}"')
         memo: dict[tuple[int, bool], str] = {}
 
         def rest(i: int, started: bool) -> str:
@@ -560,7 +558,7 @@ class _Compiler:
             return memo[key]
 
         chain = rest(0, False)
-        return self.add(hint, f'"{{" ws {chain} "}}" ws')
+        return self.add(hint, f'"{{" ws {chain} "}}"')
 
     # ------------------------------------------------------------ output
 

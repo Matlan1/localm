@@ -323,11 +323,15 @@ def register(app: FastAPI, ctx) -> None:
         def _collect() -> dict:
             facts = _file_facts(entry)
             caps = model_capabilities(name, reg=registry) if name in registry else {}
-            capabilities = ["embedding"] if entry.get("model_type") == "embedding" \
-                else ["completion", "tools"]
+            if entry.get("model_type") == "embedding":
+                capabilities = ["embedding"]
+            else:
+                capabilities = ["completion"]
+                if caps.get("tool_use"):
+                    capabilities.append("tools")
             if caps.get("vision"):
                 capabilities.append("vision")
-            if caps.get("reasoning"):
+            if caps.get("reasoning") and "embedding" not in capabilities:
                 capabilities.append("thinking")
             info: dict[str, Any] = {}
             arch = entry.get("architecture")

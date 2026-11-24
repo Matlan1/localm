@@ -432,3 +432,89 @@ def test_a_schema_derived_from_a_value_accepts_that_value_and_rejects_a_changed_
         if not isinstance(value, (dict, list)):
             other = "x" if not isinstance(value, str) else 0
             assert not grammar.accepts(json.dumps(other)), (schema, value)
+
+
+# ------------------------------------------------------------------ nothing after the root value
+
+_PERSON = {"type": "object", "properties": {"name": {"type": "string"},
+                                             "age": {"type": "integer"},
+                                             "tags": {"type": "array", "items": {"type": "string"}}},
+           "required": ["name", "age", "tags"], "additionalProperties": False}
+_TREE = {"type": "object", "properties": {"v": {"type": "integer"},
+                                           "kids": {"type": "array", "items": {"$ref": "#"}}},
+         "required": ["v", "kids"]}
+
+ROOT_SHAPES = {
+    "object": (_PERSON, {"name": "a", "age": 3, "tags": ["x", "y"]}),
+    "empty-object": ({"type": "object", "properties": {}, "additionalProperties": False}, {}),
+    "open-object": ({"type": "object"}, {"a": [1, {"b": None}], "c": "d"}),
+    "array": ({"type": "array", "items": {"type": "integer"}}, [1, 2, 3]),
+    "bounded-array": ({"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 3}, [1, 2]),
+    "empty-array": ({"type": "array", "maxItems": 0}, []),
+    "tuple": ({"type": "array", "prefixItems": [{"type": "string"}, {"type": "number"}]}, ["a", 1.5]),
+    "string": ({"type": "string"}, "hello"),
+    "bounded-string": ({"type": "string", "minLength": 1, "maxLength": 8}, "hello"),
+    "date": ({"type": "string", "format": "date"}, "2026-11-24"),
+    "number": ({"type": "number"}, 3.14),
+    "integer": ({"type": "integer"}, 42),
+    "bounded-integer": ({"type": "integer", "minimum": 1, "maximum": 99}, 42),
+    "boolean": ({"type": "boolean"}, True),
+    "null": ({"type": "null"}, None),
+    "enum": ({"enum": ["red", "green", 3]}, "green"),
+    "const": ({"const": "fixed"}, "fixed"),
+    "anyOf": ({"anyOf": [{"type": "integer"}, {"type": "string", "maxLength": 6}]}, "abc"),
+    "oneOf": ({"oneOf": [_PERSON, {"type": "null"}]}, None),
+    "type-list": ({"type": ["string", "null"]}, None),
+    "allOf": ({"allOf": [{"type": "object", "properties": {"a": {"type": "integer"}}, "required": ["a"]},
+                         {"properties": {"b": {"type": "string"}}, "required": ["b"]}]},
+               {"a": 1, "b": "x"}),
+    "ref": ({"type": "object", "properties": {"p": {"$ref": "#/$defs/p"}}, "required": ["p"],
+             "$defs": {"p": _PERSON}}, {"p": {"name": "a", "age": 1, "tags": []}}),
+    "recursive-ref": (_TREE, {"v": 1, "kids": [{"v": 2, "kids": []}]}),
+    "any-value": ({}, {"a": [1, "b", None, True]}),
+    "nested": ({"type": "object", "properties": {"geo": {"type": "object", "properties": {
+        "lat": {"type": "number"}, "pts": {"type": "array", "items": {"type": "array", "items": {"type": "integer"}}}},
+        "required": ["lat", "pts"]}}, "required": ["geo"]}, {"geo": {"lat": 1.5, "pts": [[1], [2, 3]]}}),
+}
+TAILS = (" ", "\n", "\t", "\r\n", "\n\t\t", " " * 21)
+
+
+@pytest.mark.parametrize("shape", sorted(ROOT_SHAPES))
+def test_nothing_follows_or_precedes_the_root_value(shape):
+    schema, value = ROOT_SHAPES[shape]
+    grammar = Grammar(schema_to_grammar(schema))
+    for text in (json.dumps(value, separators=(",", ":")), json.dumps(value),
+                 json.dumps(value, indent=2)):
+        assert grammar.accepts(text), (shape, text)
+        for tail in TAILS:
+            assert not grammar.accepts(text + tail), (shape, text, tail)
+        assert not grammar.accepts(" " + text), (shape, text)
+
+
+def test_whitespace_between_tokens_inside_containers_is_still_allowed():
+    grammar = Grammar(schema_to_grammar(_PERSON))
+    assert grammar.accepts('{ "name" : "a" ,\n\t"age":3 , "tags" :[ "x" , "y" ] }')
+    assert grammar.accepts('{\n  "name": "a",\n  "age": 3,\n  "tags": [\n    "x"\n  ]\n}')
+
+
+def test_json_object_mode_ends_at_the_closing_brace():
+    from localm.inference.response_format import ResponseFormat, format_grammar
+    grammar, dropped = format_grammar(ResponseFormat("json_object"))
+    assert dropped == []
+    g = Grammar(grammar)
+    assert g.accepts('{"a": [1, 2], "b": {"c": null}}')
+    assert g.accepts("{}")
+    for tail in TAILS:
+        assert not g.accepts('{"a": 1}' + tail)
+
+
+def test_a_json_schema_response_format_ends_at_the_closing_brace():
+    from localm.inference.response_format import ResponseFormat, format_grammar
+    for strict in (True, False):
+        grammar, _dropped = format_grammar(
+            ResponseFormat("json_schema", name="p", schema=_PERSON, strict=strict))
+        g = Grammar(grammar)
+        good = json.dumps({"name": "a", "age": 3, "tags": []})
+        assert g.accepts(good)
+        for tail in TAILS:
+            assert not g.accepts(good + tail), (strict, tail)

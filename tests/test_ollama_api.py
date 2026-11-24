@@ -219,7 +219,7 @@ def test_show_describes_a_registered_model(client, home):
     weights = home / "m.gguf"
     weights.write_bytes(b"x" * 10)
     _write_registry(home, {"alpha": {"path": str(weights), "architecture": "llama",
-                                     "context_length": 8192}})
+                                     "context_length": 8192, "tool_use": True}})
     body = client.post("/api/show", json={"model": "alpha"}).json()
     assert body["capabilities"] == ["completion", "tools"]
     assert body["details"]["format"] == "gguf"
@@ -235,11 +235,50 @@ def test_show_accepts_the_legacy_name_field_and_the_latest_tag(client, home):
 
 
 def test_show_offers_tools_on_chat_models_only(client, home):
-    _write_registry(home, {"alpha": {"path": str(home / "x.gguf")},
-                           "emb": {"path": str(home / "e.gguf"), "model_type": "embedding"}})
+    _write_registry(home, {"alpha": {"path": str(home / "x.gguf"), "tool_use": True},
+                           "emb": {"path": str(home / "e.gguf"), "model_type": "embedding",
+                                   "tool_use": True}})
     chat_caps = client.post("/api/show", json={"model": "alpha"}).json()["capabilities"]
     assert chat_caps[:2] == ["completion", "tools"]
     assert "tools" not in client.post("/api/show", json={"model": "emb"}).json()["capabilities"]
+
+
+def test_show_lists_tools_only_for_a_model_whose_template_renders_them(client, home):
+    _write_registry(home, {"yes": {"path": str(home / "a.gguf"), "tool_use": True},
+                           "no": {"path": str(home / "b.gguf"), "tool_use": False},
+                           "unread": {"path": str(home / "c.gguf")}})
+    shown = {n: client.post("/api/show", json={"model": n}).json()["capabilities"]
+             for n in ("yes", "no", "unread")}
+    assert shown == {"yes": ["completion", "tools"], "no": ["completion"],
+                     "unread": ["completion"]}
+
+
+def _gguf_with_template(path: Path, template: str) -> Path:
+    from tests.test_model_capabilities import _model_gguf
+    return _model_gguf(path, arch="llama", template=template, ctx=4096)
+
+
+def test_show_lists_thinking_from_the_template_not_the_name(client, home):
+    from tests.test_model_capabilities import (
+        GPT_OSS_EFFORT, QWEN3_THINKING_SWITCH, REAL_PLAIN_TEMPLATE)
+    qwen3 = _gguf_with_template(home / "q.gguf", QWEN3_THINKING_SWITCH)
+    oss = _gguf_with_template(home / "o.gguf", GPT_OSS_EFFORT)
+    plain = _gguf_with_template(home / "p.gguf", REAL_PLAIN_TEMPLATE)
+    _write_registry(home, {"plain-name-that-thinks": {"path": str(qwen3)},
+                           "gpt-oss-ish": {"path": str(oss)},
+                           "Qwen3-Thinking-R1-named-but-plain": {"path": str(plain)}})
+    shown = {n: client.post("/api/show", json={"model": n}).json()["capabilities"]
+             for n in ("plain-name-that-thinks", "gpt-oss-ish", "Qwen3-Thinking-R1-named-but-plain")}
+    assert "thinking" in shown["plain-name-that-thinks"]
+    assert "thinking" in shown["gpt-oss-ish"]
+    assert "thinking" not in shown["Qwen3-Thinking-R1-named-but-plain"]
+
+
+def test_show_never_lists_thinking_on_an_embedding_model(client, home):
+    from tests.test_model_capabilities import QWEN3_THINKING_SWITCH
+    emb = _gguf_with_template(home / "e.gguf", QWEN3_THINKING_SWITCH)
+    _write_registry(home, {"emb": {"path": str(emb), "model_type": "embedding"}})
+    assert client.post("/api/show", json={"model": "emb"}).json()["capabilities"] == ["embedding"]
 
 
 def test_show_marks_an_embedding_model(client, home):

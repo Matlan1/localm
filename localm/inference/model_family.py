@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Model-family detection shared across plugins.
 
-The single source of truth for "is this a thinking/reasoning model", used by the
-coder's per-family prompt tuning
+The single source of truth for "does this model's name say it is a thinking /
+reasoning family", used by the coder's per-family prompt tuning
 (localm.plugins.coder.prompts.detect_model_family) and by regular chat's
-<think> instruction. Detection keys on the model NAME it is handed, so an
+<think> instruction. It is a prompt-tuning hint and not a capability: what a
+model can do is read from its own chat template
+(localm.model_manager.capabilities). Detection keys on the model NAME it is handed, so an
 opaque registry alias ("m8") resolves to not-thinking. A renamed model is detected
 by the first name it had, so a rename does not change how it is treated.
 """
