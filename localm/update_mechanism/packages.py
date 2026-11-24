@@ -605,19 +605,16 @@ def _foreign(a: Area, site: Path, plan: Plan) -> set:
 def _set_aside(a: Area, site: Path, plan: Plan, foreign: set, wait: Wait, out: Outcome) -> None:
     inner = site.relative_to(a.base).as_posix()
     ops = {op.path: op for op in plan.ops}
-
-    def stays(rel: str) -> bool:
-        path, st = a.find(rel)
-        op = ops.get(rel)
-        return st is None or (op is not None and (op.old is not None
-                                                  or disk.same(path, op.new)))
     for name, folder in sorted(foreign):
         record = f"{inner}/{folder}/RECORD"
-        mine = [rel for rel in _listed(site, a.base, folder, name) if not stays(rel)]
         last = (record, f"{inner}/{folder}/METADATA")
-        for rel in sorted(mine, key=lambda rel: (rel in last, rel == last[1], rel)):
-            mover.aside(a, Op(rel, REMOVE), a.find(rel)[0], wait, out)
-            a.prune(a.find(rel)[0].parent)
+        listed = _listed(site, a.base, folder, name)
+        for rel in sorted(listed, key=lambda rel: (rel in last, rel == last[1], rel)):
+            path, st = a.find(rel)
+            op = ops.get(rel, Op(rel, REMOVE))
+            if st is not None and op.old is None:
+                mover.aside(a, op, path, wait, out)
+                a.prune(path.parent)
         out.notes.append(f"The package {name} ({folder}) was installed by somebody since; it is "
                          f"in {a.kept}.")
     for folder in os.listdir(site):

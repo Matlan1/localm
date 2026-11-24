@@ -968,7 +968,7 @@ def test_an_update_that_was_only_prepared_is_discarded(root, world):
     (root / ".localm-update" / ID / "new").mkdir(parents=True)
     packages.stage_packages(root, ID, argv(world), env=world.env)
     with job.Lock(root) as lock:
-        job.cleanup(lock)
+        job.cleanup(lock, keep=ID)
         assert packages.stage_folder(root, ID).exists()
         assert job.discard(lock, ID) is True
     assert tree(root) == before and um.left(root) == []

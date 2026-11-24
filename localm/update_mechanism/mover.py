@@ -808,6 +808,7 @@ class _Back:
         self.a, self.plan, self.wait, self.out, self.marks = a, plan, wait, out, marks
         self.users, self.heal = dict(users or {}), heal
         self.numbers = {op.path: n for n, op in enumerate(plan.ops)}
+        self.unsure = marks.last
         self.failed: set = set()
         self.left: set = set()
         self.theirs: dict = {}
@@ -897,8 +898,8 @@ class _Back:
 
     def _was_moved(self, op: Op) -> bool:
         n = self.numbers[op.path]
-        return self.marks.moved(n) or (n in self.marks.changed and op.new is not None
-                                       and disk.same(self.a.find(op.path)[0], op.new, self.wait))
+        return n in self.marks.changed and (n != self.unsure or (
+            op.new is not None and disk.same(self.a.find(op.path)[0], op.new, self.wait)))
 
     def _settle(self, op: Op) -> None:
         """The old version of *op*'s file is at its place; what the update has of it
@@ -925,6 +926,8 @@ class _Back:
     def _leave(self, op: Op) -> None:
         self.left.add(op.path)
         self.theirs.setdefault(op.dist, []).append(op.path)
+        if self.numbers[op.path] in self.marks.changed:
+            self._mark("-", op)
 
     # -- moving
 

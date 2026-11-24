@@ -188,8 +188,9 @@ def _free_reserve(root, update_id: str) -> bool:
 
 def start(lock: Lock, update_id: str, *, old: str, new: str) -> Record:
     """Begin the update *update_id*, whose folder already holds ``new``: write its
-    record in phase ENDING, and delete what others left (:func:`cleanup`). Raises :class:`Busy` when another update is unfinished,
-    :class:`Unreadable`, :class:`Blocked`, :class:`Unsafe`, :class:`Held` or OSError."""
+    record in phase ENDING, and delete what others left (:func:`cleanup`). Raises
+    :class:`Busy` when another update is unfinished, :class:`Unreadable`,
+    :class:`Blocked`, :class:`Unsafe`, :class:`Held` or OSError."""
     going = _current(lock.root)
     if read(lock.root) is not None or (going is not None and going.phase != ENDING):
         raise Busy("an earlier update of this install is not finished")

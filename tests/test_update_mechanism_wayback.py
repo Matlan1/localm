@@ -295,6 +295,18 @@ def test_a_move_that_was_marked_and_not_made_is_not_lost(root, monkeypatch):
         with pytest.raises(mover.StepFailed):
             uv.forward(root, plan)
     (site(root) / "alpha" / "data.txt").write_bytes(b"MINE")
+    failed = [disk.Held("x", "y")]
+    move = disk.move
+
+    def held(src, dst, wait, **kw):
+        if failed and src.name == "__init__.py":
+            raise failed[0]
+        move(src, dst, wait, **kw)
+    monkeypatch.setattr(disk, "move", held)
+    for _ in range(2):
+        result = uv.undo(root)
+        assert result.errors == ["x cannot be used (y)"]
+    failed.clear()
     result = uv.undo(root)
     assert (result.state, result.errors) == ("old", [])
     assert (site(root) / "alpha" / "data.txt").read_bytes() == b"MINE"
@@ -734,8 +746,8 @@ ACTIONS = {
 
 @pytest.mark.parametrize("action", ACTIONS)
 def test_killed_anywhere_and_changed_by_the_user_there_is_always_a_way_back(tmp_path, action):
-    """Each point of an update and of its way back in turn, a different one of three
-    per action."""
+    """The actions share the points of an update and of its way back; together they
+    take every one."""
     template = uv.installed(tmp_path / "template")
     um.stage(template)
     uv.stage(template, ["alpha"], [ALPHA2, GAMMA])
@@ -743,7 +755,7 @@ def test_killed_anywhere_and_changed_by_the_user_there_is_always_a_way_back(tmp_
     full = tmp_path / "full"
     shutil.copytree(template, full)
     uv.update(full, stop_before="finish")
-    first = sorted(ACTIONS).index(action) % 3
+    first = sorted(ACTIONS).index(action)
     for start, run in ((template, uv.update), (full, uv.undo)):
         work = tmp_path / "count"
         shutil.copytree(start, work)
@@ -752,11 +764,12 @@ def test_killed_anywhere_and_changed_by_the_user_there_is_always_a_way_back(tmp_
         end = uv.tree(work)
         shutil.rmtree(work)
         assert points.count > 100
-        for at in range(first, points.count, 3):
+        for at in range(first, points.count, len(ACTIONS)):
             shutil.copytree(start, work)
             with uv.Points(at):
                 run(work)
-            ended = run is uv.update and (um.done(work) or uv.tree(work) == end)
+            ended = run is uv.update and (
+                um.done(work) or (um.phase(work) is None and uv.tree(work) == end))
             want = end if ended or run is uv.undo else old
             ACTIONS[action](work)
             result = uv.undo(work)
