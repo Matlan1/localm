@@ -417,10 +417,10 @@ def _canon(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def dists(site: Path) -> dict:
-    """``{canonical name: {"dir", "version"}}`` for every distribution installed
-    in *site* (its ``*.dist-info`` folders)."""
-    out = {}
+def dist_infos(site: Path) -> list:
+    """``(canonical name, version, folder name)`` of every ``*.dist-info`` folder in
+    *site* whose metadata names both, two versions of one distribution included."""
+    out: list = []
     try:
         infos = list(site.glob("*.dist-info"))
     except OSError:
@@ -439,8 +439,15 @@ def dists(site: Path) -> dict:
         except OSError:
             continue
         if name and version:
-            out[_canon(name)] = {"dir": d.name, "version": version}
+            out.append((_canon(name), version, d.name))
     return out
+
+
+def dists(site: Path) -> dict:
+    """``{canonical name: {"dir", "version"}}`` for every distribution installed
+    in *site* (:func:`dist_infos`)."""
+    return {name: {"dir": folder, "version": version}
+            for name, version, folder in dist_infos(site)}
 
 
 def _packaging():
@@ -1163,12 +1170,19 @@ def _clone_venv(venv: Path, copy: Path, owner: Path) -> None:
             _link(Path(dirpath) / f, target / f)
 
 
+def record_rows(site: Path, dist_dir: str) -> list:
+    """The rows ``[path relative to *site*, hash, size]`` of the RECORD of the
+    distribution *dist_dir*; hash and size may be empty or missing. Raises OSError
+    when there is no RECORD and ValueError when it cannot be decoded."""
+    import csv
+    with open(site / dist_dir / "RECORD", encoding="utf-8", newline="") as fh:
+        return [row for row in csv.reader(fh) if row]
+
+
 def _record(site: Path, dist_dir: str) -> list:
     """The paths, relative to *site*, of the distribution *dist_dir*'s files."""
-    import csv
     try:
-        with open(site / dist_dir / "RECORD", encoding="utf-8", newline="") as fh:
-            return [row[0] for row in csv.reader(fh) if row]
+        return [row[0] for row in record_rows(site, dist_dir)]
     except OSError:
         return []
 

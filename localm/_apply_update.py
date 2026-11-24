@@ -810,6 +810,48 @@ def held_files(root) -> list:
     return held
 
 
+def rm_holders(files: list) -> list:
+    """Processes holding *files*, from the Windows Restart Manager:
+    ``[{"pid", "name"}]``. Empty when it names none or cannot be asked."""
+    if sys.platform != "win32":
+        return []
+    import ctypes
+    from ctypes import wintypes
+    rm = ctypes.WinDLL("rstrtmgr")
+
+    class _UniqueProcess(ctypes.Structure):
+        _fields_ = [("dwProcessId", wintypes.DWORD), ("ProcessStartTime", wintypes.FILETIME)]
+
+    class _ProcessInfo(ctypes.Structure):
+        _fields_ = [("Process", _UniqueProcess), ("strAppName", ctypes.c_wchar * 256),
+                    ("strServiceShortName", ctypes.c_wchar * 64),
+                    ("ApplicationType", ctypes.c_int), ("AppStatus", wintypes.ULONG),
+                    ("TSSessionId", wintypes.DWORD), ("bRestartable", wintypes.BOOL)]
+
+    session = wintypes.DWORD()
+    key = ctypes.create_unicode_buffer(33)
+    if rm.RmStartSession(ctypes.byref(session), 0, key) != 0:
+        return []
+    try:
+        names = (ctypes.c_wchar_p * len(files))(*[str(f) for f in files])
+        if rm.RmRegisterResources(session, len(files), names, 0, None, 0, None) != 0:
+            return []
+        needed, count, reasons = wintypes.UINT(0), wintypes.UINT(0), wintypes.DWORD(0)
+        rc = rm.RmGetList(session, ctypes.byref(needed), ctypes.byref(count), None,
+                          ctypes.byref(reasons))
+        if rc not in (0, 234) or needed.value == 0:
+            return []
+        infos = (_ProcessInfo * needed.value)()
+        count = wintypes.UINT(needed.value)
+        if rm.RmGetList(session, ctypes.byref(needed), ctypes.byref(count), infos,
+                        ctypes.byref(reasons)) != 0:
+            return []
+        return [{"pid": int(i.Process.dwProcessId), "name": i.strAppName}
+                for i in infos[:count.value]]
+    finally:
+        rm.RmEndSession(session)
+
+
 def restore_runtime(snapshot, lib) -> list:
     """Put the runtime kept in *snapshot* back at *lib*. Returns the failures as
     strings (empty on success, or when *lib* already equals the snapshot).

@@ -11,13 +11,14 @@ from pathlib import Path
 
 
 @contextlib.contextmanager
-def held(path, *, exclusive: bool = False):
+def held(path, *, exclusive: bool = False, share: int | None = None):
     """Hold the file at *path* open for the duration of the block. By default as
     Python's ``open`` does (others may read and write it, nobody may delete or
     rename it); with *exclusive* with no sharing at all (others cannot read it
-    either), the way a scanner or an installer can."""
+    either), the way a scanner or an installer can; with *share* with that Windows
+    share mode (1 read, 2 write, 4 delete and rename)."""
     path = Path(path)
-    if not exclusive:
+    if share is None and not exclusive:
         with open(path, "rb"):
             yield
         return
@@ -29,8 +30,8 @@ def held(path, *, exclusive: bool = False):
                                      wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD,
                                      wintypes.HANDLE]
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    generic_read, no_sharing, open_existing = 0x80000000, 0, 3
-    handle = kernel32.CreateFileW(str(path), generic_read, no_sharing, None, open_existing, 0,
+    generic_read, open_existing = 0x80000000, 3
+    handle = kernel32.CreateFileW(str(path), generic_read, share or 0, None, open_existing, 0,
                                   None)
     if handle == wintypes.HANDLE(-1).value:
         raise ctypes.WinError(ctypes.get_last_error())
