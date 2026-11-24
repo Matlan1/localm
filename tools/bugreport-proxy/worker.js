@@ -227,8 +227,9 @@ async function fileReport(request, env) {
   const report = full.slice(0, 60000);
   const issue = { title, body: (type ? FEEDBACK_NOTE : REPORTER_NOTE) + report };
   const labels = (env.ISSUE_LABELS || "").split(",").map((s) => s.trim()).filter(Boolean);
-  if (Object.hasOwn(TYPE_LABELS, type)) labels.push(TYPE_LABELS[type]);
-  if (labels.length) issue.labels = labels;
+  if (!type) labels.push(BUG_LABEL);
+  else if (Object.hasOwn(TYPE_LABELS, type)) labels.push(TYPE_LABELS[type]);
+  if (labels.length) issue.labels = [...new Set(labels)];
   const gh = await ghFetch(auth.token, `/repos/${env.TARGET_REPO}/issues`, {
     method: "POST", body: JSON.stringify(issue),
   });
@@ -246,7 +247,9 @@ const REPORTER_NOTE =
   "> Submitted by a localm user through the built-in bug reporter.\n\n";
 const FEEDBACK_NOTE = "> Sent by a localm user from the app.\n\n";
 
-// The GitHub label of each request type. A type that is not listed gets no label.
+// The GitHub label of a bug report (a request without a type) and of each request
+// type. A type that is not listed gets no label.
+const BUG_LABEL = "bug";
 const TYPE_LABELS = { feedback: "feedback", suggestion: "enhancement" };
 
 // The first line of every markdown report localm builds: the in-app reporter

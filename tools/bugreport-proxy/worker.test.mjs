@@ -249,10 +249,27 @@ test("a type that is not a non-empty string is a request without a type", async 
   }
 });
 
-test("a bug report without a type is filed as before: no label, the reporter note", async () => {
+test("every bug report (a request without a type) gets the bug label and the reporter note", async () => {
+  for (const body of [STANDALONE, CURL_LINE]) {
+    assert.deepEqual((await postReport({ title: "t", body })).upstream[0].body.labels, ["bug"]);
+  }
   const { upstream } = await postReport({ title: "t", body: SKELETON });
-  assert.deepEqual(upstream[0].body, { title: "t",
+  assert.deepEqual(upstream[0].body, { title: "t", labels: ["bug"],
     body: "> Submitted by a localm user through the built-in bug reporter.\n\n" + SKELETON });
+});
+
+test("extra labels are added once, beside the type's own", async () => {
+  for (const [type, want] of [[undefined, ["bug", "x"]], ["suggestion", ["bug", "x", "enhancement"]]]) {
+    let sent;
+    const restore = stubFetch(async (u, init) => {
+      sent = JSON.parse(init.body);
+      return new Response(JSON.stringify({ html_url: "h", number: 1 }), { status: 201 });
+    });
+    try {
+      await worker.fetch(req({ title: "t", body: SKELETON, type }), { ...ENV, ISSUE_LABELS: "bug, x" });
+    } finally { restore(); }
+    assert.deepEqual(sent.labels, want);
+  }
 });
 
 test("an empty body with a type is rejected", async () => {
