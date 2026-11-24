@@ -151,7 +151,13 @@ def _riding_out(work, *args):
 
 
 def _load_json(path: Path):
-    return json.loads(_riding_out(path.read_text, "utf-8"))
+    """The JSON value of the file *path*. Raises OSError, or ValueError for a file
+    that does not parse or is nested too deeply."""
+    text = _riding_out(path.read_text, "utf-8")
+    try:
+        return json.loads(text)
+    except RecursionError as e:
+        raise ValueError("nested too deeply") from e
 
 
 def _principal_dir(request: Request) -> str | None:
@@ -639,8 +645,8 @@ def conversation_upsert(conv_id: str, req: ConversationUpsert, request: Request)
     refused with 403 ``{"detail": {"error": "owner"}}`` and nothing is written.
     503 when the list of deleted conversations has to be known and cannot be
     read. 403 in privacy mode, 413 when the conversation is larger than the store
-    accepts, 422 naming the place when it holds something a conversation cannot
-    (see _not_storable)."""
+    accepts, 422 naming the place when it holds a number that is not finite, text
+    UTF-8 cannot hold, or a text part whose text is not text."""
     if not _persist_enabled():
         raise HTTPException(
             403, "Chat persistence is off (privacy mode). "
