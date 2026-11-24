@@ -830,6 +830,10 @@ _GGUF_NON_CHAT_ARCHITECTURES = {
     "wavtokenizer-dec": "an audio codec decoder",
     "qwen3tts": "a text-to-speech model",
     "pockettts": "a text-to-speech model",
+    "kokoro": "a text-to-speech model",
+    "tiny-voca": "a text-to-speech model",
+    "zonos3": "a text-to-speech model",
+    "moshi": "a speech-to-speech model",
 }
 
 # Text-to-speech architectures localm synthesizes speech with (registry type

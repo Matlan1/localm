@@ -111,7 +111,8 @@ def render(arches: list[str], tag: str) -> str:
     img = sorted(families.IMAGE_FAMILIES, key=lambda f: labels.get(f, f))
     vid = sorted(families.VIDEO_FAMILIES, key=lambda f: labels.get(f, f))
     tts = [mtmd_gen.PIPELINE_NAMES[p] for p in sorted(mtmd_gen.SUPPORTED_PIPELINES)]
-    tts_known = sorted(set(mtmd_gen.PIPELINE_NAMES.values()) - set(tts))
+    tts_known = sorted(a for a, why in gguf._GGUF_NON_CHAT_ARCHITECTURES.items()
+                       if "speech" in why and a not in gguf.GGUF_TTS_ARCHITECTURES)
     native = families._GGUF_DIFFUSION_ARCH
     gguf_img = sorted(a for a, f in native.items() if f in families.IMAGE_FAMILIES)
     gguf_vid = sorted(a for a, f in native.items() if f in families.VIDEO_FAMILIES or f is None)
