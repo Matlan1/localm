@@ -21,6 +21,7 @@ import shutil
 import stat
 import subprocess
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -53,11 +54,12 @@ def run_hidden(argv: list, cwd: str, env: dict) -> tuple:
     return done.returncode, done.stdout
 
 
-def command(argv: Iterable, *, project: bool = False) -> list:
+def command(argv: Iterable, *, project: bool = False, network: bool = False) -> list:
     """The uv command *argv* (``<uv> sync ...`` or ``<uv> pip install ...``) as this
-    step runs it: offline, and a sync without the project unless *project*."""
+    step runs it: offline unless *network*, and a sync without the project unless
+    *project*."""
     argv = [str(a) for a in argv]
-    extra = ["--offline"]
+    extra = [] if network else ["--offline"]
     if argv[1:2] == ["sync"] and not project:
         extra.append("--no-install-project")
     return [*argv, *(e for e in extra if e not in argv)]
@@ -181,45 +183,84 @@ def stage_folder(root, update_id: str) -> Path:
 
 
 def stage_packages(root, update_id: str, argv: Iterable, *, env: Mapping, project: bool = False,
-                   run: Runner = run_hidden) -> bool:
+                   run: Runner = run_hidden, more: bool = False, network: bool = False) -> bool:
     """Put what the uv command *argv* (:func:`command`) would install in *root* into
-    the staging venv of *update_id* (made anew), and note what it would remove.
-    Returns False, with nothing staged, when uv has nothing to do. The venv itself is
-    not changed, so this can run while localm does.
+    the staging venv of *update_id*, and note what it would remove. With *more* it
+    is added to what earlier commands staged, and uv sees that as installed; else
+    the staging venv is made anew. uv may download only with *network*. Returns False, with nothing staged, when uv has
+    nothing to do. The venv itself is not changed, so this can run while localm does.
 
     Raises :class:`Refused`, naming the package, for one without a RECORD, with a
     file outside the venv or behind a link, for localm itself without *project*, for
     another package from a folder or file, and when uv cannot make its plan or
-    stages something else than it planned; OSError otherwise."""
+    stages something else than it planned (the staging venv is then of no use);
+    OSError otherwise."""
     venv = mover.venv_of(root)
     site = _site(venv)
     env = _environment(env)
-    full = command(argv, project=project)
-    code, output = run([*full, "--dry-run"], str(root), env)
+    full = command(argv, project=project, network=network)
+    stage = stage_folder(root, update_id)
+    path = stage.parent / _STAGED
+    staged = _Staged.read(path) if more and disk.lstat(path) is not None else None
+    if staged is None:
+        code, output = run([*full, "--dry-run"], str(root), env)
+    else:
+        target = _into(full, root, env, stage)
+        code, output = run([*target[0], "--dry-run"], str(root), target[2])
     if code != 0:
         raise Refused(f"uv cannot prepare the packages: {_last(output)}")
     removed, installed = changes(output)
     if not removed and not installed:
         return False
     _check_allowed(removed + installed, project)
-    leaving = _leaving(venv, site, removed)
-    for name, folder in leaving:
-        _records(site, venv, folder, name)
-    stage = stage_folder(root, update_id)
-    if not disk.remove_tree(stage):
-        raise Refused(f"{stage} cannot be emptied")
-    stage.parent.mkdir(parents=True, exist_ok=True)
-    _run(run, [full[0], "venv", "--offline", "--no-config", "--relocatable",
-               *(["--system-site-packages"] if _system_site(venv) else []),
-               "--python", disk.short_path(_python(venv)), disk.short_path(stage)], root, env)
+    leaving = _leaving(venv, site, [e for e in removed
+                                    if staged is None or e[0] not in staged.installed])
+    if staged is None:
+        if not disk.remove_tree(stage):
+            raise Refused(f"{stage} cannot be emptied")
+        stage.parent.mkdir(parents=True, exist_ok=True)
+        _run(run, [full[0], "venv", "--offline", "--no-config", "--relocatable",
+                   *(["--system-site-packages"] if _system_site(venv) else []),
+                   "--python", disk.short_path(_python(venv)), disk.short_path(stage)], root, env)
+        _seed(site, _site(stage))
+        staged = _Staged(set(), set(), listing(stage))
+    else:
+        disk.unlink(path)
     staged_site = _site(stage)
-    _seed(site, staged_site, {folder for _n, folder in leaving})
-    before = listing(stage)
+    for name, folder in leaving:
+        inner = f"{staged_site.relative_to(stage).as_posix()}/{folder}/"
+        disk.remove_tree(staged_site / folder)
+        staged.base = {rel for rel in staged.base if not rel.startswith(inner)}
+        staged.removed.add((name, folder))
     _run(run, *_into(full, root, env, stage))
-    _check_stage(stage, staged_site, before, installed)
-    disk.write_json(stage.parent / _STAGED, {
-        "removed": sorted(leaving), "installed": sorted({n for n, _v, _l in installed})})
+    staged.installed -= {e[0] for e in removed}
+    staged.installed |= {e[0] for e in installed}
+    _check_stage(stage, staged_site, staged)
+    staged.write(path)
     return True
+
+
+@dataclass
+class _Staged:
+    """What is staged: the ``(name, dist-info folder)`` of the packages that go, the
+    names of those that come, and the paths of the staging venv itself."""
+    removed: set
+    installed: set
+    base: set
+
+    @staticmethod
+    def read(path: Path) -> _Staged:
+        try:
+            raw: dict = disk.read_json(path, mover.MAX_PLAN_BYTES) or {}
+            return _Staged({(str(n), str(f)) for n, f in raw["removed"]},
+                           {str(n) for n in raw["installed"]},
+                           {str(rel) for rel in raw.get("base", ())})
+        except (ValueError, TypeError, KeyError):
+            raise Refused("no packages are staged for this update") from None
+
+    def write(self, path: Path) -> None:
+        disk.write_json(path, {"removed": sorted(self.removed),
+                               "installed": sorted(self.installed), "base": sorted(self.base)})
 
 
 def _run(run: Runner, argv: list, root, env: dict) -> None:
@@ -267,12 +308,12 @@ def _python(venv: Path) -> Path:
     return venv / "Scripts" / "python.exe" if os.name == "nt" else venv / "bin" / "python"
 
 
-def _seed(site: Path, staged_site: Path, leaving: set) -> None:
-    """Copy the metadata of every distribution of *site* that stays, and nothing
-    else of it, into *staged_site*."""
+def _seed(site: Path, staged_site: Path) -> None:
+    """Copy the metadata of every distribution of *site*, and nothing else of it,
+    into *staged_site*."""
     for entry in sorted(os.listdir(site)):
         source = site / entry
-        if entry in leaving or not entry.endswith((".dist-info", ".egg-info")):
+        if not entry.endswith((".dist-info", ".egg-info")):
             continue
         if source.is_file():
             shutil.copyfile(source, staged_site / entry)
@@ -284,18 +325,18 @@ def _seed(site: Path, staged_site: Path, leaving: set) -> None:
                 shutil.copy2(source / name, staged_site / entry / name)
 
 
-def _check_stage(stage: Path, site: Path, before: set, installed: list) -> None:
+def _check_stage(stage: Path, site: Path, staged: _Staged) -> None:
     """Raise :class:`Refused` unless what uv added to *stage* is exactly the files of
-    the packages *installed*, all of them complete, none naming the staging venv."""
+    the packages *staged*, all of them complete, none naming the staging venv."""
     stated: dict = {}
-    names = {n for n, _v, _l in installed}
-    for name, folder in _infos(site, names):
+    found = _infos(site, staged.installed)
+    for name, folder in found:
         stated.update(_records(site, stage, folder, name))
-    found = {n for n, _f in _infos(site, names)}
-    if found != names:
+    names = sorted(n for n, _f in found)
+    if names != sorted(staged.installed):
         raise Refused("uv staged other packages than it planned: "
-                      + ", ".join(sorted(found ^ names)))
-    added = listing(stage) - before
+                      + ", ".join(sorted({*names} ^ staged.installed) or names))
+    added = listing(stage) - staged.base
     if added != set(stated):
         raise Refused("uv staged other files than its packages list: "
                       + ", ".join(sorted(added ^ set(stated))[:5]))
@@ -354,8 +395,9 @@ def plan_packages(root, update_id: str) -> Plan:
     venv = mover.venv_of(root)
     site = _site(venv)
     stage = stage_folder(root, update_id)
-    removed, installed = _read_staged(stage.parent / _STAGED)
-    touched = {n for n, _f in removed} | set(installed)
+    staged = _Staged.read(stage.parent / _STAGED)
+    removed, installed = staged.removed, staged.installed
+    touched = {n for n, _f in removed} | installed
     if sorted(_infos(site, touched)) != sorted(removed):
         raise Refused("the packages of the Python environment changed since the update was "
                       "prepared")
@@ -392,15 +434,6 @@ def plan_packages(root, update_id: str) -> Plan:
     return plan
 
 
-def _read_staged(path: Path) -> tuple:
-    try:
-        raw: dict = disk.read_json(path, mover.MAX_PLAN_BYTES) or {}
-        removed = [(str(n), str(f)) for n, f in raw["removed"]]
-        return removed, [str(n) for n in raw["installed"]]
-    except (ValueError, TypeError, KeyError):
-        raise Refused("no packages are staged for this update") from None
-
-
 def _was_edited(venv: Path, rel: str, old: dict, stated: tuple, made: int) -> bool:
     """Whether the file *rel* of an installed package is not the one its RECORD
     states, as far as its size and its time give reason to look."""
@@ -420,8 +453,9 @@ def forward(root, update_id: str, plan: Plan, argv: Iterable, *, env: Mapping,
             project: bool = False, run: Runner = run_hidden,
             wait_s: Optional[float] = None) -> None:
     """Make the moves of *plan* (:func:`plan_packages`), then ask uv whether it has
-    anything left to do for *argv*. Raises :class:`.mover.StepFailed`, with
-    everything moved back, when any of it fails or is interrupted."""
+    anything left to do for *argv*, the last command staged. Raises
+    :class:`.mover.StepFailed`, with everything moved back, when any of it fails or
+    is interrupted."""
     def nothing_left(_a: Area) -> None:
         code, output = run([*command(argv, project=project), "--dry-run"], str(root),
                            _environment(env))

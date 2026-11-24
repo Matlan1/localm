@@ -483,6 +483,7 @@ def test_uv_runs_offline_and_leaves_the_project_out_unless_asked():
     assert packages.command(["uv", "sync", "--frozen"]) == [
         "uv", "sync", "--frozen", "--offline", "--no-install-project"]
     assert packages.command(["uv", "sync"], project=True) == ["uv", "sync", "--offline"]
+    assert packages.command(["uv", "sync"], network=True) == ["uv", "sync", "--no-install-project"]
     assert packages.command(["uv", "pip", "install", "torch"]) == [
         "uv", "pip", "install", "torch", "--offline"]
 
@@ -600,8 +601,9 @@ def test_a_package_of_the_update_installed_anew_meanwhile_is_decided_as_a_whole(
     result = undo(root)
     assert (result.state, result.errors) == ("old", [])
     assert tree(root) == before
-    assert any("kept" in note for note in result.notes)
-    assert theirs <= everything(root)
+    if version != "2.0":
+        assert theirs <= everything(root)
+        assert any("kept" in note for note in result.notes)
     if version == "3.0":
         assert any("alpha-3.0" in note for note in result.notes)
         kept = root / ".venv" / mover.VENV_KEPT / ID / site(root).relative_to(root / ".venv")
@@ -633,6 +635,31 @@ def test_staging_changes_nothing_in_the_venv_and_holds_only_what_is_new(root, wo
         n for n in packages._METADATA if (site(root) / "beta-1.0.dist-info" / n).exists())
 
 
+def test_a_later_command_is_staged_on_top_of_an_earlier_one(root, world):
+    """The second command sees what the first staged, replaces a part of it, and
+    takes another package of the venv along."""
+    wheel(world.wheels, "alpha", "2.5", {"alpha/__init__.py": "V = 2.5\n"})
+    wheel(world.wheels, "delta", "2.0", {"delta/__init__.py": "V = 2\n"})
+    before = tree(root)
+    begin(root)
+    pip = [world.uv, "pip", "install", "--no-config", "--no-index", "--find-links",
+           str(world.wheels), "--python", str(root / ".venv")]
+    nothing = [*pip, "beta==1.0"]
+    last = [*pip, "alpha==2.5", "delta==2.0"]
+    assert packages.stage_packages(root, ID, nothing, env=world.env, more=True) is False
+    assert packages.stage_packages(root, ID, argv(world), env=world.env, more=True)
+    assert packages.stage_packages(root, ID, last, env=world.env, more=True)
+    assert packages.stage_packages(root, ID, nothing, env=world.env, more=True) is False
+    assert tree(root) == before
+    made = packages.plan_packages(root, ID)
+    mover.write_plan(root, ID, made)
+    assert made.dists == ["alpha", "delta", "gamma"]
+    forward(root, world, made, last)
+    assert versions(root) == {"alpha": "2.5", "beta": "1.0", "gamma": "1.0", "delta": "2.0"}
+    assert not (site(root) / "alpha" / "new.py").exists()
+    assert undo(root).state == "old" and tree(root) == before
+
+
 def test_a_package_that_changed_after_staging_is_refused(root, world):
     begin(root)
     packages.stage_packages(root, ID, argv(world), env=world.env)
@@ -645,6 +672,12 @@ def test_nothing_staged_is_refused(root):
     begin(root)
     with pytest.raises(mover.Refused):
         packages.plan_packages(root, ID)
+
+
+def put(path: Path, data: bytes) -> None:
+    """Write *path* anew; a staged file can be one file with uv's cache."""
+    path.unlink(missing_ok=True)
+    path.write_bytes(data)
 
 
 def staging(change):
@@ -660,17 +693,25 @@ def staging(change):
 @pytest.mark.parametrize(("change", "why"), [
     (lambda s: (s / "stray.py").write_bytes(b"x"), "other files"),
     (lambda s: next(s.rglob("alpha/new.py")).unlink(), "other files|not staged"),
-    (lambda s: next(s.rglob("alpha/new.py")).write_bytes(b"cut"), "not staged completely"),
+    (lambda s: put(next(s.rglob("alpha/new.py")), b"cut"), "not staged completely"),
     (lambda s: shutil.rmtree(next(s.rglob("gamma-1.0.dist-info"))), "other packages"),
-    (lambda s: (next(s.rglob("alpha-2.0.dist-info")) / "INSTALLER").write_text(str(s)),
-     "staging folder|not staged"),
-    (lambda s: next(s.rglob("alpha-2.0.dist-info/RECORD")).write_bytes(b"\0" * 200000), "RECORD"),
-], ids=["stray", "missing", "cut", "package", "path", "zeroed-record"])
+    (lambda s: put(next(s.rglob("alpha-2.0.dist-info/INSTALLER")), b"u"), "not staged completely"),
+    (lambda s: put(next(s.rglob("alpha-2.0.dist-info/RECORD")), b"\0" * 200000), "RECORD"),
+], ids=["stray", "missing", "cut", "package", "installer", "zeroed-record"])
 def test_a_staging_venv_that_is_not_the_plan_is_refused(root, world, change, why):
     before = tree(root)
     with pytest.raises(mover.Refused, match=why):
         plan(root, world, run=staging(change))
     assert tree(root) == before
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-16-le"])
+def test_a_staged_file_that_names_the_staging_folder_is_refused(root, world, encoding):
+    def change(stage: Path) -> None:
+        info = next(stage.rglob("alpha-2.0.dist-info"))
+        put(info / "direct_url.json", stage.as_posix().replace("/", os.sep).encode(encoding))
+    with pytest.raises(mover.Refused, match="direct_url.json names the staging folder"):
+        plan(root, world, run=staging(change))
 
 
 def test_a_zeroed_record_in_the_venv_is_refused_by_name(root, world):

@@ -279,7 +279,7 @@ def test_the_way_back_decides_from_the_files_and_not_from_a_position(root):
     (root / "localm" / "newdir" / "deep").mkdir(parents=True)
     os.rename(work / "new" / "localm" / "newdir" / "deep" / "n.py",
               root / "localm" / "newdir" / "deep" / "n.py")
-    assert mover.back(root, ID, plan) == []
+    assert mover.back(root, ID, plan) == mover.Outcome()
     assert um.tree(root) == before
 
 
@@ -331,7 +331,7 @@ def test_a_held_file_takes_everything_back_and_names_the_holder(root, rel, share
         assert f"pid {os.getpid()}" in str(e.value)
         assert e.value.errors == [] or share == 0
     assert um.tree(root) == before
-    assert mover.back(root, ID, plan) == []
+    assert mover.back(root, ID, plan) == mover.Outcome()
     assert um.tree(root) == before
 
 
@@ -342,7 +342,7 @@ def test_a_file_held_with_delete_sharing_is_replaced_and_put_back(root, tmp_path
     with held(root / "localm" / "changed.py", share=7):
         mover.forward(root, ID, plan, wait_s=0.3)
         assert (root / "localm" / "changed.py").read_bytes() == b"new"
-        assert mover.back(root, ID, plan) == []
+        assert mover.back(root, ID, plan) == mover.Outcome()
     assert um.tree(root) == before
 
 

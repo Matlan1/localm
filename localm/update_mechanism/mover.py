@@ -667,7 +667,7 @@ class _Back:
             self._each(op, self._verify)
         for rel in self.plan.folders:
             path, st = self.a.find(rel)
-            if st is not None and not self._old_below(rel):
+            if st is not None and _is_folder(st) and not self._old_below(rel):
                 self.out.notes.append(f"{path} holds files of neither version and stays.")
 
     def _each(self, op: Op, action: Callable[[Op], None]) -> None:

@@ -196,7 +196,8 @@ def test_an_update_whose_end_cannot_be_written_ends_at_the_next_try(root, tmp_pa
 def test_without_an_installed_statement_every_file_that_differs_is_kept(root):
     (root / "localm" / "changed.py").write_bytes(b"my version")
     (root / "localm" / "added.py").write_bytes(b"my own file")
-    plan = planned(root, old_files=None)
+    new = {rel: t for rel, t in um.NEW.items() if not rel.startswith(("localm/o", "localm/t"))}
+    plan = planned(root, old_files=None, new=new)
     mover.forward(root, ID, plan)
     to_starting(root)
     result = finish(root)
