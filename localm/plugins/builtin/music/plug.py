@@ -82,7 +82,7 @@ def _music_dir() -> Path:
 
 
 def _music_path(name: str) -> Path:
-    return media_paths.media_file("music", name, "track")
+    return media_paths.media_file("music", _music_dir(), name, "track")
 
 
 async def _require_native_acceptance(req: MusicRequest) -> None:

@@ -85,7 +85,7 @@ def _video_dir() -> Path:
 
 
 def _video_path(name: str) -> Path:
-    return media_paths.media_file("video", name, "clip")
+    return media_paths.media_file("video", _video_dir(), name, "clip")
 
 
 async def _require_native_size(width: int, height: int) -> None:

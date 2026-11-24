@@ -643,6 +643,7 @@ def test_a_local_sd_checkpoint_registers_as_an_image_model(tmp_path):
 
 @pytest.fixture
 def native_app(fake_native, tmp_path, monkeypatch, no_comfy):
+    monkeypatch.setattr("localm.audit.privacy_keeps", lambda kind: True)
     import localm.media.comfy_client as cc
     monkeypatch.setattr(cc, "_comfy_alive", lambda url, timeout=3.0: False)
     import localm.image_gen.comfy as ic
@@ -1023,7 +1024,9 @@ def test_coder_tool_reports_a_native_refusal(native_configured, tmp_path):
     assert not (tmp_path / "fox.png").exists()
 
 
-def test_chat_repl_generates_with_the_native_backend(native_configured, tmp_path):
+def test_chat_repl_generates_with_the_native_backend(native_configured, tmp_path,
+                                                     monkeypatch):
+    monkeypatch.setenv("LOCALM_MODE", "log")
     from rich.console import Console
 
     from localm.cli.chat import _cmd_generate_media

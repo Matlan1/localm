@@ -124,7 +124,7 @@ def _images_dir() -> Path:
 
 
 def _image_path(name: str) -> Path:
-    return media_paths.media_file("image", name, "image")
+    return media_paths.media_file("image", _images_dir(), name, "image")
 
 
 MAX_STEPS = NATIVE_STEPS_MAX

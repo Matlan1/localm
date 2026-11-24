@@ -69,15 +69,16 @@ def media_dirs(kind: str) -> list[Path]:
     return ([held] if held is not None else []) + [gallery_dir(_GALLERY_NAMES[kind])]
 
 
-def media_file(kind: str, name: str, noun: str) -> Path:
-    """The held or gallery file *name*; raises the ``HTTPException`` of
-    ``pathsafe.confined_file`` (400 for an unsafe name, 404 *noun* not found)."""
-    dirs = media_dirs(kind)
-    for d in dirs[:-1]:
-        path = _pathsafe.confined_name(d, name)
+def media_file(kind: str, gallery: Path, name: str, noun: str) -> Path:
+    """The *kind* file *name*, held or in the folder *gallery*; raises the
+    ``HTTPException`` of ``pathsafe.confined_file`` (400 for an unsafe name, 404
+    *noun* not found)."""
+    held = _held.current_folder(kind)
+    if held is not None:
+        path = _pathsafe.confined_name(held, name)
         if path.is_file() and _held.tracks(kind, path.name):
             return path
-    return _pathsafe.confined_file(dirs[-1], name, noun)
+    return _pathsafe.confined_file(gallery, name, noun)
 
 
 def rename_target(kind: str, path: Path, new_name: str) -> Path:
