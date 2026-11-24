@@ -46,6 +46,8 @@ The one-click install puts `localm` in `~/localm`, not on your PATH: run `~/loca
 
 Full install options (graphical installer, `pip install`, manual) are in [Install](#install) below.
 
+**Stuck, or did something confuse you?** Tell us in [Discussions](https://github.com/Matlan1/localm/discussions); one line is enough. No GitHub account? See [Getting help](#getting-help).
+
 ## Contents
 
 - [Features](#features)
@@ -468,7 +470,9 @@ Every `full-ci` matrix run measures coverage (`pytest --cov=localm`) and publish
 ## Getting help
 
 - **Bugs and crashes:** open an [Issue](https://github.com/Matlan1/localm/issues), or run `localm bug-report -m "..."` first to attach a safe hardware/backend snapshot.
-- **Setup questions, GPU help (AMD/NVIDIA/Intel), "does this work with my card":** [Discussions](https://github.com/Matlan1/localm/discussions).
+- **Setup failed:** use the [Setup failed form](https://github.com/Matlan1/localm/issues/new?template=setup_failed.yml); only one box is required.
+- **No GitHub account:** double-click `report-issue.bat` (Windows) or run `bash report-issue.sh` (Linux/macOS) in the localm folder, even when setup failed. From a pip install, run `localm bug-report -m "..."`. Either way you see the whole report before it is sent, and it becomes a public GitHub issue.
+- **Feedback, setup questions, GPU help (AMD/NVIDIA/Intel), "does this work with my card":** [Discussions](https://github.com/Matlan1/localm/discussions).
 - **Security vulnerabilities:** see [SECURITY.md](SECURITY.md); do not open a public issue.
 
 ## License

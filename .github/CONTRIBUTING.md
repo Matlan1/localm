@@ -8,7 +8,8 @@ looks like. By taking part you agree to follow the [Code of Conduct](CODE_OF_CON
 - **Bug or crash:** open an [issue](https://github.com/Matlan1/localm/issues/new/choose),
   or run `localm bug-report -m "..."` to attach a safe hardware and backend snapshot.
 - **Model that will not load or is not recognised:** use the "Model support" issue form.
-- **Setup or "does this work with my card" questions:** [Discussions](https://github.com/Matlan1/localm/discussions).
+- **Setup failed:** use the "Setup failed" issue form; only one box is required.
+- **Feedback, setup or "does this work with my card" questions:** [Discussions](https://github.com/Matlan1/localm/discussions).
 - **Security vulnerability:** follow [SECURITY.md](../SECURITY.md). Do not open a public issue.
 - **Larger change or new feature:** open an issue or discussion first so the approach
   can be agreed before you spend time on it.
