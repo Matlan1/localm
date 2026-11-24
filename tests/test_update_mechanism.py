@@ -101,7 +101,8 @@ def test_a_swapped_file_is_never_absent(root, monkeypatch):
 
 
 def test_without_the_installed_statement_nothing_is_removed(root):
-    plan = planned(root, old_files=None)
+    new = {rel: t for rel, t in um.NEW.items() if not rel.startswith(("localm/o", "localm/t"))}
+    plan = planned(root, new_files=um.stage(root, new), old_files=None)
     gone = {op.path for op in plan.ops if op.kind == "remove"}
     assert gone == ({"Readme.md"} if os.path.exists(root / "README.MD") else set())
     assert not any(op.edited for op in plan.ops)
@@ -225,8 +226,7 @@ def test_a_kill_at_every_operation_leaves_the_old_or_the_new_version(run_dir, tm
         assert um.phase(root) is None
         if reached or ended:
             assert um.left(root) == [], (n, reached)
-        once_more = um.restore(run_dir, root)
-        assert once_more.returncode == 0 and um.tree(root) == (new if ended else old)
+        assert undo(root).state == "none" and um.tree(root) == (new if ended else old)
         ends.add((reached, ended))
         shutil.rmtree(root.parent)
     assert {e[0] for e in ends} >= {None, job.ENDING, job.MOVING, job.STEPS, job.STARTING, job.DONE}
@@ -466,17 +466,13 @@ def test_a_windows_spelling_of_another_path_is_refused(root, bad):
         mover.plan_files(root, ID, {**um.stage(root), bad: digest}, protect=())
 
 
-@windows_only
-def test_the_short_name_of_a_folder_an_update_never_changes_is_refused(root):
-    import ctypes
+def test_a_folder_an_update_never_changes_is_known_under_any_name(root):
+    """A short name or another spelling leads to the same folder."""
     (root / "node_modules").mkdir()
-    text = ctypes.create_unicode_buffer(1024)
-    assert ctypes.windll.kernel32.GetShortPathNameW(str(root / "node_modules"), text, 1024)
-    short = Path(text.value).name
-    if short.lower() == "node_modules":
-        pytest.skip("this volume makes no short names")
+    a = mover.area(root, ID, mover.FILES)
+    (root / "node_modules").rename(root / "NODE_M~1")
     with pytest.raises(disk.Unsafe, match="not changed by an update"):
-        mover.area(root, ID, mover.FILES).find(f"{short}/x.js")
+        a.find("NODE_M~1/x.js")
 
 
 @pytest.mark.parametrize("rel", ["home/models/m.gguf", "HOME/models/m.gguf", ".venv/x", ".git/HEAD",
