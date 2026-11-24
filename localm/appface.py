@@ -22,6 +22,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from localm import procs
 from localm.debuglog import logger
 
 
@@ -489,9 +490,9 @@ def open_logs(logfile) -> None:
             return
         if sys.platform == "win32":
             import os
-            os.startfile(str(logfile))   # os.startfile is Windows-only (guarded above)
+            procs.open_for_user(os.startfile, str(logfile))   # Windows-only (guarded above)
         else:
-            webbrowser.open("file://" + str(logfile))
+            procs.open_for_user(webbrowser.open, "file://" + str(logfile))
     except Exception:
         pass
 
@@ -575,7 +576,7 @@ class _StatusWindow(AppFace):
             # tab; a second webview.start() has no free main thread. Falls back to
             # the browser when this run has no native window.
             if not show_native_window():
-                webbrowser.open(self.url)
+                procs.open_for_user(webbrowser.open, self.url)
         except Exception:
             pass
 
@@ -890,7 +891,7 @@ class _WinTray(AppFace):
             # tab; a second webview.start() has no free main thread. Falls back to
             # the browser when this run has no native window.
             if not show_native_window():
-                webbrowser.open(self.url)
+                procs.open_for_user(webbrowser.open, self.url)
         except Exception:
             pass
 

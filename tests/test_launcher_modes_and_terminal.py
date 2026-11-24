@@ -187,7 +187,12 @@ def test_posix_spawn_without_a_terminal_refuses_before_starting(mod, monkeypatch
 
 
 def test_posix_spawn_with_a_terminal_starts_the_wrapped_command(mod, monkeypatch):
+    from localm import procs
+
+    def recorded(*a, **k):
+        raise AssertionError("the user's terminal program was recorded")
     started = []
+    monkeypatch.setattr(procs, "start", recorded)
     monkeypatch.setattr(mod.subprocess, "Popen", lambda cmd, **k: started.append((cmd, k)))
     monkeypatch.setattr(mod.sys, "platform", "linux")
     monkeypatch.setattr(mod, "terminal_command", lambda cmd, env: ["term", "-e", *cmd])

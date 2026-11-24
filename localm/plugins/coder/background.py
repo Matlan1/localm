@@ -77,7 +77,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from localm import instances
+from localm import instances, procs
 
 # Per-kind ceilings on jobs running at once. A kind with no entry falls back to
 # _DEFAULT_CAP. Exceeding a cap raises rather than queueing.
@@ -431,7 +431,7 @@ class ShellJob(BackgroundJob):
             # Own session/process group, so killpg reaps the whole tree.
             kwargs["start_new_session"] = True
 
-        self._proc = subprocess.Popen(argv, **kwargs)
+        self._proc = procs.start(argv, purpose="coder shell", **kwargs)
         self.pid = self._proc.pid
         self._create_time = _process_create_time(self.pid)
         # (pid, create_time) of every descendant seen just before a kill. None

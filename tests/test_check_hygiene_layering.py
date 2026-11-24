@@ -119,6 +119,16 @@ def test_package_root_importing_a_unit_fires(tmp_path, monkeypatch):
     assert "<root> -> util" in problems[0]
 
 
+def test_package_root_may_import_procs_which_imports_nothing(tmp_path, monkeypatch):
+    layering = _tiers(("app", ["app"]), ("low", ["procs", "util"]))
+    base = {"app.py": "", "util.py": "", "__init__.py": "from localm import procs\n"}
+    _, problems = _check(tmp_path, monkeypatch, {"procs.py": "import os\n"}, layering, base)
+    assert problems == []
+    _, problems = _check(tmp_path, monkeypatch, {"procs.py": "from localm import util\n"},
+                         layering, base)
+    assert any("imports util" in x for x in problems), problems
+
+
 def test_unplaced_unit_fires(tmp_path, monkeypatch):
     _, problems = _check(tmp_path, monkeypatch, {"extra.py": ""})
     assert len(problems) == 1, problems
