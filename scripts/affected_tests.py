@@ -197,6 +197,8 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
                                                 "walks the AST of every localm .py for store writes in async functions"),
     "tests/test_mtp_arch_allowlist.py": (_LOCALM_PY, "runs the MTP architecture gate over localm/"),
     "tests/test_config_write.py": (("localm/plugins/*.py",), "scans every plugin module for direct config writes"),
+    "tests/test_rag_save_is_one_change.py": (
+        ("localm/rag/store.py", "localm/rag/_store/*.py"), "reads every module of the RAG store for file writes"),
     "tests/test_rag_store_live_lookups.py": (("localm/rag/_store/*.py",), "reads every module of the RAG store"),
     "tests/test_setup_llama_live_lookups.py": (("localm/setup_llama/*.py",), "reads every module of setup_llama"),
     "tests/test_vc_runtime.py": (("localm/setup_llama/*.py", "localm/media/sdcpp/*.py",
