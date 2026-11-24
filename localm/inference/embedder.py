@@ -17,9 +17,10 @@ so it never races a chat-model load onto the GPU.
 Provisioning (``resolve_embedding_model_path``): the ``embedding_model`` config key
 is either a filesystem path, a registered model name, or a known key (default
 ``bge-small-en-v1.5``). A known model missing from ``<home>/models/embeddings/`` is
-downloaded on demand, gated by the network policy (never behind ``net_mode=off``
-unless ``net_allow_model_downloads`` exempts it; automatic under ``net_mode=ask`` and
-``allow``, otherwise the user runs ``localm setup-embeddings`` or the GUI's download action).
+downloaded on demand, gated by the network policy: automatically only under
+``net_mode=allow`` and only while no embedding model is registered; otherwise (``ask``,
+``off``, or a registered embedding model) the user runs ``localm setup-embeddings`` or
+the GUI's download action, which ``off`` allows only with ``net_allow_model_downloads``.
 When no embedding model can be resolved, callers degrade to lexical-only retrieval;
 the reason is recorded for ``last_error()`` (what the GUI's RAG-embedding status
 reads) on every resolve attempt, not only when a load is actually attempted. A
@@ -710,13 +711,14 @@ def _registered_known_file(repo: str, filename: str,
         if not isinstance(raw, str) or not raw or is_unc_or_device_path(raw):
             continue
         p = Path(raw)
+        recorded = str(entry.get("sha256") or "").lower()
+        same_file = pin is not None and bool(recorded) and recorded == pin[1].lower()
         try:
-            if p.name.lower() != filename.lower() or not p.is_file():
+            if not p.is_file() or (p.name.lower() != filename.lower() and not same_file):
                 continue
         except OSError:
             continue
         if pin is not None:
-            recorded = str(entry.get("sha256") or "").lower()
             if recorded:
                 if recorded != pin[1].lower():
                     continue
@@ -724,6 +726,41 @@ def _registered_known_file(repo: str, filename: str,
                 continue
         return str(p)
     return None
+
+
+def embedding_download_refusal() -> Optional[str]:
+    """None when the Download button for the embedding model would be accepted by
+    the network policy (net_mode, net_deny, net_allow, the address check), else
+    the reason it would be refused. Resolves DNS: call it off the event loop."""
+    from localm.netpolicy import download_refusal
+    return download_refusal(_HF_ENDPOINT)
+
+
+def registered_embedding_models() -> list[str]:
+    """Names of the registered embedding models whose file is on disk (a reranker
+    is not one). Reads the registry only; never raises."""
+    try:
+        from localm.config import load_registry
+        from localm.pathsafe import is_unc_or_device_path
+        entries = list(load_registry().items())
+    except Exception:
+        logger.debug("could not read the registry for embedding models", exc_info=True)
+        return []
+    names: list[str] = []
+    for name, entry in entries:
+        if not isinstance(entry, dict) or entry.get("model_type") != "embedding":
+            continue
+        if entry.get("reranker") is True:
+            continue
+        raw = entry.get("path")
+        if not isinstance(raw, str) or not raw or is_unc_or_device_path(raw):
+            continue
+        try:
+            if Path(raw).exists():
+                names.append(str(name))
+        except OSError:
+            continue
+    return names
 
 
 def _pin_mismatch(path: Path, pin: Optional[tuple]) -> Optional[str]:
@@ -787,8 +824,19 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
     mode = network_mode()
     probe_only = allow_download is False
     automatic = automatic_download_allowed()
+    registered = registered_embedding_models() if allow_download is None else []
     if allow_download is None:
-        allow_download = automatic
+        allow_download = automatic and not registered
+    if registered and automatic and not probe_only:
+        reason = (
+            f"embedding model {name!r} not present, and not downloaded because an "
+            f"embedding model is registered ({', '.join(registered[:3])}); pick it "
+            "as the embedding model in Settings, or download "
+            f"{name!r} with the Download button or localm setup-embeddings. Memory "
+            "and Knowledge use keyword (BM25) search until then")
+        _set_resolve_outcome(name, reason)
+        logger.info(reason)
+        return None
     if not allow_download:
         off_note = (" (with net_mode=off this also needs net_allow_model_downloads)"
                     if mode == "off" else "")
@@ -2214,7 +2262,7 @@ def will_download_on_first_use() -> bool:
     if _EMBEDDER is not None or _TRIED_DOWNLOAD:
         return False
     from localm.netpolicy import automatic_download_allowed
-    if not automatic_download_allowed():
+    if not automatic_download_allowed() or registered_embedding_models():
         return False
     spec = _current_spec()
     if spec not in KNOWN_EMBEDDING_MODELS:

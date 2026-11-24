@@ -271,12 +271,33 @@ def _user_turn_text(session_text: str) -> Optional[str]:
     return "\n".join(lines) if seen else None
 
 
+_REQUEST_OPENERS = frozenset({
+    "tell", "give", "show", "explain", "write", "make", "help", "let", "send",
+    "list", "name", "describe", "teach", "find", "get", "bring", "read", "draw",
+    "translate", "summarize", "summarise", "generate", "create", "please", "can",
+    "could", "would", "will", "what", "who", "when", "where", "why", "how",
+    "which", "is", "are", "do", "does", "did"})
+
+
+def _is_request(sentence: str) -> bool:
+    """True when *sentence* is a question or an instruction to the assistant
+    ("Tell me one fact about apples."), where "me" is the object of the request
+    and the user states nothing about themselves."""
+    text = sentence.strip()
+    if text.endswith("?"):
+        return True
+    words = re.findall(r"[a-z']+", text.lower())
+    return bool(words) and words[0] in _REQUEST_OPENERS
+
+
 def _first_person_stems(user_text: str) -> set:
     """The first letters of every content word in the sentences of *user_text*
     where the user speaks of themselves (store._is_self_referential)."""
     from .store import _content_tokens, _is_self_referential
     stems: set = set()
     for sentence in _SENTENCE_SPLIT.split(user_text):
+        if _is_request(sentence):
+            continue
         if _is_self_referential(sentence):
             stems |= {w[:_STEM_CHARS] for w in _content_tokens(sentence) if len(w) > 1}
     return stems

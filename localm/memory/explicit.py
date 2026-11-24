@@ -72,6 +72,7 @@ _ABBREVIATIONS = frozenset((
     "prof st jr sr nr tel str evtl ggf bspw approx no").split())
 _MIN_FACT_CHARS = 6
 _MAX_SCAN_CHARS = 4000
+_MAX_FACTS = 8
 
 
 def _first_sentence(text: str) -> str:
@@ -93,8 +94,18 @@ def _first_sentence(text: str) -> str:
 
 
 def explicit_fact(message: str) -> Optional[str]:
-    """The fact a chat *message* asks to remember, or None when it is not such a
-    request.
+    """The first fact a chat *message* asks to remember (see :func:`explicit_facts`),
+    or None when it is not such a request."""
+    facts = explicit_facts(message)
+    return facts[0] if facts else None
+
+
+def explicit_facts(message: str) -> list[str]:
+    """Every fact a chat *message* asks to remember, in order, or [] when it is not
+    such a request. A sentence after a fact that is itself a request ("Remember
+    that X. Remember that Y.") adds its own fact, up to _MAX_FACTS.
+
+    The rules below apply to each request in turn.
 
     The message must open with the request (after an optional greeting, "please"
     or "can you"). English "remember"/"keep in mind"/"don't forget" need a "that",
@@ -112,8 +123,20 @@ def explicit_fact(message: str) -> Optional[str]:
     characters of *message* are read. The fact is the first sentence after the
     request, trailing punctuation removed, cut to MAX_TEXT_LEN."""
     text = message[:_MAX_SCAN_CHARS].strip() if isinstance(message, str) else ""
-    if not text:
-        return None
+    facts: list[str] = []
+    while text and len(facts) < _MAX_FACTS:
+        got = _one_request(text)
+        if got is None:
+            break
+        fact, text = got
+        if fact not in facts:
+            facts.append(fact)
+    return facts
+
+
+def _one_request(text: str) -> Optional[tuple]:
+    """``(fact, the text after the request's sentence)`` for the request that opens
+    *text*, or None when *text* does not open with a request for a fact."""
     for rx, english in ((_EN_RE, True), (_DE_RE, False)):
         m = rx.match(text)
         if m is None:
@@ -146,5 +169,5 @@ def explicit_fact(message: str) -> Optional[str]:
             if (_REQUEST_RE.search(fact) or _BACK_REFERENCE_RE.search(fact)
                     or _IMPERATIVE_NEXT_RE.match(following)):
                 return None
-        return fact[:MAX_TEXT_LEN]
+        return fact[:MAX_TEXT_LEN], " ".join(rest.split())[len(sentence):].strip()
     return None

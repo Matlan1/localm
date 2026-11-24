@@ -226,8 +226,8 @@ def _embedder_download_status(request: Request | None) -> dict:
     one click via the SAME one-time action the Knowledge page offers (POST
     /api/rag/embedding/download - reused here, not duplicated). Mirrors
     rag.plug.rag_embedding_status's can_download gate (a known internal key,
-    not yet on disk, net_mode not off unless downloads are exempted while off,
-    caller holds config:write) so the two surfaces never disagree about
+    not yet on disk, the network policy accepts the download, caller holds
+    config:write) so the two surfaces never disagree about
     whether the button would work - PLUS two checks that gate is not itself
     exposed to: the download route lives on the rag PLUGIN's router, which
     is (a) absent entirely (404) whenever rag is not installed/enabled, and
@@ -246,12 +246,12 @@ def _embedder_download_status(request: Request | None) -> dict:
         from localm.inference.embedder import (
             DEFAULT_EMBEDDING_MODEL, KNOWN_EMBEDDING_MODELS,
             resolve_embedding_model_path)
-        from localm.netpolicy import downloads_allowed_when_off, network_mode
+        from localm.inference.embedder import embedding_download_refusal
         import localm.inference.http_server as _hs
         model = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL)
         if (model in KNOWN_EMBEDDING_MODELS
                 and not resolve_embedding_model_path(allow_download=False)
-                and (network_mode() != "off" or downloads_allowed_when_off())):
+                and embedding_download_refusal() is None):
             rag_mounted = False
             if request is not None:
                 from starlette.routing import NoMatchFound
@@ -515,7 +515,7 @@ async def memory_get(request: Request = None):
             "items": [_item(r) for r in store.all()],
             "corrections": _corrections_payload(store) if writable else [],
             "path": _path_formatter(request)(store.path),
-            **_embedder_download_status(request)}
+            **await _off_loop(lambda: _embedder_download_status(request))}
 
 
 @_router.put("/api/memory")
@@ -598,6 +598,37 @@ async def memory_put(req: MemoryUpdate, request: Request = None):
     return {"status": "saved", "count": len(records), "kept_newer": kept_newer}
 
 
+_fill_lock = _threading.Lock()
+_fill_pending = False
+
+
+def _fill_vectors_later(store) -> None:
+    """Embed the records of *store* that have no vector yet on a background thread
+    (at most one at a time), so a write need not wait for the embedder to load."""
+    global _fill_pending
+    with _fill_lock:
+        if _fill_pending or _stop.is_set():
+            return
+        _fill_pending = True
+
+    def _run():
+        global _fill_pending
+        try:
+            embed_fn = _embed_fn()
+            if embed_fn is not None:
+                store.backfill_vectors(embed_fn)
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.warning("memory: could not embed a new fact: %s", e)
+        finally:
+            with _fill_lock:
+                _fill_pending = False
+
+    from localm.config import home_bound
+    _threading.Thread(target=home_bound(_run, name="memory vector fill"),
+                      daemon=True).start()
+
+
 @_router.post("/api/memory/append")
 async def memory_append(req: MemoryAppend, request: Request = None):
     _require_writable()
@@ -608,13 +639,16 @@ async def memory_append(req: MemoryAppend, request: Request = None):
 
     from localm.memory.store import N_MAX
 
-    # Off the loop: _migrate_legacy and store.add both resolve the embedder
-    # (_embed_fn -> get_embedder), which must not run on the event-loop thread.
+    # Off the loop. The fact is stored at once without a vector: loading the
+    # embedder can take many seconds on the first use, and the answer waits for
+    # nothing but the save. The vector is filled in right after, in the background.
     def _do_append():
         _migrate_legacy(store)
-        return add_user_fact(store, fact, _embed_fn())
+        return add_user_fact(store, fact, None)
 
     status, rec = await _off_loop(_do_append)
+    if status == "saved":
+        _fill_vectors_later(store)
     if status == "full":
         raise HTTPException(
             413, f"Memory is at its {N_MAX}-record cap; delete a fact before "
@@ -916,6 +950,12 @@ def _recent_sessions_text(max_chars: int = 8000) -> str:
         if file_pieces:
             out = file_pieces + out
     return "\n".join(out)
+
+
+def synthesis_skip_reason() -> str | None:
+    """Why a synthesis pass would do nothing right now ("privacy"), or None when it
+    may run. Lets a caller decide BEFORE it loads a model for the pass."""
+    return None if _persist_enabled() else "privacy"
 
 
 def synthesize_memory(complete, *, principal: str | None = None, max_facts: int = 12,
@@ -1741,12 +1781,12 @@ def _note_unsaved_request(messages, ctx) -> None:
         return
     try:
         from localm.inference.protocol import is_user_written, user_written_text
-        from localm.memory import explicit_fact
+        from localm.memory import explicit_facts
         last = next((m for m in reversed(messages) if m.get("role") == "user"), None)
         if last is not None and is_user_written(last):
-            fact = explicit_fact(user_written_text(last))
-            if fact:
-                ctx.state["memory_saved"] = {"text": fact, "status": "off"}
+            facts = explicit_facts(user_written_text(last))
+            if facts:
+                ctx.state["memory_saved"] = {"text": "; ".join(facts), "status": "off"}
     except Exception as e:
         from localm.debuglog import logger
         logger.debug("memory: could not check for a remember request: %s", e)
@@ -1758,15 +1798,15 @@ def _add_requested_facts(principal: str | None, messages) -> list[str]:
     compares what it extracts against them. Returns the facts newly stored. Nothing
     is stored in privacy mode."""
     from localm.inference.protocol import is_user_written, user_written_text
-    from localm.memory import explicit_fact
+    from localm.memory import explicit_facts
     if not _persist_enabled():
         return []
     requested: list[str] = []
     for m in messages or []:
         if isinstance(m, dict) and m.get("role") == "user" and is_user_written(m):
-            fact = explicit_fact(user_written_text(m)[:_CONVERSATION_USER_CHARS])
-            if fact and fact not in requested:
-                requested.append(fact)
+            for fact in explicit_facts(user_written_text(m)[:_CONVERSATION_USER_CHARS]):
+                if fact not in requested:
+                    requested.append(fact)
     if not requested:
         return []
     store = _chat_store(principal)
@@ -1823,18 +1863,21 @@ def _remember_explicit(messages, ctx, before_embed=None) -> None:
     if ctx is None or not _persist_enabled():
         return
     from localm.inference.protocol import is_user_written, user_written_text
-    from localm.memory import explicit_fact
+    from localm.memory import explicit_facts
     last = next((m for m in reversed(messages) if m.get("role") == "user"), None)
     if last is None or not is_user_written(last):
         return
-    fact = explicit_fact(user_written_text(last))
-    if not fact:
+    facts = explicit_facts(user_written_text(last))
+    if not facts:
         return
     store = _chat_store(_ctx_principal(ctx))
     if before_embed is not None:
         before_embed()
     _migrate_legacy(store)
-    status = _add_explicit_fact(store, fact, _embed_fn())
+    embed_fn = _embed_fn()
+    statuses = [_add_explicit_fact(store, fact, embed_fn) for fact in facts]
+    status = next((s for s in ("saved", "full", "exists") if s in statuses), "exists")
+    fact = "; ".join(facts)
     ctx.state["memory_saved"] = {"text": fact, "status": status}
     from localm.debuglog import logger
     logger.debug("memory: explicit remember request handled (%s)", status)

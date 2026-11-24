@@ -50,8 +50,8 @@ missing depends on `net_mode` (see [network.md](network.md)):
 
 | `net_mode` | a missing embedding model |
 |---|---|
-| `allow` | downloaded the first time memory needs it |
-| `ask` (default) | not downloaded; memory stays lexical-only, the debug log says once which model is missing and how to get it, and the memory dialog names it with a Download button (when the Knowledge plugin is installed) or the `localm setup-embeddings` command |
+| `allow` | downloaded the first time memory needs it, unless an embedding model is already registered (then nothing is downloaded and memory stays lexical-only until you pick that model as the embedding model or press Download) |
+| `ask` (default) | not downloaded; memory stays lexical-only, the debug log says once which model is missing and how to get it, and the memory dialog names it with a Download button (when the Knowledge plugin is installed and the network policy would accept the download) or the `localm setup-embeddings` command |
 | `off` | not downloaded; the Download button and `localm setup-embeddings` work only when `net_allow_model_downloads` is on |
 
 ## From the terminal

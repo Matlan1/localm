@@ -26,7 +26,7 @@ from localm.textguard import compose, compose_join, neutralise, untrusted_span
 from .consolidate import (ConsolidationModelError, ConsolidationReplyError, extract, judge_episode,
                           run_consolidation, summarize_session)
 from .corrections import PendingCorrection
-from .explicit import explicit_fact
+from .explicit import explicit_fact, explicit_facts
 from .gating import writes_allowed
 from .record import MemoryRecord
 from .store import (K_CAP, MAX_TEXT_LEN, N_MAX, TRUSTED_SOURCES, DeferredEmbed,
@@ -35,7 +35,7 @@ from .store import (K_CAP, MAX_TEXT_LEN, N_MAX, TRUSTED_SOURCES, DeferredEmbed,
 __all__ = [
     "MemoryRecord", "MemoryStore", "PendingCorrection", "open_store",
     "render_memories", "run_consolidation", "extract", "summarize_session", "judge_episode",
-    "ConsolidationModelError", "ConsolidationReplyError", "explicit_fact",
+    "ConsolidationModelError", "ConsolidationReplyError", "explicit_fact", "explicit_facts",
     "writes_allowed", "principal_of",
     "namespace_hash", "namespace_file", "MAX_TEXT_LEN", "N_MAX", "K_CAP",
     "TRUSTED_SOURCES", "DeferredEmbed", "EmbedderUnavailable", "MAX_INJECT", "INJECT_BLOCK_CHARS", "INJECT_LINE_CHARS",

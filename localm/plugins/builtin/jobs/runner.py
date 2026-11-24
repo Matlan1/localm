@@ -172,6 +172,20 @@ def _install_revoke_listener() -> None:
 _install_revoke_listener()
 
 
+def _skip_memory_before_loading() -> None:
+    """Raise _Skipped when a memory job has nothing to do (privacy mode), so no
+    model is served or loaded for it. A memory plugin that cannot be reached is
+    left to _run_memory, which reports it."""
+    from localm.plugins.lookup import plugin_api
+    try:
+        reason = plugin_api("memory", "plug").synthesis_skip_reason()
+    except Exception as e:
+        logger.debug("jobs: memory pre-check skipped: %s", e)
+        return
+    if reason:
+        raise _Skipped(f"memory synthesis skipped ({reason})")
+
+
 def run_job(job: Job, *, engine=None) -> dict:
     """Run *job* and return a result record. Dispatches on task_kind and never
     raises.
@@ -193,6 +207,8 @@ def run_job(job: Job, *, engine=None) -> dict:
             raise PermissionError(refusal)
         live = _register_live_run(job)
         eng = engine
+        if job.task_kind == "memory":
+            _skip_memory_before_loading()
         if job.task_kind in ("chat", "memory"):
             served = _served_engine(job, engine, notes=routing_notes)
             if served is not None:
