@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -1837,6 +1838,40 @@ def models():
 #  Config / info                                                       #
 # ------------------------------------------------------------------ #
 
+_CREDENTIAL_NAME_RE = re.compile(
+    r"(?i)(?:(?:^|[_.-])(?:auth|authorization|credentials?|cookies?|pwd)"
+    r"|token|secrets?|passwords?|passwd|passphrase|(?:api|access|private|secret)[_-]?keys?)$")
+
+
+def _is_credential_setting(key: object) -> bool:
+    """True when the setting or nested setting *key* holds a credential: the
+    settings schema marks it secret, or its name ends in a credential word
+    (``update_token``, ``api_key``)."""
+    from localm.settings_schema import CORE_FIELDS, Widget
+    name = str(key)
+    return (any(f.key == name and (f.secret or f.widget == Widget.SECRET)
+                for f in CORE_FIELDS)
+            or _CREDENTIAL_NAME_RE.search(name) is not None)
+
+
+def _without_credentials(key: object, value: Any) -> Any:
+    """*value* of the setting *key* as it may be printed: a credential becomes
+    ``(set)`` (or ``(not set)`` when empty), a credential inside a URL, query
+    parameter or header line becomes ``<redacted>``, and lists and tables are
+    handled item by item."""
+    from localm.bugreport.scrub import (_scrub_query_and_header_secrets,
+                                        _scrub_url_creds)
+    if _is_credential_setting(key) and not isinstance(value, bool):
+        return "(set)" if value else "(not set)"
+    if isinstance(value, dict):
+        return {k: _without_credentials(k, v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_without_credentials("", v) for v in value]
+    if isinstance(value, str):
+        return _scrub_query_and_header_secrets(_scrub_url_creds(value))
+    return value
+
+
 @main.command()
 def info():
     """Show paths and current configuration."""
@@ -1847,18 +1882,18 @@ def info():
 
     # HOME_DIR is wherever LOCALM_HOME/config points and a config VALUE is
     # whatever the user or a hand-edited config.json set, so both are escaped.
-    console.print(f"  [bold]models dir[/bold]   {escape(str(HOME_DIR / 'models'))}")
-    console.print(f"  [bold]registry   [/bold]   {escape(str(HOME_DIR / 'registry.json'))}")
-    console.print(f"  [bold]config     [/bold]   {escape(str(HOME_DIR / 'config.json'))}")
     binaries_s = escape(str(binary_dir)) if binary_dir else "[dim]not found[/dim]"
-    console.print(f"  [bold]binaries   [/bold]   {binaries_s}")
     from ..config import _is_portable_home, temp_dir_in_use
     mode_s = ("portable (data folder inside the install)"
               if _is_portable_home(HOME_DIR) else "standard")
     temp_path = temp_dir_in_use(HOME_DIR)
     temp_s = escape(str(temp_path)) if temp_path else "system temp folder"
-    console.print(f"  [bold]install    [/bold]   {mode_s}")
-    console.print(f"  [bold]temp dir   [/bold]   {temp_s}")
+    rows = (("models dir", escape(str(HOME_DIR / "models"))),
+            ("registry", escape(str(HOME_DIR / "registry.json"))),
+            ("config", escape(str(HOME_DIR / "config.json"))),
+            ("binaries", binaries_s), ("install", mode_s), ("temp dir", temp_s))
+    for label, value in rows:
+        console.print(f"  [bold]{label:<11}[/bold]   {value}")
     console.print()
     for k, v in sorted(cfg.items()):
         # `cfg` is DEFAULT_CONFIG overlaid with the raw contents of
@@ -1867,7 +1902,7 @@ def info():
         if v is None:
             v_s = "[dim](auto)[/dim]"
         else:
-            v_s = escape(str(v))
+            v_s = escape(str(_without_credentials(k, v)))
         console.print(f"  {escape(str(k)):<22} {v_s}")
 
 
@@ -2195,7 +2230,8 @@ def config_cmd(key, value):
     # `key` only reaches here after validate_update() proved it is one of
     # DEFAULT_CONFIG's own keys, and is escaped anyway; `value` (a free-text
     # setting like mdns_name) has no such guarantee.
-    console.print(f"[green]✓[/green] {escape(str(key))} = {escape(str(validated[key]))}")
+    shown = _without_credentials(key, validated[key])
+    console.print(f"[green]✓[/green] {escape(str(key))} = {escape(str(shown))}")
 
 
 @main.command("gpus")
