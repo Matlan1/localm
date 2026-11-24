@@ -212,15 +212,18 @@ class _TerminalReply:
         self._spinner.stop()
 
 
-# The answer to "did you mean these calls to run?", after an optional reasoning
-# block bounded as in gbnf.TOOL_CALLS_AFTER_THINK.
-_CALL_CHECK_GRAMMAR = r"""
-root        ::= opt-think opt-ws ("[run]" | "[example]") opt-ws
-opt-think   ::= ("<think>" think-body "</think>")?
-think-body  ::= think-char{0,1900}
-think-char  ::= [^<] | "<" [^/] | "</" [^t]
-opt-ws      ::= [ \t\n\r]? [ \t\n\r]?
-""".strip()
+# An optional reasoning block, bounded as in gbnf.TOOL_CALLS_AFTER_THINK.
+_OPT_THINK_RULES = r"""opt-think ::= ("<think>" think-body "</think>")?
+think-body ::= think-char{0,1900}
+think-char ::= [^<] | "<" [^/] | "</" [^t]
+"""
+# The answer to "did you mean these calls to run?".
+_CALL_CHECK_GRAMMAR = (
+    'root ::= opt-think opt-ws ("[run]" | "[example]") opt-ws\n'
+    + _OPT_THINK_RULES + r"opt-ws ::= [ \t\n\r]? [ \t\n\r]?")
+# The key the arguments of one call object stand under in tool_grammar's output.
+_RE_ARGUMENTS_KEY = re.compile(
+    r'^(root-body(?:-\d+)?-arguments-kv ::= )"\\"arguments\\""', re.MULTILINE)
 
 # Seconds between two reports of a call that is still being written.
 _CALL_PROGRESS_INTERVAL_S = 10.0
@@ -1630,10 +1633,10 @@ ws     ::= [ \t\n\r]*
         which point the call must be structurally valid JSON. External API
         backends report supports_grammar=False and are unaffected.
 
-        With *forced*, returns ``(gbnf.TOOL_CALLS_AFTER_THINK, None)`` instead:
-        no trigger, so the grammar binds from the FIRST token and the response
-        cannot be anything but an optional reasoning block followed by a real
-        tool call.
+        With *forced*, returns ``(grammar, None)`` with no trigger instead, so
+        the grammar binds from the FIRST token and the response cannot be
+        anything but an optional reasoning block followed by a real tool call
+        (see :meth:`_forced_call_grammar`).
 
         The ``coder_tool_grammar`` flag gates the forced form too, so with it
         off the rescue path is left unconstrained as well and the caller reports
@@ -1651,12 +1654,44 @@ ws     ::= [ \t\n\r]*
             if not load_config().get("coder_tool_grammar", True):
                 return None
             if forced:
-                from localm.inference.gbnf import TOOL_CALLS_AFTER_THINK
-                return TOOL_CALLS_AFTER_THINK, None
+                return self._forced_call_grammar(), None
             from localm.inference.gbnf import TOOL_CALL_TRIGGER, TOOL_CALLS_ONLY
             return TOOL_CALLS_ONLY, [TOOL_CALL_TRIGGER]
         except Exception:
             return None
+
+    def _forced_call_grammar(self) -> str:
+        """The grammar of a turn that must be a tool call: an optional reasoning
+        block, then calls that name one of this session's tools and carry its
+        arguments. ``gbnf.TOOL_CALLS_AFTER_THINK``, which takes any name and any
+        arguments, when the tools' own schemas give no usable grammar."""
+        from localm.inference.backends.base import InvalidGrammarError
+        from localm.inference.gbnf import (
+            TOOL_CALLS_AFTER_THINK, check_grammar_structure)
+        from localm.inference.tool_calling import (
+            Tool, ToolChoice, ToolsError, tool_grammar)
+        from .tooldefs import _build_openai_tool_defs
+        skip = self.disabled_tools | frozenset(self._always_denied())
+        tools = [Tool(name=f["name"], description="", parameters=f["parameters"])
+                 for f in (d["function"] for d in _build_openai_tool_defs())
+                 if f["name"] not in skip]
+        if not tools:
+            return TOOL_CALLS_AFTER_THINK
+        try:
+            grammar, _lazy, _triggers = tool_grammar(tools, ToolChoice(kind="required"))
+            grammar = _RE_ARGUMENTS_KEY.sub(r'\1"\\"args\\""', grammar)
+            root, _, rest = grammar.partition("\n")
+            if not root.startswith("root ::= "):
+                return TOOL_CALLS_AFTER_THINK
+            grammar = (f"root ::= opt-think tc-ws {root.removeprefix('root ::= ')}\n"
+                       + _OPT_THINK_RULES + rest)
+            check_grammar_structure(grammar)
+        except (ToolsError, InvalidGrammarError) as e:
+            from localm.debuglog import logger
+            logger.info("coder: the tools' schemas gave no usable grammar (%s); a "
+                        "forced call is not held to them", e)
+            return TOOL_CALLS_AFTER_THINK
+        return grammar
 
     def _ask_if_calls_meant(self, calls: list) -> Optional[bool]:
         """Ask the model whether the calls it wrote as plain JSON were meant to

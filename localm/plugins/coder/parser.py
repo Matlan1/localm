@@ -66,10 +66,6 @@ class ToolCall:
     # dialects like <|tool_call>. execution.py's confirmation gate keys on
     # this flag.
     lenient: bool = False
-    # True when the call was written in a name-gated form, trusted or not.
-    gated: bool = False
-    # Set by the executor when the call was denied only for its format.
-    format_denied: bool = False
     # Keys the call object carried beside its args instead of inside them.
     # argnorm.normalize_args uses the ones the tool declares.
     beside: dict = field(default_factory=dict)
@@ -141,7 +137,9 @@ def looks_like_tool_attempt(text: str, tool_names: Optional[set] = None) -> bool
     though :func:`parse_tool_calls` recovered nothing. Lets the caller
     re-prompt for the correct format rather than show the broken call.
 
-    When *tool_names* is supplied, ALSO recognises an XML-ish open tag naming
+    When *tool_names* is supplied, ALSO recognises a fenced block that starts
+    with one of those names (``_fenced_tool_name``), a reply that ends where a
+    ```json block opens, and an XML-ish open tag naming
     one of those tools - ``<read_file``, ``<edit_file ...>`` - even with none
     of the markers above, which is the shape some finetunes emit instead of
     this project's ``<tool_call>{"name": ...}`` wrapper. A false hit costs one
@@ -158,6 +156,29 @@ def looks_like_tool_attempt(text: str, tool_names: Optional[set] = None) -> bool
             return True
         if re.search(r"\b(?:" + names + r")\s*\(\s*[{\[]", text):
             return True
+        if _fenced_tool_name(text, names) or _RE_DANGLING_FENCE.search(text):
+            return True
+    return False
+
+
+# A reply that ends right after the line that opens a JSON or tool-call block.
+_RE_DANGLING_FENCE = re.compile(r"```[ \t]*(?:json|tool_call|tool_code)[ \t]*\s*\Z")
+
+
+def _fenced_tool_name(text: str, names: str) -> bool:
+    """True when a fenced block of *text* starts with one of the tool *names* (a
+    regex alternation) as a command or a function call: ``run_tests`` alone,
+    ``edit_file(path=...)``, ``write_file -args ...``. Comment lines before it
+    are skipped."""
+    head = re.compile(r"(?:" + names + r")[ \t]*(?:\(|\{|-|\w+=|$)")
+    for _start, _end, _lang, body in _iter_fenced_blocks(text):
+        for line in body.splitlines():
+            line = line.strip()
+            if not line or line.startswith(("#", "//")):
+                continue
+            if head.match(line):
+                return True
+            break
     return False
 
 
@@ -640,7 +661,7 @@ def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCa
     def _accept(name: str, args: dict, raw: str, start: int, end: int,
                 lenient: bool = False, body: str = "") -> None:
         calls.append(ToolCall(name=name, args=args, raw=raw, start=start,
-                               end=end, lenient=lenient, gated=lenient,
+                               end=end, lenient=lenient,
                                beside=_beside_args(body) if body else {}))
         seen_spans.append((start, end))
 
@@ -769,25 +790,6 @@ def invented_result_at(text: str, tool_names: Optional[set] = None) -> int:
             continue
         return -1
     return -1
-
-
-def in_tool_call_format(text: str, calls: list[ToolCall]) -> str:
-    """*text* with the span of every name-gated call in *calls* rewritten as
-    ``<tool_call>{"name": ..., "args": ...}</tool_call>``. Nothing else in
-    *text* changes. *calls* are calls :func:`parse_tool_calls` found in *text*."""
-    out: list[str] = []
-    pos = 0
-    for call in sorted(calls, key=lambda c: c.start):
-        if not call.gated or call.start < pos:
-            continue
-        out.append(text[pos:call.start])
-        out.append("<tool_call>\n"
-                   + json.dumps({"name": call.name, "args": call.args},
-                                ensure_ascii=False, default=str)
-                   + "\n</tool_call>")
-        pos = call.end
-    out.append(text[pos:])
-    return "".join(out)
 
 
 _RE_ANY_OPENER = re.compile(

@@ -934,7 +934,6 @@ class _ExecutionMixin:
                     self._audit.notice("loose_call_example", result.output)
                     self._emit("tool_result", tool=call.name, ok=False,
                                summary="not run: an example, not a call")
-                    call.format_denied = True
                     return result
                 elif lenient_only:
                     result = ToolResult.error(
@@ -946,7 +945,6 @@ class _ExecutionMixin:
                         '<tool_call>\n{"name": "' + call.name + '", "args": '
                         "{...}}\n</tool_call>\nand it will run.")
                     reason = "lenient"
-                    call.format_denied = True
                     self._lenient_denials += 1
                 else:
                     result = ToolResult.error(

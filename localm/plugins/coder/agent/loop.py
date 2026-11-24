@@ -19,7 +19,7 @@ from ..display import (
     print_tool_result, print_turn_divider, safe_markup,
 )
 from ..parser import (
-    in_tool_call_format, invented_result_at, looks_like_tool_attempt, split_response,
+    invented_result_at, looks_like_tool_attempt, split_response,
     strip_orphan_closers, strip_tool_calls, unfinished_call,
 )
 from ..tools import ToolResult
@@ -880,7 +880,8 @@ class _LoopMixin:
                              verify_checked_at=self._write_total(),
                              partial_notice_count=0, partial_notice_cap_announced=False,
                              nocall_escalation=0, nocall_declined=False, tool_calls_made=0,
-                             nocall_response="", code_nudged=False, announce_nudged=False,
+                             nocall_response="", code_nudged=False, code_forced=False, code_reminded=0,
+                             announce_nudged=False,
                              possible_write=False, announced_step="",
                              writes_at_start=self._write_total(),
                              files_at_start={f["path"]: f["writes"]
@@ -1079,7 +1080,6 @@ class _LoopMixin:
                           text="".join(seg for seg in segments if isinstance(seg, str)))
 
                 self._add_assistant(response)
-                reply_message = self._messages[-1]
 
                 # Execute tools - run non-destructive batches in parallel
                 loose = [c for c in calls if c.lenient]
@@ -1096,15 +1096,6 @@ class _LoopMixin:
                         "you wrote yourself. It was cut off there and dropped: only "
                         "the results above are real. Make a call, stop, and read its "
                         "real result before the next step.")
-                if any(c.gated for c in calls):
-                    # The model imitates its own earlier replies, so a call that
-                    # ran stands in the conversation in the tool-call format.
-                    reply_message["content"] = in_tool_call_format(
-                        response, [c for c in parsed_calls if not c.format_denied])
-                    result_blocks.append(
-                        "[tool-call format] If another call is needed, write "
-                        'it exactly as\n<tool_call>\n{"name": "TOOL_NAME", '
-                        '"args": {...}}\n</tool_call>\nand not in a code block.')
 
                 # parse_tool_calls silently drops a tool-call-shaped block whose
                 # body could not be recovered, and the only downstream check
@@ -1164,6 +1155,15 @@ class _LoopMixin:
                             "text still looks like an attempt); notice cap "
                             "already reached, not reported to the model "
                             "this turn")
+
+                if (st.code_reminded < 2 and _has_file_code_block(leftover)
+                        and self._change_still_owed(
+                            getattr(self, "_last_user_request", "") or "", st)):
+                    st.code_reminded += 1
+                    result_blocks.append(
+                        "[nothing written] The code block in your reply changed no "
+                        "file: only a tool call does. If it belongs in the project, "
+                        "write it now with write_file or edit_file.")
 
                 if duplicate_calls:
                     result_blocks.append(
@@ -1409,6 +1409,11 @@ class _LoopMixin:
             if cut_off:
                 self._add_user(self._cut_off_note(cut_off, interactive))
                 return (False, "")
+            request = getattr(self, "_last_user_request", "") or ""
+            if st.repair_count > 1 and self.can_force_tool_calls() and (
+                    self._change_still_owed(request, st)
+                    or self._tool_demanded(request, st)):
+                self._force_tool_grammar = True
             self._add_user(
                 "[tool-call format] That looked like a tool call, "
                 "but I could not parse it. Re-emit it in EXACTLY "
@@ -1632,6 +1637,25 @@ class _LoopMixin:
         turns_left = self._task_turns_left() and not self.plan_mode
         if self._change_still_owed(request, st) and not _asks_a_question(response):
             escalated = st.nocall_escalation and not self._used_tools_this_task(st)
+            if (st.code_nudged and not st.code_forced and turns_left
+                    and "```" in response and self.can_force_tool_calls()):
+                # It shows the change again instead of making it.
+                st.code_forced = True
+                self._force_tool_grammar = True
+                self._audit.notice("change_forced",
+                                   "the change was shown again instead of made - "
+                                   "the next turn is constrained to a tool call")
+                self._add_assistant(response)
+                self._add_user(
+                    "[nothing written] Still nothing on disk changed. This turn is "
+                    "constrained: the only output accepted is a tool call. Make the "
+                    "change you showed.")
+                if interactive:
+                    print_info("(nothing written: forcing a tool call via constrained sampling)")
+                self._emit("info", text=(
+                    "the change was shown again instead of made - forcing a tool "
+                    "call via constrained sampling"))
+                return (False, "")
             if st.code_nudged or escalated or not turns_left:
                 return ("\n\n[not finished: nothing was written to any file in this "
                         "task, so the change the request asked for was not made]")

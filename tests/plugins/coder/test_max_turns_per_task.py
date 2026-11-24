@@ -104,8 +104,8 @@ def test_new_task_runs_after_session_used_more_than_max_turns(home, tmp_path):
 
 
 def test_single_task_still_stops_at_max_turns(home, tmp_path):
-    """One task that never gives a final answer stops after exactly
-    max_turns LLM calls."""
+    """One task that never gives a final answer stops after exactly max_turns
+    turns, and the one closing reply it is then asked for runs no tool."""
     work = _workspace(tmp_path, 10)
     backend = _Scripted([_read(f"f{i}.txt") for i in range(10)])
     agent = _agent(work, backend, max_turns=3)
@@ -113,7 +113,7 @@ def test_single_task_still_stops_at_max_turns(home, tmp_path):
     reply = agent.run_task("Read every file.")
 
     assert reply == "[max_turns=3 reached]"
-    assert backend.calls == 3
+    assert backend.calls == 3 + 1
     assert agent.turns == 3
     assert agent.last_run_ok is False
 
@@ -133,7 +133,7 @@ def test_task_after_earlier_tasks_still_stops_at_its_own_max_turns(home, tmp_pat
     reply = agent.chat("Read every file.")
 
     assert reply == "[max_turns=3 reached]"
-    assert backend.calls == 5
+    assert backend.calls == 5 + 1
     assert agent.turns == 5
 
 
@@ -173,5 +173,5 @@ def test_reset_starts_the_next_task_from_zero(home, tmp_path):
     reply = agent.run_task("Read every file.")
 
     assert reply == "[max_turns=3 reached]"
-    assert backend.calls == 5
+    assert backend.calls == 5 + 1
     assert agent.turns == 3

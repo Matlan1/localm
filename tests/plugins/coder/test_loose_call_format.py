@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """A model that writes its tool calls as plain JSON still gets its task done
 unattended, and nothing it only quoted runs: it is asked once per reply whether
-it meant the calls, a result it invents itself ends the reply, and its own
-earlier calls stand in the conversation in the tool-call format."""
+it meant the calls, a result it invents itself ends the reply, and a turn that
+must be a call can only name a real tool with that tool's arguments."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from localm.plugins.coder.parser import (
-    in_tool_call_format, invented_result_at, parse_tool_calls, unfinished_call)
+    invented_result_at, looks_like_tool_attempt, unfinished_call)
 
 FENCE = "```"
 
@@ -165,43 +165,6 @@ def test_a_denied_call_that_ran_later_is_not_reported_denied_when_it_failed(tmp_
     assert agent.denied_unconfirmed == []
 
 
-# --- the conversation shows the model its calls in the right format -------
-
-def test_a_loose_call_that_ran_stands_in_the_conversation_as_a_tool_call(tmp_path):
-    (tmp_path / "a.txt").write_text("x")
-    reply = "Reading it.\n" + _loose("read_file", path="a.txt")
-    agent = _agent(tmp_path, _Backend([reply, "It holds x."]))
-    agent.run_task("what does a.txt say?")
-    assert _texts(agent, "assistant")[0] == (
-        'Reading it.\n<tool_call>\n{"name": "read_file", "args": {"path": "a.txt"}}\n'
-        "</tool_call>")
-    assert "not in a code block" in _texts(agent, "user")[1]
-
-
-def test_a_call_in_the_tool_call_format_is_kept_as_it_was_written(tmp_path):
-    (tmp_path / "a.txt").write_text("x")
-    reply = "Reading it.\n" + _xml("read_file", path="a.txt")
-    agent = _agent(tmp_path, _Backend([reply, "It holds x."]))
-    agent.run_task("what does a.txt say?")
-    assert _texts(agent, "assistant")[0] == reply
-    assert "not in a code block" not in _texts(agent, "user")[1]
-
-
-def test_a_denied_loose_call_is_not_rewritten(tmp_path):
-    reply = "Writing.\n" + _loose("write_file", path="a.txt", content="1")
-    agent = _agent(tmp_path, _Backend([reply, "Done."], check="?"))
-    agent.run_task("create a.txt")
-    assert _texts(agent, "assistant")[0] == reply
-
-
-def test_in_tool_call_format_rewrites_only_the_given_calls():
-    text = "a\n" + _loose("read_file", path="x") + "\nb\n" + _loose("read_file", path="y") + "\nc"
-    calls = parse_tool_calls(text, tool_names={"read_file"})
-    out = in_tool_call_format(text, calls[:1])
-    assert out.startswith('a\n<tool_call>\n{"name": "read_file", "args": {"path": "x"}}')
-    assert _loose("read_file", path="y") in out and out.endswith("\nc")
-
-
 # --- a result the model invents ends the reply ----------------------------
 
 INVENTED = ("Looking first.\n" + _loose("read_file", path="a.txt")
@@ -343,6 +306,116 @@ def test_a_run_that_only_ever_cuts_off_ends_and_says_so(tmp_path):
     assert "each attempt ended before the call was complete" in result
     assert agent.last_run_ok is False
     assert agent.turns <= 4
+
+
+# --- calls written as commands or Python ----------------------------------
+
+@pytest.mark.parametrize("text", [
+    FENCE + "\nrun_tests\n" + FENCE,
+    FENCE + "sh\nwrite_file -args path=\"a\" content=\"b\"\n" + FENCE,
+    FENCE + "python\n# change it\nedit_file(path=\"a\", old=\"b\", new=\"c\")\n" + FENCE,
+    "Next:\n" + FENCE + "json\n",
+])
+def test_a_tool_written_as_a_command_is_an_attempt(text):
+    assert looks_like_tool_attempt(text, {"run_tests", "write_file", "edit_file"})
+
+
+@pytest.mark.parametrize("text", [
+    "I ran run_tests and they pass.",
+    FENCE + "python\ndef run_tests_now():\n    pass\n" + FENCE,
+    FENCE + "python\nresult = read_file(path)\n" + FENCE,
+    FENCE + "json\n{\"a\": 1}\n" + FENCE,
+])
+def test_other_code_is_not_an_attempt(text):
+    assert not looks_like_tool_attempt(text, {"run_tests", "write_file", "read_file"})
+
+
+def test_a_second_broken_attempt_at_an_owed_change_is_forced(tmp_path):
+    bad = FENCE + "sh\nwrite_file -args path=a.txt content=1\n" + FENCE
+    backend = _Backend([bad, bad, _xml("write_file", path="a.txt", content="1"), "Done."])
+    agent = _agent(tmp_path, backend)
+    agent.run_task("create a.txt containing 1")
+    forced = ["grammar_lazy" not in kw for _m, kw in backend.calls]
+    assert forced == [False, False, True, False]
+    assert (tmp_path / "a.txt").read_text() == "1"
+
+
+def test_a_second_broken_attempt_at_a_question_is_not_forced(tmp_path):
+    bad = FENCE + "sh\nread_file -args path=a.txt\n" + FENCE
+    backend = _Backend([bad, bad, "That is how it looks."])
+    agent = _agent(tmp_path, backend)
+    agent.run_task("how would a read look?")
+    assert all("grammar_lazy" in kw for _m, kw in backend.calls)
+
+
+# --- a forced turn names a real tool with its arguments -------------------
+
+def _forced_grammar(agent) -> str:
+    agent._force_tool_grammar = True
+    return agent._llm_kwargs()["grammar"]
+
+
+def test_a_forced_turn_can_only_name_this_sessions_tools(tmp_path):
+    from localm.inference.gbnf import check_grammar_structure
+    agent = _agent(tmp_path, _Backend([]), disabled_tools=frozenset({"run_shell"}),
+                   always_confirm={"run_tests"})
+    grammar = _forced_grammar(agent)
+    check_grammar_structure(grammar)
+    assert grammar.startswith("root ::= opt-think")
+    assert '\\"write_file\\"' in grammar and '\\"content\\"' in grammar
+    for name in ("run_shell", "run_tests", "TOOL_NAME"):
+        assert f'("\\"{name}\\"")' not in grammar
+    assert '-arguments-kv ::= "\\"args\\""' in grammar
+    assert '\\"arguments\\"' not in grammar
+
+
+def test_a_forced_turn_falls_back_to_the_generic_call_grammar(tmp_path):
+    from localm.inference.gbnf import TOOL_CALLS_AFTER_THINK
+    from localm.inference.tool_calling import ToolsError
+    agent = _agent(tmp_path, _Backend([]))
+    with patch("localm.inference.tool_calling.tool_grammar", side_effect=ToolsError("no")):
+        assert _forced_grammar(agent) == TOOL_CALLS_AFTER_THINK
+
+
+def test_a_change_shown_twice_instead_of_made_is_forced(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    shown = "Here it is:\n" + FENCE + "python\nx = 2\n" + FENCE
+    backend = _Backend([_xml("read_file", path="a.py"), shown, shown + " ",
+                        _xml("write_file", path="a.py", content="x = 2\n"), "Done."])
+    agent = _agent(tmp_path, backend)
+    agent.run_task("change a.py so x is 2")
+    assert (tmp_path / "a.py").read_text() == "x = 2\n"
+    assert ["grammar_lazy" not in kw for _m, kw in backend.calls].count(True) == 1
+
+
+def test_a_code_block_beside_a_call_is_named_as_not_written(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    block = FENCE + "python\nx = 2\ny = 3\nz = 4\nw = 5\n" + FENCE
+    mixed = "Changing it.\n" + block + "\nNow reading it.\n" + _xml("read_file", path="a.py")
+    backend = _Backend([mixed, _xml("write_file", path="a.py", content="x = 2\n"),
+                        "Done. It now is:\n" + block + "\n"])
+    agent = _agent(tmp_path, backend)
+    agent.run_task("change a.py so x is 2")
+    notes = [t for t in _texts(agent, "user") if "The code block in your reply changed no file" in t]
+    assert len(notes) == 1 and notes[0] == _texts(agent, "user")[1]
+
+
+def test_a_code_block_beside_a_call_in_an_answer_is_left_alone(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    mixed = (FENCE + "python\nx = 2\ny = 3\nz = 4\nw = 5\n" + FENCE + "\n"
+             + _xml("read_file", path="a.py"))
+    agent = _agent(tmp_path, _Backend([mixed, "That is the idea."]))
+    agent.run_task("how could a.py look with more variables?")
+    assert "changed no file" not in "\n".join(_texts(agent, "user"))
+
+
+def test_a_prose_refusal_is_never_forced_into_a_call(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    backend = _Backend([_xml("read_file", path="a.py"), "It already holds that.",
+                        "Nothing needs to change here."])
+    agent = _agent(tmp_path, backend)
+    agent.run_task("change a.py so x is 1")
+    assert all("grammar_lazy" in kw for _m, kw in backend.calls)
 
 
 # --- progress while a call is being written -------------------------------
