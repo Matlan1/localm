@@ -2718,7 +2718,10 @@ export function parseMemoryHeader(resp) {
     if (!data || typeof data.n !== "number") return null;
     const saved = data.saved && typeof data.saved === "object"
       && typeof data.saved.status === "string"
-      ? { text: String(data.saved.text || ""), status: data.saved.status } : null;
+      ? { text: String(data.saved.text || ""), status: data.saved.status,
+          ...(Array.isArray(data.saved.facts) ? { facts: data.saved.facts
+            .filter((f) => f && typeof f.status === "string")
+            .map((f) => ({ text: String(f.text || ""), status: f.status })) } : {}) } : null;
     return {
       n: data.n,
       degrade: data.degrade ?? null,

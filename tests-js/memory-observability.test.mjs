@@ -113,8 +113,8 @@ test("several remember requests name every fact with its own outcome", () => {
   const { window } = loadApp({});
   const text = (facts) => {
     const b = window.document.createElement("div");
-    window.addMessageRow(b, "assistant", "ok", { memory: { n: 0, items: [],
-      saved: { text: facts[0].text, status: facts[0].status, facts } } });
+    window.addMessageRow(b, "assistant", "ok", { memory: window.parseMemoryHeader(headerResp({
+      n: 0, items: [], saved: { text: facts[0].text, status: facts[0].status, facts } })) });
     return b.querySelector(".mem-saved").textContent;
   };
   assert.equal(text([{ text: "a", status: "saved" }, { text: "b", status: "full" }]),
