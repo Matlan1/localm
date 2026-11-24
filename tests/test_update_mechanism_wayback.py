@@ -374,7 +374,7 @@ def test_the_way_back_looks_at_each_file_a_fixed_number_of_times(root, monkeypat
     for count in (500, 5000):
         ops = [mover.Op(f"{SITE}/big/f{n}.py", mover.REMOVE, identity, dist="big")
                for n in range(count)]
-        plan = mover.Plan(mover.PACKAGES, 1, ops, dists=["big"])
+        plan = mover.Plan("packages", 1, ops, dists=["big"])
         if state == "lost":
             with mover.Marks(root, ID, plan) as marks:
                 for n in range(count):
