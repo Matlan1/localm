@@ -982,7 +982,7 @@ tools, which only the terminal offers (see [gui.md](gui.md)).
 | `kill_shell_job` | Stop a background job and its process tree; for a background sub-agent's job, the sub-agent runs no further tool call and ends after its current reply | yes | no |
 | `git_commit` | Stage and commit (without `files`, every change, new untracked files included; localm's own session files in `.localcoder` are never committed) | yes | no |
 | `git_create_branch` | Create a branch, optionally checking it out | yes | no |
-| `git_push` | Push the current branch | yes | no |
+| `git_push` | Push the current branch; a branch with no upstream is pushed with `--set-upstream` and the result says so | yes | no |
 | `spawn_agent` | Spawn a sub-agent for a sub-task and return its result | yes | no |
 | `spawn_agent_background` | Start a sub-agent in the background, returning a job id | yes | no |
 | `check_agent_job` | Check a background sub-agent's state and result | no | no |
@@ -1331,10 +1331,13 @@ localm update --to 0.3.0 -y --allow-unverified   # non-interactive, even if its 
 localm update --repair          # bring the dependencies, native runtime and components to the installed version
 localm bug-report -m "..."      # generate an editable bug report and offer to send it to the maintainer
 localm bug-report -m "what I did" -e "what I expected" -w "what happened" --send   # non-interactive, send immediately
-localm issues [NUMBER]          # list the bug reports this install filed, or show one by number
+localm feedback -m "..."        # write feedback and offer to send it to the maintainer (--suggestion for a suggestion)
+localm issues [NUMBER]          # list the reports this install filed, or show one by number
 ```
 
 `bug-report` asks three questions (what you were doing, what you expected, what actually happened; Enter skips one) when run in a terminal without `-m`/`-e`/`-w`, and needs at least `-m` or `-w`. It attaches the tail of the running localm server's own debug log when one exists (the most recently started server of this data folder that has one; with no such server, this command's own log), with `--no-log` to leave it out, never chat content, and never the log of a run that has ended. With `--send`, a report that could not be sent exits 1, including one refused because Network access is off. `--send-anyway` sends at once as `--send` does, also while Network access is off: one connection to the bug-report server for this report only, with the setting left off. At the menu, a send refused because Network access is off asks whether to send that report anyway (no is the default). Two reports saved in the same second get separate files. `issues` is read-only and needs the bug-report proxy to be configured; `issues NUMBER` shows any issue of the tracker and says when this install did not file it.
+
+`feedback` saves your text (`-m`, or asked for in a terminal) with the localm version and nothing else, and offers to send it the way `bug-report` does, with the same `--send` and `--send-anyway`. With `--suggestion` it is sent as a suggestion.
 
 Updates are signed: localm verifies an Ed25519 signature from its release key
 before applying anything, and refuses a build that is not newer. The keys are

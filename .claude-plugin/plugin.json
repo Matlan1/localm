@@ -4,5 +4,12 @@
   "version": "1.0.0",
   "author": {
     "name": "Matlan1"
+  },
+  "mcpServers": {
+    "localm": {
+      "type": "stdio",
+      "command": "localm",
+      "args": ["mcp"]
+    }
   }
 }

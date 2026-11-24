@@ -474,7 +474,7 @@ Every `full-ci` matrix run measures coverage (`pytest --cov=localm`) and publish
 - **Bugs and crashes:** open an [Issue](https://github.com/Matlan1/localm/issues), or run `localm bug-report -m "..."` first to attach a safe hardware/backend snapshot.
 - **Setup failed:** use the [Setup failed form](https://github.com/Matlan1/localm/issues/new?template=setup_failed.yml); only one box is required.
 - **No GitHub account:** double-click `report-issue.bat` (Windows) or run `bash report-issue.sh` (Linux/macOS) in the localm folder, even when setup failed. From a pip install, run `localm bug-report -m "..."`. Either way you see the whole report before it is sent, and it becomes a public GitHub issue.
-- **Feedback, setup questions, GPU help (AMD/NVIDIA/Intel), "does this work with my card":** [Discussions](https://github.com/Matlan1/localm/discussions).
+- **Feedback, setup questions, GPU help (AMD/NVIDIA/Intel), "does this work with my card":** [Discussions](https://github.com/Matlan1/localm/discussions). Without a GitHub account: **feedback** in the app's sidebar, or `localm feedback -m "..."`.
 - **Security vulnerabilities:** see [SECURITY.md](SECURITY.md); do not open a public issue.
 
 ## License
