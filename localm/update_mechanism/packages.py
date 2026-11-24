@@ -359,7 +359,7 @@ def _names(path: Path, stage: Path) -> bool:
     data = path.read_bytes().lower()
     for form in {text, text.replace("\\", "/"), text.replace("\\", "\\\\")}:
         for encoding in ("utf-8", "utf-16-le"):
-            if form.lower().encode(encoding) in data:
+            if form.encode(encoding).lower() in data:
                 return True
     return False
 
