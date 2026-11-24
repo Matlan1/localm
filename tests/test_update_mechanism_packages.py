@@ -613,8 +613,8 @@ def test_a_kill_at_every_operation_of_the_package_step_leads_back(template, worl
     points = int(done.stdout.split("POINTS")[1])
     new = tree(whole)
     assert points > 30 and new != old
-    reached_phases = set()
-    for n in range(points):
+
+    def one(n: int):
         root = copy(template, tmp_path / f"k{n}" / "root")
         killed = um.drive(run_dir, spec(root), n)
         assert killed.returncode != 0 and "POINTS" not in killed.stdout, (n, killed.stderr)
@@ -629,9 +629,9 @@ def test_a_kill_at_every_operation_of_the_package_step_leads_back(template, worl
         assert um.phase(root) is None
         if reached or ended:
             assert not (root / ".venv" / mover.VENV_FOLDER).exists(), n
-        reached_phases.add(reached)
         shutil.rmtree(root.parent)
-    assert {job.STEPS, job.STARTING, job.DONE} <= reached_phases
+        return reached
+    assert {job.STEPS, job.STARTING, job.DONE} <= set(um.each(points, one))
 
 
 def test_a_kill_at_every_operation_of_the_way_back_of_packages_leads_back(template, world,
@@ -645,7 +645,8 @@ def test_a_kill_at_every_operation_of_the_way_back_of_packages_leads_back(templa
     assert done.returncode == 0, done.stderr
     points = int(done.stdout.split("POINTS")[1])
     assert points > 20 and tree(count) == old
-    for n in range(points):
+
+    def one(n: int) -> None:
         root = copy(first, tmp_path / f"r{n}" / "root")
         killed = um.drive(run_dir, {"do": "restore", "root": str(root)}, n)
         assert killed.returncode != 0 and "POINTS" not in killed.stdout, (n, killed.stderr)
@@ -653,6 +654,7 @@ def test_a_kill_at_every_operation_of_the_way_back_of_packages_leads_back(templa
         assert again.returncode == 0, (n, again.stderr)
         assert tree(root) == old, n
         shutil.rmtree(root.parent)
+    um.each(points, one)
 
 
 def test_the_way_back_waits_for_a_uv_that_outlived_the_update(world, tmp_path):

@@ -9,6 +9,7 @@ import os
 import stat
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from localm.update_mechanism import shared
@@ -145,6 +146,13 @@ def drive(run_dir: Path, job: dict, kill_at: int) -> subprocess.CompletedProcess
     path = Path(job["root"]).with_name("job-spec.json")
     path.write_text(json.dumps(job), encoding="utf-8")
     return run([DRIVER, run_dir, path, kill_at])
+
+
+def each(points: int, one) -> list:
+    """``[one(0), ..., one(points - 1)]``, three at a time; each raises its own
+    failure."""
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        return list(pool.map(one, range(points)))
 
 
 def restore(run_dir: Path, root: Path) -> subprocess.CompletedProcess:

@@ -209,8 +209,8 @@ def test_a_kill_at_every_operation_leaves_the_old_or_the_new_version(run_dir, tm
     assert points > 60
     new = um.new_tree(tmp_path / "fresh")
     assert um.tree(count_root) == new
-    ends = set()
-    for n in range(points):
+
+    def one(n: int) -> tuple:
         root = um.install(tmp_path / f"k{n}" / "root")
         old = um.tree(root)
         spec = job_for(root)
@@ -227,8 +227,9 @@ def test_a_kill_at_every_operation_leaves_the_old_or_the_new_version(run_dir, tm
         if reached or ended:
             assert um.left(root) == [], (n, reached)
         assert undo(root).state == "none" and um.tree(root) == (new if ended else old)
-        ends.add((reached, ended))
         shutil.rmtree(root.parent)
+        return reached, ended
+    ends = um.each(points, one)
     assert {e[0] for e in ends} >= {None, job.ENDING, job.MOVING, job.STEPS, job.STARTING, job.DONE}
 
 
@@ -253,8 +254,9 @@ def test_a_kill_at_every_operation_of_the_way_back_still_leads_back(run_dir, tmp
         points = int(done.stdout.split("POINTS")[1])
         assert points > 20
         assert um.tree(work) == old
-        for n in range(points):
-            work = tmp_path / f"{root.name}{n}" / "root"
+
+        def one(n: int, name: str = root.name, template: Path = template) -> None:
+            work = tmp_path / f"{name}{n}" / "root"
             shutil.copytree(template, work, symlinks=True)
             killed = um.drive(run_dir, {"do": "restore", "root": str(work)}, n)
             assert killed.returncode != 0 and "POINTS" not in killed.stdout, (n, killed.stderr)
@@ -263,6 +265,7 @@ def test_a_kill_at_every_operation_of_the_way_back_still_leads_back(run_dir, tmp
             assert um.tree(work) == old, n
             assert um.phase(work) is None and um.left(work) == [], n
             shutil.rmtree(work.parent)
+        um.each(points, one)
 
 
 def test_the_way_back_decides_from_the_files_and_not_from_a_position(root):
