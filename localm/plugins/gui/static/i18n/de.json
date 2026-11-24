@@ -1673,6 +1673,7 @@
   "settings.feedback.confirmSendButton": "Senden",
   "settings.feedback.notSent": "Nicht gesendet. Ihr Text ist gespeichert: {where}",
   "settings.feedback.sentToast": "Gesendet",
+  "settings.feedback.couldNotSend": "Senden fehlgeschlagen: {message}  Ihr Text ist gespeichert ({where}) - drücken Sie erneut Senden, oder schreiben Sie eine E-Mail an {maintainer}.",
   "settings.feedback.failed": "Konnte nicht gespeichert werden: {message}",
   "settings.feedback.savedRateLimited": "Gespeichert: {where}  -  Ratenbegrenzung; warten Sie kurz und drücken Sie erneut Senden.",
   "settings.bug.trackingIssue": " Tracking-Issue: {url}",

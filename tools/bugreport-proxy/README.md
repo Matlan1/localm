@@ -89,7 +89,8 @@ This keeps users account-less, which a baked-in token cannot do safely.
 
 - Set `SHARED_SECRET` so random scanners that find the URL cannot file issues.
 - A request with a `type` (`feedback`, `suggestion`) is filed as that type, with the
-  label `TYPE_LABELS` names for it (a type that is not listed is filed without a label).
+  label `TYPE_LABELS` names for it (a type that is not listed is filed without a label). Create those labels on the target
+  repo first: GitHub rejects an issue that names a missing label.
 - A request without a `type` is a bug report. Only a body with the structure a localm
   reporter writes is filed:
   - the in-app reporter: the `# localm bug report:` title line, then `## What I was

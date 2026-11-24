@@ -3141,11 +3141,14 @@ function initFeedbackCard(kind) {
   let reviewed = null;
   let canUpload = false;
   const buttons = ["save", "upload", "confirm", "cancel", "send-anyway"].map(at);
-  const busy = (on) => { for (const b of buttons) b.disabled = on; };
+  const busy = (on) => {
+    for (const b of buttons) b.disabled = on;
+    text.readOnly = on || !!reviewed;
+  };
   const say = (message) => { result.hidden = false; result.textContent = message; };
   const layout = () => {
     at("review").hidden = !reviewed;
-    save.hidden = canUpload;
+    save.hidden = canUpload || !!reviewed;
     upload.hidden = !canUpload || !!reviewed;
     text.readOnly = !!reviewed;
   };
@@ -3158,6 +3161,7 @@ function initFeedbackCard(kind) {
 
   const submit = async (review) => {
     const body = text.value.trim();
+    if (reviewed) return;
     if (!body) { toast(t("settings.feedback.empty"), true); return; }
     busy(true);
     try {
@@ -3194,6 +3198,7 @@ function initFeedbackCard(kind) {
     if (!rep) return;
     busy(true);
     at("anyway").hidden = true;
+    result.textContent = "";
     try {
       const payload = { filename: rep.filename, sha256: rep.sha256 };
       if (anyway) payload.send_anyway = true;
@@ -3218,9 +3223,8 @@ function initFeedbackCard(kind) {
       }
       at("anyway").hidden = !(data.upload_stage === "network_off" && data.can_send_anyway === true);
       result.hidden = false;
-      showInlineError(result, t("settings.bug.couldNotSend", {
-        message: data.upload_message || data.upload_error,
-        whereSuffix: t("settings.bug.whereSuffix", { where: rep.where }),
+      showInlineError(result, t("settings.feedback.couldNotSend", {
+        message: data.upload_message || data.upload_error, where: rep.where,
         maintainer: data.maintainer || t("settings.bug.defaultMaintainer") }));
     } catch (e) {
       toast(t("settings.bug.couldNotSendToast", { message: e.message }), true);

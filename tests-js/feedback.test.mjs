@@ -23,10 +23,10 @@ function boot({ saved = SAVED, sends = [], saveStatus = 200, gate = null, upload
       calls.push({ url: u, body: JSON.parse(opts.body) });
       return reply(sends.shift() || { uploaded: true });
     }
-    return reply({ models: [], active: "", conversations: [], plugins: [] });
+    return reply({ models: [], active: "", conversations: [], plugins: [], bugreport_upload: upload });
   };
   const { window } = loadAppWithPages({ fetchImpl });
-  if (upload) window.setFeedbackUpload(true);
+  window.setFeedbackUpload(upload);
   const $ = (id) => window.document.getElementById(id);
   return { window, $, calls };
 }
@@ -169,12 +169,55 @@ test("without an upload endpoint the cards only save", async () => {
   assert.equal($("suggestion-upload").hidden, false);
 });
 
-test("the buttons are locked while the text is saved", async () => {
+test("the server's capability decides between sending and saving, whichever loads first", async () => {
+  for (const available of [true, false]) {
+    const { window, $ } = boot({ upload: available });
+    window.setFeedbackUpload(!available);
+    await window.refreshPluginCommands();
+    for (const kind of ["feedback", "suggestion"]) {
+      assert.equal($(`${kind}-upload`).hidden, !available, kind);
+      assert.equal($(`${kind}-save`).hidden, available, kind);
+    }
+    const { window: late } = loadAppWithPages({ fetchImpl: async () => ({ ok: true, status: 200,
+      text: async () => "", json: async () => ({}) }),
+    beforePages: (w) => { w.__localmFeedbackUpload = available; } });
+    assert.equal(late.document.getElementById("feedback-upload").hidden, !available);
+  }
+});
+
+test("losing the capability during a review leaves the review as it is", async () => {
+  const { $, calls, window } = boot();
+  await review($, "feedback", "under review");
+  window.setFeedbackUpload(false);
+  assert.equal($("feedback-save").hidden, true);
+  $("feedback-save").click();
+  await flush();
+  assert.equal(calls.length, 1, "no second file");
+  assert.equal($("feedback-text").value, "under review");
+  assert.equal($("feedback-review").hidden, false);
+});
+
+test("the same failure twice is shown twice", async () => {
+  const off = { uploaded: false, upload_stage: "dns", upload_message: "no network" };
+  const { $ } = boot({ sends: [off, off] });
+  await review($, "feedback");
+  $("feedback-confirm").click();
+  await flush();
+  const first = $("feedback-result").textContent;
+  assert.doesNotMatch(first, /download/);
+  $("feedback-confirm").click();
+  assert.equal($("feedback-result").textContent, "", "cleared while sending");
+  await flush();
+  assert.equal($("feedback-result").textContent, first);
+});
+
+test("the buttons and the text are locked while the text is saved", async () => {
   let release;
   const gate = new Promise((r) => { release = r; });
   const { $, calls } = boot({ gate });
   await review($, "feedback");
   assert.equal($("feedback-upload").disabled, true);
+  assert.equal($("feedback-text").readOnly, true);
   $("feedback-upload").click();
   assert.equal(calls.length, 1, "a second press saves nothing");
   release();

@@ -1771,6 +1771,7 @@
   "settings.feedback.confirmSendButton": "Enviar",
   "settings.feedback.notSent": "No enviado. Tu texto está guardado: {where}",
   "settings.feedback.sentToast": "Enviado",
+  "settings.feedback.couldNotSend": "No se pudo enviar: {message}  Tu texto está guardado ({where}): vuelve a pulsar Enviar o escribe un correo a {maintainer}.",
   "settings.feedback.failed": "No se pudo guardar: {message}",
   "settings.feedback.savedRateLimited": "Guardado: {where}  -  límite de envíos alcanzado; espera un poco y vuelve a pulsar Enviar.",
   "settings.bug.trackingIssue": " Issue de seguimiento: {url}",

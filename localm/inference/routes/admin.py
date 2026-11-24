@@ -298,7 +298,8 @@ def register(app: FastAPI, ctx) -> None:
             result["upload_stage"] = "upload"
             result["upload_message"] = (
                 "The upload did not complete in time. The report is saved - "
-                "you can retry, or download it and send it by hand.")
+                "you can retry, or download it and send it by hand."
+                if kind == "bug" else "The upload did not complete in time.")
             # Not str(e): ThreadCallTimeout's message names the offloaded callable
             # by __qualname__, which the client has no use for. The budget and the
             # callable are already logged at WARNING by run_in_threadpool_bounded.

@@ -1188,7 +1188,7 @@
               <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="chat"></span>
                 <div class="card-head-text"><h3 data-i18n="settings.feedback.title">Feedback</h3></div></div>
               <div class="sub" data-i18n="settings.feedback.help">Tell us what you think, or ask a question. Only your text and the localm version are included, with no diagnostics, log, settings or chat content. Before anything is sent you see the whole text and confirm it.</div>
-              <textarea id="feedback-text" rows="4" placeholder="Your feedback" aria-label="Feedback" data-i18n-aria-label="settings.feedback.title" data-i18n-placeholder="settings.feedback.placeholder"></textarea>
+              <textarea id="feedback-text" rows="4" maxlength="50000" placeholder="Your feedback" aria-label="Feedback" data-i18n-aria-label="settings.feedback.title" data-i18n-placeholder="settings.feedback.placeholder"></textarea>
               <div class="actions">
                 <!-- Shown instead of the send button when no upload endpoint is
                      configured (capabilities.bugreport_upload). -->
@@ -1219,7 +1219,7 @@
               <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="send"></span>
                 <div class="card-head-text"><h3 data-i18n="settings.suggestion.title">Suggestion</h3></div></div>
               <div class="sub" data-i18n="settings.suggestion.help">Suggest an improvement or a new feature. Only your text and the localm version are included, with no diagnostics, log, settings or chat content. Before anything is sent you see the whole text and confirm it.</div>
-              <textarea id="suggestion-text" rows="4" placeholder="Your suggestion" aria-label="Suggestion" data-i18n-aria-label="settings.suggestion.title" data-i18n-placeholder="settings.suggestion.placeholder"></textarea>
+              <textarea id="suggestion-text" rows="4" maxlength="50000" placeholder="Your suggestion" aria-label="Suggestion" data-i18n-aria-label="settings.suggestion.title" data-i18n-placeholder="settings.suggestion.placeholder"></textarea>
               <div class="actions">
                 <!-- Shown instead of the send button when no upload endpoint is
                      configured (capabilities.bugreport_upload). -->

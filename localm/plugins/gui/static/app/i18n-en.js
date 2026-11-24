@@ -2786,6 +2786,7 @@ export const I18N_EN = {
   "settings.feedback.confirmSendButton": "Send",
   "settings.feedback.notSent": "Not sent. Your text is saved: {where}",
   "settings.feedback.sentToast": "Sent",
+  "settings.feedback.couldNotSend": "Could not send: {message}  Your text is saved ({where}) - press Send again, or email {maintainer}.",
   "settings.feedback.failed": "Could not save it: {message}",
   "settings.feedback.savedRateLimited": "Saved: {where}  -  rate limited; wait a bit and press Send again.",
 

@@ -1771,6 +1771,7 @@
   "settings.feedback.confirmSendButton": "Envoyer",
   "settings.feedback.notSent": "Non envoyé. Votre texte est enregistré : {where}",
   "settings.feedback.sentToast": "Envoyé",
+  "settings.feedback.couldNotSend": "Envoi impossible : {message}  Votre texte est enregistré ({where}) - cliquez à nouveau sur Envoyer, ou écrivez à {maintainer}.",
   "settings.feedback.failed": "Enregistrement impossible : {message}",
   "settings.feedback.savedRateLimited": "Enregistré : {where}  -  limite de débit atteinte ; patientez un peu et cliquez à nouveau sur Envoyer.",
   "settings.bug.trackingIssue": " Ticket de suivi : {url}",
