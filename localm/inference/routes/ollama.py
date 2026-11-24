@@ -322,7 +322,7 @@ def register(app: FastAPI, ctx) -> None:
 
         def _collect() -> dict:
             facts = _file_facts(entry)
-            caps = model_capabilities(name, reg=registry) if name in registry else {}
+            caps = model_capabilities(name, reg=registry if name in registry else listed)
             if entry.get("model_type") == "embedding":
                 capabilities = ["embedding"]
             else:

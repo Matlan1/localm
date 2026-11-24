@@ -11,7 +11,9 @@ import random
 import pytest
 
 from localm.inference.backends.base import InvalidGrammarError
-from localm.inference.gbnf import JSON_OBJECT, check_grammar_structure
+from localm.inference.gbnf import (
+    JSON_ARRAY, JSON_OBJECT, JSON_VALUE, check_grammar_structure,
+)
 from localm.inference.json_schema_grammar import (
     MAX_SCHEMA_BYTES, SchemaGrammarError, literal, schema_to_grammar,
 )
@@ -518,3 +520,13 @@ def test_a_json_schema_response_format_ends_at_the_closing_brace():
         assert g.accepts(good)
         for tail in TAILS:
             assert not g.accepts(good + tail), (strict, tail)
+
+
+@pytest.mark.parametrize("grammar,text", [
+    (JSON_VALUE, '{"a": [1, null]}'), (JSON_OBJECT, '{"a": [1, null]}'), (JSON_ARRAY, '[1, {"a": 2}]'),
+])
+def test_a_ready_made_json_grammar_ends_at_the_root_value(grammar, text):
+    g = Grammar(grammar)
+    assert g.accepts(text)
+    for tail in TAILS:
+        assert not g.accepts(text + tail), repr(tail)

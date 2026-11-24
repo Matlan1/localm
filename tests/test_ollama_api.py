@@ -9,6 +9,7 @@ import base64
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -19,6 +20,7 @@ import localm
 from localm import scopes as S
 from localm.inference import ollama_protocol as P
 from localm.inference.http_server import create_app
+from tests._gbnf_matcher import Grammar
 
 MODEL = "test-model"
 TINY_PNG = base64.b64encode(
@@ -274,6 +276,31 @@ def test_show_lists_thinking_from_the_template_not_the_name(client, home):
     assert "thinking" not in shown["Qwen3-Thinking-R1-named-but-plain"]
 
 
+def test_show_reads_a_capability_the_registry_entry_does_not_carry(client, home):
+    from tests.test_model_capabilities import REAL_PLAIN_TEMPLATE, REAL_TOOL_TEMPLATE
+    tools = _gguf_with_template(home / "t.gguf", REAL_TOOL_TEMPLATE)
+    plain = _gguf_with_template(home / "p.gguf", REAL_PLAIN_TEMPLATE)
+    hf = home / "hf"
+    hf.mkdir()
+    (hf / "chat_template.jinja").write_text(REAL_TOOL_TEMPLATE, encoding="utf-8")
+    _write_registry(home, {"t": {"path": str(tools)}, "p": {"path": str(plain)},
+                           "hf": {"path": str(hf)},
+                           "stored": {"path": str(tools), "tool_use": False}})
+    shown = {n: "tools" in client.post("/api/show", json={"model": n}).json()["capabilities"]
+             for n in ("t", "p", "hf", "stored")}
+    assert shown == {"t": True, "p": False, "hf": True, "stored": False}
+
+
+def test_show_reads_the_unregistered_startup_model(client, home, monkeypatch):
+    from localm.inference import http_server as hs
+    from tests.test_model_capabilities import QWEN3_THINKING_SWITCH, REAL_TOOL_TEMPLATE
+    f = _gguf_with_template(home / "s.gguf", REAL_TOOL_TEMPLATE + QWEN3_THINKING_SWITCH)
+    monkeypatch.setattr(hs, "_default_model_name", "started-with")
+    monkeypatch.setattr(hs, "_engine", SimpleNamespace(model_path=str(f)))
+    caps = client.post("/api/show", json={"model": "started-with"}).json()["capabilities"]
+    assert caps == ["completion", "tools", "thinking"]
+
+
 def test_show_never_lists_thinking_on_an_embedding_model(client, home):
     from tests.test_model_capabilities import QWEN3_THINKING_SWITCH
     emb = _gguf_with_template(home / "e.gguf", QWEN3_THINKING_SWITCH)
@@ -370,7 +397,11 @@ def test_chat_format_json_reaches_the_engine_as_a_grammar(client, engine):
     r = _chat(client, stream=False, format="json")
     assert r.status_code == 200
     _messages, kwargs = engine.seen["calls"][-1]
-    assert kwargs["grammar"] == P.JSON_GRAMMAR
+    grammar = Grammar(kwargs["grammar"])
+    assert grammar.accepts('{"a": [1, {"b": null}], "c": "d"}') and grammar.accepts("{}")
+    assert not grammar.accepts("[1]") and not grammar.accepts('"text"')
+    for tail in (" ", "\n", "\t", "\n\t\t", " " * 21):
+        assert not grammar.accepts('{"a": 1}' + tail), repr(tail)
     engine.validate_grammar.assert_called()
 
 
