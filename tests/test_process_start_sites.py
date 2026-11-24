@@ -344,7 +344,7 @@ class W(mp.Process): pass
 class P(psutil.Popen): pass
 def b(**kw):
     subprocess.run([], start_new_session=True)
-    subprocess.call([], creationflags=subprocess.DETACHED_PROCESS)
+    subprocess.call([], creationflags=subprocess.CREATE_BREAKAWAY_FROM_JOB)
     subprocess.run([], capture_output=True)
 def c():
     kw = {}

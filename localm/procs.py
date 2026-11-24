@@ -845,7 +845,7 @@ def _make_folder(install: str) -> None:
 def _make_mark(folder: str) -> str:
     mark = os.urandom(8).hex()
     os.close(os.open(os.path.join(folder, mark + ".mark"),
-                     os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
+                     os.O_WRONLY | os.O_CREAT, 0o644))
     return mark
 
 
