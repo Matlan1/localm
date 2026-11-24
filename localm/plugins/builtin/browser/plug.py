@@ -46,7 +46,7 @@ from localm import scopes
 from localm.browser import discovery, provision
 from localm.browser import session as bsession
 from localm.inference.http_server import caller_grants, principal_id
-from localm.jobmanager import FRAME_EVENT
+from localm.jobmanager import FRAME_EVENT, _terminate_process_tree
 
 _router = APIRouter()
 
@@ -527,7 +527,9 @@ async def download_browser(request: Request):
             job.push({"type": "line", "text": "Downloading the browser "
                       "(one-time, a few hundred MB)..."})
             result = provision.install_chromium(
-                on_progress=lambda line: job.push({"type": "line", "text": line}))
+                on_progress=lambda line: job.push({"type": "line", "text": line}),
+                should_cancel=lambda: job.cancel_requested,
+                kill=_terminate_process_tree)
             if not result.ok:
                 job.push({"type": "line", "text": "error: " + result.message})
                 return False

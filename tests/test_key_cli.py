@@ -250,6 +250,27 @@ class TestNamedKeys:
         assert "no owner key is set" in r.output
         assert "localm key generate" in r.output
 
+    def test_the_second_key_without_an_owner_key_is_not_called_the_only_one(self, runner):
+        first = runner.invoke(main, ["key", "create", "a", "--scope", "chat"])
+        second = runner.invoke(main, ["key", "create", "b", "--scope", "chat"])
+        assert "the only one that exists" in " ".join(first.output.split())
+        out = " ".join(second.output.split())
+        assert "only one" not in out and "turns authentication on" not in out
+        assert "no owner key is set" in out
+
+    def test_show_with_require_auth_and_no_key_does_not_say_open_mode(
+            self, runner, monkeypatch):
+        monkeypatch.setenv("LOCALM_REQUIRE_AUTH", "1")
+        out = " ".join(runner.invoke(main, ["key", "show"]).output.split())
+        assert "open mode" not in out and "accepts unauthenticated" not in out
+        assert "no API key set" in out and "refuses every protected request" in out
+        out = " ".join(runner.invoke(main, ["key", "clear", "-y"]).output.split())
+        assert "open mode" not in out and "refuses every protected request" in out
+
+    def test_show_without_require_auth_still_says_open_mode(self, runner):
+        out = runner.invoke(main, ["key", "show"]).output
+        assert "open mode" in out
+
     def test_create_with_an_owner_key_prints_no_owner_key_note(self, runner):
         runner.invoke(main, ["key", "generate"])
         r = runner.invoke(main, ["key", "create", "dashboard", "--scope", "models:read"])
@@ -287,6 +308,13 @@ class TestNamedKeys:
         r = runner.invoke(main, ["key", "create", "evil",
                                  "--scope", "keys:admin"])
         assert r.exit_code == 1
+        assert auth.list_keys() == []
+        assert "--allow-privileged" in r.output and "keys:admin" in r.output
+
+    def test_create_misspelled_scope_refused(self, runner):
+        r = runner.invoke(main, ["key", "create", "x", "--scope", "chatt"])
+        assert r.exit_code == 1
+        assert "did you mean 'chat'" in " ".join(r.output.split())
         assert auth.list_keys() == []
 
     def test_create_allow_privileged_mints_privileged_scope(self, runner):
@@ -402,6 +430,16 @@ class TestTimestampFormatting:
         from localm.cli.keys import _fmt_expires
         out = _fmt_expires(time.time() + 3600)
         assert "expired" not in out.lower()
+
+    @pytest.mark.parametrize("secs,want", [
+        (86400, "in 1d"), (7 * 86400, "in 7d"), (30 * 86400, "in 30d"),
+        (36 * 3600, "in 1d"), (3 * 3600, "in 3h"), (3600, "in 1h"),
+        (600, "in 10m"), (20, "in 19s")])
+    def test_fmt_expires_reads_a_fresh_key_as_its_own_length(
+            self, monkeypatch, secs, want):
+        from localm.cli import keys
+        monkeypatch.setattr(keys.time, "time", lambda: 1000.0)
+        assert keys._fmt_expires(1000.0 + secs - 0.4) == want
 
     def test_fmt_expires_past_is_flagged(self):
         import time

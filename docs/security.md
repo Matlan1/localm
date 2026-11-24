@@ -41,7 +41,15 @@ default `key create` refuses to mint a privileged scope into a named key (pass
 owner-equivalent trust); an owner-authenticated API call (`POST /v1/keys`) can
 mint one too (see *Capability scopes* below). A named key can also carry an
 expiry (`--expires-in` / `expires_in` on `POST /v1/keys`); `verify()` rejects it
-once it has passed.
+once it has passed. A key is only minted with localm's own scopes and those of
+installed plugins; a misspelled scope is refused. Revoking a named key, or its
+expiry, ends its browser sessions, coder sessions, open streams and running jobs.
+
+A browser's login is an HttpOnly, SameSite=Strict cookie (Secure over https)
+holding a random session id, never the key. Its name carries a hash of the
+install's own id, so moving the server to another port keeps the login and two
+installs on one machine do not replace each other's. A login cookie set by an
+older version keeps working.
 
 The owner key itself can be rolled or set from the GUI (Settings > Security)
 as well as the CLI: `POST /api/auth/key/rotate` requires the `admin` scope

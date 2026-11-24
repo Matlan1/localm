@@ -133,7 +133,8 @@ def _login(app, key) -> str:
     with TestClient(app) as c:
         r = c.post("/api/session", json={"key": key})
         assert r.status_code == 200, r.text
-        sid = c.cookies.get(hs.SESSION_COOKIE)
+        sid = next((v for n, v in c.cookies.items()
+                    if n.startswith(hs.SESSION_COOKIE)), None)
     assert sid, "login set no session cookie"
     return sid
 

@@ -47,6 +47,19 @@ def _refuse_unattended_last_key_removal(action: str) -> None:
     sys.exit(1)
 
 
+def _keyless_locked_text():
+    """Why a server with no key refuses requests (require_auth is on, or the
+    config file cannot be read), or None when it is in open mode."""
+    from localm import auth
+    required, unreadable = auth.require_auth_state()
+    if unreadable:
+        return auth.config_unreadable_detail()
+    if required:
+        return ("require_auth is on, so the server refuses every protected "
+                "request until a key is set ('localm key generate').")
+    return None
+
+
 def _fmt_ts(ts) -> str:
     """A readable local timestamp for a single-line message (the 'key create'
     confirmation), or '-' when unset. Full precision, unlike the table
@@ -89,7 +102,8 @@ def _fmt_since(ts) -> str:
 
 def _fmt_expires(ts) -> str:
     """Compact expiry for the 'key list' table: 'never' (no deadline), 'in
-    <age>' (still valid), or 'expired'. list_keys() does not filter expired keys
+    <time left>' (still valid; from an hour up rounded to the nearest hour, from
+    24 hours up in whole days), or 'expired'. list_keys() does not filter expired keys
     out, so this column is what distinguishes a dead key from a live one."""
     if ts is None:
         return "never"
@@ -98,9 +112,14 @@ def _fmt_expires(ts) -> str:
     except (TypeError, ValueError):
         return "-"
     delta = ts - time.time()
-    if delta >= 0:
-        return f"in {_fmt_age(delta)}"
-    return "[red]expired[/red]"
+    if delta < 0:
+        return "[red]expired[/red]"
+    minutes, hours = round(delta / 60), round(delta / 3600)
+    if hours >= 24:
+        return f"in {hours // 24}d"
+    if minutes >= 60:
+        return f"in {hours}h"
+    return f"in {minutes}m" if minutes else f"in {int(delta)}s"
 
 
 
@@ -129,7 +148,7 @@ def key_group():
               help="Print the full key instead of a masked preview.")
 def key_show(reveal):
     """Show the active owner key (masked), or whether the server is keyed
-    without one, or 'open mode'."""
+    without one, locked by require_auth with no key, or in 'open mode'."""
     from localm import auth
     active = auth.get_api_key()
     if not active and auth.any_key_configured():
@@ -138,11 +157,12 @@ def key_show(reveal):
                       "requires a key ('localm key list' shows named keys).")
         return
     if not active:
-        console.print("[yellow]open mode[/yellow] - no API key set; the server "
-                      "accepts unauthenticated requests.")
-        if auth.require_auth_enabled():
-            console.print("[dim]require_auth is on, so protected routes refuse "
-                          "every request until a key is set.[/dim]")
+        locked = _keyless_locked_text()
+        if locked:
+            console.print(f"[yellow]no API key set[/yellow] - {locked}")
+        else:
+            console.print("[yellow]open mode[/yellow] - no API key set; the server "
+                          "accepts unauthenticated requests.")
         return
     from rich.markup import escape
 
@@ -213,7 +233,9 @@ def key_clear(yes):
     included; piped input is refused."""
     from localm import auth, sessions
     if not auth.any_key_configured():
-        console.print("[dim]No API key set (already open mode).[/dim]")
+        locked = _keyless_locked_text()
+        console.print(f"[dim]No API key set; {locked}[/dim]" if locked else
+                      "[dim]No API key set (already open mode).[/dim]")
         return
     last = auth.removal_leaves_no_key(clear_all=True)
     if last:
@@ -248,7 +270,8 @@ def key_clear(yes):
         console.print("[dim]Delete the listed file(s) by hand, then run "
                       "'localm key clear' again to confirm.[/dim]")
     elif revoked is not None:
-        console.print("[green]✓[/green] API key cleared - open mode.")
+        locked = _keyless_locked_text()
+        console.print(f"[green]✓[/green] API key cleared - {locked or 'open mode.'}")
     if revoked is None:
         # revoke_all returns None only when the store could not be written, which
         # means live sessions REMAIN live - a leftover owner cookie keeps full
@@ -417,14 +440,30 @@ def key_create(name, scopes, fs_access, rag_roots, expires_in, allow_privileged)
     from rich.markup import escape
 
     expires = time.time() + expires_in if expires_in is not None else None
+    was_keyless = not auth.any_key_configured()
+    mgr = None
+    plugin_scopes: set = set()
+    try:
+        from localm.plugins.engine import PluginManager
+        mgr = PluginManager(None)
+        plugin_scopes = mgr.installed_scopes()
+    except Exception as e:
+        console.print("[yellow]Note:[/yellow] the installed plugins could not be "
+                      f"read, so only localm's own scopes are known: {escape(str(e))}")
     try:
         rec = auth.create_key(name, list(scopes), allow_privileged=allow_privileged,
                               fs_access=fs_access,
                               rag_roots=list(rag_roots) or None,
-                              expires=expires)
-    except (ValueError, PermissionError, ConfigUnreadable) as e:
+                              expires=expires, plugin_scopes=plugin_scopes)
+    except PermissionError:
+        refused = [s for s in S.normalize(scopes) if s in S.PRIVILEGED_SCOPES]
+        console.print(f"[red]Refusing to grant privileged scope(s): "
+                      f"{', '.join(escape(s) for s in refused)}.[/red] To mint the "
+                      "key anyway, run the command again with --allow-privileged.")
+        sys.exit(1)
+    except (ValueError, ConfigUnreadable) as e:
         # escape(): a ValueError for an unknown scope embeds the caller's raw
-        # --scope text verbatim ("Unknown scope(s): {bad}") - that text failed
+        # --scope text verbatim ("Unknown scope(s): ...") - that text failed
         # validation, so it is not restricted to any safe character class.
         console.print(f"[red]{escape(str(e))}[/red]")
         sys.exit(1)
@@ -450,27 +489,26 @@ def key_create(name, scopes, fs_access, rag_roots, expires_in, allow_privileged)
     console.print(f"[dim]id {escape(rec['id'])}; revoke with: "
                   f"localm key rm {escape(rec['id'])}[/dim]")
     if not auth.get_api_key():
-        console.print("[yellow]Note:[/yellow] no owner key is set, and this key turns "
-                      "authentication on: the web GUI and the API now ask for a key, "
-                      "and this scoped key is the only one that exists. Set an owner "
-                      "key first to keep full access:  [bold]localm key generate[/bold]")
+        why = ("no owner key is set, and this key turns authentication on: the web "
+               "GUI and the API now ask for a key, and this scoped key is the only "
+               "one that exists. Set an owner key first to keep full access:"
+               if was_keyless else
+               "no owner key is set, so only the named keys work. Set an owner key "
+               "to have full access:")
+        console.print(f"[yellow]Note:[/yellow] {why}  [bold]localm key generate[/bold]")
     # Catch at grant: if this key unlocks a plugin the host cannot serve yet
     # (not installed, or missing its pip extras), say so right here.
     try:
-        from localm.plugins.engine import PluginManager
-        mgr = PluginManager(None)
-        warns = mgr.scope_deps_warnings(list(scopes))
-        warns += S.unknown_scope_warnings(
-            list(scopes), {(sp.scope or n) for n, sp in mgr.discover().items()})
+        warns = mgr.scope_deps_warnings(list(scopes)) if mgr is not None else []
+        fixes = mgr.scope_fix_commands(list(scopes)) if warns else []
     except Exception:
-        warns = []
+        warns, fixes = [], []
     for w in warns:
         # escape(): built from an installed plugin's own manifest fields
         # (name/scope), which are not restricted to a safe character class.
         console.print(f"[yellow]Note:[/yellow] {escape(w)}")
-    if warns:
-        console.print("[dim]Install missing plugin packages on the host with:  "
-                      "localm plugin install-deps --all[/dim]")
+    for command in fixes:
+        console.print(f"[dim]To fix it, run on this machine:  {escape(command)}[/dim]")
 
 
 

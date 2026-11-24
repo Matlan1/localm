@@ -231,7 +231,8 @@ applies: a state-changing request, and any GET under `/api/` or `/v1/`, needs
 this instance's shell token (the GUI has it) or attach token, so mount routes
 under `/api/<plugin>/`. `LOCALM_REQUIRE_AUTH` or the `require_auth` setting
 refuses keyless use altogether. Scopes keep a plugin's reach explicit and let a key be
-issued for a subset of capabilities. A third-party plugin cannot claim a scope
+issued for a subset of capabilities; a key can be minted for a plugin's scope once the
+plugin is installed. A third-party plugin cannot claim a scope
 localm reserves (a kernel scope, a first-party plugin scope or `coder:full`) or
 one another installed plugin already uses.
 

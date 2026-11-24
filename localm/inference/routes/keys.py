@@ -15,6 +15,9 @@ from localm.bindhost import is_loopback_host as _is_loopback
 #: Held across the last-key check and the revoke of one DELETE /v1/keys/{id}.
 _REVOKE_LOCK = threading.Lock()
 
+#: Seconds DELETE /v1/keys/{id} waits for the key's cancelled jobs to end.
+_JOB_END_WAIT_S = 2.0
+
 
 def register(app: FastAPI, ctx) -> None:
     require_scope = _hs.require_scope
@@ -99,10 +102,20 @@ def register(app: FastAPI, ctx) -> None:
                     403,
                     f"Refusing to grant scope(s) {', '.join(beyond)}: a key may "
                     "only mint keys with scopes it holds itself.")
+        mgr = getattr(app.state, "plugin_manager", None)
+        plugin_scopes: set = set()
+        if mgr is not None:
+            try:
+                plugin_scopes = mgr.installed_scopes()
+            except Exception as e:
+                from localm.debuglog import logger as _dbg
+                _dbg.warning("could not read the installed plugins' scopes: %s", e,
+                             exc_info=True)
         try:
             created = create_key(body.get("name", ""), scope_list,
                                  allow_privileged=is_owner, expires=expires,
-                                 fs_access=fs_access, rag_roots=rag_roots or None)
+                                 fs_access=fs_access, rag_roots=rag_roots or None,
+                                 plugin_scopes=plugin_scopes)
         except PermissionError as e:
             raise HTTPException(403, str(e)) from e
         except ValueError as e:
@@ -111,13 +124,9 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(409, str(e)) from e
         # Catch at grant: warn (do not block) when a granted scope unlocks a
         # plugin the host cannot serve yet (not installed / missing pip extras).
-        mgr = getattr(app.state, "plugin_manager", None)
         if mgr is not None:
             try:
                 warns = mgr.scope_deps_warnings(scope_list)
-                warns += scopes.unknown_scope_warnings(
-                    scope_list,
-                    {(sp.scope or n) for n, sp in mgr.discover().items()})
             except Exception as e:
                 from localm.debuglog import logger as _dbg
                 _dbg.warning("could not check plugin readiness for granted scopes: %s",
@@ -158,10 +167,7 @@ def register(app: FastAPI, ctx) -> None:
                 lambda: sessions.create(scopes={scopes.ADMIN},
                                         key_hash=auth._hash_key(seeded), fs_access="host",
                                         owner_key_minted=auth._is_owner_key(seeded)))
-            secure = request.url.scheme == "https"
-            response.set_cookie(_hs.session_cookie_name(request), sid, httponly=True,
-                                secure=secure, samesite="strict", path="/",
-                                max_age=_hs.SESSION_MAX_AGE)
+            _hs.set_session_cookie(request, response, sid)
             # CSRF is derived from the session (client fetches it from
             # GET /api/session); no separate CSRF cookie to set.
         # The plaintext key is returned exactly once - it is never recoverable.
@@ -170,9 +176,12 @@ def register(app: FastAPI, ctx) -> None:
     @app.delete("/v1/keys/{key_id}", dependencies=[Depends(require_scope(scopes.KEYS_ADMIN))])
     async def revoke_key_ep(key_id: str, request: Request):
         """Revoke a named key and end what runs under it: its browser sessions,
-        the coder sessions it created and its open streams. Answers 409 when the
-        server is reachable from the network, must hold a key, and this is its
-        last one."""
+        the coder sessions it created, its running jobs and its open streams.
+        ``cancelled_jobs`` in the reply lists the jobs (``{"id", "kind",
+        "label", "ended"}``); ``ended`` is False for one whose work has not
+        stopped yet, and ``label`` is null for a caller other than the operator.
+        Answers 409 when the server is reachable from the network, must hold a
+        key, and this is its last one."""
         from fastapi.concurrency import run_in_threadpool
 
         from localm import auth
@@ -182,15 +191,22 @@ def register(app: FastAPI, ctx) -> None:
         def _revoke():
             with _REVOKE_LOCK:
                 if needs_key and auth.removal_leaves_no_key(revoke_id=key_id):
-                    return None
-                return auth.revoke_key(key_id)
+                    return None, []
+                key_hash = auth.key_hash_of(key_id)
+                done = auth.revoke_key(key_id)
+            jobs = getattr(request.app.state, "jobs", None)
+            if not done or key_hash is None or jobs is None:
+                return done, []
+            return True, jobs.jobs_cancelled_with_key(key_hash, wait_s=_JOB_END_WAIT_S)
 
         try:
-            revoked = await run_in_threadpool(_revoke)
+            revoked, cancelled = await run_in_threadpool(_revoke)
         except ConfigUnreadable as e:
             raise HTTPException(409, str(e)) from e
         if revoked is None:
             raise HTTPException(409, _hs.LAST_KEY_NETWORK_DETAIL)
         if not revoked:
             raise HTTPException(404, f"No such key: {key_id}")
-        return {"status": "revoked", "id": key_id}
+        if not _hs.caller_is_operator(request):
+            cancelled = [{**row, "label": None} for row in cancelled]
+        return {"status": "revoked", "id": key_id, "cancelled_jobs": cancelled}

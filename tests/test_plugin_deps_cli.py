@@ -313,7 +313,20 @@ def test_key_create_warns_on_uninstalled_plugin_scope(env, monkeypatch):
     r = CliRunner().invoke(env.main, ["key", "create", "dash", "-s", "voice"])
     assert r.exit_code == 0, r.output
     assert "voice plugin is not installed" in r.output
-    assert "install-deps" in r.output           # exact wording may line-wrap
+    assert "localm plugin install voice" in " ".join(r.output.split())
+    assert "install-deps" not in r.output
+
+
+def test_key_create_names_install_deps_for_an_installed_plugin_missing_packages(
+        env, monkeypatch):
+    from localm.plugins.engine import PluginManager
+    monkeypatch.setattr(PluginManager, "_unready_scopes",
+                        lambda self, granted: [("voice", "voice", ["fakepkg>=1.0"])])
+    r = CliRunner().invoke(env.main, ["key", "create", "dash", "-s", "voice"])
+    assert r.exit_code == 0, r.output
+    out = " ".join(r.output.split())
+    assert "fakepkg>=1.0" in out
+    assert "localm plugin install-deps voice" in out
 
 
 def test_doctor_reports_missing_plugin_deps(env, monkeypatch, capsys):

@@ -1238,10 +1238,13 @@ def list_keys() -> list:
 
 def create_key(name: str, scope_list, *, allow_privileged: bool = False,
                expires: Optional[float] = None, fs_access: str = "none",
-               rag_roots: Optional[list] = None) -> dict:
+               rag_roots: Optional[list] = None,
+               plugin_scopes=()) -> dict:
     """Mint a named key with *scope_list*, persist its hash, and return a record
     INCLUDING the plaintext key once - the caller must surface it now, it cannot
-    be recovered. Raises ValueError on an unknown scope.
+    be recovered. Raises ValueError on a scope that is neither localm's own nor in
+    *plugin_scopes*, the scopes of the installed plugins
+    (``scopes.unknown_scope_refusal``).
 
     *fs_access* is the host-filesystem reach this key grants ("none" | "shared" |
     "host"); it defaults to the safe "none" so a new scoped key cannot browse the
@@ -1268,9 +1271,9 @@ def create_key(name: str, scope_list, *, allow_privileged: bool = False,
     the key; None (default) never expires."""
     from localm import scopes as S
     clean = S.normalize(scope_list)
-    bad = [s for s in clean if not S.is_valid_scope(s)]
-    if bad:
-        raise ValueError(f"Unknown scope(s): {', '.join(bad)}")
+    refusal = S.unknown_scope_refusal(clean, plugin_scopes)
+    if refusal:
+        raise ValueError(refusal)
     if not allow_privileged:
         privileged = [s for s in clean if s in S.PRIVILEGED_SCOPES]
         if privileged:
@@ -1311,8 +1314,15 @@ def create_key(name: str, scope_list, *, allow_privileged: bool = False,
             "key": key}
 
 
+def key_hash_of(key_id: str) -> Optional[str]:
+    """The sha256 stored for the named key *key_id*, or None when there is none."""
+    return next((r.get("hash") for r in _load_keystore() if r.get("id") == key_id),
+                None)
+
+
 def revoke_key(key_id: str) -> bool:
-    """Delete a named key by id. Returns True if it existed.
+    """Delete a named key by id. Returns True if it existed. The revoke listeners
+    (:func:`add_revoke_listener`) end its coder sessions and running jobs.
 
     Also drops any browser SESSIONS minted from that key, so revoking a key cuts
     off a paired device immediately instead of leaving its cookie session valid
