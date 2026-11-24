@@ -482,6 +482,16 @@ class TestPositiveMembership:
         )
         assert caps.models_with_capability(caps.TOOL_USE, reg=reg) == ["yes"]
 
+    def test_routing_for_reasoning_follows_the_template_not_the_name(self, tmp_path):
+        from localm.inference.capability_routing import CapabilityNeeds, capable_models
+        thinks = _model_gguf(tmp_path / "a.gguf", template=GPT_OSS_EFFORT)
+        plain = _model_gguf(tmp_path / "b.gguf", template=REAL_TOOL_TEMPLATE)
+        reg = _reg(**{"plain-name": {"path": str(thinks), "model_type": "llm"},
+                      "Qwen3-Thinking-R1": {"path": str(plain), "model_type": "llm"}})
+        assert caps.models_with_capability(caps.REASONING, reg=reg) == ["plain-name"]
+        assert capable_models(CapabilityNeeds(capabilities=(caps.REASONING,)),
+                              reg=reg) == ["plain-name"]
+
     def test_context_listing_is_roomiest_first(self, tmp_path):
         reg = _reg(
             small={"path": str(tmp_path / "a.gguf"), "context_length": 4096},
