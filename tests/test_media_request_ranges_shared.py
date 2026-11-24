@@ -128,7 +128,8 @@ def test_the_cli_refuses_a_duration_out_of_range(tmp_path, monkeypatch, command,
     backend = _Backend()
     monkeypatch.setattr(cli_media, "_media_plugin", lambda plugin, sub: backend)
     monkeypatch.chdir(tmp_path)
-    result = CliRunner().invoke(main, [command, "x", "-d", duration])
+    result = CliRunner().invoke(main, [command, "x", "-d", duration, "-o",
+                                       str(tmp_path / f"{command}_out.bin")])
     assert result.exit_code == 1, result.output
     assert f"Duration must be between 1 and {limit} seconds" in result.output
     assert backend.loads == 0 and backend.generated == []

@@ -212,8 +212,8 @@ def _refuse_unsaved_private(explicit: bool) -> None:
 
 def _media_kept() -> bool:
     """Whether a file written without a path from the user may stay on disk."""
-    from ..audit import SessionMode, effective_mode, privacy_keeps
-    return effective_mode("server") != SessionMode.PRIVACY or privacy_keeps("media")
+    from ..audit import automatic_write_allowed, privacy_keeps
+    return automatic_write_allowed("server") or privacy_keeps("media")
 
 
 def _offer_save(held_path: Path, out_path: Path) -> None:

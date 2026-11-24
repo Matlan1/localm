@@ -407,13 +407,15 @@ def _fake_generator(calls):
 @pytest.mark.parametrize("command", ["image", "music", "video"])
 def test_the_cli_refuses_to_throw_a_result_away(command, tmp_path, monkeypatch):
     from localm.cli import main
-    monkeypatch.chdir(tmp_path)
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
     with patch(KINDS[command][2]) as gen:
         result = CliRunner().invoke(main, [command, "a secret"])
     assert result.exit_code == 2, result.output
     assert "-o" in result.output and "privacy_keep media" in result.output
     gen.assert_not_called()
-    assert list(tmp_path.iterdir()) == []
+    assert list(cwd.iterdir()) == []
 
 
 def test_the_cli_writes_the_file_it_was_told_to(tmp_path):

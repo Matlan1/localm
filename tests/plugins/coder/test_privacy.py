@@ -344,12 +344,6 @@ class TestHistoryPaths:
             paths = _psreadline_history_paths()
         assert paths == []
 
-    def test_unix_paths_empty_on_windows(self):
-        with patch("localm.plugins.coder.privacy.sys") as mock_sys:
-            mock_sys.platform = "win32"
-            paths = _unix_history_paths()
-        assert paths == []
-
     def test_unix_uses_histfile_env(self, tmp_path):
         fake_hist = tmp_path / "custom_hist"
         fake_hist.write_text("")

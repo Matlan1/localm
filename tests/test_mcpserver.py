@@ -1368,8 +1368,9 @@ class TestGenerateImageSafety:
         assert not target.exists()
         assert r["result"]["isError"] is True, r
 
-    def test_default_output_paths_are_distinct_new_files(self):
+    def test_default_output_paths_are_distinct_new_files(self, monkeypatch):
         """Two calls without output_path in the same second get two names."""
+        monkeypatch.setenv("LOCALM_MODE", "log")
         from types import SimpleNamespace
         from localm.config import home_dir
         server, _ = _server()

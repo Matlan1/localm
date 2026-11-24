@@ -105,6 +105,7 @@ VISIBLE_FIELD_GROUP = {
     "desktop_window_mode": "Desktop", "desktop_window_quit_on_close": "Desktop",
     "temp_location": "General",
     "mode": "Privacy", "chat_mode": "Privacy", "coder_mode": "Privacy",
+    "privacy_keep": "Privacy",
     "memory_enabled": "Memory", "memory_auto_consolidate": "Memory",
     "memory_recall_in_privacy": "Memory", "memory_recall_in_privacy_chat": "Memory",
     "memory_recall_in_privacy_coder": "Memory",
