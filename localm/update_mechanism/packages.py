@@ -198,7 +198,7 @@ def stage_packages(root, update_id: str, argv: Iterable, *, env: Mapping, projec
     file outside the venv or behind a link, for localm itself without *project*, for
     another package from a folder or file, and when uv cannot make its plan or
     stages something else than it planned (the staging venv is then of no use);
-    OSError otherwise."""
+    :class:`.disk.Held` and OSError otherwise. It can then be called again."""
     venv = mover.venv_of(root)
     site = _site(venv)
     env = _environment(env)
@@ -221,7 +221,8 @@ def stage_packages(root, update_id: str, argv: Iterable, *, env: Mapping, projec
                                     if staged is None or e[0] not in staged.installed])
     if staged is None:
         if not disk.remove_tree(stage):
-            raise Refused(f"{stage} cannot be emptied")
+            raise Held(next((p for p in stage.rglob("*") if p.is_file()), stage),
+                       "it cannot be deleted")
         stage.parent.mkdir(parents=True, exist_ok=True)
         _run(run, [full[0], "venv", "--offline", "--no-config", "--relocatable",
                    *(["--system-site-packages"] if _system_site(venv) else []),
@@ -453,9 +454,10 @@ def _stated(row: Optional[tuple]) -> Optional[dict]:
 
 def forward(root, update_id: str, plan: Plan, argv: Iterable, *, env: Mapping,
             project: bool = False, run: Runner = run_hidden,
-            wait_s: Optional[float] = None) -> None:
+            wait_s: Optional[float] = None, ask: Optional[disk.Ask] = None) -> None:
     """Make the moves of *plan* (:func:`plan_packages`), then ask uv whether it has
-    anything left to do for *argv*, the last command staged. Raises
+    anything left to do for *argv*, the last command staged. *ask* as in
+    :func:`.mover.forward`. Raises
     :class:`.mover.StepFailed`, with everything moved back, when any of it fails or
     is interrupted. Other programs' uv waits during the moves."""
     locked = contextlib.ExitStack()
@@ -477,10 +479,10 @@ def forward(root, update_id: str, plan: Plan, argv: Iterable, *, env: Mapping,
     with locked:
         try:
             venv = mover.area(root, update_id, plan.step).base
-            locked.enter_context(_uv_waits(venv, Wait(wait_s)))
+            locked.enter_context(_uv_waits(venv, Wait(wait_s, ask)))
         except (OSError, Held, Unsafe) as e:
-            raise mover.StepFailed(str(e)) from e
-        mover.forward(root, update_id, plan, wait_s=wait_s, then=nothing_left, back=undo)
+            raise mover.StepFailed(e) from e
+        mover.forward(root, update_id, plan, wait_s=wait_s, ask=ask, then=nothing_left, back=undo)
 
 
 @contextlib.contextmanager
@@ -488,18 +490,24 @@ def _uv_waits(venv: Path, wait: Wait) -> Iterator[None]:
     """Hold uv's lock of *venv* for the block. Raises :class:`.disk.Held` when uv has
     it for longer than *wait*, OSError otherwise."""
     path = venv / ".lock"
-    fd = disk.open_lock(path)
-    try:
+
+    def lock() -> int:
+        fd = disk.open_lock(path)
         try:
-            disk.lock_file(fd, wait)
-        except (PermissionError, BlockingIOError) as e:
-            raise Held(path, "uv is at work in this Python environment") from e
+            disk.lock_file(fd)
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+    fd = disk.patient(wait, path, lock, "uv is at work in this Python environment")
+    try:
         yield
     finally:
         os.close(fd)
 
 
-def back(root, update_id: str, plan: Plan, *, wait_s: Optional[float] = None) -> Outcome:
+def back(root, update_id: str, plan: Plan, *, wait_s: Optional[float] = None,
+         ask: Optional[disk.Ask] = None) -> Outcome:
     """:func:`.mover.back` for a package step. A package the update has changed and
     somebody installed in another form since is first moved to the *kept* folder as a
     whole, which is noted. One whose old version cannot be put back since somebody
@@ -512,8 +520,8 @@ def back(root, update_id: str, plan: Plan, *, wait_s: Optional[float] = None) ->
         if disk.lstat(Path(root) / ".venv") is not None and not a.base.is_dir():
             raise Refused(f"{Path(root) / '.venv'} leads nowhere")
         if site is None or mover.made_anew(a, plan):
-            return mover.back(root, update_id, plan, wait_s=wait_s, out=out)
-        with _uv_waits(a.base, Wait(wait_s)):
+            return mover.back(root, update_id, plan, wait_s=wait_s, ask=ask, out=out)
+        with _uv_waits(a.base, Wait(wait_s, ask)):
             with mover.Marks(root, update_id, plan) as marks:
                 had = {op.dist for op in plan.ops if op.old is not None}
                 changed = {op.dist for n, op in enumerate(plan.ops)
@@ -528,11 +536,11 @@ def back(root, update_id: str, plan: Plan, *, wait_s: Optional[float] = None) ->
                 if name in users:
                     users[name] |= _listed(site, a.base, folder, name)
             _set_aside(a, site, plan, {f for f in foreign if f[0] in changed - set(users)},
-                       Wait(wait_s), out)
-            return mover.back(root, update_id, plan, wait_s=wait_s, out=out, users=users,
+                       Wait(wait_s, ask), out)
+            return mover.back(root, update_id, plan, wait_s=wait_s, ask=ask, out=out, users=users,
                               heal=lambda *args: _heal(a, *args))
-    except (OSError, Held, Unsafe, Unreadable, Refused, disk.Blocked) as e:
-        out.errors.append(str(e))
+    except (OSError, Held, Unsafe, Unreadable, Refused) as e:
+        out.fail(e)
         return out
 
 

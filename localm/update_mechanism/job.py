@@ -275,18 +275,27 @@ def _rebuilt(root, *, damaged: bool) -> Optional[Record]:
 class Result:
     """How an update ended. *state*: ``none`` (there was none), ``old`` (the old
     version is back), ``new`` (it was finished) or ``failed``. *errors* names every
-    file that is not as it should be; *notes* are lines for the user."""
+    file that is not as it should be; *notes* are lines for the user; *held* has each
+    :class:`.disk.Held` behind one of both. Calling again goes on from there."""
     state: str
     errors: list = field(default_factory=list)
     notes: list = field(default_factory=list)
+    held: list = field(default_factory=list)
+
+    def note(self, text: str, e: BaseException) -> None:
+        """Add the note *text* on the error *e*."""
+        self.notes.append(f"{text}: {e}")
+        if isinstance(e, Held):
+            self.held.append(e)
 
 
-def finish(lock: Lock) -> Result:
+def finish(lock: Lock, *, ask: Optional[disk.Ask] = None) -> Result:
     """End the update of *lock*'s install as done: the new version stays, files the
     user had edited go to the area's ``kept`` folder, everything else of the update
     is deleted. From DONE on it is never undone; interrupted, it is done again. A
     file of the user that cannot be moved stays with the update's folder, which a
-    note names and a later :func:`cleanup` tries again.
+    note names and a later :func:`cleanup` tries again; *ask* is called about it
+    first (:class:`.disk.Wait`).
 
     Only from phase STARTING, or DONE when this was interrupted. Raises ValueError
     for another phase, and what :func:`start` raises."""
@@ -294,16 +303,16 @@ def finish(lock: Lock) -> Result:
     record = _current(lock.root)
     if record is None or record.phase not in (STARTING, DONE):
         raise ValueError("there is no started update to finish")
-    return _finish(lock, record)
+    return _finish(lock, record, ask)
 
 
-def _finish(lock: Lock, record: Record) -> Result:
+def _finish(lock: Lock, record: Record, ask: Optional[disk.Ask]) -> Result:
     result = Result("new")
     _check_fits(lock.root, record.id, DONE)
     if record.phase != DONE:
         disk.sync_disk()
         _set_phase(lock, record, DONE)
-    _hand_over(lock.root, record.id, result)
+    _hand_over(lock.root, record.id, result, ask)
     _close(lock, record, _LEFT, result)
     return result
 
@@ -321,11 +330,13 @@ def _check_fits(root, update_id: str, phase: str) -> None:
                              "that means")
 
 
-def restore(lock: Lock, *, wait_s: Optional[float] = None) -> Result:
+def restore(lock: Lock, *, wait_s: Optional[float] = None,
+            ask: Optional[disk.Ask] = None) -> Result:
     """End the unfinished update of *lock*'s install, if there is one: put the old
     version back, every step in reverse, and check every file; one that reached DONE
-    is finished instead. Safe to repeat and to interrupt. While a file cannot be put
-    back the record stays and the result is ``failed``.
+    is finished instead. Safe to repeat and to interrupt. *ask* is called about a
+    file that is still held after *wait_s* (:class:`.disk.Wait`). While a file cannot
+    be put back the record stays and the result is ``failed``.
 
     Raises :class:`Unreadable` when the record or a plan is damaged and
     :class:`Blocked` when it cannot be read now (nothing is changed then),
@@ -337,7 +348,7 @@ def restore(lock: Lock, *, wait_s: Optional[float] = None) -> Result:
         cleanup(lock)
         return Result("none")
     if record.phase == DONE:
-        return _finish(lock, record)
+        return _finish(lock, record, ask)
     if record.phase in (_ENDED, _LEFT):
         result = Result("none")
         _check_fits(lock.root, record.id, record.phase)
@@ -351,12 +362,13 @@ def restore(lock: Lock, *, wait_s: Optional[float] = None) -> Result:
         try:
             _set_phase(lock, record, RESTORING)
         except OSError as e:
-            result.notes.append(f"The record of the update could not be written: {e}")
+            result.note("The record of the update could not be written", e)
         _free_reserve(lock.root, record.id)
         for plan in reversed(plans):
-            out = _back(lock, record, plan, wait_s)
+            out = _back(lock, record, plan, wait_s, ask)
             result.errors += out.errors
             result.notes += out.notes
+            result.held += out.held
         if result.errors:
             result.state = "failed"
             return result
@@ -367,15 +379,16 @@ def restore(lock: Lock, *, wait_s: Optional[float] = None) -> Result:
 
 
 def _back(lock: Lock, record: Record, plan: mover.Plan,
-          wait_s: Optional[float]) -> mover.Outcome:
+          wait_s: Optional[float], ask: Optional[disk.Ask]) -> mover.Outcome:
     step = packages if plan.step == mover.PACKAGES else mover
-    return step.back(lock.root, record.id, plan, wait_s=wait_s)
+    return step.back(lock.root, record.id, plan, wait_s=wait_s, ask=ask)
 
 
-def _hand_over(root, update_id: str, result: Result) -> bool:
+def _hand_over(root, update_id: str, result: Result, ask: Optional[disk.Ask] = None) -> bool:
     """Move the user's own files an update replaced to the ``kept`` folders, on disk
     when this returns. Safe to repeat. Returns False when one could not be moved,
     which is noted."""
+    wait = disk.Wait(ask=ask)
     try:
         for plan in mover.read_plans(root, update_id) if mover.has_plans(root, update_id) else ():
             a = mover.area(root, update_id, plan.step)
@@ -383,13 +396,12 @@ def _hand_over(root, update_id: str, result: Result) -> bool:
             for op in plan.ops:
                 old, st = a.beside(a.old, op.path) if op.edited else (a.old, None)
                 if st is not None:
-                    disk.move(old, mover.free(a, op.path), disk.Wait(), through=True)
+                    disk.move(old, mover.free(a, op.path), wait, through=True)
                     moved += 1
             if moved:
                 result.notes.append(f"{moved} file(s) that were your own are in {a.kept}.")
-    except (Unreadable, Unsafe, Held, Blocked, OSError) as e:
-        result.notes.append("What the update replaced stays in "
-                            f"{mover.update_folder(root) / update_id}: {e}")
+    except (Unreadable, Unsafe, Held, OSError) as e:
+        result.note(f"What the update replaced stays in {mover.update_folder(root) / update_id}", e)
         return False
     disk.sync_disk()
     return True
@@ -404,7 +416,7 @@ def _close(lock: Lock, record: Record, over: str, result: Result) -> None:
             _set_state(lock, record, over)
         disk.remove_through(record_path(lock.root))
     except (OSError, Held) as e:
-        result.notes.append(f"The record of the update stays for now: {e}")
+        result.note("The record of the update stays for now", e)
         return
     cleanup(lock)
 
@@ -448,7 +460,7 @@ def cleanup(lock: Lock, *, keep: Optional[str] = None) -> list:
         try:
             if not _delete(lock, update_id):
                 left.append(str(mover.update_folder(lock.root) / update_id))
-        except (OSError, Unsafe, Unreadable, Blocked, Held) as e:
+        except (OSError, Unsafe, Unreadable, Held) as e:
             left.append(f"{update_id}: {e}")
     with contextlib.suppress(OSError):   # not empty, or never made
         os.rmdir(venv)

@@ -13,6 +13,7 @@ import sys
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path, PureWindowsPath
 from typing import Callable, Iterable, Optional, TypeVar
 
@@ -36,39 +37,66 @@ class Unsafe(Exception):
     """A path that is not one of this install's own files."""
 
 
-class Blocked(Exception):
+class Held(Exception):
+    """A file or folder that another program holds, or that this account may not
+    use. The step that met it can be made again.
+
+    *path* is the file, *reason* what the system says and *holders* the programs that
+    hold it, ``[{"pid", "name"}]``, as far as the system tells; ``str()`` names them
+    all."""
+
+    def __init__(self, path, reason) -> None:
+        self.path, self.reason, self.holders = str(path), str(reason), _holders(path)
+        by = ", ".join(f"{h['name']} (pid {h['pid']})" for h in self.holders)
+        super().__init__(f"{path} cannot be used ({reason}){by and ', held by ' + by}")
+
+
+class Blocked(Held):
     """A file that cannot be read now; nothing is known about what it holds."""
 
 
-class Held(Exception):
-    """A file that another program holds, or that this account may not use.
-
-    *path* is the file; ``str()`` names it and, where the system says so, the
-    programs that hold it."""
-
-    def __init__(self, path, reason) -> None:
-        self.path = str(path)
-        super().__init__(f"{path} cannot be used ({reason}){_holders(path)}")
-
-
-def _holders(path) -> str:
-    if sys.platform != "win32":
-        return ""
+def _holders(path) -> list:
     try:
-        found = shared.apply_update.rm_holders([path])
+        if sys.platform == "win32":
+            return shared.apply_update.rm_holders([path])
+        if sys.platform == "linux":
+            return _lockers(os.stat(path).st_ino)
     except OSError:
-        return ""
-    if not found:
-        return ""
-    return ", held by " + ", ".join(f"{h['name']} (pid {h['pid']})" for h in found)
+        return []
+    return []
+
+
+def _lockers(inode: int) -> list:
+    """The programs that have the file *inode* locked, from ``/proc/locks``."""
+    found = []
+    for line in Path("/proc/locks").read_text(encoding="ascii").splitlines():
+        parts = line.split()
+        if len(parts) > 5 and parts[1] != "->" and parts[5].rpartition(":")[2] == str(inode):
+            name = Path(f"/proc/{parts[4]}/comm").read_text(encoding="utf-8").strip()
+            found.append({"pid": int(parts[4]), "name": name})
+    return found
+
+
+#: Asked about a file that is still held: whether to go on waiting for it.
+Ask = Callable[[Held], bool]
 
 
 class Wait:
-    """How long the moves of one run wait, in all, for held files."""
+    """How long the moves of one run wait, in all, for held files. Then *ask*
+    decides, until it says no, whether they wait as long again."""
 
-    def __init__(self, seconds: Optional[float] = None) -> None:
+    def __init__(self, seconds: Optional[float] = None, ask: Optional[Ask] = None) -> None:
         self.seconds = HELD_WAIT_S if seconds is None else seconds
+        self.ask = ask
         self._deadline: Optional[float] = None
+
+    def again(self, held: Held) -> bool:
+        """Whether to wait on for the file of *held*."""
+        if self.ask is None or not self.ask(held):
+            self.ask = None
+            return False
+        self._deadline = None
+        return True
 
     def until(self) -> float:
         """The time (``time.monotonic``) at which waiting ends; the first call
@@ -78,15 +106,19 @@ class Wait:
         return self._deadline
 
 
-def patient(wait: Wait, path, action: Callable[[], _T]) -> _T:
-    """*action*'s result, tried again on Windows until *wait* ends while the file
-    *path* is held. Raises :class:`Held` when it still is, or may not be used."""
+def patient(wait: Wait, path, action: Callable[[], _T], why: str = "") -> _T:
+    """*action*'s result, tried again until *wait* ends while the file *path* is
+    held (Windows) or locked. Raises :class:`Held`, with *why* for what the system
+    says, when it still is, or may not be used."""
     while True:
         try:
             return action()
-        except PermissionError as e:
-            if os.name != "nt" or time.monotonic() >= wait.until():
-                raise Held(path, e.strerror or e) from e
+        except (PermissionError, BlockingIOError) as e:
+            may_end = os.name == "nt" or isinstance(e, BlockingIOError)
+            if not may_end or time.monotonic() >= wait.until():
+                held = Held(path, why or e.strerror or e)
+                if not may_end or not wait.again(held):
+                    raise held from e
             time.sleep(_RETRY_S)
 
 
@@ -245,15 +277,20 @@ def flush_files(paths: Iterable, wait: Optional[Wait] = None) -> None:
     one cannot be opened within *wait*, OSError otherwise."""
     wait = wait or Wait()
 
-    def one(path) -> None:
+    def one(path):
         st = os.lstat(path)
         if is_link(st) or (os.name == "nt" and not st.st_mode & stat.S_IWRITE):
-            return
-        patient(wait, path, lambda: _flush(path))
+            return None
+        try:
+            _flush(path)
+        except PermissionError:
+            return path
+        return None
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        for _ in pool.map(one, paths):
-            pass
+        held = [path for path in pool.map(one, paths) if path is not None]
+    for path in held:
+        patient(wait, path, partial(_flush, path))
 
 
 def replace_through(src: Path, dst: Path) -> None:
@@ -332,7 +369,7 @@ def read_file(path: Path, limit: int) -> Optional[bytes]:
             return None
         except OSError as e:
             if time.monotonic() >= deadline:
-                raise Blocked(f"{path} cannot be read ({e}){_holders(path)}") from e
+                raise Blocked(path, e) from e
             time.sleep(_RETRY_S)
 
 
@@ -414,6 +451,12 @@ def copy_whole(src: Path, dst: Path, wait: Wait) -> None:
     if os.name == "nt":   # a read-only file cannot be flushed there
         shutil.copystat(src, tmp, follow_symlinks=False)
     patient(wait, dst, lambda: replace_through(tmp, dst))
+
+
+def clear(folder: Path, wait: Wait) -> None:
+    """Remove *folder* when it is empty. Raises :class:`Held` or OSError."""
+    if not os.listdir(folder):
+        patient(wait, folder, lambda: os.rmdir(folder))
 
 
 def prune(folder: Path, stop: Path) -> None:

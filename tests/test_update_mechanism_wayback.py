@@ -8,6 +8,8 @@ import errno
 import json
 import os
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -16,7 +18,8 @@ from localm.update_mechanism import disk, job, mover, packages
 from tests import _update_mechanism as um
 from tests import _update_mechanism_venv as uv
 from tests._update_mechanism_venv import ALPHA1, ALPHA2, BETA, GAMMA, ID, SITE
-from tests.test_update_mechanism_safety import planned, to_starting
+from tests._held_file import held
+from tests.test_update_mechanism_safety import planned, to_starting, windows_only
 
 OTHER_ID = "f" * 32
 #: A version of alpha that is neither the old nor the new one.
@@ -737,13 +740,164 @@ def test_a_uv_at_work_in_the_venv_stops_the_step_before_any_move(root):
     fd = disk.open_lock(root / ".venv" / ".lock")
     disk.lock_file(fd)
     try:
-        with pytest.raises(mover.StepFailed, match="uv is at work"):
+        with pytest.raises(mover.StepFailed, match="uv is at work") as e:
             uv.forward(root, plan, wait_s=0.1)
-        assert uv.undo(root, wait_s=0.1).state == "failed"
+        result = uv.undo(root, wait_s=0.1)
+        assert result.state == "failed"
+        for said in (e.value.held, result.held):
+            assert [Path(h.path).name for h in said] == [".lock"]
+            if os.name == "nt" or sys.platform == "linux":
+                assert os.getpid() in [p["pid"] for p in said[0].holders]
     finally:
         os.close(fd)
     assert uv.tree(root) == before
     assert uv.undo(root).state == "old" and uv.tree(root) == before
+
+
+# ------------------------------------------------- held files and who holds them
+
+IN_USE = ["localm/changed.py", "localm.bat", "localm/gone.py", f".venv/{SITE}/alpha/data.txt",
+          f".venv/{SITE}/alpha/old.py", f".localm-update/{ID}/new/localm/added.py",
+          f".venv/.localm-old/{ID}/stage/{SITE}/alpha/new.py"]
+
+
+def step(root: Path, rel: str):
+    """``(plan, forward)`` of the step that moves *rel*."""
+    if ".venv" in rel:
+        uv.begun(root)
+        return uv.package_step(root), lambda plan, **kw: uv.forward(root, plan, **kw)
+    return planned(root), lambda plan, **kw: mover.forward(root, ID, plan, **kw)
+
+
+def check_held(found: list, rel: str) -> None:
+    assert found and all(Path(h.path).name == Path(rel).name for h in found), found
+    assert [h["pid"] for h in found[0].holders] == [os.getpid()] and found[0].holders[0]["name"]
+
+
+@windows_only
+@pytest.mark.parametrize("rel", IN_USE)
+def test_a_held_file_is_asked_about_and_the_step_goes_on_once_it_is_free(root, rel):
+    plan, forward = step(root, rel)
+    asked: list = []
+    block = held(root / rel, share=1)
+    block.__enter__()
+
+    def ask(h) -> bool:
+        asked.append(h)
+        if len(asked) == 2:
+            block.__exit__(None, None, None)
+        return True
+    forward(plan, wait_s=0.1, ask=ask)
+    assert len(asked) == 2
+    check_held(asked, rel)
+    assert uv.undo(root).state == "old"
+
+
+@windows_only
+@pytest.mark.parametrize("rel", IN_USE)
+def test_after_no_everything_is_back_and_the_same_plan_goes_again(root, rel):
+    before = uv.tree(root)
+    plan, forward = step(root, rel)
+    asked: list = []
+    with held(root / rel, share=1):
+        with pytest.raises(mover.StepFailed) as e:
+            forward(plan, wait_s=0.1, ask=lambda h: asked.append(h))
+    assert len(asked) == 1 and e.value.errors == []
+    check_held(e.value.held, rel)
+    assert uv.tree(root) == before
+    forward(plan)
+    assert uv.tree(root) != before
+    assert uv.undo(root).state == "old" and uv.tree(root) == before
+
+
+@windows_only
+@pytest.mark.parametrize("rel", ["localm/changed.py", "localm.bat", "localm/added.py",
+                                 f".venv/{SITE}/alpha/data.txt"])
+def test_a_file_held_on_the_way_back_is_asked_about_and_named(root, rel):
+    before = uv.tree(root)
+    plan, forward = step(root, rel)
+    forward(plan)
+    asked: list = []
+    with held(root / rel, share=1):
+        result = uv.undo(root, wait_s=0.1)
+        assert result.state == "failed"
+        check_held(result.held, rel)
+        assert uv.undo(root, wait_s=0.1, ask=lambda h: asked.append(h)).state == "failed"
+        assert len(asked) == 1
+    block = held(root / rel, share=1)
+    block.__enter__()
+
+    def ask(h) -> bool:
+        block.__exit__(None, None, None)
+        return True
+    result = uv.undo(root, wait_s=0.1, ask=ask)
+    assert (result.state, result.errors, result.held) == ("old", [], [])
+    assert uv.tree(root) == before
+
+
+@windows_only
+def test_an_edited_file_held_at_the_end_is_asked_about_and_named(root, monkeypatch):
+    (root / "localm" / "changed.py").write_bytes(b"MINE")
+    mover.forward(root, ID, planned(root))
+    to_starting(root)
+    monkeypatch.setattr(disk, "HELD_WAIT_S", 0.1)
+    old = root / ".localm-update" / ID / "old" / "localm" / "changed.py"
+    asked: list = []
+    with job.Lock(root) as lock, held(old):
+        result = job.finish(lock, ask=lambda h: asked.append(h))
+    assert result.state == "new" and len(asked) == 1
+    check_held(result.held, "changed.py")
+
+
+@windows_only
+def test_a_record_that_cannot_be_read_names_its_holder(root, monkeypatch):
+    mover.forward(root, ID, planned(root))
+    monkeypatch.setattr(disk, "READ_WAIT_S", 0.1)
+    with held(root / ".localm-update" / "job.json", exclusive=True):
+        with pytest.raises(job.Held) as e:
+            uv.undo(root)
+    check_held([e.value], "job.json")
+    assert uv.undo(root).state == "old"
+
+
+@windows_only
+@pytest.mark.parametrize("way", ["there", "back"])
+def test_a_program_that_stands_in_a_folder_in_the_way_is_asked_about(root, way):
+    """Its working folder becomes a file, or comes back as one."""
+    before = uv.tree(root)
+    plan = planned(root)
+    if way == "back":
+        mover.forward(root, ID, plan)
+    inside = root / "localm" / ("other" if way == "there" else "thing")
+    program = subprocess.Popen([um.PYTHON, "-I", "-S", "-c", "input()"], cwd=inside,
+                               stdin=subprocess.PIPE, **um.NO_WINDOW)
+    asked: list = []
+
+    def ask(h) -> bool:
+        asked.append(h)
+        program.communicate(b"\n", timeout=30)
+        return True
+    try:
+        if way == "there":
+            mover.forward(root, ID, plan, wait_s=0.2, ask=ask)
+            assert (root / "localm" / "other").read_bytes() == um.NEW["localm/other"].encode()
+        result = uv.undo(root, wait_s=0.2, ask=ask)
+    finally:
+        program.kill()
+        program.wait(timeout=30)
+    assert [Path(h.path) for h in asked] == [disk.long_path(inside)]
+    assert (result.state, result.errors) == ("old", []) and uv.tree(root) == before
+
+
+@windows_only
+def test_a_staged_file_in_use_is_named_when_packages_are_staged_anew(root):
+    uv.begun(root)
+    uv.stage(root, ["alpha"], [ALPHA2])
+    path = packages.stage_folder(root, ID) / SITE / "alpha" / "new.py"
+    said = (0, "Would uninstall 1 package\nWould install 1 package\n - alpha==1.0\n + alpha==2.0\n", "")
+    with held(path), pytest.raises(disk.Held) as e:
+        packages.stage_packages(root, ID, ["uv", "sync"], env={}, run=lambda *a: said[:2])
+    check_held([e.value], "new.py")
 
 
 # ------------------------------------------ killed, then the user does something

@@ -18,6 +18,7 @@ import re
 import stat
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, field, fields
+from functools import partial
 from pathlib import Path
 from typing import Optional
 
@@ -52,22 +53,34 @@ class Unreadable(Exception):
 class Outcome:
     """What a way back left. *errors*: one line per file that is not as it was
     before the step; *notes*: lines on files of somebody else that were found;
-    *kept*: the paths moved to the *kept* folder."""
+    *kept*: the paths moved to the *kept* folder; *held*: each :class:`.disk.Held`
+    behind an error."""
     errors: list = field(default_factory=list)
     notes: list = field(default_factory=list)
     kept: list = field(default_factory=list)
+    held: list = field(default_factory=list)
+
+    def fail(self, e: BaseException) -> None:
+        """Take note of the error *e*."""
+        self.errors.append(str(e))
+        if isinstance(e, Held):
+            self.held.append(e)
 
 
 class StepFailed(Exception):
     """A step failed and its files were moved back.
 
     *reason* says why. *errors* names every file that could not be put back; the
-    install is as it was before the step only when it is empty. *notes* names the
-    files of somebody else that were found."""
+    install is as it was before the step only when it is empty; then the step can be
+    made again with the same plan. *notes* names the files of somebody else that were
+    found, *held* has each :class:`.disk.Held` that stopped the step or its way
+    back."""
 
-    def __init__(self, reason: str, outcome: Optional[Outcome] = None) -> None:
+    def __init__(self, cause: BaseException, outcome: Optional[Outcome] = None) -> None:
         outcome = outcome or Outcome()
+        reason = str(cause) or type(cause).__name__
         self.reason, self.errors, self.notes = reason, outcome.errors, outcome.notes
+        self.held = [*([cause] if isinstance(cause, Held) else []), *outcome.held]
         super().__init__("; ".join([reason, *self.errors]))
 
 
@@ -194,9 +207,9 @@ class Area:
     def _is_twin(self, rel: str) -> bool:
         return bool(self._twins) and rel.casefold() in self._twins
 
-    def respell(self, rel: str) -> None:
+    def respell(self, rel: str, wait: Wait) -> None:
         """Give each folder above *rel* in *base* the spelling it has in *rel*, where
-        :meth:`watch` saw another one. Raises OSError."""
+        :meth:`watch` saw another one. Raises :class:`.disk.Held` or OSError."""
         parts = rel.split("/")
         for i in range(1, len(parts) if self._twins else 0):
             path = self.base.joinpath(*parts[:i])
@@ -205,7 +218,7 @@ class Area:
                 continue
             for name in os.listdir(path.parent):
                 if name.casefold() == path.name.casefold():
-                    os.rename(path.with_name(name), path)
+                    disk.patient(wait, path, partial(os.rename, path.with_name(name), path))
 
     def prune(self, folder: Path) -> None:
         """Remove *folder* and the folders above it while each is empty, except
@@ -636,17 +649,19 @@ def _created(a: Area, ops: list) -> list:
 # -------------------------------------------------------------- the way there
 
 def forward(root, update_id: str, plan: Plan, *, wait_s: Optional[float] = None,
+            ask: Optional[disk.Ask] = None,
             then: Optional[Callable[[Area], None]] = None,
             back: Optional[Callable[..., Outcome]] = None) -> None:
     """Make the moves of *plan*, which is already on disk (:func:`write_plan`), check
-    every file and call *then*. Raises :class:`StepFailed`, with everything moved
+    every file and call *then*. *ask* is called about a file that is still held after
+    *wait_s*; while it returns True the step waits on. Raises :class:`StepFailed`, with everything moved
     back (by *back*, :func:`back` by default), for any exception on the way,
     KeyboardInterrupt included: a move that fails, a held file, a file that is not
     what the plan says."""
     a = area(root, update_id, plan.step)
     a.watch(op.path for op in plan.ops)
     try:
-        wait = Wait(wait_s)
+        wait = Wait(wait_s, ask)
         disk.flush_files([a.beside(a.new, op.path)[0] for op in plan.ops if op.new], wait)
         with Marks(root, update_id, plan) as marks:
             _go(a, plan, wait, marks)
@@ -656,8 +671,8 @@ def forward(root, update_id: str, plan: Plan, *, wait_s: Optional[float] = None,
         if then is not None:
             then(a)
     except BaseException as e:
-        reason = str(e) or type(e).__name__
-        raise StepFailed(reason, (back or _back)(root, update_id, plan, wait_s=wait_s)) from e
+        out = (back or _back)(root, update_id, plan, wait_s=wait_s, ask=ask)
+        raise StepFailed(e, out) from e
 
 
 def _go(a: Area, plan: Plan, wait: Wait, marks: Marks) -> None:
@@ -698,7 +713,9 @@ def _go(a: Area, plan: Plan, wait: Wait, marks: Marks) -> None:
             path, st = a.find(op.path)
             if st is not None and _is_folder(st):
                 a.prune(path)
-            a.respell(op.path)
+                if disk.lstat(path) is not None:
+                    disk.clear(path, wait)
+            a.respell(op.path, wait)
             disk.move(a.beside(a.new, op.path)[0], path, wait)
 
 
@@ -746,7 +763,7 @@ def unfinished(root, update_id: str, plan: Plan, *, made: bool) -> Optional[str]
 # --------------------------------------------------------------- the way back
 
 def back(root, update_id: str, plan: Plan, *, wait_s: Optional[float] = None,
-         out: Optional[Outcome] = None, users: Optional[Mapping] = None,
+         ask: Optional[disk.Ask] = None, out: Optional[Outcome] = None, users: Optional[Mapping] = None,
          heal: Optional[Callable[[str, list, Callable], Optional[str]]] = None) -> Outcome:
     """Put back what *plan* replaced and take out what it added, from what is on
     disk now, and check every file. Safe to repeat, and to run on a plan of which
@@ -772,11 +789,11 @@ def back(root, update_id: str, plan: Plan, *, wait_s: Optional[float] = None,
                 out.notes.append(f"{a.base} was removed or made anew by somebody and stays as it "
                                  "is.")
             else:
-                _Back(a, plan, Wait(wait_s), out, marks, users, heal).run()
+                _Back(a, plan, Wait(wait_s, ask), out, marks, users, heal).run()
             with contextlib.suppress(OSError, Held):   # a file without a mark is still looked at
                 marks.settle("." if out.errors else "=")
-    except (OSError, Held, Unsafe, Unreadable, disk.Blocked) as e:
-        out.errors.append(str(e))
+    except (OSError, Held, Unsafe, Unreadable) as e:
+        out.fail(e)
     if out.kept:
         out.notes.append(f"Files of neither version are in {kept}: {_some(out.kept)}.")
     return out
@@ -836,11 +853,11 @@ class _Back:
         try:
             action(op)
         except (OSError, Held, Unsafe, Refused) as e:
-            self._fail(op, str(e))
+            self._fail(op, e)
 
-    def _fail(self, op: Op, why: str) -> None:
+    def _fail(self, op: Op, why: Exception) -> None:
         self.failed.add(op.path)
-        self.out.errors.append(why)
+        self.out.fail(why)
 
     def _mark(self, sign: str, op: Op) -> None:
         with contextlib.suppress(OSError, Held):   # a file without a mark is still looked at
@@ -916,8 +933,8 @@ class _Back:
         elif op.dist and self.heal:
             self.failed.add(op.path)
         else:
-            self._fail(op, f"{op.path}: its old version is lost. Put that version of the file back "
-                           "in its place.")
+            self._fail(op, Refused(f"{op.path}: its old version is lost. Put that version of the "
+                                   "file back in its place."))
 
     def _leave(self, op: Op) -> None:
         self.left.add(op.path)
@@ -966,6 +983,8 @@ class _Back:
                     aside(self.a, Op(inner, REMOVE), path, self.wait, self.out)
         for folder, _dirs, _names in os.walk(base, topdown=False):
             self.a.prune(Path(folder))
+        if disk.lstat(base) is not None:
+            disk.clear(base, self.wait)
 
     def _prune_created(self, op: Op, created: frozenset) -> None:
         parent = op.path.rpartition("/")[0]
@@ -979,7 +998,7 @@ class _Back:
         source = self.sources.get(op.path)
         if source is None or op.old is None:
             return
-        self.a.respell(op.path)
+        self.a.respell(op.path, self.wait)
         path, st = self.a.find(op.path)
         if st is not None and _is_folder(st):
             self._clear_folder(op.path)
@@ -991,6 +1010,9 @@ class _Back:
             elif not disk.same(path, op.old, self.wait):
                 if op.new is None or not disk.same(path, op.new, self.wait):
                     aside(self.a, op, path, self.wait, self.out)
+                else:
+                    with contextlib.suppress(OSError, Held):   # only a second try needs it
+                        disk.copy_whole(path, self.a.beside(self.a.new, op.path)[0], Wait(0))
                 disk.put_over(source, path, self.wait)
             elif st.st_mode != os.lstat(source).st_mode:
                 disk.put_over(source, path, self.wait)

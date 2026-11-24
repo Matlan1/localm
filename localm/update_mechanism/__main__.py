@@ -53,7 +53,7 @@ def main(argv) -> int:
     except job.Busy as e:
         print(str(e), file=sys.stderr)
         return 3
-    except (job.Unreadable, job.Unsafe, job.Held, job.Blocked, OSError) as e:
+    except (job.Unreadable, job.Unsafe, job.Held, OSError) as e:
         print(f"The interrupted update could not be undone: {e}", file=sys.stderr)
         return 1
     for line in result.notes:
