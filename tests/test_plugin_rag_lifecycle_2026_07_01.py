@@ -142,6 +142,9 @@ def test_rag_add_embed_flag_passes_embed_fn(env, monkeypatch):
         def exists(self):
             return True
 
+        def stats(self):
+            return {"has_vectors": False}
+
         def create(self):
             pass
 
@@ -179,6 +182,9 @@ def _fake_repair_collection(monkeypatch, ragcli, *, has_vectors, captured):
         @property
         def corrupt(self):
             return False
+
+        def exists(self):
+            return True
 
         def documents(self):
             return ["/x/a.txt"]

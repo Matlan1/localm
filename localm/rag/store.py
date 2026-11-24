@@ -335,11 +335,13 @@ class Collection(_CollectionFiles, _CollectionSidecar, _CollectionIndexing,
                   force: bool = False,
                   model_name: Optional[str] = None) -> dict:
         """
-        Index files/folders. Unchanged files (same mtime+size+content hash) are
-        skipped; changed ones are re-indexed in place. Pass ``force=True`` to
-        re-index every file regardless (``localm rag add --force`` / repair).
-        Returns counters plus per-file failures. embed_fn failures degrade to
-        lexical-only, never abort.
+        Index files/folders. Unchanged files (same size and content hash,
+        whatever the mtime) are skipped; changed ones are re-indexed in place.
+        Pass ``force=True`` to re-index every file regardless
+        (``localm rag add --force`` / repair). Returns counters plus per-file
+        failures, and ``not_found``: the named paths that are neither a file
+        nor a folder any more. embed_fn failures degrade to lexical-only,
+        never abort.
 
         When *policy* is given (the HTTP API passes ``indexing_policy()``), an
         out-of-bounds top-level path raises ``ValueError`` and nested escapes are

@@ -39,6 +39,17 @@ localm rag rm-doc manuals D:\docs\printer-manual.pdf   # drop one document (file
 localm rag rm manuals                           # delete the whole collection (files kept)
 ```
 
+Re-adding a file skips it when its content is unchanged, even if its modified
+time moved. `rag add --force` re-indexes regardless; on a collection that has
+embeddings, without `--embed`, that would drop them for every re-indexed
+document, so it asks first, as `rag repair` does (`--yes` accepts the drop, and
+with no terminal to answer the embeddings are kept by re-embedding).
+
+`rag repair` and `rag resync` say so when a document's source file is gone:
+`repair` lists the vanished sources and leaves their chunks in the index,
+`resync` flags them as missing on every run until the file returns or
+`--prune-missing` removes them.
+
 `rag rm-doc` matches PATH against the index's stored key exactly, so copy it
 from `rag docs`'s own output rather than retyping it - a path that is
 otherwise equivalent but spelled differently (forward vs backward slashes, a

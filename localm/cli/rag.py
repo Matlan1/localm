@@ -39,6 +39,79 @@ def _refuse_bad_path(console):
         sys.exit(1)
 
 
+def _require_collection(console, coll, name):
+    """Print "No such collection" and exit 1 when *coll* does not exist."""
+    from rich.markup import escape
+    if not coll.exists():
+        console.print(f"[red]No such collection:[/red] {escape(name)}")
+        sys.exit(1)
+
+
+def _guard_vector_loss(console, coll, name, *, embed, yes, doing, doing_short):
+    """Warn and ask before a re-index drops the embeddings *name* has.
+
+    Returns the ``embed`` flag to use. With no vectors, ``--embed`` or ``--yes``
+    nothing is asked. Answering no aborts. With no one to answer (no terminal)
+    the embeddings are kept by re-embedding, never dropped silently and never
+    refused. *doing* names the action in the warning, *doing_short* in the
+    non-interactive note."""
+    from rich.markup import escape
+    if embed or yes or not coll.stats().get("has_vectors"):
+        return embed
+    console.print(
+        f"[yellow]'{escape(name)}' currently has semantic (hybrid) search. "
+        f"{doing} without --embed will REMOVE the existing embeddings for "
+        "every re-indexed document (it goes back to BM25/lexical-only).[/yellow]")
+    # NOT `abort=True`: that collapses "the user answered no" and "there
+    # was no user to answer" into the same Abort. Without it, an explicit
+    # "no" RETURNS False while EOF still raises Abort, so the two stay
+    # separable.
+    try:
+        proceed = click.confirm("Continue and drop the embeddings?")
+    except click.Abort:
+        console.print(
+            "[yellow]Not an interactive terminal, so nothing can answer that. "
+            f"{doing_short} WITH embeddings so they are not lost - pass --yes to "
+            "continue lexical-only instead, or --embed to silence this.[/yellow]")
+        return True
+    if not proceed:
+        raise click.Abort()
+    return embed
+
+
+def _note_vector_gap(console, name, *, had_vectors, embedded, result):
+    """Say so when documents were indexed without embeddings into a collection
+    that has them: semantic search then covers fewer of its chunks."""
+    from rich.markup import escape
+    n = result["added"] + result["updated"]
+    if embedded or not had_vectors or not n:
+        return
+    console.print(
+        f"[yellow]{n} document(s) were indexed without embeddings into "
+        f"'{escape(name)}', which has them, so semantic search covers fewer of its "
+        f"chunks. Close the gap with 'localm rag repair {escape(name)} --embed'.[/yellow]")
+
+
+def _report_not_found(console, name, result):
+    """Say which named paths no longer exist, and what to do about the
+    documents indexed from them."""
+    from rich.markup import escape
+    gone = result.get("not_found") or []
+    if not gone:
+        return
+    console.print(
+        f"[yellow]{len(gone)} named path(s) no longer exist on disk and were not "
+        f"re-indexed; anything already indexed from them is still in "
+        f"'{escape(name)}'.[/yellow]")
+    for p in gone[:10]:
+        console.print(f"  [yellow]gone:[/yellow] {escape(p)}")
+    if len(gone) > 10:
+        console.print(f"  [yellow]... and {len(gone) - 10} more[/yellow]")
+    console.print(
+        f"[yellow]'localm rag resync {escape(name)}' flags them as missing, "
+        f"'localm rag rm-doc {escape(name)} <path>' removes one.[/yellow]")
+
+
 def _discard_if_empty(console, name):
     """Remove collection *name* when it holds no documents, after a refused
     first add left it behind. Says so when it cannot."""
@@ -73,6 +146,7 @@ def rag_list():
     from rich.markup import escape
 
     from ..rag import Collection, collection_names
+    from ..rag._store.indexing import count_noun
     console = Console()
     names = collection_names()
     if not names:
@@ -84,8 +158,8 @@ def rag_list():
         retrieval = "hybrid" if s["has_vectors"] else "BM25"
         marker = ("  [yellow](corrupt index - run 'localm rag repair')[/yellow]"
                   if s.get("corrupt") else "")
-        console.print(f"[cyan]{escape(n)}[/cyan]  {s['n_docs']} docs · "
-                      f"{s['n_chunks']} chunks · {retrieval}{marker}")
+        console.print(f"[cyan]{escape(n)}[/cyan]  {count_noun(s['n_docs'], 'doc')} · "
+                      f"{count_noun(s['n_chunks'], 'chunk')} · {retrieval}{marker}")
 
 
 
@@ -94,7 +168,10 @@ def rag_list():
 @click.argument("collection")
 @click.argument("paths", nargs=-1, required=True)
 @click.option("--force", is_flag=True,
-              help="Re-index even unchanged files (rebuild stale entries).")
+              help="Re-index even unchanged files (rebuild stale entries). On a "
+                   "collection that has embeddings, without --embed this REMOVES "
+                   "them for every re-indexed document (you will be asked to "
+                   "confirm).")
 @click.option("--embed", is_flag=True,
               help="Also compute embeddings at index time via a running localm "
                    "server, for hybrid (vector+lexical) retrieval - matching the "
@@ -102,13 +179,21 @@ def rag_list():
 @click.option("--url", default=None,
               help="Server base URL for --embed (default: auto-discover a running "
                    "instance, else the configured port on localhost).")
-def rag_add(collection, paths, force, embed, url):
+@click.option("-y", "--yes", is_flag=True,
+              help="Skip the embeddings-loss confirmation of --force.")
+def rag_add(collection, paths, force, embed, url, yes):
     """Index files/folders into COLLECTION (created if missing).
 
     Folders are indexed recursively (txt/md/pdf/docx/html/code). Unchanged
-    files (same content) are skipped; changed ones are re-indexed. Use --force
-    to re-index regardless. By default CLI indexing is lexical-only; pass --embed
-    to add embeddings via a running server, matching the GUI.
+    files (same content) are skipped, whatever their modified time; changed
+    ones are re-indexed. Use --force to re-index regardless. By default CLI
+    indexing is lexical-only; pass --embed to add embeddings via a running
+    server, matching the GUI.
+
+    --force on a collection that HAS embeddings, without --embed, would drop
+    them for every re-indexed document, so you are asked first. Run
+    non-interactively there is nothing to answer, so the embeddings are kept by
+    re-embedding; pass --yes to accept the drop.
 
     \b
     Examples:
@@ -130,7 +215,13 @@ def rag_add(collection, paths, force, embed, url):
             console.print(f"[red]Path does not exist: {escape(p)}[/red]")
         console.print("[red]Nothing was added.[/red]")
         sys.exit(1)
+    from ..rag._store.indexing import count_noun
     coll = run_or_die(Collection, collection)
+    had_vectors = bool(coll.exists() and coll.stats().get("has_vectors"))
+    if force:
+        embed = _guard_vector_loss(
+            console, coll, collection, embed=embed, yes=yes,
+            doing="Re-indexing with --force", doing_short="Re-indexing")
     embed_fn = _cli_rag_embed_fn(url) if embed else None
     # The configured embedding model's name, so a fresh collection ends up with
     # embedding_model() on record. None (never embedded) is fine: the store only
@@ -154,7 +245,11 @@ def rag_add(collection, paths, force, embed, url):
             raise
     console.print(f"[green]{result['added']} added, {result['updated']} updated, "
                   f"{result['skipped']} unchanged[/green] - "
-                  f"{result['chunks']} chunks in '{escape(collection)}'")
+                  f"{count_noun(result['chunks'], 'chunk')} in '{escape(collection)}'")
+    _report_not_found(console, collection, result)
+    if not force:
+        _note_vector_gap(console, collection, had_vectors=had_vectors,
+                         embedded=embed, result=result)
     _report_add_paths_result(result)
 
 
@@ -191,8 +286,10 @@ def rag_repair(collection, embed, url, yes):
 
     from ..rag import Collection
     from .errors import _report_add_paths_result, run_or_die
+    from ..rag._store.indexing import count_noun
     console = Console()
     coll = run_or_die(Collection, collection)
+    _require_collection(console, coll, collection)
     paths = coll.documents()
     if not paths:
         if coll.corrupt:
@@ -245,28 +342,8 @@ def rag_repair(collection, embed, url, yes):
     # A repair is force=True on every doc: without --embed, every re-indexed
     # chunk gets NO vector, dropping a collection that currently has semantic
     # search back to BM25-only. Surface that and require an explicit yes.
-    if not embed and coll.stats().get("has_vectors") and not yes:
-        console.print(
-            f"[yellow]'{escape(collection)}' currently has semantic (hybrid) search. "
-            "Repairing without --embed will REMOVE the existing embeddings for "
-            "every re-indexed document (it goes back to BM25/lexical-only).[/yellow]")
-        # NOT `abort=True`: that collapses "the user answered no" and "there
-        # was no user to answer" into the same Abort. Without it, an explicit
-        # "no" RETURNS False while EOF still raises Abort, so the two stay
-        # separable.
-        try:
-            proceed = click.confirm("Continue and drop the embeddings?")
-        except click.Abort:
-            # Nobody was there to answer: keep the embeddings the collection
-            # already has, say so, and let the repair run (exit 0).
-            console.print(
-                "[yellow]Not an interactive terminal, so nothing can answer that. "
-                "Repairing WITH embeddings so they are not lost - pass --yes to "
-                "repair lexical-only instead, or --embed to silence this.[/yellow]")
-            embed = True
-        else:
-            if not proceed:
-                raise click.Abort()
+    embed = _guard_vector_loss(console, coll, collection, embed=embed, yes=yes,
+                               doing="Repairing", doing_short="Repairing")
     embed_fn = _cli_rag_embed_fn(url) if embed else None
     # See `rag add`: record the model this repair actually re-embeds with.
     model_name = None
@@ -281,7 +358,8 @@ def rag_repair(collection, embed, url, yes):
             on_progress=lambda t, **_: console.print(f"  [dim]{escape(t)}[/dim]"))
     console.print(f"[green]repaired: {result['updated']} re-indexed, "
                   f"{result['added']} added[/green] - "
-                  f"{result['chunks']} chunks in '{escape(collection)}'")
+                  f"{count_noun(result['chunks'], 'chunk')} in '{escape(collection)}'")
+    _report_not_found(console, collection, result)
     _report_add_paths_result(result)
 
 
@@ -323,11 +401,11 @@ def rag_resync(collection, embed, url, prune_missing):
 
     from ..rag import Collection
     from .errors import _report_add_paths_result, run_or_die
+    from ..rag._store.indexing import count_noun
     console = Console()
     coll = run_or_die(Collection, collection)
-    if not coll.exists():
-        console.print(f"[red]No such collection:[/red] {escape(collection)}")
-        sys.exit(1)
+    _require_collection(console, coll, collection)
+    had_vectors = bool(coll.stats().get("has_vectors"))
     if not coll.roots():
         # Not an error: with no folder to re-walk, a re-sync can only refresh
         # the files it already knows, so say that rather than reporting a bare
@@ -356,18 +434,22 @@ def rag_resync(collection, embed, url, prune_missing):
             on_progress=lambda t, **_: console.print(f"  [dim]{escape(t)}[/dim]"))
     console.print(f"[green]{result['added']} added, {result['updated']} updated, "
                   f"{result['skipped']} unchanged[/green] - "
-                  f"{result['chunks']} chunks in '{escape(collection)}' over "
+                  f"{count_noun(result['chunks'], 'chunk')} in '{escape(collection)}' over "
                   f"{len(result['roots'])} folder(s)")
     if result["restored"]:
         console.print(f"[green]{len(result['restored'])} previously missing "
                       f"document(s) are back.[/green]")
-    if result["missing"]:
+    still_gone = sorted(set(result["missing"]) | set(result["still_missing"]))
+    if still_gone:
         console.print(
-            f"[yellow]{len(result['missing'])} document(s) are no longer on "
+            f"[yellow]{len(still_gone)} document(s) are no longer on "
             f"disk. They are flagged, NOT removed - re-run with --prune-missing "
             f"to delete them from the index:[/yellow]")
-        for p in result["missing"][:10]:
+        for p in still_gone[:10]:
             console.print(f"  [yellow]missing:[/yellow] {escape(p)}")
+        if len(still_gone) > 10:
+            console.print(f"  [yellow]... and {len(still_gone) - 10} more "
+                          f"(see 'localm rag docs {escape(collection)}')[/yellow]")
     if result["pruned"]:
         console.print(f"[yellow]pruned {len(result['pruned'])} entr"
                       f"{'y' if len(result['pruned']) == 1 else 'ies'} (file gone "
@@ -383,6 +465,8 @@ def rag_resync(collection, embed, url, prune_missing):
             f"{escape(result['vector_degrade_reason'])}. The stored vector index was "
             f"left in place, not deleted - rebuild it with "
             f"'localm rag repair {escape(collection)} --embed'.[/yellow]")
+    _note_vector_gap(console, collection, had_vectors=had_vectors,
+                     embedded=embed, result=result)
     _report_add_paths_result(result)
 
 
@@ -408,11 +492,11 @@ def rag_reembed(collection, url, yes):
     from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
     from localm.rag.store import Collection
 
+    from localm.rag._store.indexing import count_noun
+
     console = Console()
     coll = Collection(collection)
-    if not coll.exists():
-        console.print(f"[red]No collection named '{escape(collection)}'.[/red]")
-        raise SystemExit(1)
+    _require_collection(console, coll, collection)
 
     n = len(coll._chunks)
     if not n:
@@ -421,7 +505,7 @@ def rag_reembed(collection, url, yes):
     model = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL).strip()
     was = coll.embedding_model()
     console.print(
-        f"Re-embedding [bold]{escape(collection)}[/bold]: {n} chunks"
+        f"Re-embedding [bold]{escape(collection)}[/bold]: {count_noun(n, 'chunk')}"
         + (f", built with {escape(was)}" if was else "")
         + f" -> {escape(model)}.")
     if not yes and not click.confirm("  Proceed?", default=True):
@@ -439,7 +523,7 @@ def rag_reembed(collection, url, yes):
             console.print("[dim]The previous index was left untouched.[/dim]")
             raise SystemExit(1) from e
     console.print(
-        f"[green]Done.[/green] {res['chunks']} chunks re-embedded at "
+        f"[green]Done.[/green] {count_noun(res['chunks'], 'chunk')} re-embedded at "
         f"{res['dim']} dimensions with {escape(model)}.")
 
 
@@ -531,9 +615,7 @@ def rag_query(collection, text, k, embed, url, relevant_only, rerank, context):
     from ..rag import Collection
     console = Console()
     coll = Collection(collection)
-    if not coll.exists():
-        console.print(f"[red]No such collection:[/red] {escape(collection)}")
-        sys.exit(1)
+    _require_collection(console, coll, collection)
     embed_fn = _cli_rag_embed_fn(url) if embed else None
     from ..rag.rerank import rerank_plan
     plan = rerank_plan(enabled=rerank)
@@ -583,9 +665,7 @@ def rag_docs(collection):
     from .errors import run_or_die
     console = Console()
     coll = run_or_die(Collection, collection)
-    if not coll.exists():
-        console.print(f"[red]No such collection:[/red] {escape(collection)}")
-        sys.exit(1)
+    _require_collection(console, coll, collection)
     docs = coll.docs()
     if not docs:
         console.print(f"[dim]'{escape(collection)}' has no indexed documents.[/dim]")
@@ -617,9 +697,7 @@ def rag_rm_doc(collection, path):
     from .errors import run_or_die
     console = Console()
     coll = run_or_die(Collection, collection)
-    if not coll.exists():
-        console.print(f"[red]No such collection:[/red] {escape(collection)}")
-        sys.exit(1)
+    _require_collection(console, coll, collection)
     with _refuse_if_locked(console):
         if coll.remove_doc(path):
             console.print(f"[green]Removed '{escape(path)}' from '{escape(collection)}'.[/green]")
