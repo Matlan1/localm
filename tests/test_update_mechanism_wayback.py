@@ -887,6 +887,18 @@ def test_a_program_that_stands_in_a_folder_in_the_way_is_asked_about(root, way):
         program.wait(timeout=30)
     assert [Path(h.path) for h in asked] == [disk.long_path(inside)]
     assert (result.state, result.errors) == ("old", []) and uv.tree(root) == before
+    assert not (root / ".localm-update" / "kept").exists()
+
+
+@windows_only
+def test_one_no_is_not_asked_again_for_the_next_file_of_the_same_run(root):
+    plan = planned(root)
+    mover.forward(root, ID, plan)
+    asked: list = []
+    with held(root / "localm" / "changed.py"), held(root / "localm" / "added.py"):
+        result = uv.undo(root, wait_s=0.1, ask=lambda h: asked.append(h))
+    assert len(asked) == 1 and len(result.held) == 2 and result.state == "failed"
+    assert uv.undo(root).state == "old"
 
 
 @windows_only
