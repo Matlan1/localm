@@ -589,21 +589,27 @@ def _announced_step(text: str) -> str:
 
 
 def _dedupe_calls(calls: list) -> tuple[list, int]:
-    """``(calls, dropped)``: *calls* with every call whose name and arguments
-    equal an earlier call's removed, in order, and how many were removed."""
+    """``(calls, dropped)``: *calls* with one of every set of calls that have the
+    same name and arguments, in order, and how many were removed. Kept is the one
+    written in the call format, else one that stands outside the reply's
+    reasoning, else the first."""
     import json
-    seen: set = set()
-    kept = []
-    for call in calls:
+
+    def rank(call) -> tuple:
+        return (getattr(call, "lenient", False) is True,
+                getattr(call, "in_reasoning", False) is True)
+
+    best: dict = {}
+    keys: list = []
+    for i, call in enumerate(calls):
         try:
             key = (call.name, json.dumps(call.args, sort_keys=True, default=str))
         except (TypeError, ValueError):
-            kept.append(call)
-            continue
-        if key in seen:
-            continue
-        seen.add(key)
-        kept.append(call)
+            key = i
+        keys.append(key)
+        if key not in best or rank(call) < rank(calls[best[key]]):
+            best[key] = i
+    kept = [call for i, call in enumerate(calls) if best[keys[i]] == i]
     return kept, len(calls) - len(kept)
 
 
@@ -641,13 +647,21 @@ class _LoopMixin:
 
         def _call_llm(self, messages: list[dict], interactive: bool) -> str: ...
 
-        _loose_check: tuple | None
+        _loose_answers: dict
+        _loose_unasked: dict
+        _loose_refused: set
+        _answered_with_example: set
+        _typed_now: str
         _force_not: frozenset
+
+        def _ask_if_request_open(self) -> bool | None: ...
+
+        def _note_foreign_text(self, text) -> None: ...
         _consecutive_errors: dict[str, int]
 
         def _loose_calls_to_check(self, calls: list) -> list: ...
 
-        def _ask_if_calls_meant(self, calls: list) -> bool | None: ...
+        def _ask_if_calls_meant(self, calls: list) -> dict: ...
 
         def _build_messages(self) -> list[dict]: ...
 
@@ -735,6 +749,8 @@ class _LoopMixin:
         message = self._with_episodes(task)
         if attachments:
             message = compose(message, attachments)
+        if getattr(self, "parent", None) is None:
+            self._typed_now = task
         note = "" if interactive else self._unconfirmable_note()
         self._add_user_with_plan_note(compose(message, note) if note else message)
         return self._loop(interactive=interactive)
@@ -793,6 +809,7 @@ class _LoopMixin:
         # Recall relevant past lessons on the first turn of a session (the turn
         # that sets the session's task); later turns keep the same context.
         self._last_user_request = user_input   # raw, see run_task
+        typed = user_input
         self._untrusted_in_context = False
         if record_request:
             self._note_typed_request(user_input)
@@ -802,6 +819,7 @@ class _LoopMixin:
             user_input = self._with_episodes(user_input)
         if not self._review_task:
             self._review_task = user_input
+        self._typed_now = typed
         self._add_user_with_plan_note(compose(user_input, attachments) if attachments else user_input)
         return self._loop(interactive=True)
 
@@ -885,6 +903,7 @@ class _LoopMixin:
                                            # its own gate says otherwise
         self._denied_unconfirmed = []      # per-run: see Agent.denied_unconfirmed
         self._reply_limit = None           # per-run: see _raise_reply_limit
+        self._disarm_forced_call()
         self._files_read = set()           # per-run
         start_turns = self._turns          # turns used by *this* task only
         self._task_start_turns = start_turns
@@ -909,6 +928,7 @@ class _LoopMixin:
                              start_turns=start_turns,
                              budget_reminded=0, invented_count=0,
                              question_answered=False, example_replies=0,
+                             example_open=None,
                              cut_off_count=0,
                              unfounded_checked=False,
                              plan_submitted=False, plan_nudges=0,
@@ -928,6 +948,7 @@ class _LoopMixin:
                 for queued in self._drain_queued():
                     self._note_typed_request(queued)
                     self._record_typed_request(queued)
+                    self._typed_now = queued
                     self._add_user(
                         "[user steering note - read this before continuing, it "
                         f"overrides earlier instructions where they conflict]\n{queued}"
@@ -1004,8 +1025,7 @@ class _LoopMixin:
                 # One-shot: the forcing grammar applies only to the turn the
                 # ladder armed it for. Cleared here, next to the single call that
                 # consumes it, so no later path inherits a constrained sampler.
-                self._force_tool_grammar = False
-                self._force_not = frozenset()
+                self._disarm_forced_call()
 
                 if self.stop_pending:
                     # Stopped mid-generation: keep the partial text, run nothing
@@ -1079,39 +1099,40 @@ class _LoopMixin:
                     continue
 
                 # ---- there are tool calls --------------------------------
-                # Recorded before execution: the escalation ladder asks whether
-                # the model can produce a CALL at all, not whether it succeeded.
-                st.tool_calls_made += len(calls)
-
                 # A loosely written call is run, or offered for approval, only
-                # once the model was asked whether it meant it.
+                # once the model was asked whether it meant this call.
                 self._add_assistant(response)
+                self._loose_unasked.clear()
+                self._loose_refused.clear()
+                self._answered_with_example.clear()
                 loose = self._loose_calls_to_check(calls)
-                meant = self._ask_if_calls_meant(loose) if loose else None
-                request = getattr(self, "_last_user_request", "") or ""
-                if meant is False:
+                self._loose_answers = self._ask_if_calls_meant(loose) if loose else {}
+                shown = (bool(loose) and all(
+                    self._loose_answers.get(id(c)) is False for c in loose)
+                    and all(c.lenient for c in calls))
+                if shown:
                     st.example_replies += 1
-                change_asked = demands_action(request) and asks_for_change(request)
-                if (meant is False
-                        and ((len(loose) == len(calls) and not change_asked)
-                             or (st.example_replies > 1
-                                 and all(c.lenient for c in calls)))
-                        and not self._change_still_owed(request, st)):
-                    # Every call in the reply was an example, or this is the
-                    # second such reply to a request for a change or with reads
-                    # beside it: the reply is the answer, judged and recorded like
-                    # any other final reply.
-                    self._messages.pop()
+                turns_left = self._task_turns_left()
+                if (shown and st.example_replies == 1 and turns_left
+                        and len(loose) == len(calls)):
+                    self._loose_answers = {}
                     self._show_examples(response, parsed_calls, interactive)
+                    self._send_example_back(interactive)
+                    continue
+                if shown and (st.example_replies > 1 or not turns_left):
+                    # Shown again after the model was told that nothing ran, or
+                    # on the last turn: the reply is the answer, judged and
+                    # recorded like any other final reply.
+                    self._loose_answers = {}
+                    self._show_examples(response, parsed_calls, interactive)
+                    st.example_open = self._ask_if_request_open()
+                    self._messages.pop()
                     should_break, fr = self._handle_no_tool_calls(
                         response, interactive, st, examples=True)
                     if should_break:
                         final_response = fr
                         break
                     continue
-                st.possible_write = st.possible_write or any(
-                    _may_write_files(c, self.cwd) for c in calls
-                    if meant is not False or not any(c is x for x in loose))
 
                 # Show the non-tool-call text parts when not already streamed
                 segments = split_response(response, parsed_calls)
@@ -1131,12 +1152,17 @@ class _LoopMixin:
                           text="".join(seg for seg in segments if isinstance(seg, str)))
 
                 # Execute tools - run non-destructive batches in parallel
-                self._loose_check = (loose, meant) if loose else None
                 writes_before = self._write_total()
                 try:
                     result_blocks = self._execute_tools(calls, interactive=interactive)
                 finally:
-                    self._loose_check = None
+                    self._loose_answers = {}
+                # A call refused for its format or as an example is no evidence
+                # that the model used a tool, and changed nothing.
+                used = [c for c in calls if id(c) not in self._loose_refused]
+                st.tool_calls_made += len(used)
+                st.possible_write = st.possible_write or any(
+                    _may_write_files(c, self.cwd) for c in used)
                 st.plan_submitted = st.plan_submitted or any(
                     c.name == "exit_plan_mode" for c in calls)
                 if invented:
@@ -1159,6 +1185,7 @@ class _LoopMixin:
                 prose = "".join(seg for seg in segments if isinstance(seg, str))
                 leftover = strip_orphan_closers(prose)
                 cut_off = unfinished_call(prose, tool_names)
+                request = getattr(self, "_last_user_request", "") or ""
                 as_command = (demands_action(request)
                               and names_a_tool_as_command(leftover, tool_names))
                 if cut_off and st.partial_notice_count < _MAX_TOOL_REPAIRS:
@@ -1217,9 +1244,8 @@ class _LoopMixin:
                         "[nothing written] The code block in your reply changed no "
                         "file: only a tool call does. If it belongs in the project, "
                         "write it now with write_file or edit_file.")
-                    if st.code_reminded > 1 and self.can_force_tool_calls():
-                        self._force_tool_grammar = True
-                        self._force_not = frozenset(c.name for c in calls)
+                    if st.code_reminded > 1 and self._arm_forced_call(
+                            c.name for c in calls):
                         note += (
                             " Your next reply is constrained: it must be a tool call, "
                             "and not " + ", ".join(sorted(self._force_not)) + " again.")
@@ -1286,6 +1312,7 @@ class _LoopMixin:
         finally:
             # Auto-run from an approved plan lasts for this run only.
             self._end_plan_autorun()
+            self._disarm_forced_call()
             # Fold this run's outcome into the session-level flag before the next
             # run re-arms the per-run one, so every failure path (max_turns,
             # either circuit breaker) is captured in one place. A user stop is
@@ -1296,6 +1323,20 @@ class _LoopMixin:
                 self._had_any_failure = True
 
         return final_response
+
+    def _arm_forced_call(self, but_not=()) -> bool:
+        """Hold the next turn of this task to a tool call, to none of *but_not*.
+        Returns False, and changes nothing, when no turn is left or the backend
+        cannot enforce it."""
+        if not self._task_turns_left() or not self.can_force_tool_calls():
+            return False
+        self._force_tool_grammar = True
+        self._force_not = frozenset(but_not)
+        return True
+
+    def _disarm_forced_call(self) -> None:
+        self._force_tool_grammar = False
+        self._force_not = frozenset()
 
     def _show_examples(self, response: str, calls: list, interactive: bool) -> None:
         """Show a reply whose calls are all examples whole: the live display
@@ -1310,6 +1351,21 @@ class _LoopMixin:
             for part in parts:
                 console.print(safe_markup(part))
             print_info("(an example, as the model said: nothing was run)")
+
+    def _send_example_back(self, interactive: bool) -> None:
+        """Tell the model, once per task, that the calls it called examples did
+        not run, and leave it to make them or to answer."""
+        self._add_user(
+            "[nothing ran] You said the tool call in your reply was an example, so "
+            "nothing ran and nothing changed. If any part of the user's request "
+            "asks for something to be done, do it now with a call, exactly as\n"
+            '<tool_call>\n{"name": "TOOL_NAME", "args": {"PARAM": "VALUE"}}\n'
+            "</tool_call>\nIf the request only asks to be shown or told something, "
+            "give your answer again.")
+        note = "the model called its tool call an example, so nothing ran - asking once more"
+        if interactive:
+            print_info(f"({note})")
+        self._emit("info", text=note)
 
     def _remind_of_budget(self, task_turns: int, st) -> None:
         """Past the turn budget, tell the model how many turns are left: once
@@ -1336,6 +1392,7 @@ class _LoopMixin:
         run made no tool call or was stopped."""
         if not st.tool_calls_made or self.stop_pending:
             return ""
+        self._disarm_forced_call()
         self._add_user(
             f"[run ending] All {self.max_turns} turns of this run are used. No "
             "tool call will run any more. In plain text and in a few sentences: "
@@ -1500,10 +1557,10 @@ class _LoopMixin:
         ):
             st.repair_count += 1
             self._add_assistant(response)
-            if st.repair_count > 1 and self.can_force_tool_calls() and (
+            if st.repair_count > 1 and (
                     self._change_still_owed(request, st)
                     or self._tool_demanded(request, st)):
-                self._force_tool_grammar = True
+                self._arm_forced_call()
             self._add_user(
                 "[tool-call format] That looked like a tool call, "
                 "but I could not parse it. Re-emit it in EXACTLY "
@@ -1574,7 +1631,7 @@ class _LoopMixin:
         elif declined is not None:
             st.nocall_declined = True
             response = response[declined.end():]
-        if declined is None and invented < 0:
+        if declined is None and invented < 0 and not examples:
             escalated = self._escalate_no_tool_attempt(response, interactive, st)
             if escalated is not None:
                 return escalated
@@ -1589,6 +1646,10 @@ class _LoopMixin:
             if isinstance(gated, tuple):
                 return gated
             unfinished = gated or ""
+            if examples and not unfinished and st.example_open is not False:
+                unfinished = ("\n\n[not finished: the model called the tool calls in "
+                              "this answer examples, so they were not run, and did "
+                              "not say that the request needs nothing done]")
 
         # Code shown for a workspace file that defines names the file does not
         # contain is invented file content, whatever the reply says it read.
@@ -1709,9 +1770,7 @@ class _LoopMixin:
         *kept*, the part before that result, stays in the conversation. The
         second time the next turn is held to a tool call where the backend can."""
         st.invented_count += 1
-        forced = st.invented_count > 1 and self.can_force_tool_calls()
-        if forced:
-            self._force_tool_grammar = True
+        forced = st.invented_count > 1 and self._arm_forced_call()
         self._audit.notice("invented_result", "the reply showed a result of a "
                            "command that no tool ran; cut off there")
         self._add_assistant(kept.strip() or "(a made-up tool result, dropped)")
@@ -1773,10 +1832,9 @@ class _LoopMixin:
         if self._change_still_owed(request, st) and not _asks_a_question(response):
             escalated = st.nocall_escalation and not self._used_tools_this_task(st)
             if (st.code_nudged and not st.code_forced and turns_left
-                    and "```" in response and self.can_force_tool_calls()):
+                    and "```" in response and self._arm_forced_call()):
                 # It shows the change again instead of making it.
                 st.code_forced = True
-                self._force_tool_grammar = True
                 self._audit.notice("change_forced",
                                    "the change was shown again instead of made - "
                                    "the next turn is constrained to a tool call")
@@ -1910,8 +1968,8 @@ class _LoopMixin:
                 "now with the whole plan as markdown in its plan argument "
                 "(read-only tools first if you still need to look). If you need "
                 "an answer from the user first, ask one short question instead.")
-            if st.plan_nudges == 2 and self.can_force_tool_calls():
-                self._force_tool_grammar = True
+            if st.plan_nudges == 2:
+                self._arm_forced_call()
             if interactive:
                 print_info("(plan mode: asking the agent to submit the plan)")
             self._emit("info", text=(
@@ -2041,7 +2099,7 @@ class _LoopMixin:
                 "re-prompt did not produce a tool call and grammar forcing is "
                 "unavailable on this backend/config")
             return None                      # caller's own branch reports it
-        self._force_tool_grammar = True
+        self._arm_forced_call()
         self._audit.notice(
             "no_tool_call",
             "re-prompt did not produce a tool call - re-running the turn with "
@@ -2349,6 +2407,8 @@ class _LoopMixin:
         """
         TOOL_REGISTRY = _agent.TOOL_REGISTRY  # live: honour a patched agent.TOOL_REGISTRY
         from ..provenance import build_result_block, is_untrusted_tool, taints_session
+        if id(call) not in self._answered_with_example:
+            self._note_foreign_text(result.output)
         if taints_session(call.name, TOOL_REGISTRY.get(call.name), result):
             agent = self
             while agent is not None:

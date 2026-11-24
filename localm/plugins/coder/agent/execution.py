@@ -180,7 +180,10 @@ class _ExecutionMixin:
         _user_declines: int
         _lenient_denials: int
         _writing_commands: int
-        _loose_check: Optional[tuple]
+        _answered_with_example: set
+        _loose_answers: dict
+        _loose_unasked: dict
+        _loose_refused: set
         dry_run: bool
         _files_read: set
         _denied_unconfirmed: list
@@ -598,6 +601,7 @@ class _ExecutionMixin:
         # Refuse a call whose arguments cannot bind to the tool's function.
         bad_args = bad_args_message(call.name, tool_def, call.args)
         if bad_args is not None:
+            self._answered_with_example.add(id(call))
             result = self._track_tool_failure(call, ToolResult.error(bad_args))
             if interactive:
                 print_tool_error(call.name, result.output)
@@ -779,10 +783,11 @@ class _ExecutionMixin:
         #
         # call.lenient: a call recovered only via parser.py's name-gated fallback
         # (a bare JSON object or an unlabelled fence) may be a quotation. The
-        # model is asked, once per reply, whether it meant it: a call it meant
-        # counts as normally written, an example does not run and is not asked
-        # about, and without a clear answer the call needs confirmation even
-        # under auto_approve. See ToolCall.lenient and _loose_call_meant.
+        # model is asked about each such call whether it meant it: a call it
+        # meant counts as normally written, an example does not run and is not
+        # asked about, and without a clear answer, or when the call also stands
+        # in text the user did not write, it needs confirmation even under
+        # auto_approve. See ToolCall.lenient and _loose_call_meant.
         #
         # isinstance-gated rather than a bare call.lenient or getattr(call,
         # "lenient", False): a ToolCall-shaped MagicMock auto-vivifies any
@@ -901,7 +906,8 @@ class _ExecutionMixin:
             self._emit("info", text=note)
             self._audit.notice("data_guard_confirm", note)
         if needs_confirm and lenient_call and gated and can_ask:
-            note = (f"{call.name} was not written in the <tool_call> format, so "
+            note = (f"{call.name} was not written in the <tool_call> format"
+                    + self._loose_unasked.get(id(call), "") + ", so "
                     "it is asked about as an exact approval"
                     + (", even with auto-approve on" if lenient_only else "")
                     + " and cannot be always-allowed.")
@@ -953,7 +959,9 @@ class _ExecutionMixin:
                 elif lenient_only:
                     result = ToolResult.error(
                         f"{call.name} requires confirmation: the call was not "
-                        "written in the <tool_call> format, and a loosely "
+                        "written in the <tool_call> format"
+                        + self._loose_unasked.get(id(call), "")
+                        + ", and a loosely "
                         "formatted call needs a confirmation this "
                         "non-interactive run cannot give - denied. Re-emit it "
                         "with the same arguments, exactly as\n"
@@ -961,6 +969,7 @@ class _ExecutionMixin:
                         "{...}}\n</tool_call>\nand it will run.")
                     reason = "lenient"
                     self._lenient_denials += 1
+                    self._loose_refused.add(id(call))
                 else:
                     result = ToolResult.error(
                         f"{call.name} requires confirmation, but this run is "
@@ -1166,17 +1175,14 @@ class _ExecutionMixin:
         return found
 
     def _loose_call_meant(self, call: ToolCall) -> Optional[bool]:
-        """The model's answer, asked for once per reply (see ``_loop``), on
-        whether the loosely written calls of the reply being executed were meant
-        to run: True, or False for an example. None when it gave neither answer,
-        or when *call* is not one it was asked about."""
-        if self._loose_check is None:
-            return None
-        calls, meant = self._loose_check
-        return meant if any(call is c for c in calls) else None
+        """The model's answer on whether *call*, a loosely written call of the
+        reply being executed, was meant to run: True, or False for an example.
+        None when it gave neither answer or was not asked about this call."""
+        return self._loose_answers.get(id(call))
 
     def _refuse_example(self, call: ToolCall, interactive: bool) -> ToolResult:
         """The result of a loosely written call the model called an example."""
+        self._loose_refused.add(id(call))
         result = ToolResult.error(
             f"{call.name} was not run: you said it was an example, not a call. If "
             "it should run after all, write it as\n"

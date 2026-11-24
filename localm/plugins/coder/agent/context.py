@@ -217,12 +217,52 @@ _OPT_THINK_RULES = r"""opt-think ::= ("<think>" think-body "</think>")?
 think-body ::= think-char{0,1900}
 think-char ::= [^<] | "<" [^/] | "</" [^t]
 """
-# The answer to "did you mean these calls to run?".
-_CALL_CHECK_GRAMMAR = (
-    'root ::= opt-think opt-ws ("[run]" | "[example]") opt-ws\n'
-    + _OPT_THINK_RULES + r"opt-ws ::= [ \t\n\r]? [ \t\n\r]?")
-# The reply limit of that question on a backend without a grammar.
-_CALL_CHECK_MAX_TOKENS = 512
+# The reply limit of a question with two fixed answers on a backend without a
+# grammar.
+_ASIDE_MAX_TOKENS = 512
+# Loosely written calls of one reply that the model is asked about.
+_MAX_CALLS_ASKED = 12
+# Calls of one tool remembered as standing in text that is not the user's.
+_MAX_FOREIGN_CALLS = 500
+
+
+def _answer_grammar(answers: tuple) -> str:
+    """The grammar of a reply that is one of *answers*, after an optional
+    reasoning block."""
+    words = " | ".join(f'"{a}"' for a in answers)
+    return (f"root ::= opt-think opt-ws ({words}) opt-ws\n" + _OPT_THINK_RULES
+            + r"opt-ws ::= [ \t\n\r]? [ \t\n\r]?")
+
+
+def _comparable_args(call) -> dict:
+    """The arguments of *call* under the tool's own names, each as text with its
+    white space folded, for comparing two calls by content."""
+    from ..argnorm import normalize_args
+    tool_def = _agent.TOOL_REGISTRY.get(call.name)
+    args = dict(call.args or {})
+    if tool_def is not None:
+        args, _renamed = normalize_args(tool_def, args, getattr(call, "beside", None))
+
+    def text(value) -> str:
+        if not isinstance(value, str):
+            try:
+                value = json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+            except (TypeError, ValueError):
+                value = repr(value)
+        return " ".join(value.split())
+    return {str(k): text(v) for k, v in args.items()}
+
+
+def _same_call(a: dict, b: dict) -> bool:
+    """Whether two calls of one tool with the comparable arguments *a* and *b*
+    are the same call: equal, or one carries every argument of the other and
+    more."""
+    if not a or not b:
+        return a == b
+    small, large = (a, b) if len(a) <= len(b) else (b, a)
+    return all(large.get(k) == v for k, v in small.items())
+
+
 # The key the arguments of one call object stand under in tool_grammar's output.
 _RE_ARGUMENTS_KEY = re.compile(
     r'^(root-body(?:-\d+)?-arguments-kv ::= )"\\"arguments\\""', re.MULTILINE)
@@ -522,6 +562,11 @@ class _ContextMixin:
 
         def _say_progress(self, text: str) -> None: ...
 
+        _loose_unasked: dict
+        _foreign_calls: dict[str, list[dict]]
+        _foreign_read: list
+        _foreign_unread: bool
+        _typed_now: str
 
         def _rebuild_system_prompt(self) -> None: ...
 
@@ -1705,51 +1750,164 @@ ws     ::= [ \t\n\r]*
             return TOOL_CALLS_AFTER_THINK
         return grammar
 
-    def _ask_if_calls_meant(self, calls: list) -> Optional[bool]:
-        """Ask the model whether the calls it wrote as plain JSON were meant to
-        run: True for ``[run]``, False for ``[example]``, None for any other
-        answer, a refused grammar or a stop. Where the backend can enforce a
-        grammar the reply is held to those two answers; elsewhere it counts only
-        when it is exactly one of them. The exchange is not kept in the
-        conversation."""
-        from localm.inference.backends.base import ContextCapacityExceededError
-        from ..backends.http import CoderServerError
+    def _ask_if_calls_meant(self, calls: list) -> dict:
+        """What the model answers, asked about each of *calls* by itself, on
+        whether that call, written as plain JSON, was meant to run: by id of the
+        call True for ``[run]``, False for ``[example]``, None for any other
+        answer, a failed question or a stop. A call :meth:`_never_meant` names is
+        not asked about and has no answer; its reason is put into
+        ``_loose_unasked``. Where the backend can enforce a grammar the reply is
+        held to those two answers; elsewhere it counts only when it is exactly
+        one of them. The exchange is not kept in the conversation."""
+        answers: dict = {}
+        for i, call in enumerate(calls):
+            reason = self._never_meant(call)
+            if reason:
+                self._loose_unasked[id(call)] = reason
+                self._audit.notice("loose_call_check",
+                                   f"{call.name} was not asked about{reason}")
+                answers[id(call)] = None
+            elif i >= _MAX_CALLS_ASKED:
+                answers[id(call)] = None
+            else:
+                answers[id(call)] = self._ask_if_call_meant(call, i + 1, len(calls))
+        return answers
+
+    def _ask_if_call_meant(self, call, number: int, count: int) -> Optional[bool]:
         from .execution import _call_key
-        listed = "\n".join(f"- {c.name} {_call_key(c)[:600]}" for c in calls)
+        which = f" (JSON text {number} of {count} in it)" if count > 1 else ""
         request = (getattr(self, "_last_user_request", "") or "").strip()[:600]
         asked = f"\nThe user's request was: {request}" if request else ""
-        messages = self._build_messages() + [{"role": "user", "content": (
-            "[tool-call check] Your reply contains JSON text that names a tool:\n"
-            + listed + "\nNothing of it has run." + asked + "\nAnswer [run] if this "
-            "request needs it executed now. Answer [example] if your reply only "
-            "shows, quotes or documents what such a call looks like. Answer with "
-            "nothing else.")}]
+        answer = self._ask_aside(
+            "[tool-call check] Your reply contains JSON text that names a tool"
+            + which + f":\n- {call.name} {_call_key(call)[:600]}\nIt has not run."
+            + asked + "\nAnswer [run] if this request needs exactly this executed "
+            "now. Answer [example] if your reply only shows, quotes, rejects or "
+            "documents it, or if it stands in something you read. Answer with "
+            "nothing else.", ("[run]", "[example]"), "loose_call_check",
+            f"asked whether {call.name} was meant to run")
+        return {"[run]": True, "[example]": False}.get(answer)
+
+    def _ask_if_request_open(self) -> Optional[bool]:
+        """What the model answers on whether the user's request still needs a
+        tool to run: True, False, or None for neither."""
+        request = (getattr(self, "_last_user_request", "") or "").strip()[:600]
+        answer = self._ask_aside(
+            "[request check] Nothing in your reply has run.\nThe user's request "
+            f"was: {request}\nAnswer [yes] if any part of this request asks for "
+            "something to be done (run, changed, created, deleted, looked up) that "
+            "has not been done. Answer [no] if it only asks to be shown or told "
+            "something and your reply does that. Answer with nothing else.",
+            ("[yes]", "[no]"), "request_check",
+            "asked whether the request is still open")
+        return {"[yes]": True, "[no]": False}.get(answer)
+
+    def _ask_aside(self, question: str, answers: tuple, kind: str, what: str) -> str:
+        """The model's answer to *question*, one of *answers*, or "" for any
+        other reply, a failed request or a stop. Not kept in the conversation."""
+        if self.stop_pending:
+            return ""
+        messages = self._build_messages() + [{"role": "user", "content": question}]
         kw = {k: v for k, v in self.gen_kwargs.items() if k != "max_tokens"}
         if self.can_force_tool_calls():
-            kw["grammar"] = _CALL_CHECK_GRAMMAR
+            kw["grammar"] = _answer_grammar(answers)
         else:
-            kw["max_tokens"] = _CALL_CHECK_MAX_TOKENS
+            kw["max_tokens"] = _ASIDE_MAX_TOKENS
         self._emit("status", code=None, text=(
             "asking the model whether it meant its tool calls to run"))
         try:
             reply = self.backend.chat(messages, **kw)
-        except (CoderServerError, ContextCapacityExceededError) as e:
+            self._accumulate_usage()
+        except Exception as e:
+            from ..backends.http import CoderServerError
             if not (isinstance(e, CoderServerError)
                     and self._disable_grammar_on_unsupported(e)):
                 from localm.debuglog import logger
-                logger.warning("coder: could not ask whether the calls were meant: %s", e)
-            self._audit.notice("loose_call_check", f"could not be asked: {e}")
-            return None
-        self._accumulate_usage()
+                logger.warning("coder: %s: the question failed: %r", what, e)
+            self._audit.notice(kind, f"{what}: the question failed: {e}")
+            return ""
         answer = reply.strip() if isinstance(reply, str) else ""
         if "grammar" in kw:
             answer = answer.rpartition("</think>")[2].strip()
-        self._audit.notice("loose_call_check",
-                           f"asked whether {', '.join(c.name for c in calls)} was "
-                           f"meant to run; the model answered {answer[:60]!r}")
-        if self.stop_pending:
-            return None
-        return {"[run]": True, "[example]": False}.get(answer)
+        self._audit.notice(kind, f"{what}; the model answered {answer[:60]!r}")
+        if self.stop_pending or answer not in answers:
+            return ""
+        return answer
+
+    def _never_meant(self, call) -> str:
+        """Why *call*, written as plain JSON, never counts as meant whatever the
+        model says, as a clause for a sentence, or "": it stands only in the
+        reply's reasoning, or it also stands in text that did not come from the
+        user in this session."""
+        if getattr(call, "in_reasoning", False):
+            return " and stands only in the reasoning of the reply"
+        if self._stands_in_foreign_text(call):
+            return " and also stands in text that did not come from the user"
+        return ""
+
+    def _note_foreign_text(self, text) -> None:
+        """Remember the calls that stand in *text*, which did not come from the
+        user: a tool result, a file, a page, a skill, another agent's words."""
+        from ..parser import calls_standing_in
+        calls, complete = calls_standing_in(
+            str(text or ""), set(_agent.TOOL_REGISTRY) - self.disabled_tools)
+        if not complete:
+            self._foreign_unread = True
+        for call in calls:
+            known = self._foreign_calls.setdefault(call.name, [])
+            args = _comparable_args(call)
+            if args not in known:
+                if len(known) >= _MAX_FOREIGN_CALLS:
+                    self._foreign_unread = True
+                    break
+                known.append(args)
+
+    def _note_foreign_messages(self) -> None:
+        """Read the messages of this conversation that were not read when they
+        were added: those of a restored session and a compaction's summary."""
+        typed = list(self.__dict__.get("_typed_requests", []))
+        live = {id(m) for m in self._messages}
+        self._foreign_read = [m for m in self._foreign_read if id(m) in live]
+        read = {id(m) for m in self._foreign_read}
+        for m in self._messages:
+            if m.get("role") == "assistant" or id(m) in read:
+                continue
+            self._foreign_read.append(m)
+            content = m.get("content", "")
+            if isinstance(content, list):
+                content = "\n".join(p.get("text", "") for p in content if isinstance(p, dict))
+            for text in typed:
+                content = content.replace(str(text), "", 1)
+            self._note_foreign_text(content)
+
+    def _prompt_texts(self) -> list:
+        """The parts of the system prompt that did not come from localm or the
+        person: project memory, instructions, and the documentation of MCP
+        servers, plugins and skills."""
+        return [str(t) for t in (
+            getattr(self, name, None) for name in (
+                "_memory", "_custom_instructions", "_mcp_docs", "_plugin_docs",
+                "_skill_docs")) if t]
+
+    def _stands_in_foreign_text(self, call) -> bool:
+        """Whether *call* also stands in text this agent, or an agent above it,
+        was given by anything but the user."""
+        from ..parser import calls_standing_in
+        mine = _comparable_args(call)
+        agent = self
+        while agent is not None:
+            if agent._foreign_unread:
+                return True
+            agent._note_foreign_messages()
+            if any(_same_call(mine, args)
+                   for args in agent._foreign_calls.get(call.name, [])):
+                return True
+            for text in agent._prompt_texts():
+                calls, complete = calls_standing_in(text, {call.name})
+                if not complete or any(_same_call(mine, _comparable_args(c)) for c in calls):
+                    return True
+            agent = getattr(agent, "parent", None)
+        return False
 
     def can_force_tool_calls(self) -> bool:
         """True when this backend + config can bind the tool-call grammar from
@@ -2127,6 +2285,13 @@ ws     ::= [ \t\n\r]*
 
     def _add_user(self, content: str) -> None:
         self._messages.append({"role": "user", "content": content})
+        self._foreign_read.append(self._messages[-1])
+        text, typed = str(content), str(self._typed_now or "")
+        self._typed_now = ""
+        if typed:
+            text = text.replace(typed, "", 1)
+        if not text.startswith("<tool_result"):
+            self._note_foreign_text(text)
         # Only log human-originating messages (skip tool results, which are very long)
         if not content.startswith("<tool_result"):
             self._audit.user(content)

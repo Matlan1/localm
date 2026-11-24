@@ -69,6 +69,8 @@ class ToolCall:
     # Keys the call object carried beside its args instead of inside them.
     # argnorm.normalize_args uses the ones the tool declares.
     beside: dict = field(default_factory=dict)
+    # True when the call stands inside the reply's reasoning text.
+    in_reasoning: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -747,9 +749,140 @@ def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCa
             for call, _exact in gated:
                 call.lenient = False
 
+    for start, end in reasoning_spans(text, seen_spans):
+        for call in calls:
+            if start <= call.start < end:
+                call.in_reasoning = True
+
     # Sort by position in the response
     calls.sort(key=lambda c: c.start)
     return calls
+
+
+_REASONING_WORDS = r"(?:think|thinking|reasoning|thought|reflection)"
+_RE_REASONING_TAG = re.compile(
+    r"(?P<open><[ \t]{0,4}" + _REASONING_WORDS + r"[ \t]{0,4}>|\[THINK\]"
+    r"|<\|?[ \t]{0,4}channel[ \t]{0,4}\|?>"
+    r"(?:thought|thinking|analysis|reasoning|commentary|reflection))"
+    r"|(?P<close><[ \t]{0,4}/[ \t]{0,4}" + _REASONING_WORDS + r"[ \t]{0,4}>|\[/THINK\]"
+    r"|<[ \t]{0,4}channel[ \t]{0,4}\|>|<\|?[ \t]{0,4}channel[ \t]{0,4}\|?>final)",
+    re.IGNORECASE)
+
+
+def reasoning_spans(text: str, inside=()) -> list[tuple[int, int]]:
+    """The ``(start, end)`` ranges of *text*, a model's reply, that are
+    reasoning: between an opening and a closing tag, from an opening tag that is
+    never closed to the end, and before a closing tag that was never opened. A
+    tag inside one of the *inside* ranges (a call) is content, not a tag."""
+    spans = []
+    opened = None
+    last = 0
+    for m in _RE_REASONING_TAG.finditer(text):
+        if any(s <= m.start() < e for s, e in inside):
+            continue
+        if m.group("open"):
+            if opened is None:
+                opened = m.start()
+        else:
+            spans.append((last if opened is None else opened, m.end()))
+            opened = None
+            last = m.end()
+    if opened is not None:
+        spans.append((opened, len(text)))
+    return spans
+
+
+_RE_NAME_VALUE = re.compile(
+    r"""(?:["']name["']|\bname)\s{0,40}:\s{0,40}["']([\w.-]{1,128})["']""")
+_RE_BARE_KEY = re.compile(r"([{,]\s{0,200})([A-Za-z_]\w{0,64})(?=\s{0,40}:)")
+# What a tool or a viewer puts in front of each line of a text it shows: a line
+# number, a path and line number, a diff or quote sign, a comment sign.
+_RE_LINE_PREFIX = re.compile(
+    r"^[ \t]*(?:(?:[^\s{}\"']{1,200}[:-])?\d{1,7}[ \t]*[:|\t-]?[ \t]?|[+\-][ \t]?"
+    r"|[>#|*]{1,6}[ \t]?|//+[ \t]?)", re.MULTILINE)
+_MAX_STANDING_CALLS = 200
+_MAX_STANDING_OBJECT = 20000
+_MAX_STANDING_BRACES = 4
+
+
+def _readings_of(text: str) -> list[str]:
+    """*text* as it is and as it reads without line prefixes, string escapes and
+    HTML escapes."""
+    readings = [text]
+    plain = _RE_LINE_PREFIX.sub("", text)
+    if plain != text:
+        readings.append(plain)
+    if "&quot;" in text or "&#" in text:
+        import html
+        readings += [html.unescape(r) for r in list(readings)]
+    if '\\"' in text:
+        readings += [r.replace('\\"', '"').replace("\\n", "\n").replace("\\\\", "\\")
+                     for r in list(readings)]
+    return readings
+
+
+def _standing_call(body: str) -> Optional[tuple[str, dict]]:
+    """``(name, args)`` of the call object *body*, also when it is a Python
+    literal, has unquoted keys or carries its arguments as a JSON string."""
+    obj = _lenient_json(body)
+    if not isinstance(obj, dict):
+        import ast
+        for spelled in (body, _RE_BARE_KEY.sub(r'\1"\2"', body)):
+            try:
+                obj = ast.literal_eval(spelled)
+                break
+            except (ValueError, SyntaxError, MemoryError, RecursionError, TypeError):
+                continue
+    if not isinstance(obj, dict) or not isinstance(obj.get("name"), str):
+        return None
+    args = next((obj[k] for k in ("args", "arguments", "parameters")
+                 if obj.get(k) is not None), {})
+    if isinstance(args, str):
+        args = _lenient_json(args)
+    if not isinstance(args, dict):
+        return None
+    beside = {k: v for k, v in obj.items() if k not in _CALL_ENVELOPE_KEYS}
+    return obj["name"], {**beside, **args}
+
+
+def calls_standing_in(text: str, tool_names: set) -> tuple[list[ToolCall], bool]:
+    """``(calls, complete)``: every call of one of *tool_names* that stands in
+    *text*, however it is written there: wrapped, fenced, bare, nested in other
+    JSON, numbered line by line or escaped. *complete* is False when *text* holds
+    more of them than are looked at."""
+    found: list[ToolCall] = []
+    complete = True
+    if not isinstance(text, str) or not text or not tool_names:
+        return found, complete
+    for reading in _readings_of(text):
+        if any(mark in reading for mark in ("tool_call", "TOOL_CALLS", "tool_code")):
+            found += [c for c in parse_tool_calls(reading, tool_names=tool_names)
+                      if c.name in tool_names]
+        seen = 0
+        for m in _RE_NAME_VALUE.finditer(reading):
+            if m.group(1) not in tool_names:
+                continue
+            seen += 1
+            if seen > _MAX_STANDING_CALLS:
+                complete = False
+                break
+            at = m.start()
+            floor = max(0, at - _MAX_STANDING_OBJECT)
+            for _ in range(_MAX_STANDING_BRACES):
+                at = reading.rfind("{", floor, at)
+                if at < 0:
+                    break
+                window = reading[at:at + _MAX_STANDING_OBJECT]
+                end = _object_end_from(window, 0, window.rfind("}"))
+                if end < 0 or at + end <= m.start():
+                    continue
+                body = window[:end]
+                parsed = _standing_call(body)
+                if parsed is not None and parsed[0] == m.group(1):
+                    found.append(ToolCall(name=parsed[0], args=parsed[1], raw=body,
+                                          start=at, end=at + end, lenient=True))
+                    break
+    return found, complete
 
 
 def split_response(text: str, calls: list[ToolCall]) -> list[str | ToolCall]:
