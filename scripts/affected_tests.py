@@ -140,6 +140,12 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
     "tests/test_streaming_response_closes_body.py": (_LOCALM_PY, "reads every localm/*.py for StreamingResponse uses"),
     "tests/test_update_steps_run_in_the_new_version.py": (
         _LOCALM_PY, "scans every localm module for updater.apply calls"),
+    "tests/test_process_start_sites.py": (
+        ("localm/*.py", "installer/*.py", "runtime/*.py", "launcher.pyw", "hatch_build.py",
+         "localm.py", "scripts/crash_recovery_watchdog.py", "scripts/report_issue.py",
+         "scripts/rollback_update.py", "scripts/update_watchdog.py",
+         "scripts/verify_release.py"),
+        "walks the AST of every shipped Python file for process starts"),
     "tests/test_process_tree_guard.py": (
         _LOCALM_PY, "scans every localm module that lists processes for a parent pid read"),
     "tests/test_amd_windows_torch_pin_one_source.py": (
