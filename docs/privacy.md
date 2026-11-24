@@ -148,8 +148,9 @@ the process that started it and the process ids of programs it opened for you (a
 browser), never a command line, an environment or any content; the file also holds one
 number made from the ids of this machine and this folder, which is the same for no
 other folder; the file stays when the process ends and is deleted by a localm process
-that starts later, or that asks which processes run (one written by another machine,
-or copied here with the folder, is left alone).
+that starts later, or that asks which processes run (one written by another machine or
+container, copied here with the folder, or, on a Linux system without a machine id,
+left from before a restart, stays).
 
 ---
 

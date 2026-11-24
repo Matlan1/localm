@@ -5,6 +5,8 @@ processes of a small install: its ``localm`` package is ``__init__.py`` and
 
 from __future__ import annotations
 
+import ast
+import errno
 import os
 import re
 import shutil
@@ -652,15 +654,205 @@ def _key_of(pid: int) -> tuple:
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows rights")
-def test_a_file_that_cannot_be_read_is_not_believed_on_windows(make):
+def test_a_file_that_cannot_be_read_still_names_its_process_on_windows(make):
     inst = make()
     other = _planted(inst)
     path = _file(inst, *_key_of(other.pid))
     assert other.pid in inst.pids()
     _icacls(path, "/deny", "*S-1-1-0:(RD)")
-    assert inst.pids() == set() and procs.end_others(inst.root, timeout=0) == []
+    _cannot_be_read(inst, other.pid)
     _icacls(path, "/remove:d", "*S-1-1-0")
-    assert path.exists() and other.poll() is None
+
+
+END = """
+import localm
+from localm import procs
+print(procs.end_others(timeout={timeout}), flush=True)"""
+
+
+def _cannot_be_read(inst: Install, pid: int) -> None:
+    """The process with the file that cannot be read is listed, its children are not; a
+    start works; end_others ends it."""
+    begun = time.monotonic()
+    (entry,) = inst.list()
+    assert time.monotonic() - begun < 5
+    assert (entry.pid, entry.purpose, entry.recorded, entry.users) == (pid, "unknown", True, None)
+    assert inst.run(END.format(timeout=5)).first == "[]"
+    _until(lambda: procs._process(pid) is None)
+
+
+def _unreadable(path: Path) -> None:
+    if sys.platform == "win32":
+        _icacls(path, "/deny", "*S-1-1-0:(RD)")
+    else:
+        os.chmod(path, 0)
+
+
+@pytest.mark.skipif(sys.platform != "win32" and os.geteuid() == 0, reason="root may read anything")
+def test_below_a_process_whose_file_cannot_be_read_nothing_is_listed_or_ended(make):
+    inst = make()
+    p = inst.importer("""
+from localm import procs
+a = [sys.executable, '-c', 'import time; time.sleep(60)']
+users = procs.open_for_user(subprocess.Popen, a)
+tool = subprocess.Popen(a)
+print(users.pid, tool.pid, flush=True)""")
+    users, tool = (int(x) for x in p.first.split())
+    pid = int(p.stdout.readline())
+    try:
+        assert {pid, tool} <= inst.pids() and users not in inst.pids()
+        (name,) = inst.files()
+        _unreadable(inst.folder / name)
+        assert inst.pids() & {pid, tool, users} == {pid}
+        assert inst.run(END.format(timeout=3)).first == "[]"
+        _until(lambda: procs._process(pid) is None)
+        assert procs._process(users) is not None and procs._process(tool) is not None
+    finally:
+        _kill(users)
+        _kill(tool)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="files another program has open")
+def test_end_others_waits_for_a_file_another_program_holds(make):
+    import _winapi
+    inst = make()
+    p = inst.importer("t = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                      "print(t.pid, flush=True)")
+    tool, pid = int(p.first), int(p.stdout.readline())
+    (name,) = inst.files()
+    handle = _winapi.CreateFile(str(inst.folder / name), 0x80000000, 0, 0, 3, 0, 0)
+    closing = threading.Timer(3, _winapi.CloseHandle, [handle])
+    closing.start()
+    assert inst.run(END.format(timeout=20)).first == "[]"
+    closing.join()
+    assert procs._process(pid) is None and procs._process(tool) is None
+
+
+def test_what_is_in_the_way_is_named(make):
+    inst = make()
+    p = inst.importer()
+    pid = int(p.first)
+    q = inst.run("""
+        import localm
+        from localm import procs
+        procs._end = lambda entry, force: None
+        left = procs.end_others(timeout=0.3)
+        print([(e.pid, e.in_the_way) for e in left], flush=True)
+        """)
+    left = dict(ast.literal_eval(q.first))
+    (way,) = left[pid]
+    assert way["pid"] == pid and os.path.isfile(way["path"])
+    assert way["name"] == os.path.basename(way["path"]) and "python" in way["name"].lower()
+
+
+@pytest.mark.skipif(sys.platform != "win32" and os.geteuid() == 0, reason="root may read anything")
+def test_what_holds_a_file_of_the_record_is_named(make):
+    inst = make()
+    pid = int(inst.importer().first)
+    (name,) = inst.files()
+    path = str(inst.folder / name)
+    _unreadable(inst.folder / name)
+    asked: list = []
+
+    def holders(files):
+        asked.append(files)
+        return [{"pid": 77, "name": "Scanner"}]
+    way = next(e for e in procs.list(inst.root, holders=holders) if e.pid == pid).in_the_way
+    assert way == ({"path": path, "pid": 77, "name": "Scanner"},) and asked == [[path]]
+    for silent in (None, lambda files: [], lambda files: 1 / 0):
+        way = next(e for e in procs.list(inst.root, holders=silent) if e.pid == pid).in_the_way
+        assert way == ({"path": path, "pid": None, "name": ""},)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the Restart Manager")
+def test_the_program_that_holds_a_file_is_the_one_windows_names(make):
+    import _winapi
+
+    from localm.updater_runtime import _rm_holders
+    inst = make()
+    other = _planted(inst)
+    path = _file(inst, *_key_of(other.pid))
+    handle = _winapi.CreateFile(str(path), 0x80000000, 0, 0, 3, 0, 0)
+    try:
+        way = next(e for e in procs.list(inst.root, holders=_rm_holders)
+                   if e.pid == other.pid).in_the_way
+    finally:
+        _winapi.CloseHandle(handle)
+    assert [w["pid"] for w in way] == [os.getpid()] and way[0]["name"]
+
+
+def test_a_file_of_which_nothing_can_be_told_is_an_error(make, monkeypatch):
+    inst = make()
+    path = _file(inst, os.getpid(), _me())
+    table = {os.getpid(): procs._process(os.getpid())}
+
+    def fail(*a, **k):
+        raise PermissionError(errno.EACCES, "denied")
+    real = os.lstat
+    with monkeypatch.context() as m:
+        m.setattr(os, "lstat", lambda p, **k: fail() if str(p) == str(path) else real(p, **k))
+        with pytest.raises(procs.CannotTell, match=path.name) as raised:
+            procs._recorded(str(inst.root), table, holders=lambda f: [{"pid": 7, "name": "x"}])
+        assert raised.value.in_the_way == ({"path": str(path), "pid": 7, "name": "x"},)
+    with monkeypatch.context() as m:
+        m.setattr(procs, "_believed", fail)
+        m.setattr(procs, "_state", lambda *a: None)
+        with pytest.raises(OSError, match=path.name):
+            procs._recorded(str(inst.root), table)
+        m.setattr(procs, "_state", lambda pid, start, table=None: table is not None)
+        assert procs._recorded(str(inst.root), table) == {}
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="files another program has open")
+def test_a_file_another_program_holds_is_not_skipped(make):
+    import _winapi
+    inst = make()
+    other = _planted(inst)
+    path = _file(inst, *_key_of(other.pid))
+    handle = _winapi.CreateFile(str(path), 0x80000000, 0, 0, 3, 0, 0)
+    try:
+        _cannot_be_read(inst, other.pid)
+    finally:
+        _winapi.CloseHandle(handle)
+
+
+def test_a_file_the_system_cannot_read_now_is_not_skipped(make, monkeypatch):
+    inst = make()
+    path = _file(inst, os.getpid(), _me())
+    for name, number in (("open", errno.EMFILE), ("read", errno.EIO)):
+        def fail(*a, number=number):
+            raise OSError(number, os.strerror(number))
+        with monkeypatch.context() as m:
+            m.setattr(os, name, fail)
+            found = procs._recorded(str(inst.root), {os.getpid(): procs._process(os.getpid())})
+        assert [e.purpose for e in found.values()] == ["unknown"] and path.exists()
+
+
+def test_a_file_of_an_ended_process_that_cannot_be_read_is_left(make, monkeypatch):
+    inst = make()
+    path = _file(inst, os.getpid(), procs._text(1))
+
+    def fail(*a):
+        raise OSError(errno.EIO, "x")
+    with monkeypatch.context() as m:
+        m.setattr(procs, "_believed", fail)
+        procs._sweep(*inst.place())
+        assert inst.list() == []
+    assert path.exists()
+
+
+def test_what_a_cut_off_write_left_goes_with_its_process(make):
+    inst = make()
+    here = inst.place()[1]
+    live = inst.folder / f"{here}-{os.getpid()}-{_me()}.0123abcd.new"
+    gone = inst.folder / f"{here}-{os.getpid()}-{procs._text(1)}.0123abcd.new"
+    odd = inst.folder / f"{here}-{os.getpid()}-{procs._text(1)}.0123abcx.new"
+    for look in (lambda: procs._sweep(*inst.place()), inst.list):
+        for path in (live, gone, odd):
+            path.write_text("", encoding="utf-8")
+        look()
+        assert live.exists() and odd.exists() and not gone.exists()
+    assert inst.list() == []
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="files another program has open")
@@ -676,7 +868,7 @@ def test_a_file_another_program_has_for_a_moment_is_still_believed(make):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="file modes")
-def test_a_file_that_cannot_be_read_is_not_believed(make):
+def test_a_file_that_cannot_be_read_still_names_its_process(make):
     if os.geteuid() == 0:
         pytest.skip("root may read anything")
     inst = make()
@@ -684,8 +876,7 @@ def test_a_file_that_cannot_be_read_is_not_believed(make):
     path = _file(inst, *_key_of(other.pid))
     assert inst.pids() == {other.pid}
     os.chmod(path, 0)
-    assert inst.pids() == set() and procs.end_others(inst.root, timeout=0) == []
-    assert path.exists() and other.poll() is None
+    _cannot_be_read(inst, other.pid)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="owners")
@@ -693,11 +884,13 @@ def test_a_file_of_another_user_is_neither_believed_nor_deleted(make, monkeypatc
     inst = make()
     live = _file(inst, os.getpid(), _me())
     gone = _file(inst, os.getpid(), procs._text(1))
+    os.chmod(live, 0)
     place = inst.place()
     with monkeypatch.context() as m:
         m.setattr(procs, "_folder", lambda install: (str(inst.folder), {os.getuid() + 1}))
         assert inst.list() == []
         procs._sweep(*place)
+    os.chmod(live, 0o600)
     assert live.exists() and gone.exists()
 
 

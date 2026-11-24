@@ -16,10 +16,12 @@ A file is believed only when
   (for root: to root or to the owner of the install); and
 - what it says is well formed and is what its name says.
 
-Every other file is left alone: not listed, not deleted. A process never removes its
-own file, so it is listed until it has really ended. The believed file of a process
-that has ended is deleted by the next localm process that starts and by the next
-reader.
+Every other file is left alone: not listed, not deleted. A file of this machine, folder
+and user that cannot be read is tried again for a while. Then its name counts: while
+the process in it runs, that is an entry of unknown purpose, which is listed and ended.
+Nothing below it is, because only the file says which programs were opened for the user.
+A process never removes its own file, so it is listed until it has really ended. The believed file of a process that has ended is deleted by
+the next localm process that starts and by the next reader.
 
 A short tool has no file: it is a running child of a process that has one, and
 :func:`list` finds it there. A program localm opens for the user (a web browser, a
@@ -65,15 +67,20 @@ _CONSOLE_HOSTS = frozenset({"conhost.exe", "openconsole.exe"})
 #: The browser process of localm's own app window.
 _APP_WINDOW = "msedgewebview2.exe"
 _POSIX_GRACE_S = 5.0
+#: How long a file that cannot be read is tried again.
+_PATIENCE_S = 2.0
 
 
 class Entry:
     """One running process. *start* is when it started, in a form that only this
     process has on this system; *parent* is ``(pid, start)`` or None; *recorded* is
     whether it has a file of its own; *users* are the ``(pid, start)`` of the programs
-    it opened for the user."""
+    it opened for the user, or None when its file cannot be read. *in_the_way* is what
+    to close when it cannot be read or ended: ``{"path", "pid", "name"}`` of each program
+    that has the file open, and of this process itself when :func:`end_others` returns
+    it. pid None and name "" where the system does not say."""
 
-    __slots__ = ("pid", "start", "purpose", "parent", "recorded", "users")
+    __slots__ = ("pid", "start", "purpose", "parent", "recorded", "users", "in_the_way")
 
     def __init__(self, pid, start, purpose, parent=None, recorded=True, users=()) -> None:
         self.pid = pid
@@ -81,7 +88,8 @@ class Entry:
         self.purpose = purpose
         self.parent = parent
         self.recorded = recorded
-        self.users = frozenset(users)
+        self.users = None if users is None else frozenset(users)
+        self.in_the_way: tuple = ()
 
     @property
     def key(self) -> tuple:
@@ -96,6 +104,15 @@ class Entry:
     def __repr__(self) -> str:
         started_by = f" started by {self.parent[0]}" if self.parent else ""
         return f"<{self.purpose} pid {self.pid}{started_by}>"
+
+
+class CannotTell(OSError):
+    """A file of the record cannot be read, and it cannot be told whose it is or whether
+    its process runs. *in_the_way* is as in :class:`Entry`."""
+
+    def __init__(self, text: str, in_the_way=()) -> None:
+        super().__init__(text)
+        self.in_the_way = tuple(in_the_way)
 
 
 # --------------------------------------------------------------------------- #
@@ -283,6 +300,7 @@ def _mac_lib():
             ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
         lib.proc_listallpids.argtypes = [ctypes.c_void_p, ctypes.c_int]
         lib.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+        lib.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
         _DLLS["proc"] = lib
     return _DLLS["proc"]
 
@@ -538,10 +556,15 @@ def _key(text: str):
 
 
 def _said(here: str, name: str):
-    """``(pid, start)`` of the file name of an entry of this machine and folder, or None."""
-    if not name.startswith(here + "-") or not name.endswith(".proc"):
+    """``(pid, start)`` of the file name of an entry of this machine and folder, whole or
+    being written, or None."""
+    if not name.startswith(here + "-"):
         return None
-    return _key(name[len(here) + 1:-5])
+    body, _, end = name[len(here) + 1:].rpartition(".")
+    if end == "new":
+        body, _, number = body.rpartition(".")
+        return _key(body) if _hex(number, 8) else None
+    return _key(body) if end == "proc" else None
 
 
 def _name(here: str, pid: int, started: str) -> str:
@@ -558,7 +581,7 @@ def _name(here: str, pid: int, started: str) -> str:
 
 
 def _content(name: str, entry: Entry) -> bytes:
-    keys = [entry.parent, *sorted(entry.users)]
+    keys = [entry.parent, *sorted(entry.users or ())]
     lines = [name[:-5], entry.purpose, *("%d-%s" % k if k else "" for k in keys)]
     return ("\n".join(lines) + "\n").encode("ascii")
 
@@ -704,7 +727,7 @@ def open_for_user(call, *args, **kwargs):
                 me = current()
                 if opened and me is not None:
                     entry = Entry(me.pid, me.start, me.purpose, me.parent,
-                                  users=me.users | opened)
+                                  users=(me.users or frozenset()) | opened)
                     _write(_PLACE, entry)
                     _CURRENT = entry
             except Exception:
@@ -747,33 +770,59 @@ def alive(entry: Entry) -> bool:
     return _state(entry.pid, entry.start) is not False
 
 
+def _own_file(path: str, users) -> bool:
+    """Whether there is a regular file of one of *users* at *path*."""
+    try:
+        at = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    return (not _is_link(at) and stat.S_ISREG(at.st_mode)
+            and (users is None or at.st_uid in users))
+
+
 def _believed(folder: str, users, name: str, said) -> "Entry | None":
     """The entry in the file *name*, which names the process *said*, or None when it is
-    not believed."""
+    not believed. Raises OSError when it cannot be read."""
+    import errno
     path = os.path.join(folder, name)
+    if not _own_file(path, users):
+        return None
     flags = os.O_RDONLY | sum(getattr(os, f, 0) for f in (
         "O_NOFOLLOW", "O_NONBLOCK", "O_BINARY"))
     try:
-        at = os.lstat(path)
-        if _is_link(at) or not stat.S_ISREG(at.st_mode):
+        fd = os.open(path, flags)
+    except OSError as e:
+        if e.errno in (errno.ENOENT, errno.ELOOP):
             return None
-        fd = _patiently(os.open, path, flags)
-        try:
-            now = os.fstat(fd)
-            if (not stat.S_ISREG(now.st_mode) or now.st_ino != at.st_ino
-                    or now.st_size > _MAX_BYTES or (users and now.st_uid not in users)):
-                return None
-            lines = os.read(fd, _MAX_BYTES).decode("ascii").split("\n")
-        finally:
-            os.close(fd)
-    except (OSError, ValueError):
+        raise
+    try:
+        now = os.fstat(fd)
+        if (not stat.S_ISREG(now.st_mode) or now.st_size > _MAX_BYTES
+                or (users is not None and now.st_uid not in users)):
+            return None
+        lines = os.read(fd, _MAX_BYTES).decode("ascii").split("\n")
+    except ValueError:
         return None
+    finally:
+        os.close(fd)
     if len(lines) < 4 or lines.pop() or lines[0] != name[:-5] or not lines[1].isprintable():
         return None
     parent, opened = _key(lines[2]), [_key(k) for k in lines[3:]]
     if None in opened or (lines[2] and not parent):
         return None
     return Entry(said[0], said[1], lines[1], parent, users=opened)
+
+
+def _drop(folder: str, users, name: str, said) -> None:
+    """Delete the file *name* of the ended process *said* if it is believed, or is an
+    own one that was never written whole."""
+    path = os.path.join(folder, name)
+    try:
+        if (_own_file(path, users) if name.endswith(".new")
+                else _believed(folder, users, name, said)):
+            os.unlink(path)
+    except OSError:
+        pass
 
 
 def _sweep(install: str, here: str) -> None:
@@ -783,29 +832,85 @@ def _sweep(install: str, here: str) -> None:
     for i in range(min(_SWEEP, len(names))):
         name = names[(os.getpid() // 4 + i) % len(names)]
         said = _said(here, name)
-        if said and _state(*said, {}) is False and _believed(folder, users, name, said):
-            _unlink(os.path.join(folder, name))
+        if said and _state(*said, {}) is False:
+            _drop(folder, users, name, said)
 
 
-def _recorded(install: str, table: dict) -> dict:
+def _held_by(path: str, holders) -> tuple:
+    """Which programs have the file at *path* open, as *holders* says."""
+    try:
+        found = holders([path]) if holders else []
+    except Exception:
+        found = []
+        _note("what has a file of the record open cannot be told")
+    return tuple({"path": path, "pid": h.get("pid"), "name": h.get("name") or ""}
+                 for h in found) or ({"path": path, "pid": None, "name": ""},)
+
+
+def _program(pid: int) -> str:
+    """The program file of *pid*, or "" when the system does not say."""
+    if sys.platform == "win32":
+        return _win_image(pid)
+    if sys.platform == "darwin":
+        import ctypes
+        buf = ctypes.create_string_buffer(4096)
+        done = _mac_lib().proc_pidpath(pid, buf, 4096)
+        return os.fsdecode(buf.raw[:done]) if done > 0 else ""
+    try:
+        return os.readlink(f"/proc/{int(pid)}/exe")
+    except OSError:
+        return ""
+
+
+def _recorded(install: str, table: dict, patience: float = 0.0, holders=None) -> dict:
     """{pid: Entry} of the running processes that have a file; deletes the files of
-    those that have ended. Raises OSError when the record cannot be read."""
+    those that have ended. A file that cannot be read is tried again for *patience*
+    seconds in all. Raises OSError when the record cannot be read, or when it cannot be
+    told whose file that is or whether its process runs."""
+    import time
     folder, users = _folder(install)
     if not folder:
         return {}
-    here, found = _here(install), {}
+    here, found, held = _here(install), {}, {}
+
+    def look(name: str, said) -> None:
+        try:
+            entry = _believed(folder, users, name, said)
+        except OSError:
+            held[name] = said
+            return
+        held.pop(name, None)
+        if entry is not None:
+            found[entry.pid] = entry
+
     for name in os.listdir(folder):
         said = _said(here, name)
         if said is None:
             continue
-        running = _state(*said, table)
-        entry = _believed(folder, users, name, said)
-        if entry is None:
+        if _state(*said, table) is False:
+            _drop(folder, users, name, said)
             continue
-        if running is False:
-            _unlink(os.path.join(folder, name))
-        else:
-            found[entry.pid] = entry
+        if not name.endswith(".new"):
+            look(name, said)
+    deadline = time.monotonic() + patience
+    while held and time.monotonic() < deadline:
+        time.sleep(0.05)
+        for name, said in tuple(held.items()):
+            look(name, said)
+    for name, (pid, at) in held.items():
+        path = os.path.join(folder, name)
+        try:
+            if not _own_file(path, users):
+                continue
+        except OSError as e:
+            raise CannotTell(f"{FOLDER}/{name} cannot be read: {e.strerror}",
+                             _held_by(path, holders)) from e
+        running = _state(pid, at)
+        if running is None:
+            raise CannotTell(f"{FOLDER}/{name} cannot be read", _held_by(path, holders))
+        if running:
+            found[pid] = Entry(pid, at, "unknown", users=None)
+            found[pid].in_the_way = ({"path": path, "pid": None, "name": ""},)
     return found
 
 
@@ -916,7 +1021,7 @@ def _within(path: str, folder: str) -> bool:
 def _users_own(install: str, table: dict):
     """A test ``(pid, above, direct)`` for an unrecorded program below a recorded
     process: True when it is, or may be, a program of the user. *above* started it and
-    *direct* says that *above* is recorded.
+    *direct* is the entry of *above*, or None when it has none.
 
     Windows: a program that is not one for the console, or shows a window. When the
     windows cannot be seen, a console program that localm started itself is a tool (the
@@ -926,8 +1031,8 @@ def _users_own(install: str, table: dict):
         windows = _win_windows()
         mine = _win_session(os.getpid())
 
-        def may_be(pid: int, above: int, direct: bool) -> bool:
-            if table[pid][2] in _CONSOLE_HOSTS:
+        def may_be(pid: int, above: int, direct) -> bool:
+            if table[pid][2] in _CONSOLE_HOSTS or (direct and direct.users is None):
                 return True
             if table[pid][2] == _APP_WINDOW and (direct or table[above][2] == _APP_WINDOW):
                 return False
@@ -941,7 +1046,9 @@ def _users_own(install: str, table: dict):
             return pid in windows
         return may_be
 
-    def own_session(pid: int, above: int, direct: bool) -> bool:
+    def own_session(pid: int, above: int, direct) -> bool:
+        if direct and direct.users is None:
+            return True
         try:
             return os.getsid(pid) != os.getsid(above)
         except OSError:
@@ -952,7 +1059,7 @@ def _users_own(install: str, table: dict):
 def _below(top: int, install: str, recorded: dict, table: dict, children: dict, skip) -> dict:
     """{pid: Entry} of the running processes of localm below *top*, without it."""
     found: dict = {}
-    users = {k for e in recorded.values() for k in e.users}
+    users = {k for e in recorded.values() for k in e.users or ()}
     todo = [top]
     while todo:
         above = todo.pop()
@@ -962,7 +1069,7 @@ def _below(top: int, install: str, recorded: dict, table: dict, children: dict, 
             entry = recorded.get(pid)
             if entry is None:
                 key = (pid, _text(table[pid][1]))
-                if key in users or skip(pid, above, above in recorded):
+                if key in users or skip(pid, above, recorded.get(above)):
                     continue
                 entry = Entry(*key, "tool", (above, _text(table[above][1])), recorded=False)
             found[pid] = entry
@@ -1010,18 +1117,28 @@ def _all(install: str, table: dict, recorded: dict) -> dict:
     return found
 
 
-def list(install=None):
+def list(install=None, *, holders=None):
     """Every running process of the install at *install* (this one by default), oldest
     first: those that have a file, the short tools below them, and on Windows the venv
     programs that started them. The caller and what :func:`end_others` spares are among
     them: one that needs the files of the install free looks here for what still runs.
-    Empty for an install without a record (:func:`current` is None there). Raises
-    OSError when the processes of this system or the record cannot be read."""
+    Empty for an install without a record (:func:`current` is None there). *holders* is
+    asked with ``[path]`` which programs have a file open that cannot be read, and answers
+    ``[{"pid", "name"}]``. Raises OSError when the processes of this system or the record
+    cannot be read, :class:`CannotTell` for one file of it."""
     install = os.fspath(install or root())
     if not _folder(install)[0]:
         return []
     table = _table()
-    return _sorted(_all(install, table, _recorded(install, table)))
+    found = _all(install, table, _recorded(install, table, _PATIENCE_S, holders))
+    for entry in found.values():
+        _ask(entry, holders)
+    return _sorted(found)
+
+
+def _ask(entry: Entry, holders) -> None:
+    if entry.users is None:
+        entry.in_the_way = _held_by(entry.in_the_way[0]["path"], holders)
 
 
 def descendants(entry: Entry, install=None):
@@ -1031,7 +1148,7 @@ def descendants(entry: Entry, install=None):
     table = _table()
     if _state(entry.pid, entry.start, table) is not True:
         return []
-    recorded = _recorded(install, table)
+    recorded = _recorded(install, table, _PATIENCE_S)
     return _sorted(_below(entry.pid, install, recorded, table, _children(table),
                           _users_own(install, table)))
 
@@ -1088,14 +1205,17 @@ def _end(entry: Entry, force: bool) -> None:
             os.close(fd)
 
 
-def end_others(install=None, *, timeout: float = 20.0, spare=()):
+def end_others(install=None, *, timeout: float = 20.0, spare=(), holders=None):
     """End every process of the install except this one, every process above it (a
     localm command that waits for this one among them), what this one started, and
-    *spare* (entries or pids). Watchdogs end first. A process that starts meanwhile is
+    *spare* (entries or pids). What any other spared process started is not spared.
+    Watchdogs end first. A process that starts meanwhile is
     ended as well, unless its starter was ended in the same moment and it has no file:
-    then nothing names it.
+    then nothing names it. A process whose file cannot be read is waited for through most
+    of *timeout* and then ended alone: what it started may be a program of the user.
 
-    Returns the entries that still run after *timeout* seconds of those it tried to end.
+    Returns the entries that still run after *timeout* seconds of those it tried to end,
+    each with what is in the way (:class:`Entry`); *holders* is as in :func:`list`.
     Empty does not say that the files of the install are free: a spared process may have
     some open, and :func:`list` names it. Raises OSError when the processes of this
     system or the record cannot be read."""
@@ -1104,12 +1224,12 @@ def end_others(install=None, *, timeout: float = 20.0, spare=()):
     if not _folder(install)[0]:
         return []
     named = {s.pid if isinstance(s, Entry) else s for s in spare}
-    deadline = time.monotonic() + timeout
+    begun = time.monotonic()
     asked: dict = {}
     me = os.getpid()
     while True:
         table = _table()
-        recorded = _recorded(install, table)
+        recorded = _recorded(install, table, holders=holders)
         spared = named | _ancestors(me, table) | set(_below(
             me, install, recorded, table, _children(table), lambda *_: False))
         for pid in named:
@@ -1117,10 +1237,18 @@ def end_others(install=None, *, timeout: float = 20.0, spare=()):
         rest = [e for e in _sorted(_all(install, table, recorded)) if e.pid not in spared]
         now = time.monotonic()
         for entry in sorted(rest, key=lambda e: "watchdog" not in e.purpose):
+            if entry.users is None and now - begun < 0.7 * timeout:
+                continue
             first = asked.setdefault(entry.key, now)
             _end(entry, now - first >= _POSIX_GRACE_S)
         if not rest:
             return []
-        if now > deadline:
-            return [e for e in rest if alive(e)]
+        if now - begun > timeout:
+            rest = [e for e in rest if alive(e)]
+            for entry in rest:
+                _ask(entry, holders)
+                path = _program(entry.pid)
+                name = os.path.basename(path) or table.get(entry.pid, _UNKNOWN)[2]
+                entry.in_the_way += ({"path": path, "pid": entry.pid, "name": name},)
+            return rest
         time.sleep(0.1)
