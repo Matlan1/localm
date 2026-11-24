@@ -130,7 +130,7 @@ class TestTemporaryFolders:
 
 class TestRenameRefusedWhileTheFolderIsFree:
     def _flaky_rename(self, monkeypatch, times):
-        real = placing.rename_new
+        real = placing.put_new
         calls = {"n": 0}
 
         def _rename(src, dst):
@@ -139,7 +139,7 @@ class TestRenameRefusedWhileTheFolderIsFree:
                 if calls["n"] <= times:
                     raise PermissionError(5, "Access is denied")
             return real(src, dst)
-        monkeypatch.setattr(placing, "rename_new", _rename)
+        monkeypatch.setattr(placing, "put_new", _rename)
         monkeypatch.setattr(_registry, "_RENAME_RETRY_SECONDS", 0)
         return calls
 

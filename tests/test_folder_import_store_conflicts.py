@@ -228,13 +228,13 @@ class TestMovingAHfFolderAgain:
 
 
 def _cross_device(monkeypatch):
-    real = placing.rename_new
+    real = placing.put_new
 
     def _rename(src, dst):
         if not Path(src).name.startswith(TRANSFER_TEMP_PREFIX):
             raise OSError("cross-device")
         return real(src, dst)
-    monkeypatch.setattr(placing, "rename_new", _rename)
+    monkeypatch.setattr(placing, "put_new", _rename)
 
 
 def _failing_copytree(monkeypatch, name, *, corrupt=False):

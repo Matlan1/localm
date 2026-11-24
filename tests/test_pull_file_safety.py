@@ -365,7 +365,7 @@ class TestRedownloadOfAHuggingFaceFile:
         assert _pull() is True
         hub.files[NAME] = OTHER
 
-        def _full(files, base, old):
+        def _full(*a):
             raise OSError(errno.ENOSPC, "No space left on device")
         monkeypatch.setattr(placing, "place_files", _full)
         assert _pull(redownload=True) is False
@@ -416,55 +416,30 @@ class TestRedownloadOfAHuggingFaceFile:
         assert [p.read_bytes() for p in _held(hub.models)] == [OTHER]
         assert "unload the model and pull again" in _text(capsys)
 
-    def test_replacing_several_parts_never_leaves_a_name_without_a_file(self, tmp_path, monkeypatch):
-        base = tmp_path / "models"
-        base.mkdir()
-        held = {}
-        for n in ("a", "b"):
-            (base / n).write_bytes(f"old {n}".encode())
-            held[n] = tmp_path / f"new-{n}"
-            held[n].write_bytes(f"new {n}".encode())
-        real, seen = os.replace, []
+    def test_a_file_in_use_keeps_every_part_of_a_split_model(self, hub, capsys, monkeypatch):
+        parts = ["m-00001-of-00002.gguf", "m-00002-of-00002.gguf"]
+        for p in parts:
+            hub.files[p] = _gguf(hub.models.parent / p, payload=b"1" + p.encode()).read_bytes()
+        assert _pull(f"o/r:{parts[0]}", model_type="llm") is True
+        old = {p: hub.files[p] for p in parts}
+        for p in parts:
+            hub.files[p] = _gguf(hub.models.parent / p, payload=b"2" + p.encode()).read_bytes()
+        real = placing.put_new
 
-        def _replace(src, dst):
-            seen.append(Path(dst).read_text() if Path(dst).exists() else None)
-            return real(src, dst)
-        monkeypatch.setattr(pull_mod.os, "replace", _replace)
-        placing.place_files(held, base, {n: placing.stamp(base / n) for n in held})
-        assert seen == ["old b", "old a"]
-        assert _names_and_text(base) == {"a": "new a", "b": "new b"}
-
-    @pytest.mark.parametrize("links", [True, False])
-    def test_when_one_part_cannot_be_replaced_the_others_go_back(self, tmp_path, monkeypatch, links):
-        if not links:
-            def _link(src, dst, **kw):
-                raise OSError(errno.EPERM, "links are not supported here")
-            monkeypatch.setattr(pull_mod.os, "link", _link)
-            real_put = placing.put_new
-
-            def _put(src, dst):
-                if Path(src) == tmp_path / "new-a":
-                    raise PermissionError(13, "in use")
-                return real_put(src, dst)
-            monkeypatch.setattr(placing, "put_new", _put)
-        base = tmp_path / "models"
-        base.mkdir()
-        held = {}
-        for n in ("a", "b"):
-            (base / n).write_bytes(f"old {n}".encode())
-            held[n] = tmp_path / f"new-{n}"
-            held[n].write_bytes(f"new {n}".encode())
-        real = os.replace
-
-        def _replace(src, dst):
-            if Path(src) == held["a"]:
+        def _put(src, dst):
+            if Path(src) == hub.models / parts[0]:
                 raise PermissionError(13, "in use")
             return real(src, dst)
-        monkeypatch.setattr(pull_mod.os, "replace", _replace)
-        with pytest.raises(PermissionError):
-            placing.place_files(held, base, {n: placing.stamp(base / n) for n in held})
-        assert _names_and_text(base) == {"a": "old a", "b": "old b"}
-        assert held["a"].read_text() == "new a" and held["b"].read_text() == "new b"
+        monkeypatch.setattr(placing, "put_new", _put)
+        assert _pull(f"o/r:{parts[0]}", model_type="llm", redownload=True) is False
+        assert {p: (hub.models / p).read_bytes() for p in parts} == old
+        assert sorted(p.read_bytes() for p in _held(hub.models)) == sorted(hub.files.values())
+        text = _text(capsys)
+        assert "unload the model and pull again" in text and "is unchanged" in text
+        monkeypatch.setattr(placing, "put_new", real)
+        assert _pull(f"o/r:{parts[0]}", model_type="llm", redownload=True) is True
+        assert {p: (hub.models / p).read_bytes() for p in parts} == hub.files
+        assert list(hub.models.glob(".localm-old-*")) == []
 
 
 # ------------------------------------------------------------------ direct URLs
@@ -1020,7 +995,7 @@ class TestAFullRepository:
 def test_a_failed_placement_errno_is_reported_like_any_other(hub, capsys, monkeypatch):
     hub.files[NAME] = GOOD
 
-    def _full(files, base, old):
+    def _full(*a):
         raise OSError(errno.ENOSPC, "No space left on device")
     monkeypatch.setattr(placing, "place_files", _full)
     assert _pull() is False

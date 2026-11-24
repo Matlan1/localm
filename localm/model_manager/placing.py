@@ -3,9 +3,12 @@
 
 A file gets a new name only where that name is free (:func:`put_new`), or where it
 still belongs to the exact file that is to be replaced (:func:`put_over`); several
-files are replaced together with a journal (:func:`place_files`). A name is deleted
-only when another one was seen to hold the file (:func:`drop_name`). See
+files are replaced together (:func:`place_files`). A name is deleted only when another
+one was seen to hold the file (:func:`drop_name`). See
 test_model_files_are_named_only_through_placing.
+
+What an interrupted step needs to be put right is recorded in a folder of the data
+directory. Nothing below the models folder is read for that: a model can ship any file.
 """
 
 from __future__ import annotations
@@ -14,18 +17,46 @@ import ctypes
 import errno
 import json
 import os
+import re
 import secrets
-import shutil
 import stat as _stat
 import sys
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Iterable, NamedTuple, Optional
 
 from ..debuglog import logger
 
-# Where :func:`place_files` keeps what it replaces, under the folder it works in.
-REPLACED = Path(".cache") / "huggingface" / "localm-replaced"
-_JOURNAL = "journal.json"
+# Under a destination folder: where a single file of a repository, or a whole one, is
+# downloaded to and verified before its files get their names.
+FILE_STAGING = Path(".cache") / "localm-staging"
+REPO_STAGING = Path(".cache") / "huggingface" / "download" / "localm-staging"
+
+
+# --------------------------------------------------------------- reserved names
+
+def reserved(rel: str) -> bool:
+    """True when *rel*, a ``/``-separated path below a model folder, is where localm or
+    huggingface_hub keep data of their own: in ``.cache``, or under a name starting with
+    ``.localm-``. A file a model ships there is never downloaded or copied in."""
+    parts = [p.rstrip(". ") for p in rel.replace("\\", "/").casefold().split("/")]
+    return parts[0] == ".cache" or any(p.startswith(".localm-") for p in parts)
+
+
+def reserved_in_models(name: str) -> bool:
+    """True when a file *name* directly in the models folder would be taken for data of
+    localm: a :func:`reserved` one, a partial download or its record, or the record of
+    where a projector came from."""
+    return reserved(name) or name.casefold().endswith(
+        (".part", ".part.json", ".incomplete", ".owner", ".origin.json"))
+
+
+_SAID: set[str] = set()
+
+
+def _say_once(text: str) -> None:
+    if text not in _SAID:
+        _SAID.add(text)
+        logger.warning("%s", text)
 
 
 # --------------------------------------------------------------- identity
@@ -110,13 +141,19 @@ def _rename_exclusive(src: Path, dest: Path) -> bool:
     if call(*args) == 0:
         return True
     code = ctypes.get_errno()
-    if code in (errno.ENOSYS, errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP):
+    if code in (errno.ENOSYS, errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EPERM):
         return False
     raise OSError(code, os.strerror(code), str(src), None, str(dest))
 
 
-def rename_new(src: Path, dest: Path) -> None:
-    """Rename *src* to *dest*, raising FileExistsError when *dest* exists."""
+def put_new(src: Path, dest: Path) -> None:
+    """Give the file or folder *src* the name *dest* instead of its own. Raises
+    FileExistsError, with nothing changed, when *dest* exists. Where no system call
+    renames without replacing, a file is linked and its old name removed; where links do
+    not work either, *dest* is looked at just before the rename.
+
+    Returns only when the old name is gone. An old name that cannot be removed is raised
+    as the error, and the new one is taken away again."""
     try:
         if _rename_exclusive(src, dest):
             return
@@ -126,16 +163,21 @@ def rename_new(src: Path, dest: Path) -> None:
         raise
     if os.path.lexists(dest):
         raise _exists(dest)
-    if Path(src).is_dir() and not Path(src).is_symlink():
+    if os.path.islink(src) or os.path.isdir(src):
         os.rename(src, dest)
         return
-    with open(dest, "xb"):
-        pass
-    mine = stamp(dest)
     try:
-        put_over(src, dest, mine)
+        second_name(src, dest)
+    except FileExistsError:
+        raise _exists(dest) from None
+    except OSError as e:
+        logger.debug("cannot link %s to %s (%s); renaming it", src, dest, e)
+        os.rename(src, dest)
+        return
+    try:
+        os.unlink(src)
     except BaseException:
-        if os.path.lexists(src) and stamp(dest) == mine:
+        if two_names(src, dest):
             os.unlink(dest)
         raise
 
@@ -146,21 +188,34 @@ def second_name(src: Path, dest: Path) -> None:
     os.link(src, dest)
 
 
-def put_new(src: Path, dest: Path) -> None:
-    """Give the file *src* the name *dest* instead of its own. Never replaces: raises
-    FileExistsError, with nothing changed, when *dest* exists."""
+def two_names(a: Path, b: Path) -> bool:
+    """True when *a* and *b* are names of one regular file (no symbolic link)."""
     try:
-        second_name(src, dest)
-    except FileExistsError:
-        raise _exists(dest) from None
-    except OSError as e:
-        logger.debug("cannot link %s to %s (%s); renaming it", src, dest, e)
-        rename_new(src, dest)
-        return
+        at = os.lstat(a), os.lstat(b)
+    except (OSError, ValueError):
+        return False
+    return (all(_stat.S_ISREG(st.st_mode) for st in at) and os.path.samestat(*at)
+            and at[0].st_nlink >= 2 and file_id(a) is not None)
+
+
+def drop_second_name(temp: Path, dest: Path) -> None:
+    """Remove the temporary name *temp* when it and *dest* are names of one file, as a
+    :func:`put_new` that was cut off leaves it where it has to link."""
+    if two_names(temp, dest):
+        try:
+            os.unlink(temp)
+        except OSError as e:
+            logger.debug("could not remove %s, another name of %s: %s", temp, dest, e)
+
+
+def only_name(path: Path) -> bool:
+    """True when *path* is a regular file that has no other name. No other partial
+    download is opened for writing."""
     try:
-        os.unlink(src)
-    except OSError as e:
-        logger.warning("%s is now %s, but the old name could not be removed: %s", src, dest, e)
+        st = os.lstat(path)
+    except (OSError, ValueError):
+        return False
+    return _stat.S_ISREG(st.st_mode) and st.st_nlink <= 1
 
 
 def put_over(src: Path, dest: Path, old: tuple | None) -> None:
@@ -195,169 +250,290 @@ def put_first_free(src: Path, names: Iterable[Path]) -> Path:
 
 # --------------------------------------------------------------- several files
 
-def place_files(files: dict[str, Path], base: Path, old: dict[str, tuple | None]) -> None:
+_PLACING, _DONE = "placing", "done"
+
+
+class NotPutBack(OSError):
+    """Files could not be placed, and what they replaced could not be put back either.
+    The old files are kept, and :func:`put_back` tries again."""
+
+
+class Unfinished(NamedTuple):
+    """The record of a :func:`place_files` call that runs or was cut off: the folder in
+    the models folder it works in (``""``: the models folder itself; None: the record
+    cannot be read now), the names it places there, and whether it is still placing."""
+    record: Path
+    folder: Optional[str]
+    names: list[str]
+    placing: bool
+
+
+def place_files(files: dict[str, Path], base: Path, old: dict[str, tuple | None],
+                models: Optional[Path] = None, records: Optional[Path] = None) -> None:
     """Move the files *files* (name under *base* to path) to their names, last one
     first. *old* gives the :func:`stamp` of each file to be replaced; a name without
-    one must be free. When one cannot be placed, everything goes back and the error is
-    raised. What is replaced is kept, with a journal, under :data:`REPLACED` until all
-    are placed, so a process that is killed meanwhile is put right by
-    :func:`put_back`."""
-    if len(files) == 1:
-        (name, src), = files.items()
-        (base / name).parent.mkdir(parents=True, exist_ok=True)
-        os.utime(src)
-        put(src, base / name, old.get(name))
-        return
-    root = base / REPLACED / secrets.token_hex(8)
+    one must be free.
+
+    With *records* (*base* is the models folder *models* or a folder in it, and every
+    path is in a staging folder of *base*) they are placed together: what is replaced is
+    moved aside, and a record in the folder *records*, changed in one step from
+    "placing" to "done", says what to put back. When a file cannot be placed everything
+    goes back and the error is raised, or :class:`NotPutBack`; a process that is killed
+    meanwhile is put right by :func:`put_back`. Without *records* each file is replaced
+    on its own."""
     for src in files.values():
         os.utime(src)
-    if any(old.get(name) is not None for name in files):
-        root.mkdir(parents=True)
-        (root / _JOURNAL).write_text(json.dumps({
-            name: {"new": list(stamp(src) or ()), "from": str(src)}
-            for name, src in files.items()}), encoding="utf-8")
+    if records is None or models is None or len(files) == 1 or not any(
+            old.get(name) is not None for name in files):
+        _place_each(files, base, old)
+        return
+    from ..storekit import atomic_write
+    rows = [{"name": name, "had": old.get(name) is not None, "from": _below(src, base),
+             "new": list(_size_and_time(src) or ())} for name, src in files.items()]
+    folder = _below(base, models)
+    if _parse(models, folder, rows) is None:
+        raise OSError(errno.EINVAL, "not files localm can replace together", str(base))
+    token = secrets.token_hex(16)
+    kept = _kept(base, token)
+    record = records / f"{token}.json"
+
+    def _write(phase: str) -> None:
+        atomic_write(record, json.dumps({"phase": phase, "folder": folder, "files": rows}))
+
+    records.mkdir(parents=True, exist_ok=True)
+    try:
+        _write(_PLACING)
+        os.mkdir(kept)
+        for i, name in reversed(list(enumerate(files))):
+            final, was = base / name, old.get(name)
+            final.parent.mkdir(parents=True, exist_ok=True)
+            if was is not None:
+                if stamp(final) != was:
+                    raise _exists(final)
+                put_new(final, kept / str(i))
+                if _size_and_time(kept / str(i)) != was[2:]:
+                    raise _exists(final)
+            put_new(files[name], final)
+        _write(_DONE)
+    except OSError as e:
+        if not _recover(record, models):
+            raise NotPutBack(f"{e}. The files that were there are kept in {kept} and go back "
+                             "with the next scan or pull that can move them") from e
+        raise
+    except BaseException:
+        _recover(record, models)
+        raise
+    _recover(record, models)
+
+
+def _place_each(files: dict[str, Path], base: Path, old: dict[str, tuple | None]) -> None:
+    added: list[str] = []
     try:
         for name in reversed(list(files)):
-            final = base / name
-            final.parent.mkdir(parents=True, exist_ok=True)
+            (base / name).parent.mkdir(parents=True, exist_ok=True)
+            put(files[name], base / name, old.get(name))
             if old.get(name) is None:
-                put_new(files[name], final)
-            else:
-                _replace_one(files[name], final, old[name], root / "old" / name)
+                added.append(name)
     except BaseException:
-        if root.is_dir():
-            undo(root, base)
-        else:
-            for name, src in files.items():
-                if not os.path.lexists(src):
-                    put_new(base / name, src)
+        for name in added:
+            try:
+                put_new(base / name, files[name])
+            except OSError as e:
+                logger.warning("could not move %s back to %s: %s", base / name, files[name], e)
         raise
-    shutil.rmtree(root, ignore_errors=True)
 
 
-def _replace_one(src: Path, final: Path, old: tuple | None, aside: Path) -> None:
-    if stamp(final) != old:
-        raise _exists(final)
-    aside.parent.mkdir(parents=True, exist_ok=True)
+def _size_and_time(path: Path) -> tuple | None:
+    now = stamp(path)
+    return None if now is None else now[2:]
+
+
+def _kept(base: Path, token: str) -> Path:
+    return base / f".localm-old-{token}"
+
+
+def _below(path: Path, base: Path) -> Optional[str]:
+    """*path* relative to the folder *base*, ``/``-separated and ``""`` for *base*
+    itself, or None when it is not below it."""
     try:
-        second_name(final, aside)
-    except OSError as e:
-        logger.debug("cannot link %s (%s); renaming it", final, e)
-        rename_new(final, aside)
-        put_new(src, final)
-        return
-    if not same_file(final, aside):
-        raise _exists(final)
-    os.replace(src, final)
+        rel = os.path.relpath(*(str(p).removeprefix("\\\\?\\") for p in (path, base)))
+    except ValueError:
+        return None
+    parts = Path(rel).parts
+    return None if ".." in parts or os.path.isabs(rel) else "/".join(parts)
 
 
-def undo(root: Path, base: Path) -> bool:
-    """Put back what an unfinished :func:`place_files` in *base* replaced, as the
-    journal in *root* says, and give the new files their earlier names. Returns False,
-    with *root* kept, when a file could not be put back."""
+def _inside(base: Path, name: object) -> Optional[Path]:
+    """The file *name* (``/``-separated) below *base*, or None when it is not a plain
+    relative name, or its folder is not in *base* once links are followed."""
+    if not isinstance(name, str) or re.search(r"[\\:\0]", name) or any(
+            p in ("", ".", "..") for p in name.split("/")):
+        return None
+    path = base.joinpath(*name.split("/"))
+    return path if path.parent.resolve().is_relative_to(base.resolve()) else None
+
+
+def _parse(models: Path, folder: object, rows: object) -> Optional[tuple]:
+    """``(base, rows)`` of a record, each row ``(final, staged, had, new)``, or None when
+    a part of it is not what :func:`place_files` writes: the folder is the models folder
+    or directly in it, every name is inside that, and every staged file is in one of its
+    staging folders."""
+    from .pending_pulls import _as_extended_path
+    if not isinstance(folder, str) or "/" in folder or not isinstance(rows, list):
+        return None
+    base = _inside(models, folder) if folder else models
+    if base is None:
+        return None
+    out = []
+    for row in rows:
+        final, staged = _inside(base, row["name"]), _inside(base, row["from"])
+        if (final is None or staged is None or reserved(row["name"])
+                or not any(staged.is_relative_to(base / d) for d in (FILE_STAGING, REPO_STAGING))
+                or len(row["new"]) != 2 or not isinstance(row["had"], bool)):
+            return None
+        out.append((final, _as_extended_path(staged, 255), row["had"], tuple(row["new"])))
+    return base, out
+
+
+def _recover(record: Path, models: Path) -> bool:
+    """Put right what the :func:`place_files` call of *record* left: while it was
+    placing, every old file gets its name back and the new files go back to staging;
+    when it was done, the old files are deleted. Returns False when an old file could
+    not be put back; then nothing is deleted and the record stays."""
     try:
-        journal = json.loads((root / _JOURNAL).read_text(encoding="utf-8"))
-        rows = {str(n): (tuple(v["new"]), Path(v["from"])) for n, v in journal.items()}
+        rec = json.loads(record.read_text(encoding="utf-8"))
+        parsed = _parse(models, rec["folder"], rec["files"])
+        if parsed is None or rec["phase"] not in (_PLACING, _DONE):
+            raise ValueError("it is not a record localm writes")
+    except FileNotFoundError:
+        return True
     except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError) as e:
-        logger.warning("cannot read %s (%s); %s is left as it is", root / _JOURNAL, e, root)
-        return not any(p.is_file() for p in (root / "old").rglob("*"))
+        _say_unusable(record, e)
+        return False
+    (base, rows), done = parsed, rec["phase"] == _DONE
+    if not base.is_dir():
+        if models.is_dir() and not os.path.lexists(base):
+            record.unlink(missing_ok=True)
+            return True
+        _say_once(f"cannot put back the files noted in {record}: {base} cannot be reached")
+        return False
+    kept = _kept(base, record.stem)
     whole = True
-    for name, (new, origin) in rows.items():
-        final, aside = base / name, root / "old" / name
+    for i, (final, staged, had, new) in enumerate(rows):
+        aside = kept / str(i)
         try:
-            _undo_one(final, aside, new, origin)
+            if done:
+                _unlink_kept(aside)
+            else:
+                _undo_one(final, aside, staged, had, new)
         except OSError as e:
-            logger.error("could not put %s back to %s: %s", aside, final, e)
             whole = False
+            if not done:
+                _say_once(f"{final} was being replaced when that was interrupted, and could not "
+                          f"be put back ({e}). Every file was kept"
+                          + (f", the earlier one is {aside}" if had else "") +
+                          ". Close what uses these files, or move a file away that was put there "
+                          "since")
     if whole:
-        shutil.rmtree(root, ignore_errors=True)
-    return whole
-
-
-def _undo_one(final: Path, aside: Path, new: tuple, origin: Path) -> None:
-    if os.path.lexists(final) and stamp(final) == new:
-        origin.parent.mkdir(parents=True, exist_ok=True)
-        if not os.path.lexists(aside):
-            put_new(final, origin)
-            return
         try:
-            second_name(final, origin)
-        except FileExistsError:
-            pass
-        except OSError:
-            put_new(final, origin)
-    if not os.path.lexists(aside):
+            if os.path.lexists(kept):
+                os.rmdir(kept)
+            record.unlink(missing_ok=True)
+        except OSError as e:
+            logger.debug("could not remove %s or %s yet: %s", kept, record, e)
+    return whole or done
+
+
+def _say_unusable(record: Path, e: Exception) -> None:
+    _say_once(f"cannot use {record}, the record of an interrupted replacement ({e}). Nothing "
+              f"was changed; kept files are in folders named .localm-old-{record.stem}")
+
+
+def _unlink_kept(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except PermissionError:
+        if path.is_symlink():
+            raise
+        os.chmod(path, path.stat().st_mode | _stat.S_IWRITE)
+        path.unlink()
+
+
+def _undo_one(final: Path, aside: Path, staged: Path, had: bool, new: tuple) -> None:
+    """Put back one file of a replacement that was cut off; every step leaves a state
+    this goes on from. Raises OSError, with nothing deleted, when it cannot."""
+    if had and not os.path.lexists(aside):
         return
-    if not os.path.lexists(final):
-        put_new(aside, final)
-    elif same_file(aside, final):
+    if not had and _size_and_time(final) != new:
+        return
+    if had and two_names(aside, final):
         os.unlink(aside)
-    elif stamp(final) == new:
-        put_over(aside, final, new)
-    else:
-        raise _exists(final)
+        return
+    if os.path.lexists(final):
+        if _size_and_time(final) != new:
+            raise _exists(final)
+        if two_names(final, staged):
+            os.unlink(final)
+        else:
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            put_new(final, staged)
+    if had:
+        put_new(aside, final)
 
 
-def unfinished(base: Path) -> list[tuple[Path, list[str]]]:
-    """The journals of unfinished :func:`place_files` calls in *base*, as ``(root, file
-    names)``; an unreadable one has no names."""
+def unfinished(records: Path) -> list[Unfinished]:
+    """The records in the folder *records*; see :class:`Unfinished`."""
     out = []
     try:
-        roots = sorted(p for p in (base / REPLACED).iterdir() if p.is_dir())
+        paths = sorted(p for p in records.glob("*.json") if re.fullmatch("[0-9a-f]{32}", p.stem))
     except OSError:
         return []
-    for root in roots:
+    for path in paths:
         try:
-            names = [str(n) for n in json.loads((root / _JOURNAL).read_text(encoding="utf-8"))]
-        except (OSError, ValueError, TypeError, RecursionError):
-            names = []
-        out.append((root, names))
+            rec = json.loads(path.read_text(encoding="utf-8"))
+            out.append(Unfinished(path, str(rec["folder"]), [str(f["name"]) for f in rec["files"]],
+                                  rec["phase"] == _PLACING))
+        except FileNotFoundError:
+            continue
+        except OSError:
+            out.append(Unfinished(path, None, [], True))
+        except (ValueError, KeyError, TypeError, RecursionError) as e:
+            _say_unusable(path, e)
     return out
 
 
-def put_back(base: Path, names: Iterable[str] | None = None) -> bool:
-    """:func:`undo` every unfinished replacement in *base* (with *names*: those that
-    touch one of them). The caller holds the locks of these names, so none is running.
-    Returns False when something could not be put back."""
-    wanted = None if names is None else set(names)
-    return all([undo(root, base) for root, files in unfinished(base)
-                if wanted is None or wanted & set(files)])
+def put_back(models: Path, records: Path, folder: str,
+             names: Optional[Iterable[str]] = None) -> bool:
+    """Put right every :func:`place_files` call in *folder* (see :class:`Unfinished`)
+    that was cut off; with *names*, those that place one of them. The caller holds the
+    locks of these names, so none of them runs. Returns False when an old file could not
+    be put back: the caller places and deletes nothing there."""
+    wanted = None if names is None else {os.path.normcase(n) for n in names}
+    return all([_recover(u.record, models) for u in unfinished(records)
+                if u.folder is None or (u.folder.casefold() == folder.casefold() and (
+                    wanted is None or wanted & {os.path.normcase(n) for n in u.names}))])
+
+
+def being_replaced(models: Path, records: Path) -> set[str]:
+    """The paths (``os.path.normcase``) whose file a replacement that runs or was cut off
+    may have moved aside."""
+    return {os.path.normcase(str(models / (u.folder or "") / n))
+            for u in unfinished(records) if u.placing for n in u.names}
 
 
 # --------------------------------------------------------------- deleting a name
 
-def drop_name(victim: Path, keeper: Path, kept: Callable[[Path], bool],
-              records: Optional[Path] = None, *, copy: bool = False) -> None:
-    """Delete the name *victim* of a file, when *kept* (given the name *victim* has
-    meanwhile) shows that *keeper* still holds the file without it. *victim* is
-    renamed first, so when both paths reach one name, *keeper* is gone at that moment
-    and *victim* is renamed back. A read-only file is deleted too, and *keeper* keeps
-    its attributes. Raises OSError with *victim* left.
-
-    With *records* a note of it is kept in that folder meanwhile, so
-    :func:`finish_dropped` completes or undoes it when the process is killed. *copy*
-    says *keeper* is a copy, not another name of the file."""
-    temp = victim.with_name(f".localm-moving-{victim.name[:80]}.{secrets.token_hex(4)}")
-    note = _note_drop(records, victim, temp, keeper, copy) if records is not None else None
-    try:
-        rename_new(victim, temp)
-        try:
-            if not kept(temp):
-                raise OSError(f"{keeper} does not hold the file")
-            _unlink_read_only_too(temp, keeper)
-        except BaseException:
-            if os.path.lexists(temp) and not os.path.lexists(victim):
-                rename_new(temp, victim)
-            raise
-    finally:
-        if note is not None:
-            if not os.path.lexists(temp):
-                note.unlink(missing_ok=True)
-            _ACTIVE.discard(note.name)
-
-
-# The notes of drops this process is in the middle of.
-_ACTIVE: set[str] = set()
+def drop_name(victim: Path, keeper: Path, *, copy: bool = False) -> None:
+    """Delete the name *victim* of a file that *keeper* holds as well: as another name of
+    the same file in another folder (two paths that reach one name are never that), or
+    with *copy* as a file of its own, which the caller has verified. A read-only file is
+    deleted too, and *keeper* keeps its attributes. Raises OSError, with *victim* left,
+    when *keeper* does not hold it."""
+    folders = file_id(victim.parent), file_id(keeper.parent)
+    if not (keeper.is_file() and not same_file(victim, keeper) if copy else
+            two_names(victim, keeper) and None not in folders and folders[0] != folders[1]):
+        raise OSError(f"{keeper} does not hold the file")
+    _unlink_read_only_too(victim, keeper)
 
 
 def _unlink_read_only_too(path: Path, keeper: Path) -> None:
@@ -377,60 +553,3 @@ def _unlink_read_only_too(path: Path, keeper: Path) -> None:
             os.chmod(path, mode)
         elif shared:
             os.chmod(keeper, mode)
-
-
-def _note_drop(records: Path, victim: Path, temp: Path, keeper: Path, copy: bool) -> Path:
-    from localm.instances import process_start_identity
-    records.mkdir(parents=True, exist_ok=True)
-    note = records / f"{secrets.token_hex(8)}.json"
-    _ACTIVE.add(note.name)
-    note.write_text(json.dumps({
-        "victim": str(victim.absolute()), "temp": str(temp.absolute()),
-        "keeper": str(keeper.absolute()), "copy": copy,
-        "keeper_stamp": list(stamp(keeper) or ()), "pid": os.getpid(),
-        "start": process_start_identity(os.getpid())}), encoding="utf-8")
-    return note
-
-
-def finish_dropped(records: Path) -> None:
-    """Complete or undo every :func:`drop_name` of a process that is gone, by the notes
-    in *records*: the renamed file is deleted when its keeper still holds it, else gets
-    its name back. One that can be neither is left, with its note. Never raises."""
-    try:
-        notes = sorted(records.glob("*.json"))
-    except OSError:
-        return
-    for note in notes:
-        if note.name in _ACTIVE:
-            continue
-        try:
-            rec = json.loads(note.read_text(encoding="utf-8"))
-            victim, temp, keeper = (Path(rec[k]) for k in ("victim", "temp", "keeper"))
-            if not _owner_gone(rec):
-                continue
-            if os.path.lexists(temp):
-                held = (stamp(keeper) is not None
-                        and list(stamp(keeper) or ()) == rec.get("keeper_stamp")
-                        and not same_file(temp, keeper)) if rec.get("copy") else (
-                            same_file(temp, keeper))
-                if held:
-                    _unlink_read_only_too(temp, keeper)
-                else:
-                    rename_new(temp, victim)
-                logger.info("finished an interrupted move of %s", victim)
-            elif not temp.parent.is_dir():
-                continue
-            note.unlink(missing_ok=True)
-        except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError) as e:
-            logger.warning("could not finish the interrupted move noted in %s: %s", note, e)
-
-
-def _owner_gone(rec: dict) -> bool:
-    from localm.instances import pid_alive, process_start_identity
-    pid = int(rec["pid"])
-    if pid == os.getpid():
-        return True
-    if not pid_alive(pid):
-        return True
-    start = process_start_identity(pid)
-    return start is not None and rec.get("start") is not None and start != rec["start"]

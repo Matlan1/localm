@@ -49,6 +49,7 @@ from .registry import find_aliases_by_path
 from .registry import model_owners
 from .registry import names_using_projector
 from .registry import SNAPSHOT_CLAIM as _SNAPSHOT_CLAIM
+from .registry import replacement_records
 from . import placing
 
 # HF_ENDPOINT / HF_HUB_ENDPOINT are ambient env vars localm never exposes as a
@@ -186,7 +187,8 @@ def _partial_owner_is_gone(partial: Path, *, lock_held: bool = False) -> bool:
 
 def _partial_candidates(incomplete_path: Path) -> "list[Path]":
     """Every temp file for the blob *incomplete_path* names: the per-process
-    ``<stem>.<id>.incomplete`` files and a plain ``<stem>.incomplete``."""
+    ``<stem>.<id>.incomplete`` files and a plain ``<stem>.incomplete``. One that is a
+    second name of a file is left out: a resumed download writes into what it adopts."""
     stem = incomplete_path.stem
     out = []
     try:
@@ -194,7 +196,7 @@ def _partial_candidates(incomplete_path: Path) -> "list[Path]":
             n = p.name
             if not n.endswith(".incomplete"):
                 continue
-            if (n == incomplete_path.name or n.startswith(stem + ".")) and p.is_file():
+            if (n == incomplete_path.name or n.startswith(stem + ".")) and placing.only_name(p):
                 out.append(p)
     except OSError:
         pass
@@ -383,7 +385,7 @@ def _resumable_download_to_tmp_and_move(
                 tqdm_class=tqdm_class,
             )
         else:
-            mode = "r+b" if resume_size > 0 else "wb"
+            mode = "r+b" if resume_size > 0 else "xb"
             try:
                 with tmp_path.open(mode) as f:
                     if resume_size > 0:
@@ -523,7 +525,7 @@ _REPO_PATH_PART_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._+-]*\Z")
 
 # The folder under a destination that a download of a file inside a repo
 # folder is staged in before it is moved into the destination.
-_REPO_FOLDER_STAGING = Path(".cache") / "localm-staging"
+_REPO_FOLDER_STAGING = placing.FILE_STAGING
 
 
 def _safe_repo_subdir(remote_dir: str, base_dir: Path) -> bool:
@@ -2588,11 +2590,11 @@ def _pull_gguf_file(
     # it is used as a destination, and the whole pull is rejected on any unsafe
     # part. `part` is escaped: it names a filename that just failed this check.
     for part in all_parts:
-        if _safe_models_filename(part, base_dir) is None:
+        if _safe_models_filename(part, base_dir) is None or placing.reserved_in_models(part):
             console.print(
                 f"[red]Unsafe model filename:[/red] {escape(part)}\n"
                 "A model filename must be a single name inside the models folder "
-                "(no '/', '\\', or '..')."
+                "(no '/', '\\', or '..'), and not one localm keeps its own data under."
             )
             return False
 
@@ -2737,7 +2739,9 @@ def _pull_gguf_file_locked(
     if unchecked:
         _note_unverified(repo_id, unchecked)
 
-    placing.put_back(base_dir, all_parts)
+    if dest_dir is None and not _put_back("", all_parts):
+        console.print(f"[red]Cannot pull:[/red] {escape(_NOT_PUT_BACK)}")
+        return False
     stamps = {p: placing.stamp(base_dir / p) for p in all_parts}
     present = [p for p in all_parts if os.path.lexists(base_dir / p)]
     if redownload and present and _redownload_refused(
@@ -3066,7 +3070,9 @@ def _pull_gguf_file_locked(
         try:
             with _digest_forgotten(dest if filename in replaced else None):
                 placing.place_files(held.files, base_dir,
-                                    {p: stamps[p] for p in held.files if p in replaced})
+                                    {p: stamps[p] for p in held.files if p in replaced},
+                                    _mm.MODELS_DIR,
+                                    replacement_records() if dest_dir is None else None)
         except FileExistsError as e:
             console.print(
                 f"[red]Download kept aside:[/red] a file named "
@@ -3079,7 +3085,7 @@ def _pull_gguf_file_locked(
                 f"[red]Could not move the download into place:[/red] {escape(str(e))}\n"
                 + ("The file that was there is unchanged; if a running model or another "
                    "program uses it, unload the model and pull again. "
-                   if replaced else "")
+                   if replaced and not isinstance(e, placing.NotPutBack) else "")
                 + "The download is kept and continues from there.")
             return False
         if filename in replaced:
@@ -3297,14 +3303,15 @@ def _snapshot_matches_listing(dest: Path, repo_siblings) -> bool:
 # Where a full-repo pull fetches files that are already in its folder: inside
 # huggingface_hub's own download folder, so what is measured, resumed and deleted
 # there as partial data covers it.
-_SNAPSHOT_STAGING = Path(".cache") / "huggingface" / "download" / "localm-staging"
+_SNAPSHOT_STAGING = placing.REPO_STAGING
 
 
 def _folder_has_files(folder: Path) -> bool:
-    """True when *folder* is a directory holding anything besides ``.cache``. A
-    folder that cannot be listed counts as holding files."""
+    """True when *folder* is a directory holding anything besides ``.cache`` and the
+    claim marker. A folder that cannot be listed counts as holding files."""
     try:
-        return folder.is_dir() and any(p.name != ".cache" for p in folder.iterdir())
+        return folder.is_dir() and any(p.name not in (".cache", _SNAPSHOT_CLAIM)
+                                       for p in folder.iterdir())
     except OSError:
         return True
 
@@ -3330,13 +3337,6 @@ def _snapshot_names_to_replace(dest: Path, names, repo_siblings, damaged,
                     fp, blob):
                 out.append(name)
     return out
-
-
-def _has_partial_data(dest: Path) -> bool:
-    """True when the folder *dest* holds temp files of a download into it."""
-    root = dest / ".cache" / "huggingface" / "download"
-    return root.is_dir() and any(_SNAPSHOT_STAGING.name not in f.relative_to(root).parts
-                                 for f in root.rglob("*.incomplete"))
 
 
 def _refetch_snapshot_files(repo_id: str, dest: Path, names: list[str], repo_siblings,
@@ -3370,15 +3370,17 @@ def _refetch_snapshot_files(repo_id: str, dest: Path, names: list[str], repo_sib
     absent = [n for n in names if not (stage / n).is_file()]
     if absent:
         return f"Hugging Face did not deliver {', '.join(absent[:3])}"
-    wrong = _snapshot_files_failing_digest(stage, listed, repo_id)
-    wrong += [n for n in _snapshot_files_damaged(stage, listed, repo_id) if n not in wrong]
+    wrong = _snapshot_names_to_replace(
+        stage, names, listed, _snapshot_files_failing_digest(stage, listed, repo_id)
+        + _snapshot_files_damaged(stage, listed, repo_id), False)
     if wrong:
         for n in wrong:
             _unlink_quiet(stage / n)
         return (f"{', '.join(wrong[:3])} of {repo_id} did not arrive as Hugging Face "
                 "publishes it (wrong size or digest); pull again to fetch it")
     try:
-        placing.place_files({n: stage / n for n in names}, dest, stamps)
+        placing.place_files({n: stage / n for n in names}, dest, stamps,
+                            _mm.MODELS_DIR, replacement_records())
     except FileExistsError as e:
         return (f"{Path(e.filename or dest).name} appeared or changed meanwhile and was left "
                 "as it is; pull again")
@@ -3386,11 +3388,6 @@ def _refetch_snapshot_files(repo_id: str, dest: Path, names: list[str], repo_sib
         return (f"the new files could not be moved into place ({e}): a running model or "
                 "another program may be using the old ones. Unload the model and pull "
                 "again; the download is kept")
-    for n in names:
-        rel = Path(".cache") / "huggingface" / "download" / f"{n}.metadata"
-        with contextlib.suppress(OSError):
-            (dest / rel).parent.mkdir(parents=True, exist_ok=True)
-            os.replace(stage / rel, dest / rel)
     shutil.rmtree(stage, ignore_errors=True)
     return None
 
@@ -3418,6 +3415,17 @@ def _snapshot_bytes_on_disk(dest: Path) -> int:
     return total
 
 
+_NOT_PUT_BACK = (
+    "an earlier replacement of these files was interrupted, and what was there before could "
+    "not be put back. Nothing was deleted. Unload the model, close other programs that use its "
+    "files, and try again; the log names the files.")
+
+
+def _put_back(folder: str, names: "list[str] | None" = None) -> bool:
+    """:func:`placing.put_back` in the folder *folder* of the models folder."""
+    return placing.put_back(_mm.MODELS_DIR, replacement_records(), folder, names)
+
+
 def _delete_hf_temp_files(base_dir: Path, rels: "list[str] | None") -> int:
     """Delete the temp files (and their owner records) of downloads under
     *base_dir*: those of the files *rels*, or every one when *rels* is None.
@@ -3428,12 +3436,13 @@ def _delete_hf_temp_files(base_dir: Path, rels: "list[str] | None") -> int:
     are deleted."""
     root = Path(base_dir) / ".cache" / "huggingface" / "download"
     if rels is None:
+        if not _put_back(Path(base_dir).name):
+            raise PullInFlight(_NOT_PUT_BACK)
         if not root.is_dir():
             return 0
         freed = _unlink_temp_files(
             [f for f in root.rglob("*.incomplete")
              if _partial_owner_is_gone(f, lock_held=False)])
-        placing.put_back(Path(base_dir))
         stage = Path(base_dir) / _SNAPSHOT_STAGING
         if stage.is_dir() and not any(stage.rglob("*.incomplete")):
             freed += _snapshot_bytes_on_disk(stage)
@@ -3585,7 +3594,8 @@ def discard_partial_download(spec: str, name: Optional[str] = None) -> int:
         with contextlib.ExitStack() as locks:
             for p in parts:
                 locks.enter_context(_part_lock(p))
-            placing.put_back(_mm.MODELS_DIR, parts)
+            if not _put_back("", parts):
+                raise PullInFlight(_NOT_PUT_BACK)
             freed = _delete_hf_temp_files(stage_dir, rels)
             if not in_folder:
                 # Where an earlier localm kept the partial data of such a file.
@@ -3834,12 +3844,13 @@ def _pull_hf_snapshot_locked(
     # not just config.json) and to size the disk-space preflight and progress
     # display below. A disk-full mid-download can leave config.json, one of the
     # smallest and earliest files, on disk while weight shards are missing.
-    repo_siblings = None
+    listing = repo_siblings = None
     commit = _rev_commit(revision)
     total_size = 0
     try:
         info = _hf_api().model_info(repo_id, files_metadata=True, **_revision_kwargs(commit))
-        repo_siblings = info.siblings
+        listing = info.siblings
+        repo_siblings = [s for s in listing if not placing.reserved(str(s.rfilename))]
         if getattr(info, "gated", None) in ("auto", "manual"):
             gated = _gated_refusal(repo_id)
             if gated is not None:
@@ -3854,7 +3865,9 @@ def _pull_hf_snapshot_locked(
         logger.debug("could not fetch file listing for %s (%s); falling back "
                      "to a config.json-only completeness check", repo_id, e)
 
-    placing.put_back(dest)
+    if not _put_back(dest.name):
+        console.print(f"[red]Cannot pull:[/red] {escape(_NOT_PUT_BACK)}")
+        return False
     damaged: list[str] = []
     if dest.exists() and repo_siblings is not None:
         damaged = _snapshot_files_damaged(dest, repo_siblings, repo_id)
@@ -3981,11 +3994,8 @@ def _pull_hf_snapshot_locked(
             )
             return False
 
-    # A folder that holds a model keeps every file until the whole new set is here;
-    # only the folder of an unfinished first pull is filled in place.
-    unfinished = (not find_aliases_by_path(dest, _mm.load_registry())
-                  and (ours or _has_partial_data(dest)))
-    keep_until_complete = _folder_has_files(dest) and (redownload or not unfinished)
+    # A folder that holds files keeps every one until the whole new set is here.
+    keep_until_complete = _folder_has_files(dest)
     if repo_siblings is None and keep_until_complete:
         console.print(
             f"[red]Refusing to replace the files in {escape(str(dest))}:[/red] the file "
@@ -4003,7 +4013,7 @@ def _pull_hf_snapshot_locked(
     def _disk_bytes() -> int:
         return _snapshot_bytes_on_disk(dest)
 
-    names, listed_at = _snapshot_listing_names(repo_id, repo_siblings, commit)
+    names, listed_at = _snapshot_listing_names(repo_id, listing, commit)
     if names is None:
         console.print(
             f"[red]Refusing to pull {escape(repo_id)}:[/red] its file list could not be "
@@ -4011,6 +4021,11 @@ def _pull_hf_snapshot_locked(
             "checked. Retry when Hugging Face answers.")
         return False
     commit = listed_at
+    skipped = [n for n in names if placing.reserved(n)]
+    names = [n for n in names if not placing.reserved(n)]
+    if skipped:
+        logger.info("not downloading %s of %s: localm keeps its own data under such names",
+                    ", ".join(skipped[:5]), repo_id)
     unsafe = _snapshot_unsafe_name(dest, names)
     if unsafe is not None:
         console.print(
@@ -4021,10 +4036,12 @@ def _pull_hf_snapshot_locked(
         return False
 
     staged = (_snapshot_names_to_replace(dest, names, repo_siblings, damaged, redownload)
-              if keep_until_complete else damaged)
+              if keep_until_complete else [])
     staged_total = sum(getattr(s, "size", None) or 0 for s in repo_siblings or []
                        if str(s.rfilename) in set(staged))
     stage = dest / _SNAPSHOT_STAGING
+    for n in staged:
+        _take_over_partials(dest, stage, n)
     # Only the bytes still MISSING need room: the download resumes on top of what
     # already landed. _pull_gguf_file and _pull_url count the same way.
     rest = 0 if keep_until_complete else max(0, total_size - _disk_bytes())
@@ -4070,8 +4087,8 @@ def _pull_hf_snapshot_locked(
             if problem is not None:
                 console.print(f"[red]Nothing was replaced:[/red] {escape(problem)}.")
                 return False
-        if not keep_until_complete and not (
-                staged and _snapshot_is_complete(dest, repo_siblings, repo_id)):
+        if not keep_until_complete:
+            import glob
             with _snapshot_progress(_disk_bytes, total_size, label=repo_id) as _prog:
                 snapshot_download(
                     repo_id=repo_id,
@@ -4079,6 +4096,7 @@ def _pull_hf_snapshot_locked(
                     endpoint=_HF_ENDPOINT,
                     token=_hf_token(),
                     tqdm_class=meter_tqdm_class(),
+                    **({"ignore_patterns": [glob.escape(n) for n in skipped]} if skipped else {}),
                     **_revision_kwargs(commit),
                 )
                 _prog.ok()
@@ -4795,6 +4813,7 @@ def _pull_url_locked(
 
     dest      = _mm.MODELS_DIR / filename
     part_file = _mm.MODELS_DIR / (filename + ".part")
+    placing.drop_second_name(part_file, dest)
 
     old = placing.stamp(dest)
     present = os.path.lexists(dest)
@@ -4935,7 +4954,11 @@ def _pull_url_locked(
     # Opened, and truncated on a restart, before either progress reporter below
     # reads the partial's size. See
     # test_a_restart_over_another_urls_partial_reports_progress_from_zero.
-    f = open(part_file, "ab") if already_have else _start_part(part_file, identity)
+    try:
+        f = open(part_file, "ab") if already_have else _start_part(part_file, identity)
+    except OSError as e:
+        console.print(f"[red]Download failed:[/red] {escape(str(e))}")
+        return False
 
     stream_error: list = []
 
@@ -5206,9 +5229,10 @@ def _part_record_path(part_file: Path) -> Path:
 
 
 def _part_is_resumable(part_file: Path, identity: dict) -> bool:
-    """True when *part_file* exists and the record beside it equals
-    *identity*. A missing, unreadable or malformed record never matches."""
-    if not part_file.is_file():
+    """True when *part_file* exists, under no other name (:func:`placing.only_name`), and
+    the record beside it equals *identity*. A missing, unreadable or malformed record
+    never matches."""
+    if not placing.only_name(part_file):
         return False
     try:
         rec = json.loads(_part_record_path(part_file).read_text(encoding="utf-8"))
@@ -5224,18 +5248,20 @@ def _discard_part(part_file: Path) -> None:
 
 
 def _start_part(part_file: Path, identity: dict):
-    """Open *part_file* empty for writing and record *identity* beside it.
+    """Open a new *part_file* for writing and record *identity* beside it. A file
+    already there is removed, never written into.
 
-    The earlier record is removed before the file is truncated and the new one
+    The earlier record is removed before that file and the new one
     is written after it (see
     test_a_restart_that_cannot_truncate_leaves_no_record_beside_the_old_bytes).
-    Raises OSError when the earlier record cannot be removed or the file cannot
-    be opened. A new record that cannot be written is logged and left absent,
+    Raises OSError when the earlier record or file cannot be removed or the new one
+    cannot be created. A new record that cannot be written is logged and left absent,
     which makes the partial unresumable. Returns the open file.
     """
     rec = _part_record_path(part_file)
     rec.unlink(missing_ok=True)
-    f = open(part_file, "wb")
+    part_file.unlink(missing_ok=True)
+    f = open(part_file, "xb")
     try:
         rec.write_text(json.dumps(identity), encoding="utf-8")
     except OSError as e:
@@ -5290,6 +5316,7 @@ def _pull_civitai_file_locked(
     dest_dir = dest.parent
     old = placing.stamp(dest)
     part_file = dest_dir / (filename + ".part")
+    placing.drop_second_name(part_file, dest)
     identity = _civitai_part_identity(version_id, resolved, verify_digest)
     # Read under the part lock. See
     # test_a_partial_that_grew_before_the_lock_resumes_from_its_new_end.
@@ -5599,11 +5626,13 @@ def _digest_forgotten(dest: Optional[Path]):
         if values:
             _mm.update_registry(_apply)
 
+    before = placing.stamp(dest) if dest else None
     _store(dict.fromkeys(kept))
     try:
         yield
     except BaseException:
-        _store(kept)
+        if kept and dest and placing.stamp(dest) == before:
+            _store(kept)
         raise
 
 
@@ -5821,7 +5850,7 @@ def _pull_civitai_file(
         dest_dir = _mm.MODELS_DIR
 
     safe = _safe_models_filename(resolved.filename, dest_dir)
-    if safe is None:
+    if safe is None or placing.reserved_in_models(safe):
         console.print(
             f"[red]Unsafe model filename:[/red] {escape(resolved.filename)}")
         return False

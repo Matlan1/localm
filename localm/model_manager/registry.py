@@ -3007,18 +3007,29 @@ def _put_back_replacements() -> None:
     folder or in a model folder in it (:func:`placing.put_back`), unless a pull of
     these names is running. Never raises."""
     from .pull import PullInFlight, _part_lock, _snapshot_dest_lock
-    try:
-        for _root, names in placing.unfinished(_mm.MODELS_DIR):
+    records = replacement_records()
+    for found in placing.unfinished(records):
+        if found.folder is None:
+            continue
+        try:
             with suppress(PullInFlight), ExitStack() as locks:
-                for name in names:
-                    locks.enter_context(_part_lock(name))
-                placing.put_back(_mm.MODELS_DIR, names)
-        for folder in _mm.MODELS_DIR.iterdir():
-            if placing.unfinished(folder):
-                with suppress(PullInFlight), _snapshot_dest_lock(folder.name):
-                    placing.put_back(folder)
-    except OSError as e:
-        logger.warning("could not check for unfinished replacements: %s", e)
+                if found.folder:
+                    locks.enter_context(_snapshot_dest_lock(found.folder))
+                else:
+                    for name in found.names:
+                        locks.enter_context(_part_lock(name))
+                placing.put_back(_mm.MODELS_DIR, records, found.folder, found.names)
+        except OSError as e:
+            logger.warning("could not check the replacement noted in %s: %s", found.record, e)
+
+
+def _being_replaced(path: Path) -> bool:
+    """True when a pull is replacing the file *path* (or a file in the model folder
+    *path*), or was stopped while it did and that could not be put right yet. Its name
+    may be without a file for now."""
+    here = os.path.normcase(str(path.parent.resolve() / path.name))
+    return any(here in (p, os.path.dirname(p)) for p in placing.being_replaced(
+        _mm.MODELS_DIR.resolve(), replacement_records()))
 
 
 def sync_models_dir(prune: Optional[bool] = None, *,
@@ -3055,7 +3066,6 @@ def sync_models_dir(prune: Optional[bool] = None, *,
         prune = bool(load_config().get("autoprune_missing_models", False))
 
     _mm.ensure_dirs()
-    placing.finish_dropped(_drop_notes())
     _put_back_replacements()
     reg = _mm.load_registry()
 
@@ -3080,7 +3090,7 @@ def sync_models_dir(prune: Optional[bool] = None, *,
         for child in hf_dirs:
             try:
                 resolved = str(child.resolve())
-                if resolved in known or _in_unfinished_pull(child):
+                if resolved in known or _in_unfinished_pull(child) or _being_replaced(child):
                     continue
                 mtype, _gmeta = _detect_local_model_type(child, is_gguf=False, is_hf=True)
                 _mm._register(_unique_registry_name(reg, child.name), child,
@@ -3094,7 +3104,7 @@ def sync_models_dir(prune: Optional[bool] = None, *,
         for child in gguf_first_parts:
             try:
                 resolved = str(child.resolve())
-                if resolved in known or _in_unfinished_pull(child):
+                if resolved in known or _in_unfinished_pull(child) or _being_replaced(child):
                     continue
                 # Skip a file that is not actually a GGUF (foreign file renamed
                 # .gguf, an empty/partial copy): registering it would pollute the
@@ -3279,6 +3289,8 @@ def sync_models_dir(prune: Optional[bool] = None, *,
                 continue
 
             # File is gone.
+            if _being_replaced(path) or path.exists():
+                continue
             if prune and not suspicious and _under_models_dir(path):
                 if not backed_up:
                     # Snapshot the registry before the first deletion so the
@@ -3628,11 +3640,13 @@ def _remove_partial(dest: Path) -> str:
     return ""
 
 
-def _verify_dir_copy(src: Path, dest: Path) -> Optional[str]:
-    """Compare the file tree under *src* with the copy under *dest*: the same
-    relative paths, the same sizes and the same SHA-256 per file. None when
-    they match, else a sentence naming the first difference."""
-    src_files = sorted(f.relative_to(src) for f in src.rglob("*") if f.is_file())
+def _verify_dir_copy(src: Path, dest: Path,
+                     left_out: "Callable[[str], bool]" = lambda rel: False) -> Optional[str]:
+    """Compare the file tree under *src*, without the files *left_out* names, with the
+    copy under *dest*: the same relative paths, the same sizes and the same SHA-256 per
+    file. None when they match, else a sentence naming the first difference."""
+    src_files = sorted(f.relative_to(src) for f in src.rglob("*") if f.is_file()
+                       and not left_out(f.relative_to(src).as_posix()))
     dest_files = sorted(f.relative_to(dest) for f in dest.rglob("*") if f.is_file())
     if src_files != dest_files:
         missing = sorted(set(src_files) - set(dest_files))
@@ -3705,7 +3719,7 @@ def _rename_into_place(temp: Path, dest: Path, action: str, source: Path) -> Opt
         if dest.exists():
             break
         try:
-            placing.rename_new(temp, dest)
+            placing.put_new(temp, dest)
             return None
         except PermissionError as e:
             last = e
@@ -3737,9 +3751,9 @@ class _Placed(NamedTuple):
     stamp: "tuple | None"
 
 
-def _drop_notes() -> Path:
-    """Where :func:`placing.drop_name` keeps its notes."""
-    return _mm.MODELS_DIR.parent / "locks" / "moving"
+def replacement_records() -> Path:
+    """Where :func:`placing.place_files` keeps its records."""
+    return _mm.MODELS_DIR.parent / "locks" / "replacing"
 
 
 class _Placement:
@@ -3781,6 +3795,7 @@ class _Placement:
         """Lock the file name *name* in the models folder until this placement is
         settled. Raises RuntimeError when another add or pull holds it."""
         from .pull import PullInFlight, _holds_part_lock, _part_lock
+        _refuse_reserved(name)
         if name.casefold() in self._locked or _holds_part_lock(name):
             return
         try:
@@ -3832,7 +3847,7 @@ class _Placement:
                 except OSError as e:
                     logger.debug("cannot link %s to %s (%s); renaming it", src, dest, e)
             try:
-                placing.rename_new(src, dest)
+                placing.put_new(src, dest)
                 return "rename"
             except FileExistsError:
                 raise RuntimeError(f"Cannot move: {dest} already exists") from None
@@ -3843,6 +3858,7 @@ class _Placement:
 
     def place_dir(self, src: Path, dest: Path, action: str, follow: bool = False) -> None:
         """Bring the directory *src* to *dest*; see :func:`_transfer_model_dir`."""
+        _refuse_reserved(dest.name)
         old = src.resolve()
         renamed = _transfer_model_dir(src, dest, action)
         if action == "move" or follow:
@@ -3962,6 +3978,12 @@ class _Placement:
             console.print("[dim]Nothing was moved: every file is where it was.[/dim]")
 
 
+def _refuse_reserved(name: str) -> None:
+    if placing.reserved_in_models(name):
+        raise RuntimeError(f"Cannot bring in {name}: localm keeps its own data under such a "
+                           "name in the models folder. Rename it first.")
+
+
 def _what_is_at(src: Path, dest: Path) -> str:
     """See :meth:`_Placement.held`, for a *dest* that exists."""
     if placing.same_entry(src, dest):
@@ -3989,12 +4011,11 @@ def _remove_moved_source(p: _Placed) -> None:
             raise OSError(f"{p.dest} does not hold the folder")
         shutil.rmtree(p.src)
     elif p.how == "copy":
-        placing.drop_name(p.src, p.dest, lambda temp: (
-            placing.stamp(p.dest) == p.stamp and not placing.same_file(temp, p.dest)),
-            _drop_notes(), copy=True)
+        if placing.stamp(p.dest) != p.stamp:
+            raise OSError(f"{p.dest} is not the file that was put there")
+        placing.drop_name(p.src, p.dest, copy=True)
     else:
-        placing.drop_name(p.src, p.dest, lambda temp: placing.same_file(temp, p.dest),
-                          _drop_notes())
+        placing.drop_name(p.src, p.dest)
 
 
 def _take_back(p: _Placed) -> None:
@@ -4006,17 +4027,13 @@ def _take_back(p: _Placed) -> None:
     if placing.stamp(p.dest) != p.stamp:
         raise OSError(f"{p.dest} is not the file that was put there")
     if p.how == "rename":
-        placing.rename_new(p.dest, p.src)
+        placing.put_new(p.dest, p.src)
     elif p.dest.is_dir() and not p.dest.is_symlink():
         if not p.src.is_dir() or placing.same_file(p.src, p.dest):
             raise FileNotFoundError(f"{p.src} is gone")
         shutil.rmtree(p.dest)
-    elif p.how == "link":
-        placing.drop_name(p.dest, p.src, lambda temp: placing.same_file(temp, p.src),
-                          _drop_notes())
     else:
-        placing.drop_name(p.dest, p.src, lambda temp: (
-            p.src.is_file() and not placing.same_file(temp, p.src)), _drop_notes(), copy=True)
+        placing.drop_name(p.dest, p.src, copy=p.how != "link")
 
 
 def _copy_verified(src: Path, dest: Path, mode: str) -> None:
@@ -4048,7 +4065,8 @@ def _copy_verified(src: Path, dest: Path, mode: str) -> None:
 
 
 def _transfer_model_dir(path: Path, dest: Path, action: str) -> bool:
-    """Copy or move the directory *path* to *dest*, which must not exist.
+    """Copy or move the directory *path* to *dest*, which must not exist. A copy leaves
+    out what has a :func:`placing.reserved` name; a move takes every file along.
 
     A move renames when it can. Otherwise the tree is copied into a temporary
     folder this call creates beside *dest* (``TRANSFER_TEMP_PREFIX`` name), checked
@@ -4065,7 +4083,7 @@ def _transfer_model_dir(path: Path, dest: Path, action: str) -> bool:
     _remove_stale_transfer_folders()
     if action == "move":
         try:
-            placing.rename_new(path, dest)
+            placing.put_new(path, dest)
         except OSError:
             if dest.exists():
                 raise RuntimeError(f"Cannot {action}: {dest} already exists") from None
@@ -4078,8 +4096,10 @@ def _transfer_model_dir(path: Path, dest: Path, action: str) -> bool:
     except OSError as e:
         raise RuntimeError(f"Cannot {action} {path} into {_mm.MODELS_DIR}: {e}.") from e
     try:
-        shutil.copytree(path, temp, dirs_exist_ok=True)
-        problem = _verify_dir_copy(path, temp)
+        left_out = placing.reserved if action == "copy" else (lambda rel: False)
+        shutil.copytree(path, temp, dirs_exist_ok=True, ignore=lambda folder, names: [
+            n for n in names if left_out((Path(folder).relative_to(path) / n).as_posix())])
+        problem = _verify_dir_copy(path, temp, left_out)
         if problem is not None:
             failure: Optional[str] = (
                 f"Copy verification failed for {path.name}: {problem} (source left "
@@ -5874,8 +5894,9 @@ def _extract_gguf_member(archive: zipfile.ZipFile, info: zipfile.ZipInfo,
     digest = hashlib.sha256()
     written = 0
     try:
+        part.unlink(missing_ok=True)
         with _ExtractProgress(filename, info.file_size) as progress, \
-                archive.open(info) as src, open(part, "wb") as out:
+                archive.open(info) as src, open(part, "xb") as out:
             while True:
                 chunk = src.read(_EXTRACT_CHUNK_BYTES)
                 if not chunk:
@@ -6378,7 +6399,6 @@ def add_local(
     """
     from rich.markup import escape
 
-    placing.finish_dropped(_drop_notes())
     p = logical_model_path(Path(path_str))
     if not p.exists():
         console.print(f"[red]Not found:[/red] {escape(path_str)}")

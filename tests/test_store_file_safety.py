@@ -44,13 +44,13 @@ def _no_links(monkeypatch) -> None:
 
 def _other_volume(monkeypatch) -> None:
     _no_links(monkeypatch)
-    real = placing.rename_new
+    real = placing.put_new
 
     def _rename(src, dst):
         if Path(dst).parent.name == "models" and Path(src).parent != Path(dst).parent:
             raise OSError(errno.EXDEV, "cross-device")
         return real(src, dst)
-    monkeypatch.setattr(placing, "rename_new", _rename)
+    monkeypatch.setattr(placing, "put_new", _rename)
 
 
 class TestAByteIdenticalFile:
@@ -311,12 +311,31 @@ class TestASecondPathToALibraryFile:
         assert mm.add_local(str(alias), "taken", store="move") is False
         assert f.is_file() and _names(home) == ["m.gguf", "other.gguf"]
 
-    def test_no_name_is_deleted_unless_the_other_one_holds_the_file(self, home, monkeypatch):
+    @pytest.mark.parametrize("third", [False, True])
+    def test_no_name_is_deleted_unless_the_other_one_holds_the_file(
+            self, home, tmp_path, monkeypatch, third):
         f = _gguf(home / "models" / "m.gguf")
+        if third:
+            os.link(f, tmp_path / "third.gguf")
         alias = _alias(f, monkeypatch, home / "models")
+        for victim in (alias, f):
+            with pytest.raises(OSError):
+                placing.drop_name(victim, f)
         with pytest.raises(OSError):
-            placing.drop_name(alias, f, lambda temp: placing.same_file(temp, f))
+            placing.drop_name(alias, f, copy=True)
         assert f.is_file() and _names(home) == ["m.gguf"]
+
+    def test_no_file_is_deleted_whose_other_name_only_points_to_it(self, home, tmp_path):
+        src = _gguf(tmp_path / "mine" / "m.gguf")
+        os.link(src, tmp_path / "third.gguf")
+        dest = home / "models" / "m.gguf"
+        try:
+            dest.symlink_to(src)
+        except OSError:
+            pytest.skip("symlinks are not available here")
+        with pytest.raises(OSError):
+            placing.drop_name(src, dest)
+        assert src.is_file()
 
     def test_an_external_file_moved_by_a_second_path_takes_its_entry_along(
             self, home, tmp_path, printed, monkeypatch):
@@ -378,50 +397,6 @@ class TestPathsThatAreNotTheSameFile:
         assert mm.add_local(str(link)) is True
         (entry,) = load_registry().values()
         assert Path(entry["path"]).name == "hm.gguf"
-
-
-class TestADropThatWasKilled:
-    def _killed(self, tmp_path, notes, *, same, copy=False):
-        import shutil
-        victim, keeper = tmp_path / "victim.gguf", tmp_path / "keeper.gguf"
-        victim.write_bytes(b"body" * 50)
-        if copy:
-            shutil.copyfile(victim, keeper)
-        elif same:
-            os.link(victim, keeper)
-        else:
-            keeper.write_bytes(b"else")
-        code = ("import os, sys; from pathlib import Path; "
-                "from localm.model_manager import placing as p; "
-                "p.drop_name(Path(sys.argv[1]), Path(sys.argv[2]), lambda t: os._exit(3), "
-                "Path(sys.argv[3]), copy=sys.argv[4] == '1')")
-        run = subprocess.run([sys.executable, "-c", code, str(victim), str(keeper), str(notes),
-                              "1" if copy else "0"], cwd=Path(__file__).resolve().parents[1])
-        assert run.returncode == 3
-        assert not victim.exists() and len(list(tmp_path.glob(".localm-moving-*"))) == 1
-        return victim, keeper
-
-    @pytest.mark.parametrize("same, copy", [(True, False), (False, False), (False, True)])
-    def test_the_next_scan_finishes_it(self, home, tmp_path, printed, same, copy):
-        work = tmp_path / "work"
-        work.mkdir()
-        notes = home / "locks" / "moving"
-        victim, keeper = self._killed(work, notes, same=same, copy=copy)
-        mm.sync_models_dir(backfill_mmproj=False)
-        assert list(work.glob(".localm-moving-*")) == [] and list(notes.iterdir()) == []
-        assert keeper.is_file()
-        assert victim.exists() is not (same or copy)
-
-    def test_a_drop_that_is_running_is_left_alone(self, home, tmp_path, printed):
-        victim, keeper = tmp_path / "v", tmp_path / "k"
-        victim.write_bytes(b"body")
-        os.link(victim, keeper)
-
-        def _scan(temp):
-            mm.sync_models_dir(backfill_mmproj=False)
-            return temp.exists()
-        placing.drop_name(victim, keeper, _scan, home / "locks" / "moving")
-        assert not victim.exists() and keeper.read_bytes() == b"body"
 
 
 class TestTwoAddsOfOneFile:
