@@ -4940,14 +4940,6 @@
             {
                 "code": "reportAttributeAccessIssue",
                 "range": {
-                    "startColumn": 16,
-                    "endColumn": 23,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
                     "startColumn": 26,
                     "endColumn": 38,
                     "lineCount": 1
@@ -4988,14 +4980,6 @@
             {
                 "code": "reportAttributeAccessIssue",
                 "range": {
-                    "startColumn": 34,
-                    "endColumn": 41,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
                     "startColumn": 25,
                     "endColumn": 45,
                     "lineCount": 1
@@ -5022,14 +5006,6 @@
                 "range": {
                     "startColumn": 25,
                     "endColumn": 43,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
-                    "startColumn": 21,
-                    "endColumn": 28,
                     "lineCount": 1
                 }
             },
@@ -5400,14 +5376,6 @@
                 "range": {
                     "startColumn": 20,
                     "endColumn": 38,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
-                    "startColumn": 26,
-                    "endColumn": 45,
                     "lineCount": 1
                 }
             },

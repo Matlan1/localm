@@ -181,6 +181,7 @@ class _ExecutionMixin:
         _lenient_denials: int
         _writing_commands: int
         _loose_check: Optional[tuple]
+        dry_run: bool
         _files_read: set
         _denied_unconfirmed: list
         _consecutive_errors: dict[str, int]
