@@ -3850,6 +3850,8 @@ def _pull_hf_snapshot_locked(
     try:
         info = _hf_api().model_info(repo_id, files_metadata=True, **_revision_kwargs(commit))
         listing = info.siblings
+        if listing is None:
+            raise ValueError("the answer holds no file list")
         repo_siblings = [s for s in listing if not placing.reserved(str(s.rfilename))]
         if getattr(info, "gated", None) in ("auto", "manual"):
             gated = _gated_refusal(repo_id)

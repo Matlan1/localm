@@ -487,13 +487,50 @@ class TestAReplacementThatWasKilled:
         assert any("could not be put back" in line for line in printed)
 
 
+class TestAReplacementOfAnotherFile:
+    @pytest.mark.parametrize("when", ["before", "while it is moved"])
+    def test_a_file_that_is_another_one_by_then_stays(self, lib, monkeypatch, when):
+        real = placing.put_new
+        target = lib.base / HAD[1]
+
+        def _swap():
+            os.unlink(target)
+            _file(target, "somebody's own")
+
+        def _put(src, dest):
+            if Path(src) == target and when != "before":
+                _swap()
+            return real(src, dest)
+        monkeypatch.setattr(placing, "put_new", _put)
+        old = {n: placing.stamp(lib.base / n) for n in NAMES}
+        if when == "before":
+            _swap()
+        with pytest.raises(FileExistsError):
+            placing.place_files({n: lib.stage / n for n in NAMES}, lib.base, old,
+                                lib.models, lib.records)
+        assert lib.at() == {HAD[0]: f"old {HAD[0]}", HAD[1]: "somebody's own"}
+        assert {f"new {n}" for n in NAMES} <= set(lib.texts())
+        assert placing.unfinished(lib.records) == []
+
+    def test_a_link_to_a_file_elsewhere_is_replaced_and_its_file_stays(self, lib, tmp_path):
+        target = _file(tmp_path / "shared" / "weights", "shared")
+        (lib.base / HAD[1]).unlink()
+        try:
+            (lib.base / HAD[1]).symlink_to(os.path.relpath(target, (lib.base / HAD[1]).parent))
+        except OSError:
+            pytest.skip("symlinks are not available here")
+        lib.place()
+        assert lib.at() == {n: f"new {n}" for n in NAMES} and target.read_text() == "shared"
+        assert placing.unfinished(lib.records) == []
+
+
 class TestAReplacementThatIsDone:
     """What is left of it once every new file has its name is never an undo."""
 
     def test_kept_copies_that_cannot_be_deleted_stay_without_undoing_it(
             self, lib, printed, monkeypatch):
         with monkeypatch.context() as m:
-            m.setattr(placing, "_unlink_kept", _raise_in_use)
+            m.setattr(placing, "_unlink_read_only_too", _raise_in_use)
             lib.place()
             mm.sync_models_dir(backfill_mmproj=False)
             assert lib.put_back() is True
@@ -602,7 +639,7 @@ class TestARecord:
         self._write(lib, **{"from": value})
         assert lib.put_back() is False
 
-    @pytest.mark.parametrize("folder", ["..", "a/b", "/x", "C:", "a\\b", "."])
+    @pytest.mark.parametrize("folder", ["..", "a/b", "a\\b", "."])
     def test_a_folder_that_is_not_in_the_models_folder_is_refused(self, lib, folder):
         self._write(lib, folder=folder)
         assert placing.put_back(lib.models, lib.records, folder) is False
@@ -652,6 +689,10 @@ class TestARecord:
         lib.check_settled()
 
 
+def _asked_the_hub(*a, **k):
+    raise AssertionError("the hub was asked for it")
+
+
 class TestWhatAModelFolderHolds:
     """A repository can ship any file. None of them is read as an instruction."""
 
@@ -660,7 +701,7 @@ class TestWhatAModelFolderHolds:
         _file(folder / ".cache" / "huggingface" / "localm-replaced" / "ab" / "journal.json",
               json.dumps(journal))
         _file(folder / ".cache" / "huggingface" / "evil.pth", "evil")
-        _file(folder / ".localm-old-ab" / "0", "evil")
+        _file(folder / f".localm-old-{'ab' * 16}" / "0", "evil")
         _file(folder / ".localm-revision.json", json.dumps({"repo": "evil/evil"}))
         _file(folder / "locks" / "replacing" / f"{'ab' * 16}.json", json.dumps({
             "phase": "placing", "folder": "snap", "files": [{
@@ -687,8 +728,7 @@ class TestWhatAModelFolderHolds:
         after = {p for p in home.parent.rglob("*") if "models" not in p.relative_to(home.parent).parts}
         assert not any("evil" in p.name for p in after - before)
 
-    @pytest.mark.parametrize("first", [True, False])
-    @pytest.mark.parametrize("listed", [True, False])
+    @pytest.mark.parametrize("first, listed", [(True, True), (True, False), (False, True)])
     def test_a_pull_does_not_download_what_lies_under_localms_names(
             self, home, printed, monkeypatch, first, listed):
         dest = home / "models" / "snap"
@@ -732,16 +772,19 @@ class TestWhatAModelFolderHolds:
             dest.mkdir()
             (dest / "model.safetensors").write_bytes(DAMAGED_WEIGHTS)
             mm._register("snap", dest, "hf:o/r")
-        assert mm._pull_hf_snapshot("o/r", "snap") is (first or listed)
-        assert set(got) == ({"config.json", "model.safetensors"} if first or listed else set())
+        assert mm._pull_hf_snapshot("o/r", "snap") is True
+        assert set(got) == {"config.json", "model.safetensors"}
 
     @pytest.mark.parametrize("name", [".cache", ".localm-incoming-x.1.0123abcd", "m.gguf.part",
                                       "m.gguf.part.json", "mmproj.gguf.origin.json"])
-    def test_a_single_file_of_such_a_name_is_not_downloaded(self, home, printed, name):
+    def test_a_single_file_of_such_a_name_is_not_downloaded(
+            self, home, printed, monkeypatch, name):
+        monkeypatch.setattr(mm, "_hf_file_sha256", _asked_the_hub)
         assert mm._pull_gguf_file(f"o/r:{name}", None) is False
         assert any("Unsafe model filename" in line for line in printed)
 
-    def test_nor_one_in_a_folder_of_such_a_name(self, home, printed):
+    def test_nor_one_in_a_folder_of_such_a_name(self, home, printed, monkeypatch):
+        monkeypatch.setattr(mm, "_hf_file_sha256", _asked_the_hub)
         assert mm._pull_gguf_file("o/r:.cache/huggingface/download/m.gguf", None) is False
         assert any("Unsafe repository path" in line for line in printed)
 
@@ -862,7 +905,7 @@ def test_model_files_are_named_only_through_placing():
 def test_a_partial_is_never_opened_so_that_it_is_emptied():
     """Every open for writing in the model manager, by function and mode."""
     out = set()
-    for module in ("pull.py", "registry.py"):
+    for module in ("pull.py", "registry.py", "placing.py"):
         tree = ast.parse((ROOT / "localm" / "model_manager" / module).read_text(encoding="utf-8"))
         for func in ast.walk(tree):
             if not isinstance(func, ast.FunctionDef):

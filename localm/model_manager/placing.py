@@ -308,10 +308,12 @@ def place_files(files: dict[str, Path], base: Path, old: dict[str, tuple | None]
             final, was = base / name, old.get(name)
             final.parent.mkdir(parents=True, exist_ok=True)
             if was is not None:
+                at = os.lstat(final)
                 if stamp(final) != was:
                     raise _exists(final)
                 put_new(final, kept / str(i))
-                if _size_and_time(kept / str(i)) != was[2:]:
+                moved = os.lstat(kept / str(i))
+                if (moved.st_size, moved.st_mtime_ns) != (at.st_size, at.st_mtime_ns):
                     raise _exists(final)
             put_new(files[name], final)
         _write(_DONE)
@@ -423,7 +425,8 @@ def _recover(record: Path, models: Path) -> bool:
         aside = kept / str(i)
         try:
             if done:
-                _unlink_kept(aside)
+                if os.path.lexists(aside):
+                    _unlink_read_only_too(aside, final)
             else:
                 _undo_one(final, aside, staged, had, new)
         except OSError as e:
@@ -447,16 +450,6 @@ def _recover(record: Path, models: Path) -> bool:
 def _say_unusable(record: Path, e: Exception) -> None:
     _say_once(f"cannot use {record}, the record of an interrupted replacement ({e}). Nothing "
               f"was changed; kept files are in folders named .localm-old-{record.stem}")
-
-
-def _unlink_kept(path: Path) -> None:
-    try:
-        path.unlink(missing_ok=True)
-    except PermissionError:
-        if path.is_symlink():
-            raise
-        os.chmod(path, path.stat().st_mode | _stat.S_IWRITE)
-        path.unlink()
 
 
 def _undo_one(final: Path, aside: Path, staged: Path, had: bool, new: tuple) -> None:

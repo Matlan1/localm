@@ -3810,14 +3810,6 @@
                 }
             },
             {
-                "code": "reportOptionalIterable",
-                "range": {
-                    "startColumn": 64,
-                    "endColumn": 77,
-                    "lineCount": 1
-                }
-            },
-            {
                 "code": "reportArgumentType",
                 "range": {
                     "startColumn": 37,
