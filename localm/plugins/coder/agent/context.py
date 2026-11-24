@@ -1818,11 +1818,12 @@ ws     ::= [ \t\n\r]*
             messages = [*messages[:-1], {"role": "assistant", "content": reply}]
         messages.append({"role": "user", "content": question})
         kw = {k: v for k, v in self.gen_kwargs.items() if k != "max_tokens"}
-        if "temperature" in kw:
-            kw["temperature"] = 0.0
         if self.can_force_tool_calls():
             kw["grammar"] = _answer_grammar(answers)
+            kw["temperature"] = 0.0
         else:
+            if "temperature" in kw:
+                kw["temperature"] = 0.0
             kw["max_tokens"] = _ASIDE_MAX_TOKENS
         self._emit("status", code=None, text=(
             "asking the model whether it meant its tool calls to run"))
@@ -1849,7 +1850,8 @@ ws     ::= [ \t\n\r]*
         """Why *call*, written as plain JSON, never counts as meant whatever the
         model says, as a clause for a sentence, or "": it stands only in the
         reply's reasoning, or it also stands in text that did not come from the
-        user in this session."""
+        user in this session, localm's own example calls included (one without
+        arguments excepted)."""
         if getattr(call, "in_reasoning", False):
             return " and stands only in the reasoning of the reply"
         if self._stands_in_foreign_text(call):
@@ -1917,6 +1919,11 @@ ws     ::= [ \t\n\r]*
                 calls, complete = calls_standing_in(text, {call.name})
                 if not complete or any(_same_call(mine, _comparable_args(c)) for c in calls):
                     return True
+            if mine and any(
+                    _same_call(mine, _comparable_args(c)) for c in
+                    calls_standing_in(str(agent._system_prompt), {call.name})[0] if c.args):
+                # The example calls of localm's own tool documentation.
+                return True
             agent = getattr(agent, "parent", None)
         return False
 
