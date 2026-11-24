@@ -19,8 +19,8 @@ from ..display import (
     print_tool_result, print_turn_divider, safe_markup,
 )
 from ..parser import (
-    invented_result_at, looks_like_tool_attempt, names_a_tool_as_command,
-    split_response, strip_orphan_closers, strip_tool_calls, unfinished_call,
+    invented_result_at, invented_result_without_call, looks_like_tool_attempt,
+    names_a_tool_as_command, split_response, strip_orphan_closers, strip_tool_calls, unfinished_call,
 )
 from ..tools import ToolResult
 from ..audit import SessionMode
@@ -642,6 +642,7 @@ class _LoopMixin:
         def _call_llm(self, messages: list[dict], interactive: bool) -> str: ...
 
         _loose_check: tuple | None
+        _consecutive_errors: dict[str, int]
 
         def _loose_calls_to_check(self, calls: list) -> list: ...
 
@@ -905,7 +906,8 @@ class _LoopMixin:
                              files_at_start={f["path"]: f["writes"]
                                              for f in self.changed_files()},
                              start_turns=start_turns,
-                             budget_reminded=0,
+                             budget_reminded=0, invented_count=0,
+                             question_answered=False,
                              unfounded_checked=False,
                              plan_submitted=False, plan_nudges=0,
                              declines_at_start=self._user_declines)
@@ -1077,8 +1079,6 @@ class _LoopMixin:
                 # Recorded before execution: the escalation ladder asks whether
                 # the model can produce a CALL at all, not whether it succeeded.
                 st.tool_calls_made += len(calls)
-                st.possible_write = st.possible_write or any(
-                    _may_write_files(c, self.cwd) for c in calls)
 
                 # A loosely written call is run, or offered for approval, only
                 # once the model was asked whether it meant it.
@@ -1098,6 +1098,9 @@ class _LoopMixin:
                         final_response = fr
                         break
                     continue
+                st.possible_write = st.possible_write or any(
+                    _may_write_files(c, self.cwd) for c in calls
+                    if meant is not False or not any(c is x for x in loose))
 
                 # Show the non-tool-call text parts when not already streamed
                 segments = split_response(response, parsed_calls)
@@ -1118,6 +1121,7 @@ class _LoopMixin:
 
                 # Execute tools - run non-destructive batches in parallel
                 self._loose_check = (loose, meant) if loose else None
+                writes_before = self._write_total()
                 try:
                     result_blocks = self._execute_tools(calls, interactive=interactive)
                 finally:
@@ -1141,9 +1145,9 @@ class _LoopMixin:
                 # Capped at _MAX_TOOL_REPAIRS: the notice's own example text is
                 # itself tool-call-shaped, so a model echoing it back would
                 # re-trigger the notice every turn.
-                leftover = strip_orphan_closers(
-                    "".join(seg for seg in segments if isinstance(seg, str)))
-                cut_off = unfinished_call(leftover, tool_names)
+                prose = "".join(seg for seg in segments if isinstance(seg, str))
+                leftover = strip_orphan_closers(prose)
+                cut_off = unfinished_call(prose, tool_names)
                 if cut_off and st.partial_notice_count < _MAX_TOOL_REPAIRS:
                     st.partial_notice_count += 1
                     result_blocks.append(self._cut_off_note(cut_off, interactive))
@@ -1190,9 +1194,12 @@ class _LoopMixin:
                             "already reached, not reported to the model "
                             "this turn")
 
+                request = getattr(self, "_last_user_request", "") or ""
+                tests_fail = (self._consecutive_errors.get("run_tests", 0) > 0
+                              and self._write_total() == writes_before
+                              and demands_action(request) and asks_for_change(request))
                 if (st.code_reminded < 2 and _has_file_code_block(leftover)
-                        and self._change_still_owed(
-                            getattr(self, "_last_user_request", "") or "", st)):
+                        and (tests_fail or self._change_still_owed(request, st))):
                     st.code_reminded += 1
                     result_blocks.append(
                         "[nothing written] The code block in your reply changed no "
@@ -1411,6 +1418,12 @@ class _LoopMixin:
             if gated is not None:
                 return gated
 
+        request = getattr(self, "_last_user_request", "") or ""
+        invented = (-1 if examples or not demands_action(request)
+                    else invented_result_without_call(response))
+        if invented >= 0 and st.invented_count < 2 and self._task_turns_left():
+            return self._invented_result_nudge(response[:invented], interactive, st)
+
         # Self-verification: nudge the agent to check its work while code changes
         # sit unverified. Fires at most once per task.
         if (
@@ -1453,8 +1466,8 @@ class _LoopMixin:
             st.repair_count < _MAX_TOOL_REPAIRS
             and self._task_turns_left()
             and (attempt
-                 or (not examples
-                     and demands_action(getattr(self, "_last_user_request", "") or "")
+                 or (not examples and invented < 0
+                     and demands_action(request)
                      and names_a_tool_as_command(response, tool_names)))
         ):
             st.repair_count += 1
@@ -1463,7 +1476,6 @@ class _LoopMixin:
             if cut_off:
                 self._add_user(self._cut_off_note(cut_off, interactive))
                 return (False, "")
-            request = getattr(self, "_last_user_request", "") or ""
             if st.repair_count > 1 and self.can_force_tool_calls() and (
                     self._change_still_owed(request, st)
                     or self._tool_demanded(request, st)):
@@ -1511,9 +1523,7 @@ class _LoopMixin:
             return (True, notice)
 
         # Zero-attempt escalation: the model produced nothing tool-shaped on a
-        # request that needs a tool. Every branch above is reached only via
-        # looks_like_tool_attempt().
-        request = getattr(self, "_last_user_request", "") or ""
+        # request that needs a tool.
         if self._plan_owed(request, response, st):
             return self._plan_not_submitted(response, interactive, st)
         offered = st.nocall_escalation >= 1 or st.code_nudged
@@ -1541,13 +1551,17 @@ class _LoopMixin:
         elif declined is not None:
             st.nocall_declined = True
             response = response[declined.end():]
-        if declined is None:
+        if declined is None and invented < 0:
             escalated = self._escalate_no_tool_attempt(response, interactive, st)
             if escalated is not None:
                 return escalated
 
         unfinished = ""
-        if not st.nocall_declined:
+        if invented >= 0:
+            unfinished = ("\n\n[not finished: this reply shows a tool result the "
+                          "model wrote itself. No tool produced it, so do not rely "
+                          "on it.]")
+        elif not st.nocall_declined:
             gated = self._unfinished_work_gate(response, request, interactive, st)
             if isinstance(gated, tuple):
                 return gated
@@ -1667,11 +1681,38 @@ class _LoopMixin:
         self._add_assistant(_with_notices(response, enforcement, unfinished, unverified))
         return (True, final_text)
 
+    def _invented_result_nudge(self, kept, interactive, st) -> tuple[bool, str]:
+        """Answer a reply that shows the result of a command nothing ran. Only
+        *kept*, the part before that result, stays in the conversation. The
+        second time the next turn is held to a tool call where the backend can."""
+        st.invented_count += 1
+        forced = st.invented_count > 1 and self.can_force_tool_calls()
+        if forced:
+            self._force_tool_grammar = True
+        self._audit.notice("invented_result", "the reply showed a result of a "
+                           "command that no tool ran; cut off there")
+        self._add_assistant(kept)
+        self._add_user(
+            "[invented result] Nothing ran: the <tool_result> in your reply was "
+            "written by you, so it is not real and was dropped. A code block runs "
+            "nothing. Run what you showed with a tool call now, stop, and read its "
+            "real result."
+            + (" This turn is constrained: the only output accepted is a tool call."
+               if forced else ""))
+        note = "the reply showed a tool result nothing produced - asking for a real call"
+        if interactive:
+            print_info(f"({note})")
+        self._emit("info", text=note)
+        return (False, "")
+
     def _unfinished_work_gate(self, response, request, interactive, st):
         """Hold back a final answer that leaves the requested work undone.
 
-        Three cases:
+        Four cases:
 
+        * in a run nobody answers, a short question while a change is still owed:
+          the agent is told once to find out for itself, and a second question
+          stands as the answer;
         * the reply to the self-verification request is empty (or only the
           ``[no tool needed]`` marker) while changed code files are still
           unverified: the run ends as not finished, naming those files;
@@ -1689,6 +1730,23 @@ class _LoopMixin:
         the final answer when the run ends with the case still open (it is then
         reported as not finished), or ``""``."""
         turns_left = self._task_turns_left() and not self.plan_mode
+        if (self._change_still_owed(request, st) and _asks_a_question(response)
+                and turns_left and not interactive and self.confirm_handler is None
+                and not st.question_answered):
+            st.question_answered = True
+            self._audit.notice("question_unattended",
+                               "the reply asked the user something in a run "
+                               "nobody answers")
+            self._add_assistant(response)
+            self._add_user(
+                "[unattended run] Nobody can answer in this run. Find out what you "
+                "can with your tools (list_dir, grep, read_file, run_tests), decide "
+                "the rest yourself, and do the task. If it cannot be done without an "
+                "answer, say in your final answer exactly what is missing.")
+            self._emit("info", text=(
+                "the model asked a question in a run nobody answers - asking it to "
+                "find out for itself"))
+            return (False, "")
         if self._change_still_owed(request, st) and not _asks_a_question(response):
             escalated = st.nocall_escalation and not self._used_tools_this_task(st)
             if (st.code_nudged and not st.code_forced and turns_left

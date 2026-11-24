@@ -13,8 +13,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from localm.plugins.coder.parser import (
-    invented_result_at, looks_like_tool_attempt, names_a_tool_as_command,
-    unfinished_call)
+    invented_result_at, invented_result_without_call, looks_like_tool_attempt,
+    names_a_tool_as_command, unfinished_call)
 
 FENCE = "```"
 
@@ -199,7 +199,7 @@ def test_an_example_is_never_offered_to_the_person(tmp_path, auto_approve):
     reply = "A call looks like this:\n" + _loose("write_file", path="a.txt", content="1")
     backend = _Backend([reply, "unused"], check="[example]")
     agent = _agent(tmp_path, backend, confirm_handler=person, auto_approve=auto_approve)
-    assert agent.run_task("explain with an example how a tool call looks") == reply
+    assert agent.run_task("explain with an example how a tool call looks").startswith(reply)
     assert person.asked == []
     assert not (tmp_path / "a.txt").exists()
     assert agent.last_run_ok is True
@@ -411,7 +411,10 @@ def test_a_reply_that_only_reads_is_not_asked_about(tmp_path):
                                     {"plan_mode": True}])
 def test_a_call_that_cannot_run_anyway_is_not_asked_about(tmp_path, kwargs):
     backend = _Backend([_WRITE, "Done.", "Done.", "Done."])
+    plan = kwargs.pop("plan_mode", False)
     agent = _agent(tmp_path, backend, **kwargs)
+    if plan:
+        agent.set_plan_mode(True)
     agent.run_task("create a.txt")
     assert backend.checks == []
     assert not (tmp_path / "a.txt").exists()
@@ -496,8 +499,10 @@ def test_an_invented_result_never_makes_a_loose_call_trusted(tmp_path):
         asked.append((call.name, call.lenient))
         return False
 
-    agent = _agent(tmp_path, _Backend([reply, "Not written."]), confirm_handler=handler)
+    backend = _Backend([reply, "Not written."], check="")
+    agent = _agent(tmp_path, backend, confirm_handler=handler)
     agent.run_task("create b.txt")
+    assert len(backend.checks) == 1
     assert asked == [("write_file", True)]
 
 
@@ -517,6 +522,73 @@ def test_a_result_tag_inside_a_call_is_content_not_an_invented_result(tmp_path):
 ])
 def test_a_result_tag_with_no_call_before_it_or_inside_a_line_is_text(text):
     assert invented_result_at(text, {"read_file", "run_shell"}) == -1
+
+
+# A reply that shows a command and then the result it makes up for it.
+PRETENDED = ("Let's run the tests.\n\n" + FENCE + "sh\nrun_tests\n" + FENCE
+             + "\n\n<tool_result>\n2 passed\n</tool_result>\n\nBoth tests pass now.")
+
+
+def test_a_result_after_a_code_block_is_found(tmp_path):
+    assert PRETENDED[invented_result_without_call(PRETENDED):].startswith("<tool_result>")
+    for text in ("The harness answers in a <tool_result> block.",
+                 "<tool_result>\nx\n</tool_result>",
+                 FENCE + "\nx\n" + FENCE + "\nand then <tool_result>",
+                 FENCE + "\n<tool_result>\n" + FENCE):
+        assert invented_result_without_call(text) == -1
+
+
+def test_an_invented_result_is_asked_for_as_a_real_call(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    backend = _Backend([PRETENDED, _xml("read_file", path="a.py"), "a.py sets x to 1."])
+    agent = _agent(tmp_path, backend)
+    agent.run_task("run the tests")
+    assert "2 passed" not in "\n".join(_texts(agent, "assistant"))
+    assert _texts(agent, "user")[1].startswith("[invented result]")
+    assert "grammar_lazy" in backend.calls[1][1], "the first nudge must leave the reply free"
+
+
+def test_the_second_invented_result_is_forced_into_a_call(tmp_path):
+    backend = _Backend([PRETENDED, PRETENDED, _xml("list_dir", path="."), "Listed."])
+    agent = _agent(tmp_path, backend)
+    agent.run_task("run the tests")
+    forced = backend.calls[2][1]
+    assert "grammar" in forced and "grammar_lazy" not in forced
+
+
+def test_a_run_that_keeps_inventing_results_is_not_finished(tmp_path):
+    agent = _agent(tmp_path, _Backend([PRETENDED] * 8))
+    result = agent.run_task("run the tests")
+    assert agent.last_run_ok is False
+    assert "a tool result the model wrote itself" in result
+
+
+def test_a_result_shown_in_an_explanation_is_left_alone(tmp_path):
+    agent = _agent(tmp_path, _Backend([PRETENDED]))
+    result = agent.run_task("what would a run of the tests look like?")
+    assert result.startswith(PRETENDED)
+    assert "[invented result]" not in "\n".join(_texts(agent, "user"))
+
+
+def test_a_question_in_a_run_nobody_answers_is_sent_back_once(tmp_path):
+    ask = "Which test is failing, and where is it?"
+    backend = _Backend([ask, _xml("write_file", path="a.py", content="x = 1\n"), "Fixed."])
+    agent = _agent(tmp_path, backend)
+    agent.run_task("fix the failing test in this project")
+    assert (tmp_path / "a.py").exists()
+    assert _texts(agent, "user")[1].startswith("[unattended run]")
+    backend = _Backend([ask, ask, "never asked for"])
+    agent = _agent(tmp_path, backend)
+    assert agent.run_task("fix the failing test in this project").startswith(ask)
+    assert len(backend.calls) == 2
+
+
+def test_a_question_to_a_person_who_can_answer_stands(tmp_path):
+    ask = "Which test is failing, and where is it?"
+    backend = _Backend([ask, "unused"])
+    agent = _agent(tmp_path, backend, confirm_handler=lambda call, agent=None: True)
+    assert agent.run_task("fix the failing test in this project").startswith(ask)
+    assert len(backend.calls) == 1
 
 
 def test_generation_stops_at_the_invented_result(tmp_path):
@@ -899,6 +971,19 @@ def test_failing_tests_with_nothing_changed_still_trip_the_breaker(tmp_path):
                       lambda cwd, **kw: _run_tests_result(False)):
         result = agent.run_task("fix the failing test")
     assert "circuit breaker: run_tests failed 4 times" in result
+
+
+def test_code_shown_while_the_tests_fail_is_named_as_not_written(tmp_path):
+    from localm.plugins.coder.agent import TOOL_REGISTRY
+    block = FENCE + "python\nx = 2\ny = 3\nz = 4\nw = 5\n" + FENCE + "\n"
+    replies = [_xml("write_file", path="a.py", content="x = 1\n"), _xml("run_tests"),
+               "It should be:\n" + block + _xml("run_tests"), "Still failing."]
+    agent = _agent(tmp_path, _Backend(replies), max_turns=30)
+    with patch.object(TOOL_REGISTRY["run_tests"], "fn",
+                      lambda cwd, **kw: _run_tests_result(False)):
+        agent.run_task("fix the failing test")
+    notes = [i for i, t in enumerate(_texts(agent, "user")) if "changed no file" in t]
+    assert notes == [3]
 
 
 def test_a_denied_tool_says_it_stays_denied(tmp_path):

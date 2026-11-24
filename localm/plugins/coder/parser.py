@@ -796,6 +796,20 @@ def invented_result_at(text: str, tool_names: Optional[set] = None) -> int:
     return -1
 
 
+_RE_RESULT_NEXT = re.compile(r"\s*<tool_result\b")
+
+
+def invented_result_without_call(text: str) -> int:
+    """Where a reply that makes no call starts to invent a result: the first
+    ``<tool_result`` that directly follows a code block, as if the block had been
+    run; -1 when there is none."""
+    for _start, end, _lang, _body in _iter_fenced_blocks(text or ""):
+        m = _RE_RESULT_NEXT.match(text, end)
+        if m:
+            return text.index("<tool_result", end)
+    return -1
+
+
 _RE_ANY_OPENER = re.compile(
     r"<\|?tool_call(?:\s+name=['\"][^'\"]+['\"])?\|?>|\[tool_call\]"
     r"|```[ \t]*(?:[\w+.-]+)?[ \t]*\r?\n",

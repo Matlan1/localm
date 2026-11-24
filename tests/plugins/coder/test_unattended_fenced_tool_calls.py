@@ -235,7 +235,8 @@ def test_a_timed_out_run_still_carries_its_denials(tmp_path, monkeypatch):
 
     class _Gated(_ScriptedBackend):
         def chat(self, messages, **kw):
-            if len(self.seen) == 1:
+            if len(self.seen) == 1 and not messages[-1]["content"].startswith(
+                    "[tool-call check]"):
                 gate.wait()
             return super().chat(messages, **kw)
 

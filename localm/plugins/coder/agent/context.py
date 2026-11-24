@@ -1715,11 +1715,14 @@ ws     ::= [ \t\n\r]*
         from ..backends.http import CoderServerError
         from .execution import _call_key
         listed = "\n".join(f"- {c.name} {_call_key(c)[:600]}" for c in calls)
+        request = (getattr(self, "_last_user_request", "") or "").strip()[:600]
+        asked = f"\nThe user's request was: {request}" if request else ""
         messages = self._build_messages() + [{"role": "user", "content": (
             "[tool-call check] Your reply contains JSON text that names a tool:\n"
-            + listed + "\nNothing of it has run. Answer [run] if you wrote it as a "
-            "call for me to execute now. Answer [example] if it was an example, a "
-            "quotation, or an illustration for the user. Answer with nothing else.")}]
+            + listed + "\nNothing of it has run." + asked + "\nAnswer [run] if this "
+            "request needs it executed now. Answer [example] if your reply only "
+            "shows, quotes or documents what such a call looks like. Answer with "
+            "nothing else.")}]
         kw = {k: v for k, v in self.gen_kwargs.items() if k != "max_tokens"}
         if self.can_force_tool_calls():
             kw["grammar"] = _CALL_CHECK_GRAMMAR
