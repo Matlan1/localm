@@ -372,7 +372,7 @@ class FullDisk:
 
     def __init__(self, monkeypatch, root: Path, start: int, room: int = 400) -> None:
         self.reserve = root / ".localm-update" / ID / "reserve"
-        self.start, self.room, self.seen, self.fired = start, room, 0, False
+        self.start, self.room, self.seen, self.fired, self.had = start, room, 0, False, False
         for name in ("mkdir", "fsync"):
             monkeypatch.setattr(os, name, self._wrap(getattr(os, name)))
 
@@ -380,8 +380,9 @@ class FullDisk:
         def call(*args, **kw):
             n = self.seen
             self.seen += 1
+            self.had = self.had or self.reserve.exists()
             if 0 <= self.start <= n:
-                if self.fired and not self.reserve.exists() and self.room > 0:
+                if self.had and not self.reserve.exists() and self.room > 0:
                     self.room -= 1
                 else:
                     self.fired = True
@@ -432,7 +433,8 @@ class Journal:
         monkeypatch.setattr(os, "open", self._open(os.open))
         monkeypatch.setattr(builtins, "open", self._builtin_open(builtins.open))
         monkeypatch.setattr(disk, "sync_disk", lambda: self.log.append(("barrier",)))
-        monkeypatch.setattr(disk, "sync_folder", lambda folder: None)
+        monkeypatch.setattr(disk, "sync_folder",
+                            lambda folder: self.log.append(("sync", self._rel(folder))))
         monkeypatch.setattr(disk, "replace_through", self._through)
         real_tree = disk.remove_tree
 
@@ -527,7 +529,7 @@ def replay(template: Path, dest: Path, log: list, *, lost: int | None = None,
 
     for n, entry in enumerate(log):
         kind = entry[0]
-        if kind == "barrier" or n == lost:
+        if kind in ("barrier", "sync") or n == lost:
             if n == lost and kind == "rename":
                 missing.add(entry[2])
             continue
@@ -574,6 +576,13 @@ def replay(template: Path, dest: Path, log: list, *, lost: int | None = None,
             path.write_bytes(b"\0" * size)
 
 
+def safe(log: list, n: int, at: int) -> bool:
+    """Whether the operation *n* is on disk behind *at*: the folder of its file was
+    flushed since."""
+    folders = {rel.rpartition("/")[0] for rel in log[n][1:] if isinstance(rel, str)}
+    return any(e[0] == "sync" and e[1] in (f or "." for f in folders) for e in log[n:at])
+
+
 def cuts(log: list):
     """Each prefix of *log*, and the whole of each stretch between two flushes with
     one of its operations lost."""
@@ -583,7 +592,7 @@ def cuts(log: list):
     for n, entry in enumerate([*log, ("barrier",)]):
         if entry[0] == "barrier":
             for lost in range(start, n):
-                if log[lost][0] != "content":
+                if log[lost][0] not in ("content", "sync") and not safe(log, lost, n):
                     yield n, lost
             start = n + 1
 

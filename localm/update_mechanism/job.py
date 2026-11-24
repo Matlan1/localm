@@ -244,6 +244,8 @@ def _current(root) -> Optional[Record]:
         return record
     if state is not None and state.phase in (DONE, RESTORING, _ENDED, _LEFT):
         record.phase = state.phase
+    if record.phase == DONE and disk.lstat(mover.work_folder(root, record.id)) is None:
+        record.phase = _ENDED
     return record
 
 
@@ -384,7 +386,7 @@ def _close(lock: Lock, record: Record, over: str, result: Result) -> None:
     try:
         if disk.lstat(mover.work_folder(lock.root, record.id)) is not None:
             _set_state(lock, record, over)
-        disk.unlink(record_path(lock.root))
+        disk.remove_through(record_path(lock.root))
     except (OSError, Held) as e:
         result.notes.append(f"The record of the update stays for now: {e}")
         return
@@ -418,8 +420,9 @@ def cleanup(lock: Lock) -> list:
     the folders that are left."""
     _held(lock)
     left = []
-    with contextlib.suppress(OSError, Held):   # a write that never took effect
-        disk.unlink(record_path(lock.root).with_name("job.json.tmp"))
+    for name in ("job.json.tmp", "job.json.gone"):
+        with contextlib.suppress(OSError, Held):   # a write that never took effect
+            disk.unlink(record_path(lock.root).with_name(name))
     for update_id in _ids(lock.root):
         try:
             if not _delete(lock, update_id):

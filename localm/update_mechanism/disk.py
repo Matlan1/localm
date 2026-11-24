@@ -284,6 +284,15 @@ def unlink(path: Path) -> None:
     sync_folder(path.parent)
 
 
+def remove_through(path: Path) -> None:
+    """Remove the file at *path* if it is there; that it is gone is on disk when this
+    returns. Raises :class:`Held` or OSError."""
+    gone = path.with_name(path.name + ".gone")
+    if lstat(path) is not None:
+        patient(Wait(_REPLACE_WAIT_S), path, lambda: replace_through(path, gone))
+    unlink(gone)
+
+
 def read_json(path: Path, limit: int):
     """The JSON value in the regular file *path* of at most *limit* bytes, or None
     when there is no file. Raises ValueError when it is anything else, and
