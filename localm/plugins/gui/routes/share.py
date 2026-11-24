@@ -189,9 +189,11 @@ def register(app: FastAPI, ctx) -> None:
                 (inbox / name).write_bytes(data)
             n += 1
         skipped = empty + not_image
+        names = _skipped_names(app)
+        now = time.time()
+        names[:] = [n for n in names if n[2] > now]
+        names.extend((owner, name[:80], expires_at) for name in skipped_names)
         if skipped:
-            _skipped_names(app).extend(
-                (owner, name[:80], expires_at) for name in skipped_names)
             logger.info("share-target: staged %d item(s), skipped %d file(s) (%d "
                         "empty, %d not an image)", n, skipped, empty, not_image)
         # 303 so the browser GETs the app shell (a POST-redirect-GET); the app
@@ -250,9 +252,10 @@ def register(app: FastAPI, ctx) -> None:
             _add(fid, name, data)
         now = time.time()
         names = _skipped_names(app)
+        caller = principal_id(request)
         live = [n for n in names if n[2] > now]
-        skipped = [name for owner, name, _exp in live if job_owner_ok(request, owner)]
-        names[:] = [n for n in live if not job_owner_ok(request, n[0])]
+        skipped = [name for owner, name, _exp in live if owner == caller]
+        names[:] = [n for n in live if n[0] != caller]
         return {"items": items, "skipped": skipped}
 
     @app.post("/api/share/clear", dependencies=[Depends(_require_auth)])

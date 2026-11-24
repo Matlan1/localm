@@ -126,8 +126,16 @@ export function migrateConversations(list) {
 /*  Chat                                                             */
 /* ================================================================ */
 
+/** The conversations this browser cached, marked as read from its cache. */
+function cachedConversations() {
+  const list = readStoredJSON("localm.conversations", []);
+  if (!Array.isArray(list)) return [];
+  return migrateConversations(list.filter((c) => c && typeof c === "object"))
+    .map((c) => Object.assign(c, { _cached: true }));
+}
+
 export const chat = {
-  conversations: migrateConversations(readStoredJSON("localm.conversations", [])),
+  conversations: cachedConversations(),
   activeId: null,
   abort: null,
   busy: false,
@@ -181,6 +189,10 @@ export const chat = {
   // have to re-derive it - only instanceMatch (confirmed-only) is the right
   // gate for anything that WRITES to the backend.
   instanceState: "confirmed",
+  // Which store the conversations shown here are in: the install and a tag of
+  // the key behind this page ("" until the server has said so).
+  inst: "",
+  prin: "",
   // True once the in-memory privacy-mode wipe below has run for this page
   // load. refreshCtxLimit() also runs on a 30s poll for the tab's whole
   // lifetime (init.js), and the wipe must fire only the FIRST time privacy
@@ -696,6 +708,7 @@ export async function refreshCtxLimit() {
   // foreign cache the mismatch branch exists to remove.
   let reconciled = false;
   const upTo = _writeSeq;
+  const read = ++_modeReads;
   try {
     const r = await fetch("/v1/config", { headers: authHeaders() });
     if (!r.ok) {
@@ -768,7 +781,7 @@ export async function refreshCtxLimit() {
         showView("chat");
       }
 
-      applySessionMode(cfg, upTo);
+      applySessionMode(cfg, upTo, read);
       hydrateChatToggles(cfg);   // R34: reflect saved choice / global net policy
     }
   } catch (e) {
@@ -781,21 +794,32 @@ export async function refreshCtxLimit() {
   }
 }
 
-/** Applies the session mode of the /v1/config payload *cfg*, asked for when the
- *  newest queued write had sequence number *upTo*, to the page. In
+// The newest /v1/config read that was sent, and the newest whose mode was applied.
+let _modeReads = 0;
+let _modeApplied = 0;
+
+/** Applies the session mode of the /v1/config payload *cfg*, the answer to read
+ *  number *read*, sent when the newest queued write had sequence number *upTo*.
+ *  An answer older than one already applied changes nothing. In
  *  privacy mode conversations live in memory only: anything an earlier
  *  non-privacy session left in this browser is wiped and the hint is shown. The
  *  server applies a change of the mode at once, so this also handles a switch
  *  while the page is open. */
-function applySessionMode(cfg, upTo) {
+function applySessionMode(cfg, upTo, read) {
+  if (read < _modeApplied) return;
+  _modeApplied = read;
+  if (cfg.instance_id) chat.inst = cfg.instance_id;
   const wasPrivacy = chat.modeKnown && chat.privacy;
   chat.privacy = (cfg.effective_chat_mode ?? cfg.effective_mode) === "privacy";
   chat.serverPrivacy = cfg.effective_mode === "privacy";
   chat.modeKnown = true;
+  let wiped = true;
   for (const key of INSTANCE_SCOPED_KEYS) {
-    if (scopedKeyPrivate(key)) localStorage.removeItem(key);
+    if (!scopedKeyPrivate(key)) continue;
+    try { localStorage.removeItem(key); } catch { wiped = false; }
   }
-  if (chat.privacy) wipeStoredDrafts();
+  if (chat.privacy) wipeStoredDrafts(wiped);
+  else _wipeDone = false;
   settlePendingScopedWrites(upTo);
   _syncRecentErrorsStore();
   if (chat.serverPrivacy) {
@@ -839,6 +863,26 @@ function applySessionMode(cfg, upTo) {
   }
   _updateUnsavedIndicator();
   _flushPendingWrites();
+  if (!chat.privacy && _storeAsked && (!chat.persist || !_draftsRestored)) connectStore();
+}
+
+// Set once the page has asked for its conversation store.
+let _storeAsked = false;
+let _connecting = false;
+
+/** Connects the page to the server's conversation store and brings back what
+ *  this browser kept for it. Also called when a mode is confirmed later than
+ *  the page loaded. */
+export async function connectStore() {
+  _storeAsked = true;
+  if (_connecting) return;
+  _connecting = true;
+  try {
+    if (!chat.persist) await initServerConversations();
+    await restoreDrafts();
+  } finally {
+    _connecting = false;
+  }
 }
 
 /** Privacy mode was confirmed: the conversations on screen leave it. One that
@@ -875,9 +919,10 @@ function leavePrivacyMode() {
     held++;
   }
   holdDraftsInTab();
+  if (_composerOwner === null && !draftIsEmpty(liveDraft())) newConversation();
   if (held) toast(tn("chat.conv.privacyKept", held));
   renderConvList();
-  initServerConversations();
+  connectStore();
 }
 
 /** Marks *conv* as held in this tab only: it is never written to this browser
@@ -924,21 +969,35 @@ document.addEventListener("localm:language", () => {
 
 let _modeCheck = null;
 
+// How long a read of the session mode may take before the last confirmed mode
+// stands for the writes that wait for it.
+const MODE_READ_TIMEOUT_MS = 4000;
+
 /** Reads the session mode from the server and applies it. Calls made while a
- *  read is in flight share it. An unreachable server, a refused read or an
- *  answer that names no mode leaves the last confirmed mode standing. Never
- *  throws. */
+ *  read is in flight share it. An unreachable server, a refused read, an answer
+ *  that names no mode and a read that takes longer than MODE_READ_TIMEOUT_MS
+ *  leave the last confirmed mode standing. Never throws. */
 export function confirmSessionMode() {
   if (!_modeCheck) {
     const upTo = _writeSeq;
-    _modeCheck = (async () => {
+    const read = ++_modeReads;
+    const ctl = new AbortController();
+    let timer = 0;
+    const answer = (async () => {
       try {
-        const r = await fetch("/v1/config", { headers: authHeaders() });
+        const r = await fetch("/v1/config", { headers: authHeaders(), signal: ctl.signal });
         if (!r.ok) return;
         const cfg = await r.json();
-        if (cfg && (cfg.effective_chat_mode ?? cfg.effective_mode)) applySessionMode(cfg, upTo);
+        if (cfg && (cfg.effective_chat_mode ?? cfg.effective_mode)) applySessionMode(cfg, upTo, read);
       } catch { /* the last confirmed mode stands */ }
-    })().finally(() => { _modeCheck = null; });
+    })();
+    const late = new Promise((resolve) => {
+      timer = setTimeout(() => { ctl.abort(); resolve(); }, MODE_READ_TIMEOUT_MS);
+    });
+    _modeCheck = Promise.race([answer, late]).finally(() => {
+      clearTimeout(timer);
+      _modeCheck = null;
+    });
   }
   return _modeCheck;
 }
@@ -997,7 +1056,7 @@ async function _flushPendingWrites() {
 // server mode (chat.serverPrivacy).
 const CHAT_SCOPED_KEYS = Object.freeze([
   "localm.conversations", "localm.convCollapsed", "localm.webAccess",
-  "localm.speakAloud",
+  "localm.speakAloud", "localm.chatOwner",
 ]);
 
 /** True when *key* must not be kept in localStorage under the confirmed mode. */
@@ -1130,33 +1189,52 @@ export function saveConversations(changed) {
   _flushPendingWrites();
 }
 
-// The ids this page deleted, dropped or gave up: never kept in the cache.
-const _goneIds = new Set();
+// The ids of the conversations deleted in this page.
+const _deletedHere = new Set();
+// The ids this page gave up without deleting them (a copy or a chat held in this
+// tab got an id of its own).
+const _leftIds = new Set();
 
-/** The conversations the browser cache gets: those this page holds, and a copy
- *  another tab cached with a change it has not saved yet. R40: server index-only
- *  rows (_meta) carry no messages and are not cached. */
+/** The conversations the browser cache gets: those this page holds, marked with
+ *  the store they are in, and from what is cached already those of another store
+ *  and the copy another tab cached with a change it has not saved yet. R40:
+ *  server index-only rows (_meta) carry no messages and are not cached. */
 function cacheableConversations() {
-  const mine = chat.conversations.filter((c) => !c._meta && convPersistable(c));
-  const unsavedHere = new Set(mine.filter((c) => c.unsaved).map((c) => c.id));
-  const others = readStoredJSON("localm.conversations", []).filter((c) => c && c.unsaved &&
-    (c.messages || []).length && !unsavedHere.has(c.id) && !_goneIds.has(c.id));
+  const tag = cacheTag();
+  const own = chat.conversations.filter((c) => !c._meta && convPersistable(c));
+  const unsavedHere = new Set(own.filter((c) => c.unsaved).map((c) => c.id));
+  const stored = readStoredJSON("localm.conversations", []);
+  const others = [];
+  const foreign = [];
+  for (const c of Array.isArray(stored) ? stored : []) {
+    if (!c || typeof c !== "object") continue;
+    if (!cachedHere(c)) foreign.push(c);
+    else if (c.unsaved && (c.messages || []).length && !unsavedHere.has(c.id) &&
+             !_deletedHere.has(c.id) && !_leftIds.has(c.id)) others.push(c);
+  }
   const keep = new Set(others.map((c) => c.id));
-  return [...others, ...mine.filter((c) => !keep.has(c.id))]
+  const mine = [...others, ...own.filter((c) => !keep.has(c.id))]
+    .map((c) => {
+      const row = { ...c, ...tag };
+      delete row._cached;
+      return row;
+    })
     .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+  return { mine, foreign };
 }
 
 function _writeConversationCache() {
-  const cacheable = cacheableConversations();
+  if (_cleared) return;
+  const { mine, foreign } = cacheableConversations();
   let localOk = true;
-  let kept = cacheable.slice(0, 50);
+  let kept = mine.slice(0, 50);
   try {
-    localStorage.setItem("localm.conversations", JSON.stringify(kept));
+    localStorage.setItem("localm.conversations", JSON.stringify([...kept, ...foreign.slice(0, 50)]));
   } catch {
     // Quota: drop image-heavy older conversations and retry once
-    kept = cacheable.slice(0, 10);
+    kept = mine.slice(0, 10);
     try {
-      localStorage.setItem("localm.conversations", JSON.stringify(kept));
+      localStorage.setItem("localm.conversations", JSON.stringify([...kept, ...foreign.slice(0, 50)]));
     } catch (e2) {
       localOk = false;
       kept = [];
@@ -1169,6 +1247,95 @@ function _writeConversationCache() {
   _updateUnsavedIndicator();
 }
 
+/* ---- whose conversations these are ---- */
+
+const CHAT_OWNER_KEY = "localm.chatOwner";
+
+/** The store this page is connected to as `{ inst, prin }`, null when unknown. */
+function storeTag() {
+  return chat.inst && chat.prin ? { inst: chat.inst, prin: chat.prin } : null;
+}
+
+/** The store the page's conversations were last known to be in. */
+function lastOwner() {
+  const prev = readStoredJSON(CHAT_OWNER_KEY, null);
+  return prev && prev.inst && prev.prin ? { inst: prev.inst, prin: prev.prin } : null;
+}
+
+const sameStore = (a, b) => !!a && !!b && a.inst === b.inst && a.prin === b.prin;
+
+function cacheTag() {
+  return storeTag() || lastOwner() || {};
+}
+
+/** Whether the cached row *c* belongs to the store this page is connected to. A
+ *  row cached before rows were marked belongs to it unless another store was
+ *  recorded; while the store is unknown, every row does. */
+function cachedHere(c) {
+  const tag = storeTag();
+  if (!tag) return true;
+  if (c.prin) return sameStore(c, tag);
+  const prev = lastOwner();
+  return !prev || sameStore(prev, tag);
+}
+
+/** Takes the store the server named in an index answer. Cached conversations of
+ *  another store leave the page; those of the key this browser used before for
+ *  the same install are removed. When the key changed under an open page,
+ *  everything it held leaves the page. */
+function adoptStore(data) {
+  if (typeof data.principal !== "string" || typeof data.instance !== "string" ||
+      !data.principal || !data.instance) return;
+  const next = { inst: data.instance, prin: data.principal };
+  const known = storeTag();
+  if (known && !sameStore(known, next)) {
+    chat.conversations = [];
+    chat.activeId = null;
+    chat.queue = [];
+    for (const timer of _convPushTimers.values()) clearTimeout(timer);
+    _convPushTimers.clear();
+    _drafts.clear();
+    _rows.clear();
+    _composerOwner = null;
+    showDraft(emptyDraft());
+    _draftsRestored = false;
+  }
+  const prev = lastOwner();
+  chat.inst = next.inst;
+  chat.prin = next.prin;
+  if (!sameStore(prev, next)) {
+    if (prev && prev.inst === next.inst) clearStoredChats(prev);
+    if (!chat.privacy) lsSetScoped(CHAT_OWNER_KEY, JSON.stringify(next));
+  }
+  chat.conversations = chat.conversations.filter((c) => !c._cached || c.tabOnly ||
+    (c.prin ? sameStore(c, next) : !prev || sameStore(prev, next)));
+  for (const c of chat.conversations) delete c._cached;
+}
+
+// Set when this browser was signed out: the page writes nothing more here.
+let _cleared = false;
+
+/** After a sign-out: removes what this browser kept of the store this page was
+ *  connected to, and lets the page write nothing more. */
+export function clearSignedOutChats() {
+  _cleared = true;
+  return clearStoredChats(storeTag() || lastOwner());
+}
+
+/** Removes from this browser the conversations and drafts of the store *owner*. */
+function clearStoredChats(owner) {
+  try {
+    const rows = readStoredJSON("localm.conversations", []);
+    const keep = (Array.isArray(rows) ? rows : []).filter((c) => c && c.prin && !sameStore(c, owner));
+    if (keep.length) localStorage.setItem("localm.conversations", JSON.stringify(keep));
+    else localStorage.removeItem("localm.conversations");
+  } catch { toast(t("chat.drafts.clearFailed"), true); }
+  _rows.clear();
+  if (!draftStore.available()) return Promise.resolve();
+  return draftCall(() => draftStore.remove((v) => !v.prin || sameStore(v, owner)),
+                   () => toast(t("chat.drafts.clearFailed"), true));
+}
+
 /* ---- server-side conversation store (non-privacy modes only) ---- */
 
 export const _convPushTimers = new Map();
@@ -1178,6 +1345,7 @@ const _convTooLargeWarned = new Set();   // conversation ids already toasted for
 // The save of each conversation in flight: the next one of the same conversation
 // waits for it, so it names the revision that save returned.
 const _convPushChain = new WeakMap();
+const _savesInFlight = new Set();
 
 /** Debounced upsert of one conversation to the server store. The save names the
  *  stored revision it replaces (`conv.rev`); when the store holds another one,
@@ -1193,22 +1361,43 @@ export function pushConversation(conv) {
     _convPushTimers.delete(conv.id);
     const run = (_convPushChain.get(conv) || Promise.resolve()).then(() => _putConversation(conv));
     _convPushChain.set(conv, run);
+    _savesInFlight.add(run);
+    run.finally(() => _savesInFlight.delete(run));
   }, 600));
 }
 
 /** Saves a change of title, pin, folder, pinned model or drawer values made on
  *  *conv*, an index row whose messages are not loaded: loads the stored copy,
- *  puts the change back on it and saves it. Says so when it cannot be loaded. */
+ *  puts only what was changed here on it and saves it. Says so when it cannot
+ *  be loaded. */
 async function saveIndexRowChange(conv) {
   const mine = convMeta(conv);
-  const ok = await hydrateConversation(conv, { keep: mine });
-  if (ok && !conv._meta) {
-    saveConversations(conv);
-    renderConvList();
-    if (conv === currentConv()) renderChat();
-  } else {
-    toast(t("chat.conv.saveFailed"), true);
+  const row = conv._row || {};
+  const changed = {};
+  for (const key of ["title", "pinned", "folder"]) {
+    if (key in row && !_sameJSON(mine[key], row[key])) changed[key] = mine[key];
   }
+  if (conv.pinnedModel) changed.pinned_model = mine.pinned_model;
+  if (conv.params) changed.params = mine.params;
+  const ok = await hydrateConversation(conv);
+  if (!ok || conv._meta) {
+    toast(t("chat.conv.saveFailed"), true);
+    return;
+  }
+  if (Object.keys(changed).length) {
+    applyConvMeta(conv, { ...convMeta(conv), ...changed });
+    saveConversations(conv);
+  } else if (conv.unsaved) {
+    pushConversation(conv);
+  }
+  renderConvList();
+  if (conv === currentConv() && !chatBusy()) renderChat();
+}
+
+/** A list row of the stored conversation *row*. */
+function rowPlaceholder(row) {
+  return { ...row, _meta: true, messages: [],
+           _row: { title: row.title, pinned: !!row.pinned, folder: row.folder || null } };
 }
 
 /** The title of *conv* as the list shows it. */
@@ -1260,7 +1449,34 @@ function putBody(conv) {
   const body = { ...convMeta(conv), updated_at: conv.updated_at,
                  branches: conv.branches || [], messages: conv.messages };
   if (conv.rev) body.base_rev = conv.rev;
+  const tag = storeTag();
+  if (tag) {
+    body.instance = tag.inst;
+    body.principal = tag.prin;
+  }
+  body.save_id = randomId();
+  // What the stored copy is if this save lands and its answer is lost.
+  conv.tries = [...(conv.tries || []), { id: body.save_id, sync: syncPoint(conv) }].slice(-5);
   return JSON.stringify(body);
+}
+
+/** 16 random hex digits. */
+function randomId() {
+  const bytes = new Uint8Array(8);
+  if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(bytes);
+  else for (let i = 0; i < 8; i++) bytes[i] = Math.floor(Math.random() * 256);
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** When the stored copy named by *row* is one this page wrote and never got the
+ *  answer for, takes its revision. Returns whether it is. */
+function recogniseOwnSave(conv, row) {
+  const mine = row && row.save_id && (conv.tries || []).find((x) => x.id === row.save_id);
+  if (!mine || typeof row.rev !== "string") return false;
+  conv.rev = row.rev;
+  conv.sync = mine.sync;
+  delete conv.tries;
+  return true;
 }
 
 /** The PUT of one conversation (see pushConversation). Never throws. */
@@ -1277,9 +1493,15 @@ async function _putConversation(conv) {
       _convPushWarned = false;
       _saveFailed.delete(conv.id);
       const saved = await r.json().catch(() => null);
+      if (conv.deleted) {
+        // Deleted while this save was on its way.
+        deleteConversationRemote(conv);
+        return;
+      }
       if (saved && typeof saved.rev === "string") {
         conv.rev = saved.rev;
         conv.sync = sent;
+        delete conv.tries;
       }
       if ((_editCount.get(conv) || 0) === edits) delete conv.unsaved;
       saveConversations();
@@ -1288,7 +1510,11 @@ async function _putConversation(conv) {
       await resolveStaleSave(conv, (data && data.detail) || {});
     } else {
       failed();
-      if (r.status === 403) refreshCtxLimit();   // the mode, or this key's rights, changed
+      if (r.status === 403) {   // the mode, or this key's rights, changed
+        const data = await r.json().catch(() => null);
+        if (data && data.detail && data.detail.error === "owner") initServerConversations();
+        else refreshCtxLimit();
+      }
       if (r.status === 413 && !_convTooLargeWarned.has(conv.id)) {
         _convTooLargeWarned.add(conv.id);
         toast(t(_localSaveOk && _localSavedIds.has(conv.id)
@@ -1326,7 +1552,7 @@ function rekeyConversation(conv, id) {
   clearTimeout(_convPushTimers.get(old));
   _convPushTimers.delete(old);
   _saveFailed.delete(old);
-  _goneIds.add(old);
+  _leftIds.add(old);
   conv.id = id;
   if (chat.activeId === old) chat.activeId = id;
   for (const q of chat.queue) if (q.convId === old) q.convId = id;
@@ -1336,18 +1562,22 @@ function rekeyConversation(conv, id) {
 
 /** Settles a save of *conv* the store refused because it holds another
  *  revision. *detail* is the 409's detail: `rev` null when the conversation is
- *  not stored any more. A conversation deleted elsewhere stays in this tab only
- *  when it holds something not saved, else it goes here too. Changes of the
+ *  not stored any more, `deleted` when that is because it was deleted. One
+ *  deleted elsewhere stays in this tab only when it holds something not saved,
+ *  else it goes here too; one that is missing is stored again from this copy. A
+ *  stored copy this page wrote itself is recognised. Changes of the
  *  title, pin, folder, pinned model and drawer values are merged. When the
  *  messages changed both here and there, the copy here becomes a conversation
  *  of its own and the stored one is listed beside it. */
 async function resolveStaleSave(conv, detail) {
-  if (!detail.rev) { dropDeletedElsewhere(conv); return; }
+  if (!convPersistable(conv)) return;
+  if (!detail.rev) { settleNotStored(conv, !!detail.deleted); return; }
+  if (recogniseOwnSave(conv, detail.row)) { pushConversation(conv); return; }
   let data = null;
   try {
     const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id),
                           { headers: authHeaders() });
-    if (r.status === 404) { dropDeletedElsewhere(conv); return; }
+    if (r.status === 410 || r.status === 404) { settleNotStored(conv, r.status === 410); return; }
     if (r.ok) data = await r.json();
   } catch { /* kept as a copy below */ }
   if (!convPersistable(conv)) return;
@@ -1359,7 +1589,7 @@ async function resolveStaleSave(conv, detail) {
     const changedHere = mine !== theirs && (!base || mine !== base.body);
     const changedThere = mine !== theirs && (!base || theirs !== base.body);
     if (!(changedHere && changedThere)) {
-      if (changedThere && chatBusy() && conv === currentConv()) {
+      if (changedThere && chatBusy()) {
         setTimeout(() => pushConversation(conv), 1000);
         return;
       }
@@ -1368,6 +1598,28 @@ async function resolveStaleSave(conv, detail) {
     }
   }
   keepAsCopy(conv, detail.row);
+}
+
+let _restoredTold = false;
+
+/** The server does not hold *conv*, which it stored before. *deleted* says it was
+ *  deleted; otherwise its file is missing and it is stored again from this copy,
+ *  which is said once. */
+function settleNotStored(conv, deleted, { quiet = false } = {}) {
+  if (deleted) { dropDeletedElsewhere(conv, { quiet }); return; }
+  if (conv._meta) {
+    // Only its list row is here.
+    chat.conversations = chat.conversations.filter((c) => c !== conv);
+    return;
+  }
+  delete conv.rev;
+  delete conv.sync;
+  delete conv.tries;
+  if (!_restoredTold) {
+    _restoredTold = true;
+    toast(t("chat.conv.restored"), true);
+  }
+  pushConversation(conv);
 }
 
 /** Merges the stored copy *data* into *conv*: the messages when *body*, and
@@ -1415,7 +1667,7 @@ function keepAsCopy(conv, row) {
   delete conv.sync;
   const at = chat.conversations.indexOf(conv);
   if (row && at !== -1 && !chat.conversations.some((c) => c.id === oldId)) {
-    chat.conversations.splice(at + 1, 0, { title: name, ...row, id: oldId, _meta: true, messages: [] });
+    chat.conversations.splice(at + 1, 0, rowPlaceholder({ title: name, ...row, id: oldId }));
   }
   saveConversations(conv);
   renderConvList();
@@ -1431,7 +1683,7 @@ function dropDeletedElsewhere(conv, { quiet = false } = {}) {
     toast(t("chat.conv.deletedElsewhereKept"), true);
   } else {
     conv.deleted = true;
-    _goneIds.add(conv.id);
+    _deletedHere.add(conv.id);
     clearTimeout(_convPushTimers.get(conv.id));
     _convPushTimers.delete(conv.id);
     chat.conversations = chat.conversations.filter((c) => c !== conv);
@@ -1447,21 +1699,26 @@ function dropDeletedElsewhere(conv, { quiet = false } = {}) {
   if (!chatBusy()) renderChat();
 }
 
-export function deleteConversationRemote(convId) {
+/** Deletes *conv* from the server store, after its own saves that are on their
+ *  way. */
+export async function deleteConversationRemote(conv) {
   if (!chat.persist) return;
-  clearTimeout(_convPushTimers.get(convId));
-  _convPushTimers.delete(convId);
-  fetch("/api/conversations/" + encodeURIComponent(convId), {
-    method: "DELETE", headers: authHeaders(),
-  }).then((r) => {
+  clearTimeout(_convPushTimers.get(conv.id));
+  _convPushTimers.delete(conv.id);
+  try { await _convPushChain.get(conv); } catch { /* its failure was said when it happened */ }
+  try {
+    const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id), {
+      method: "DELETE", headers: authHeaders(),
+    });
     if (!r.ok) throw new Error("HTTP " + r.status);
-  }).catch((e) => {
+  } catch (e) {
     // Deleting is privacy-relevant and the UI copy is already gone: a failed
     // server delete must not pass silently - the server copy would resurrect
     // on the next load while the user believes it was deleted.
+    _deletedHere.delete(conv.id);
     toast(t("chat.conv.deleteFailed"), true);
     console.error("conversation delete failed: " + (e && e.message ? e.message : e));
-  });
+  }
 }
 
 /** Delete every conversation in the server store, page by page, until the list
@@ -1472,6 +1729,7 @@ export function deleteConversationRemote(convId) {
 export async function deleteAllServerConversations() {
   for (const timer of _convPushTimers.values()) clearTimeout(timer);
   _convPushTimers.clear();
+  await Promise.allSettled([..._savesInFlight]);
   const deleted = new Set();
   const failed = new Set();
   const result = (listFailed) => ({ deleted: [...deleted], failed: [...failed], listFailed });
@@ -1509,7 +1767,7 @@ export async function deleteAllServerConversations() {
 /** Keep only the conversations *keep* accepts, here and in this browser's cache,
  *  and repaint the list and the chat. */
 export function retainConversations(keep) {
-  for (const c of chat.conversations) if (!keep(c)) _goneIds.add(c.id);
+  for (const c of chat.conversations) if (!keep(c)) _deletedHere.add(c.id);
   chat.conversations = chat.conversations.filter(keep);
   if (!chat.conversations.some((c) => c.id === chat.activeId)) {
     chat.activeId = chat.conversations[0]?.id || null;
@@ -1521,41 +1779,56 @@ export function retainConversations(keep) {
   renderChat();
 }
 
-/** R40: fetch a full conversation's body on demand and replace its index-only
- *  ("_meta") placeholder in chat.conversations. *keep* (a convMeta) puts those
- *  values back over the stored ones. Returns true on success. */
-export async function hydrateConversation(conv, { keep = null } = {}) {
-  if (!conv || !conv._meta) return true;
-  try {
-    const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id),
-                          { headers: authHeaders() });
-    if (!r.ok) return false;
-    applyStoredConversation(conv, await r.json());
-    if (keep) {
-      const stored = convMeta(conv);
-      for (const key of ["pinned_model", "params"]) {
-        if (!keep[key] || !Object.keys(keep[key]).length) keep[key] = stored[key];
-      }
-      applyConvMeta(conv, keep);
-    }
-    delete conv._meta;
-    saveConversations();   // cache the now-full conversation locally
-    return true;
-  } catch {
-    return false;   // offline - keep the placeholder; renderChat shows the hint
-  }
-}
+const _loading = new WeakMap();
 
-/** Takes the stored copy of *conv*, whose messages this page holds, unless it
- *  was changed here meanwhile. */
+/** R40: fetch a full conversation's body on demand and replace its index-only
+ *  ("_meta") placeholder in chat.conversations. Messages added to the placeholder
+ *  meanwhile follow the stored ones. Calls for one conversation share a request.
+ *  Returns true on success. */
+export function hydrateConversation(conv) {
+  if (!conv || !conv._meta) return Promise.resolve(true);
+  if (!_loading.has(conv)) {
+    _loading.set(conv, (async () => {
+      try {
+        const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id),
+                              { headers: authHeaders() });
+        if (!r.ok) return false;
+        const data = await r.json();
+        if (!conv._meta) return true;
+        const added = conv.messages;
+        const unsaved = conv.unsaved;
+        applyStoredConversation(conv, data);
+        delete conv._meta;
+        delete conv._row;
+        if (added.length) conv.messages = [...conv.messages, ...added];
+        if (added.length || unsaved) conv.unsaved = true;
+        saveConversations();   // cache the now-full conversation locally
+        return true;
+      } catch {
+        return false;   // offline - keep the placeholder; renderChat shows the hint
+      } finally {
+        _loading.delete(conv);
+      }
+    })());
+  }
+  return _loading.get(conv);
+}
+window.hydrateConversation = hydrateConversation;
+
+/** Takes the stored copy of *conv*, whose messages this page holds, unless
+ *  anything was added to it or changed in it meanwhile. */
 async function refreshStored(conv) {
+  const { messages } = conv;
+  const count = messages.length;
+  const edits = _editCount.get(conv) || 0;
   try {
     const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id),
                           { headers: authHeaders() });
-    if (r.ok) {
-      const data = await r.json();
-      if (!conv.unsaved && convPersistable(conv)) applyStoredConversation(conv, data);
-    }
+    if (!r.ok) return;
+    const data = await r.json();
+    if (conv.unsaved || !convPersistable(conv) || chatBusy() || conv.messages !== messages ||
+        messages.length !== count || (_editCount.get(conv) || 0) !== edits) return;
+    applyStoredConversation(conv, data);
   } catch { /* the next sync tries again */ }
 }
 
@@ -1575,21 +1848,22 @@ function applyStoredConversation(conv, data) {
   }
   delete conv.unsaved;
 }
-window.hydrateConversation = hydrateConversation;
-
 /** The server store's index: the rows of its first page (`rows`, what the list
  *  shows), every stored row by id (`byId`), whether that is all of them
  *  (`complete`) and the ids of unreadable files. Null when it cannot be read. */
 async function fetchServerIndex() {
   const page = async (offset) => {
-    const r = await fetch(`/api/conversations?meta=true&limit=200&offset=${offset}`,
+    const r = await fetch(`/api/conversations?meta=true&limit=${offset ? 1000 : 200}&offset=${offset}`,
                           { headers: authHeaders() });
+    if (!offset && (r.status === 401 || r.status === 403)) return { refused: true };
     if (!r.ok) return null;
-    const data = await r.json();
-    return data.enabled ? data : null;
+    return r.json();
   };
   const first = await page(0);
   if (!first) return null;
+  if (first.refused) return first;
+  adoptStore(first);
+  if (!first.enabled) return null;
   const rows = first.conversations || [];
   const byId = new Map(rows.map((c) => [c.id, c]));
   const total = Number.isInteger(first.total) ? first.total : rows.length;
@@ -1614,21 +1888,38 @@ async function fetchServerIndex() {
 export async function initServerConversations() {
   if (chat.privacy) return;
   try {
+    const shown = _listPrint();
     const index = await fetchServerIndex();
-    if (!index || chat.privacy) return;
+    if (!index || chat.privacy) {
+      if (!chat.privacy && shown !== _listPrint()) {
+        if (!currentConv()) chat.activeId = chat.conversations[0]?.id || null;
+        renderConvList();
+        if (!chatBusy()) renderChat();
+      }
+      return;
+    }
+    if (index.refused) {
+      // This key may not read conversations, so none cached here are shown to it.
+      chat.conversations = chat.conversations.filter((c) => !c._cached);
+      if (!chat.conversations.some((c) => c.id === chat.activeId)) chat.activeId = null;
+      renderConvList();
+      if (!chatBusy()) renderChat();
+      return;
+    }
     const boot = !chat.persist;
     chat.persist = true;
     if (boot && index.unreadable.size) {
       toast(tn("chat.conv.unreadable", index.unreadable.size), true);
     }
     const before = _listPrint();
-    const byId = new Map(index.rows.map((c) => [c.id, { ...c, _meta: true, messages: [] }]));
+    const byId = new Map(index.rows.filter((c) => !_deletedHere.has(c.id))
+      .map((c) => [c.id, rowPlaceholder(c)]));
     const stale = [];
     const gone = [];
     for (const local of chat.conversations) {
       const remote = index.byId.get(local.id);
       const keep = () => byId.set(local.id, local);
-      const keepRow = () => byId.set(local.id, { ...remote, _meta: true, messages: [] });
+      const keepRow = () => byId.set(local.id, rowPlaceholder(remote));
       if (local.tabOnly) keep();
       else if (!remote) {
         // A conversation this backend's index does not know may belong to
@@ -1642,7 +1933,12 @@ export async function initServerConversations() {
           pushConversation(local);
         }
       } else if (local._meta) {
-        Object.assign(local, remote);
+        const kept = convMeta(local);
+        const was = local._row || {};
+        Object.assign(local, rowPlaceholder(remote), { messages: local.messages });
+        for (const key of ["title", "pinned", "folder"]) {
+          if (key in was && !_sameJSON(kept[key], was[key])) local[key] = kept[key];
+        }
         keep();
       } else if (!local.rev || typeof remote.rev !== "string") {
         // Held since before conversations had a revision: the newer copy wins,
@@ -1656,7 +1952,7 @@ export async function initServerConversations() {
           local.rev = remote.rev;
           local.sync = syncPoint(local);
         }
-      } else if (local.rev === remote.rev) {
+      } else if (local.rev === remote.rev || recogniseOwnSave(local, remote)) {
         keep();
         if (local.unsaved) pushConversation(local);
       } else if (local.unsaved) {
@@ -1673,29 +1969,33 @@ export async function initServerConversations() {
       .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
     // One saved since the index was read is stored after all.
     for (const conv of gone) {
-      if (await isNotStored(conv)) dropDeletedElsewhere(conv, { quiet: boot });
+      const status = await storedStatus(conv);
+      if ((status === 410 || status === 404) && convPersistable(conv)) {
+        settleNotStored(conv, status === 410, { quiet: boot });
+      }
     }
     if (!chat.conversations.some((c) => c.id === chat.activeId)) {
       chat.activeId = chat.conversations[0]?.id || null;
     }
     for (const conv of stale) await refreshStored(conv);
-    await hydrateConversation(currentConv());   // load the active conversation's body
     if (boot || stale.length || before !== _listPrint()) {
       saveConversations();
       renderConvList();
-      if (!chatBusy()) renderChat();
+      if (!chatBusy()) renderChat();   // loads the active conversation's body
     }
+    await hydrateConversation(currentConv());
     _updateUnsavedIndicator();
   } catch { /* store unavailable - localStorage keeps working */ }
 }
 
-/** Whether the server says that *conv* is not stored. */
-async function isNotStored(conv) {
+/** The status the server answers for *conv*: 410 deleted, 404 not stored, 0 when
+ *  it cannot be asked. */
+async function storedStatus(conv) {
   try {
     const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id),
                           { headers: authHeaders() });
-    return r.status === 404 && convPersistable(conv);
-  } catch { return false; }
+    return r.status;
+  } catch { return 0; }
 }
 
 /** A fingerprint of the listed conversations. */
@@ -1714,7 +2014,8 @@ export async function syncConversations() {
   _syncing = true;
   try {
     await confirmSessionMode();
-    if (chat.persist && !chat.privacy && !chatBusy()) await initServerConversations();
+    if (!chat.privacy && !chatBusy()) await initServerConversations();
+    if (!chat.privacy && !_draftsRestored) await restoreDrafts();
   } finally {
     _syncing = false;
   }
@@ -2095,6 +2396,16 @@ export function takeComposer(conv) {
   return { text: d.text.trim(), attachments: d.attachments, docs: d.docs, clips: d.clips };
 }
 
+/** Puts *item*, taken with takeComposer and not sent, back into the message box
+ *  of *conv*, before what it holds by now. */
+export function returnComposer(conv, item) {
+  const back = { ...emptyDraft(), text: item.text, attachments: item.attachments,
+                 docs: item.docs, clips: item.clips };
+  if (conv.id === _composerOwner || _composerOwner === null) showDraft(joinDrafts(back, liveDraft()));
+  else _drafts.set(conv.id, joinDrafts(back, _drafts.get(conv.id) || emptyDraft()));
+  saveDraftsSoon();
+}
+
 /** The message box keeps what it holds and belongs to no conversation. */
 function releaseComposer() {
   _composerOwner = null;
@@ -2117,83 +2428,139 @@ function holdDraftsInTab() {
 
 /* Drafts in this browser. Outside privacy mode what is typed, attached or
    queued is kept in IndexedDB, so a reload or a server restart does not lose it.
-   A row's key is "<conversation id>|<tab id>|text", "...|media" or "|<tab id>|queue":
-   each tab writes its own rows, and a conversation opened in a new tab takes the
-   newest rows a closed tab left. Writes wait for the session mode like every
+   A row belongs to one store (inst, prin) and to one page at a time (owner): a
+   page changes or removes a row only while it owns it, checked in the same
+   transaction. A page that goes away gives its rows up; one that opens takes the
+   rows no open page owns. A queued message is a row of its own, and it is sent
+   only after its row was claimed. Writes wait for the session mode like every
    other (see _flushPendingWrites); privacy mode empties the store. */
 
 const DRAFT_DB = "localm-drafts";
-const TAB_ID_KEY = "localm.tabId";
 const DRAFT_KEEP_MS = 30 * 24 * 3600 * 1000;
+// Without a way to ask the other pages, a row its owner has not written for this
+// long is taken for abandoned.
+const DRAFT_ABANDONED_MS = 180 * 1000;
+const PAGE_ANSWER_MS = 500;
+// This page load.
+const PAGE = randomId();
 
 let _draftDb = null;
 
 function draftDb() {
   if (!_draftDb) {
-    _draftDb = new Promise((resolve, reject) => {
-      const req = window.indexedDB.open(DRAFT_DB, 1);
-      req.onupgradeneeded = () => req.result.createObjectStore("drafts");
-      req.onsuccess = () => resolve(req.result);
+    const opening = new Promise((resolve, reject) => {
+      const req = window.indexedDB.open(DRAFT_DB, 2);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        for (const name of [...db.objectStoreNames]) db.deleteObjectStore(name);
+        db.createObjectStore("rows");
+      };
+      req.onsuccess = () => {
+        const db = req.result;
+        const closed = () => { if (_draftDb === opening) _draftDb = null; };
+        db.onclose = closed;
+        db.onversionchange = () => { db.close(); closed(); };
+        resolve(db);
+      };
       req.onerror = () => reject(req.error);
     });
-    _draftDb.catch(() => { _draftDb = null; });
+    _draftDb = opening;
+    opening.catch(() => { if (_draftDb === opening) _draftDb = null; });
   }
   return _draftDb;
 }
 
+/** One transaction over the rows. *work* gets the object store and returns an
+ *  array or Map it fills; resolves with it once the transaction is complete. A
+ *  connection that was lost is opened again once. */
+async function draftTx(mode, work) {
+  for (let again = false; ; again = true) {
+    const db = await draftDb();
+    try {
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction("rows", mode);
+        const out = work(tx.objectStore("rows"));
+        tx.oncomplete = () => resolve(out);
+        tx.onabort = () => reject(tx.error || new Error("aborted"));
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (e) {
+      if (again || !e || e.name !== "InvalidStateError") throw e;
+      _draftDb = null;
+    }
+  }
+}
+
 /** The IndexedDB rows of the drafts. */
 export const draftStore = {
-  available() { return !!window.indexedDB; },
-  async all() {
-    const db = await draftDb();
-    return new Promise((resolve, reject) => {
+  available() {
+    try { return !!window.indexedDB; } catch { return false; }
+  },
+  /** Every row by key. */
+  all() {
+    return draftTx("readonly", (store) => {
       const rows = new Map();
-      const req = db.transaction("drafts").objectStore("drafts").openCursor();
-      req.onerror = () => reject(req.error);
+      const req = store.openCursor();
       req.onsuccess = () => {
         const cur = req.result;
-        if (!cur) { resolve(rows); return; }
+        if (!cur) return;
         rows.set(cur.key, cur.value);
         cur.continue();
       };
+      return rows;
     });
   },
-  async write(puts, dels) {
-    const db = await draftDb();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction("drafts", "readwrite");
-      const store = tx.objectStore("drafts");
-      for (const [key, value] of puts) store.put(value, key);
-      for (const key of dels) store.delete(key);
-      tx.oncomplete = () => resolve();
-      tx.onabort = tx.onerror = () => reject(tx.error);
+  /** Reads each key of *edits* ([key, change] pairs) and stores what its
+   *  change(current) returns: a value, null to remove the row, undefined to leave
+   *  it. All in one transaction. Resolves with what the changes returned. */
+  change(edits) {
+    return draftTx("readwrite", (store) => {
+      const out = new Array(edits.length);
+      edits.forEach(([key, fn], i) => {
+        const req = store.get(key);
+        req.onsuccess = () => {
+          const next = fn(req.result);
+          out[i] = next;
+          if (next === null) store.delete(key);
+          else if (next !== undefined) store.put(next, key);
+        };
+      });
+      return out;
     });
   },
-  async clear() {
-    const db = await draftDb();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction("drafts", "readwrite");
-      tx.objectStore("drafts").clear();
-      tx.oncomplete = () => resolve();
-      tx.onabort = tx.onerror = () => reject(tx.error);
+  /** Removes every row *match*(value) answers true for. */
+  remove(match) {
+    return draftTx("readwrite", (store) => {
+      const gone = [];
+      const req = store.openCursor();
+      req.onsuccess = () => {
+        const cur = req.result;
+        if (!cur) return;
+        if (match(cur.value)) { gone.push(cur.key); cur.delete(); }
+        cur.continue();
+      };
+      return gone;
     });
   },
 };
 
-// What this tab's rows held when they were last written, by key; null for a row
-// that was read back. A row this tab's drafts do not make any more is removed by
-// the write that stores those they do.
-const _draftsWritten = new Map();
+// The rows this page owns, by what they hold ("<conversation id>|text",
+// "...|media" or "q|<queued message id>"), as { key, print, extra? }. *print*
+// differs when the value does and is null for a row taken over from another
+// page; *extra* are keys of further rows joined into this one.
+const _rows = new Map();
+// The queued messages that were claimed and whose turn has not ended.
+const _sending = new Set();
 let _draftWarned = false;
-let _draftsWiped = false;
 let _draftsRestored = false;
 let _draftTimer = 0;
-let _tabId = "";
 // The draft store's calls run one after another.
 let _draftChain = Promise.resolve();
 
-function draftCall(work) {
-  _draftChain = _draftChain.then(work).catch((e) => {
+function draftCall(work, onFail = null) {
+  const run = _draftChain.then(work);
+  _draftChain = run.catch((e) => {
+    if (onFail) onFail(e);
     if (_draftWarned) return;
     _draftWarned = true;
     console.warn("localm: unsent text and attachments cannot be kept in this browser:", e);
@@ -2201,32 +2568,31 @@ function draftCall(work) {
   return _draftChain;
 }
 
-function tabId() {
-  if (_tabId) return _tabId;
-  try {
-    _tabId = sessionStorage.getItem(TAB_ID_KEY) || "";
-    if (!_tabId) {
-      _tabId = newConvId() + newConvId();
-      sessionStorage.setItem(TAB_ID_KEY, _tabId);
-    }
-  } catch { _tabId = _tabId || newConvId() + newConvId(); }
-  return _tabId;
+let _pages = null;
+
+/** The channel the open pages of this browser answer each other on, null when
+ *  the browser has none. */
+function pageChannel() {
+  if (!_pages && typeof window.BroadcastChannel === "function") {
+    _pages = new window.BroadcastChannel("localm-pages");
+    _pages.onmessage = (e) => {
+      if (e.data && e.data.ask && e.data.ask !== PAGE) _pages.postMessage({ live: PAGE, to: e.data.ask });
+    };
+  }
+  return _pages;
 }
 
-// While this tab is open it holds a lock of its name, so another tab can tell
-// its rows from those a closed tab left.
-const TAB_LOCK = "localm-tab:";
-let _tabLocked = false;
-function holdTabLock() {
-  if (_tabLocked || !navigator.locks) return;
-  _tabLocked = true;
-  navigator.locks.request(TAB_LOCK + tabId(), () => new Promise(() => {})).catch(() => {});
-}
-async function openTabs() {
-  try {
-    const held = (await navigator.locks.query()).held || [];
-    return new Set(held.filter((l) => l.name.startsWith(TAB_LOCK)).map((l) => l.name.slice(TAB_LOCK.length)));
-  } catch { return new Set(); }
+/** The ids of the other open pages, null when they cannot be asked. */
+async function openPages() {
+  const channel = pageChannel();
+  if (!channel) return null;
+  const live = new Set();
+  const heard = (e) => { if (e.data && e.data.live && e.data.to === PAGE) live.add(e.data.live); };
+  channel.addEventListener("message", heard);
+  channel.postMessage({ ask: PAGE });
+  await new Promise((resolve) => setTimeout(resolve, PAGE_ANSWER_MS));
+  channel.removeEventListener("message", heard);
+  return live;
 }
 
 /** Queues a write of the drafts; text typed in quick succession is one write. */
@@ -2244,133 +2610,230 @@ function saveDraftsNow() {
   _flushPendingWrites();
 }
 
-/** The rows this tab's drafts make, by key, each with a short *print* that
- *  differs when its value does. */
+/** What this page's rows should hold, by the same names as _rows, each as
+ *  { print, value }. */
 function draftRows() {
   const rows = new Map();
+  const tag = storeTag();
+  if (!tag) return rows;
+  const base = { ...tag, owner: PAGE, at: Date.now() };
   const media = (list, size) => list.map((x) => x.name + ":" + size(x)).join("/");
   const add = (id, d) => {
     if (d.held || draftIsEmpty(d)) return;
     const conv = chat.conversations.find((c) => c.id === id);
     if (conv ? !convPersistable(conv) : id !== null) return;
-    const key = `${id || ""}|${tabId()}|`;
-    if (d.text) rows.set(key + "text", { print: d.text, value: { text: d.text } });
+    const of = { ...base, conv: id || "" };
+    if (d.text) rows.set(`${id || ""}|text`, { print: d.text, value: { ...of, kind: "text", text: d.text } });
     if (d.attachments.length || d.docs.length || d.clips.length) {
       const end = (x) => x.length + x.slice(-24);
-      rows.set(key + "media", {
+      rows.set(`${id || ""}|media`, {
         print: [media(d.attachments, (x) => end(x.dataUri)), media(d.docs, (x) => end(x.text)),
                 media(d.clips, (x) => end(x.data) + x.seconds)].join("|"),
-        value: { attachments: d.attachments, docs: d.docs, clips: d.clips } });
+        value: { ...of, kind: "media", attachments: d.attachments, docs: d.docs, clips: d.clips } });
     }
   };
   add(_composerOwner, liveDraft());
   for (const [id, d] of _drafts) add(id, d);
-  const queued = chat.queue.filter((q) =>
-    convPersistable(chat.conversations.find((c) => c.id === q.convId)));
-  if (queued.length) {
-    rows.set(`|${tabId()}|queue`, {
-      print: queued.map((q) => [q.convId, q.text, q.attachments.length, q.docs.length, q.clips.length].join(":")).join("|"),
-      value: { items: queued.map(({ convId, text, attachments, docs, clips }) =>
-        ({ convId, text, attachments, docs, clips })) } });
+  for (const q of chat.queue) {
+    if (!convPersistable(chat.conversations.find((c) => c.id === q.convId))) continue;
+    if (!q.id) q.id = randomId();
+    const { id, convId, text, attachments, docs, clips } = q;
+    rows.set(`q|${id}`, { print: q.held ? "held" : "queued", value: { ...base, conv: convId, kind: "queue", state: "queued",
+      ...(q.held ? { held: true } : {}), item: { id, convId, text, attachments, docs, clips } } });
   }
   return rows;
 }
 
+/** Whether this page may change the row *cur*. */
+const ownsRow = (cur) => !!cur && (cur.owner === PAGE || cur.owner === null);
+
 function _writeDrafts() {
   if (!draftStore.available()) return;
-  const rows = draftRows();
-  const puts = [];
-  const dels = [];
-  for (const [key, row] of rows) {
-    if (_draftsWritten.get(key) === row.print) continue;
-    puts.push([key, { ...row.value, at: Date.now() }]);
-    _draftsWritten.set(key, row.print);
-  }
-  for (const key of [..._draftsWritten.keys()]) {
-    if (rows.has(key)) continue;
-    dels.push(key);
-    _draftsWritten.delete(key);
-  }
-  if (!puts.length && !dels.length) return;
-  _draftsWiped = false;
-  holdTabLock();
-  draftCall(() => draftStore.write(puts, dels));
-}
-
-/** Empties the draft store of this browser (privacy mode). */
-function wipeStoredDrafts() {
-  if (_draftsWiped) return;
-  _draftsWiped = true;
-  _draftsWritten.clear();
-  _tabId = "";
-  _tabLocked = false;
-  try { sessionStorage.removeItem(TAB_ID_KEY); } catch { /* nothing is stored there */ }
-  if (draftStore.available()) draftCall(() => draftStore.clear());
-}
-
-/** Removes the stored drafts, of every tab, of the conversations with the ids
- *  *ids*, or of those *gone* answers true for. */
-function forgetDrafts(ids, gone = (id) => ids.includes(id)) {
-  for (const id of [..._drafts.keys()]) if (gone(id)) _drafts.delete(id);
-  if (chat.privacy || !draftStore.available()) return;
   draftCall(async () => {
-    const keys = [...(await draftStore.all()).keys()].filter((k) => {
-      const id = k.split("|")[0];
-      return id && gone(id);
-    });
-    for (const k of keys) _draftsWritten.delete(k);
-    if (keys.length) await draftStore.write([], keys);
+    if (chat.privacy || _cleared) return;
+    const want = draftRows();
+    const edits = [];
+    const done = [];
+    for (const [name, row] of want) {
+      const have = _rows.get(name);
+      if (have && have.print === row.print && !have.extra) continue;
+      const key = have ? have.key : randomId();
+      edits.push([key, (cur) => (have && !ownsRow(cur) ? undefined : row.value)]);
+      done.push((result) => {
+        if (result === undefined) lostRow(name);
+        else _rows.set(name, { key, print: row.print, conv: row.value.conv });
+      });
+      for (const extra of (have && have.extra) || []) {
+        edits.push([extra, (cur) => (ownsRow(cur) ? null : undefined)]);
+        done.push(() => {});
+      }
+    }
+    for (const [name, have] of _rows) {
+      if (want.has(name) || _sending.has(name)) continue;
+      for (const key of [have.key, ...(have.extra || [])]) {
+        edits.push([key, (cur) => (ownsRow(cur) ? null : undefined)]);
+        done.push(() => { _rows.delete(name); });
+      }
+    }
+    if (!edits.length) return;
+    const results = await draftStore.change(edits);
+    results.forEach((r, i) => done[i](r));
   });
 }
 
-/** Puts the drafts and queued messages this browser kept back: those of this
- *  tab, else the newest a closed tab left for a conversation. Those of a
- *  conversation that is not listed any more are removed. A queued message
- *  stays queued until something is sent. Call once the mode is known. */
+/** Another page took the row *name*. A queued message is that page's now; a draft
+ *  still in this page's box gets a row of its own. */
+function lostRow(name) {
+  _rows.delete(name);
+  if (name.startsWith("q|")) {
+    chat.queue = chat.queue.filter((q) => "q|" + q.id !== name);
+    renderQueuedIndicator();
+  } else {
+    saveDraftsSoon();
+  }
+}
+
+/** Claims the queued message *item* for sending. "mine": it is this page's to
+ *  send; "gone": another page took it; "unknown": the browser's storage did not
+ *  answer, so nothing may be sent. */
+export async function claimQueued(item) {
+  const name = "q|" + item.id;
+  await _draftChain;
+  const have = item.id ? _rows.get(name) : null;
+  if (!have) return "mine";
+  try {
+    const [row] = await draftStore.change([[have.key,
+      (cur) => (ownsRow(cur) && cur.state !== "sending" ? { ...cur, owner: PAGE, state: "sending" } : undefined)]]);
+    if (row) {
+      _sending.add(name);
+      return "mine";
+    }
+    _rows.delete(name);
+    return "gone";
+  } catch {
+    return "unknown";
+  }
+}
+
+/** Gives the claimed queued message *item* back unsent. */
+export function unclaimQueued(item) {
+  const name = "q|" + item.id;
+  const have = _rows.get(name);
+  _sending.delete(name);
+  if (have) {
+    draftCall(() => draftStore.change([[have.key,
+      (cur) => (ownsRow(cur) ? { ...cur, state: "queued" } : undefined)]]));
+  }
+}
+
+/** The turn of the claimed queued message *item* ended: it is in its chat. */
+export function queuedDone(item) {
+  if (_sending.delete("q|" + item.id)) saveDraftsSoon();
+}
+
+// Whether what this browser kept was removed since privacy mode was confirmed.
+let _wipeDone = false;
+let _wiping = false;
+let _wipeTries = 0;
+
+/** Empties this install's rows of the draft store (privacy mode), trying again
+ *  until it succeeds. *cacheWiped* is false when the rest of the browser's
+ *  storage could not be emptied. A failure is said and stays on screen until
+ *  the wipe succeeds. */
+function wipeStoredDrafts(cacheWiped = true) {
+  if (_wiping) return;
+  if (_wipeDone && cacheWiped) return;
+  _wiping = true;
+  _rows.clear();
+  const attempt = async () => {
+    if (!chat.privacy) return true;
+    if (draftStore.available()) await draftStore.remove((v) => !v || !v.inst || !chat.inst || v.inst === chat.inst);
+    return cacheWiped;
+  };
+  const run = _draftChain.then(attempt);
+  _draftChain = run.catch(() => { /* said below */ });
+  run.catch((e) => {
+    console.error("localm: what privacy mode must not keep could not be removed from this browser:", e);
+    return false;
+  }).then((ok) => {
+    _wiping = false;
+    if (ok) {
+      _wipeDone = chat.privacy;
+      _wipeTries = 0;
+    } else {
+      if (!_wipeTries++) toast(t("chat.privacy.wipeFailed.title"), true);
+      setTimeout(() => {
+        if (!chat.privacy) return;
+        let clean = true;
+        for (const key of CHAT_SCOPED_KEYS) {
+          try { localStorage.removeItem(key); } catch { clean = false; }
+        }
+        wipeStoredDrafts(clean);
+      }, Math.min(30000, 1000 * 2 ** Math.min(_wipeTries, 5)));
+    }
+    _convHint("privacy-wipe-failed", "unsaved-warning", "chat.privacy.wipeFailed", !ok);
+  });
+}
+
+/** Removes the stored drafts and queued messages, of every page, of the
+ *  conversations with the ids *ids*, or of those *gone* answers true for. */
+function forgetDrafts(ids, gone = (id) => ids.includes(id)) {
+  for (const id of [..._drafts.keys()]) if (gone(id)) _drafts.delete(id);
+  const tag = storeTag();
+  if (chat.privacy || !tag || !draftStore.available()) return;
+  for (const [name, have] of [..._rows]) if (have.conv && gone(have.conv)) _rows.delete(name);
+  draftCall(() => draftStore.remove((v) => v && sameStore(v, tag) && v.conv && gone(v.conv)));
+}
+
+/** Takes over the drafts and queued messages of this store that no open page
+ *  owns and puts them back. Those of a conversation that is gone are removed. A
+ *  queued message another page may have been sending is kept waiting until the
+ *  user says. Does nothing until the mode and the store are known. */
 export async function restoreDrafts() {
-  if (_draftsRestored || !chat.modeKnown) return;
+  const tag = storeTag();
+  if (_draftsRestored || !chat.modeKnown || !tag) return;
   _draftsRestored = true;
   if (chat.privacy || !draftStore.available()) return;
   await draftCall(async () => {
-    const rows = await draftStore.all();
-    if (chat.privacy) return;
-    const own = tabId();
-    holdTabLock();
-    const open = await openTabs();
+    const rows = [...await draftStore.all()].filter(([, v]) => v && sameStore(v, tag) && v.owner !== PAGE);
+    const live = rows.some(([, v]) => v.owner !== null) ? await openPages() : (pageChannel(), new Set());
+    if (chat.privacy || !sameStore(storeTag(), tag)) return;
+    const now = Date.now();
+    const abandoned = (v) => v.owner === null ||
+      (live ? !live.has(v.owner) : now - (v.at || 0) > DRAFT_ABANDONED_MS);
+    const open = rows.filter(([, v]) => abandoned(v));
+    const listed = (id) => chat.conversations.some((c) => c.id === id);
+    const taken = await draftStore.change(open.map(([key, v]) => [key, (cur) => {
+      if (!cur || (cur.owner !== v.owner && cur.owner !== null)) return undefined;
+      if (now - (cur.at || 0) > DRAFT_KEEP_MS) return null;
+      if (cur.conv && !listed(cur.conv) && chat.persist) return null;
+      return { ...cur, owner: PAGE, ...(cur.kind === "queue"
+        ? { state: "queued", held: !!cur.held || cur.state === "sending" } : {}) };
+    }]));
     const found = new Map();
-    const drop = [];
-    const entries = [...rows].map(([key, value]) => {
-      const [id, tab, kind] = key.split("|");
-      return { key, id, tab, kind, value };
-    }).filter((r) => r.tab === own || !open.has(r.tab))
-      .sort((a, b) => (b.tab === own) - (a.tab === own) || (b.value.at || 0) - (a.value.at || 0));
-    const from = new Map();
-    for (const r of entries) {
-      const age = Date.now() - (r.value.at || 0);
-      if (age > DRAFT_KEEP_MS) { drop.push(r.key); continue; }
-      if (r.kind === "queue") {
-        for (const item of r.value.items || []) {
-          if (chat.conversations.some((c) => c.id === item.convId)) chat.queue.push(item);
+    taken.map((v, i) => [open[i][0], v]).filter(([, v]) => v)
+      .sort(([, a], [, b]) => (a.at || 0) - (b.at || 0))
+      .forEach(([key, v]) => {
+        if (v.kind === "queue") {
+          if (!listed(v.conv) || chat.queue.some((q) => q.id === v.item.id)) return;
+          chat.queue.push({ ...v.item, ...(v.held ? { held: true } : {}) });
+          _rows.set("q|" + v.item.id, { key, print: v.held ? "held" : "queued", conv: v.conv });
+          return;
         }
-        _draftsWritten.set(r.key, null);
-        continue;
-      }
-      if (r.id && !chat.conversations.some((c) => c.id === r.id)) {
-        if (chat.persist) drop.push(r.key);
-        continue;
-      }
-      if (!from.has(r.id)) from.set(r.id, r.tab);
-      if (from.get(r.id) !== r.tab) continue;
-      const d = found.get(r.id) || emptyDraft();
-      if (r.kind === "text") d.text = r.value.text || "";
-      else Object.assign(d, { attachments: r.value.attachments || [], docs: r.value.docs || [],
-                              clips: r.value.clips || [] });
-      found.set(r.id, d);
-      _draftsWritten.set(r.key, null);
-    }
-    if (drop.length) await draftStore.write([], drop);
+        const name = `${v.conv}|${v.kind}`;
+        const have = _rows.get(name);
+        if (have) have.extra = [...(have.extra || []), key];
+        else _rows.set(name, { key, print: null, conv: v.conv });
+        const d = found.get(v.conv) || emptyDraft();
+        if (v.kind === "text" && !d.text.split("\n").includes(v.text) && d.text !== v.text) {
+          d.text = [d.text, v.text].filter((x) => x.trim()).join("\n");
+        } else if (v.kind === "media") {
+          for (const list of ["attachments", "docs", "clips"]) d[list] = [...d[list], ...(v[list] || [])];
+        }
+        found.set(v.conv, d);
+      });
     for (const [id, d] of found) {
-      if (id === (_composerOwner || "") || !id) showDraft(joinDrafts(d, liveDraft()));
+      if (!id || id === _composerOwner) showDraft(joinDrafts(d, liveDraft()));
       else _drafts.set(id, _drafts.has(id) ? joinDrafts(d, _drafts.get(id)) : d);
     }
   });
@@ -2379,11 +2842,22 @@ export async function restoreDrafts() {
 }
 
 $("chat-input").addEventListener("input", saveDraftsSoon);
-window.addEventListener("pagehide", saveDraftsNow);
+// A page that goes away gives up its rows, so the next page takes them at once.
+window.addEventListener("pagehide", () => {
+  if (_draftTimer) saveDraftsNow();
+  if (!_rows.size || chat.privacy || !draftStore.available()) return;
+  const edits = [];
+  for (const have of _rows.values()) {
+    for (const key of [have.key, ...(have.extra || [])]) {
+      edits.push([key, (cur) => (cur && cur.owner === PAGE && cur.state !== "sending"
+        ? { ...cur, owner: null } : undefined)]);
+    }
+  }
+  draftStore.change(edits).catch(() => { /* the next page asks whether this one is open */ });
+});
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden" && _draftTimer) saveDraftsNow();
 });
-
 
 for (const evt of ["input", "change"]) {
   $("params").addEventListener(evt, (e) => {
@@ -2700,13 +3174,13 @@ export function buildConvItem(conv, snippet) {
     // Marked deleted: pushConversation never writes it again, also not at the
     // end of a reply still streaming into it.
     conv.deleted = true;
-    _goneIds.add(conv.id);
+    _deletedHere.add(conv.id);
     clearTimeout(_convPushTimers.get(conv.id));
     _convPushTimers.delete(conv.id);
     chat.conversations = chat.conversations.filter((c) => c.id !== conv.id);
     if (chat.activeId === conv.id) chat.activeId = chat.conversations[0]?.id || null;
     chat.queue = chat.queue.filter((q) => q.convId !== conv.id);
-    if (!conv.tabOnly) deleteConversationRemote(conv.id);
+    if (!conv.tabOnly) deleteConversationRemote(conv);
     forgetDrafts([conv.id]);
     saveConversations();
     renderConvList();
@@ -2730,10 +3204,11 @@ export function buildConvItem(conv, snippet) {
       if (row !== item) row.classList.remove("active");
     }
     item.classList.add("active");
-    if (conv._meta) await hydrateConversation(conv);   // R40: load the body on open
-    renderChat();
+    delete conv._hydrateFailed;
+    renderChat();   // the message box and the drawer are this chat's from now on
     showView("chat");
-    processChatQueue();
+    if (conv._meta) await hydrateConversation(conv);   // R40: load the body on open
+    if (chat.activeId === conv.id) processChatQueue();
   };
   return item;
 }
@@ -3585,8 +4060,8 @@ export function renderChat() {
     conv._hydrating = true;
     hydrateConversation(conv).then((ok) => {
       conv._hydrating = false;
-      if (ok) renderChat();
-      else conv._hydrateFailed = true;
+      if (!ok) conv._hydrateFailed = true;
+      else if (conv === currentConv()) { renderChat(); processChatQueue(); }
     });
   }
   const pending = conv && !chatBusy() ? pendingBranch(conv) : null;
@@ -4236,7 +4711,7 @@ export async function ingestSharedFiles() {
       try {
         const txt = decodeURIComponent(escape(atob(it.data_uri.split(",", 2)[1] || "")));
         const ta = $("chat-input");
-        if (ta) { ta.value = (ta.value ? ta.value + "\n" : "") + txt; autoGrow(ta); }
+        if (ta) { ta.value = (ta.value ? ta.value + "\n" : "") + txt; autoGrow(ta); saveDraftsSoon(); }
       } catch { /* not decodable text */ }
     }
   }

@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
-import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, chatSurfaceHeaders, compactConversation, currentConv, elideAudioForWire, elideImagesForWire, isToolEvent, latestTurnHasAudio, latestTurnIsAudioOnly, lsSetScoped, markNotSent, markRefusedBy, maybeCompactConversation, memorySavedText, modelCannotHearAudio, modelReadsImages, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, persistChatParams, pinnedModelName, refreshWebPolicy, removeStatusIndicator, renderChat, renderConvList, resolvePinnedModel, saveConversations, saveDraftsSoon, scopedKeyPrivate, setConversationPin, showPinnedGone, syncPinModelToggle, takeComposer, titleFromText, titleIsAutomatic, updateStatusIndicator, wireHasImageAndAudio, wireParts } from "./chat.js";
+import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, chatSurfaceHeaders, claimQueued, compactConversation, currentConv, elideAudioForWire, elideImagesForWire, hydrateConversation, isToolEvent, latestTurnHasAudio, latestTurnIsAudioOnly, lsSetScoped, markNotSent, markRefusedBy, maybeCompactConversation, memorySavedText, modelCannotHearAudio, modelReadsImages, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, persistChatParams, pinnedModelName, queuedDone, refreshWebPolicy, removeStatusIndicator, renderChat, renderConvList, resolvePinnedModel, returnComposer, saveConversations, saveDraftsSoon, scopedKeyPrivate, setConversationPin, showPinnedGone, syncPinModelToggle, takeComposer, titleFromText, titleIsAutomatic, unclaimQueued, updateStatusIndicator, wireHasImageAndAudio, wireParts } from "./chat.js";
 import { $, GIB, TOOL_CALL_DELIM, authHeaders, localizeServerNotes, autoGrow, confirmDanger, confirmDangerAsync, el, liveThinkText, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setCanvasNavigationAllowed, setPreviewAllowed, splitThink, streamJob, stripAsrPrefix, stripThink, toast } from "./helpers.js";
 import { onLanguageReload, t, tn } from "./i18n.js";
 import { announcedLoadingModel, isPeerSelected, modelCache, modelSelect, refreshModels, reloadModel, toastLoadResult, waitForModelLoad } from "./models-sidebar.js";
@@ -1682,6 +1682,7 @@ export async function toggleMic() {
       const input = $("chat-input");
       input.value = (input.value ? input.value.trimEnd() + " " : "") + data.text;
       autoGrow(input);
+      saveDraftsSoon();
       input.focus();
     } catch (e) {
       toast(t("voice.transcriptionFailed", { message: e.message }), true);
@@ -3704,8 +3705,14 @@ export function renderQueuedIndicator() {
     if (item.convId && conv && item.convId !== conv.id) continue;
     const { row } = addMessageRow(box, "user", item.text, {
       cls: "user queued",
-      label: (chat.userName || t("chat.row.you")) + " (" + t("chat.queuedBadge") + ")",
+      label: (chat.userName || t("chat.row.you")) + " (" +
+        t(item.held ? "chat.queuedMaybeSent" : "chat.queuedBadge") + ")",
       actions: [
+        ...(item.held ? [[t("chat.send"), () => {
+          delete item.held;
+          saveDraftsSoon();
+          processChatQueue();
+        }, "send"]] : []),
         [t("chat.cancel") || "Cancel", () => {
           const at = chat.queue.indexOf(item);
           if (at !== -1) chat.queue.splice(at, 1);
@@ -3720,22 +3727,50 @@ export function renderQueuedIndicator() {
 }
 
 /** Dispatches the oldest queued message of the active conversation when the
- *  chat is idle and a model is there to answer. Messages queued for another conversation stay queued until
- *  that conversation is active. */
+ *  chat is idle, its messages are loaded and a model is there to answer.
+ *  Messages queued for another conversation stay queued until that conversation
+ *  is active, and one that may have been sent already until the user sends it. A
+ *  message this browser keeps is claimed first, so that no other tab sends it
+ *  too. */
 export async function processChatQueue() {
   renderQueuedIndicator();
   if (!chat.queue.length) return;
-  if (chatBusy()) return;
+  if (chatBusy() || _claiming) return;
   const conv = currentConv();
-  if (!conv) return;
-  const idx = chat.queue.findIndex((item) => !item.convId || item.convId === conv.id);
+  if (!conv || conv._meta) return;
+  const idx = chat.queue.findIndex((item) => !item.held && (!item.convId || item.convId === conv.id));
   if (idx === -1) return;
   if (!modelCache.active && !modelCache.resumable && !announcedLoadingModel()) return;
   const [item] = chat.queue.splice(idx, 1);
+  if (item.id) {
+    _claiming = true;
+    let claim;
+    try { claim = await claimQueued(item); } finally { _claiming = false; }
+    if (claim === "unknown") {
+      item.held = true;
+      chat.queue.unshift(item);
+      renderQueuedIndicator();
+      return;
+    }
+    if (claim === "gone") { processChatQueue(); return; }
+    if (chatBusy() || currentConv() !== conv) {
+      unclaimQueued(item);
+      chat.queue.unshift(item);
+      renderQueuedIndicator();
+      return;
+    }
+  }
   saveDraftsSoon();
   renderQueuedIndicator();
-  await dispatchChatTurn(conv, item.text, item.attachments, item.docs, item.clips);
+  try {
+    await dispatchChatTurn(conv, item.text, item.attachments, item.docs, item.clips);
+  } finally {
+    queuedDone(item);
+  }
 }
+
+// A queued message is being claimed: another send waits behind it.
+let _claiming = false;
 
 /** Runs one chat turn. The turn owns a single AbortController (chat.abort,
  *  aborted by Stop) and chat.busy from the moment Stop is shown until
@@ -3905,10 +3940,16 @@ export async function sendChat() {
 
   if (text.startsWith("/")) {
     if (chatBusy()) { toast(t("chat.waitForReply"), true); return; }
+    const shown = currentConv();
+    if (shown && shown._meta) {
+      if (!(await hydrateConversation(shown))) { toast(t("chat.conv.openFailed"), true); return; }
+      if (currentConv() !== shown || !input || input.value.trim() !== text) return;
+    }
     if (input) {
       input.value = "";
       autoGrow(input);
     }
+    saveDraftsSoon();
     handleSlashSubmit(text, execChatCommand);
     return;
   }
@@ -3917,24 +3958,37 @@ export async function sendChat() {
 
   if (!currentConv()) newConversation();
   const conv = currentConv();
+  // What is sent is taken at once, for the chat it was sent in.
+  const item = { ...takeComposer(conv), convId: conv.id };
+  if (!item.text && !item.attachments.length && !item.docs.length && !item.clips.length) return;
+
+  if (conv._meta) {
+    // The chat is still loading: the message waits in it.
+    chat.queue.push(item);
+    renderQueuedIndicator();
+    if (await hydrateConversation(conv)) await processChatQueue();
+    else toast(t("chat.conv.openFailed"), true);
+    return;
+  }
 
   if (!(await resolvePinnedModel(conv))) {
+    returnComposer(conv, item);
     showPinnedGone(conv);
     return;
   }
 
-  const item = { ...takeComposer(conv), convId: conv.id };
-
-  if (chatBusy()) {
+  if (chatBusy() || _claiming) {
     chat.queue.push(item);
+    saveDraftsSoon();
     toast(t("chat.queuedToast"));
     renderQueuedIndicator();
     return;
   }
 
   // Older queued messages of this conversation go first.
-  if (chat.queue.some((q) => !q.convId || q.convId === conv.id)) {
+  if (chat.queue.some((q) => !q.held && (!q.convId || q.convId === conv.id))) {
     chat.queue.push(item);
+    saveDraftsSoon();
     await processChatQueue();
     return;
   }

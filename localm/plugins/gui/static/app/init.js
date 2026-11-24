@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { chat, convUI, ingestSharedFiles, initServerConversations, refreshCtxLimit, renderChat, renderConvList, restoreDrafts, syncConversations } from "./chat.js";
+import { chat, clearSignedOutChats, connectStore, convUI, ingestSharedFiles, refreshCtxLimit, renderChat, renderConvList, syncConversations } from "./chat.js";
 import { populateSetupModels, reattachSessions } from "./coder.js";
 import { $, SHELL_TOKEN, authHeaders, confirmDangerAsync, el, instanceCacheTrusted, refreshCsrf, reloadApp, safeStorageGet, sentPreviousShellToken, sentShellToken, setShellToken, toast } from "./helpers.js";
 import { setLanguageReloadOpen, syncLanguageFromConfig, t } from "./i18n.js";
@@ -185,8 +185,9 @@ window.resetServiceWorkerAndCaches = resetServiceWorkerAndCaches;
 
 /** Sign this browser out: POST /api/session/logout with the session's CSRF
  *  token (read from GET /api/session first when the page has none).
- *  Returns {ok: true} when the server cleared the session cookie and ended the
- *  session; otherwise {ok: false} with one of: *unreachable* true (the request
+ *  Once the cookie is cleared, the conversations and drafts this browser kept for
+ *  the key are removed. Returns {ok: true} when the server cleared the session
+ *  cookie and ended the session; otherwise {ok: false} with one of: *unreachable* true (the request
  *  did not complete), *status* and *detail* (the server refused; the cookie is
  *  kept), or *cookieCleared* true with *warnings* (the cookie is cleared but the
  *  server could not end the session). Never throws. */
@@ -205,12 +206,13 @@ export async function signOutSession() {
   }
   const body = await r.json().catch(() => ({}));
   const warnings = Array.isArray(body && body.warnings) ? body.warnings.map(String) : [];
+  await clearSignedOutChats();
   if (warnings.length) return { ok: false, cookieCleared: true, warnings };
   return { ok: true };
 }
 
 /** Clear the page-session flags, the readable cookies, the service worker and
- *  its caches. localStorage (chats kept in this browser, preferences) is kept. */
+ *  its caches. Preferences in localStorage are kept. */
 async function _clearClientSession() {
   try {
     document.cookie.split(";").forEach((c) => {
@@ -693,7 +695,7 @@ window.bootAuthProbe = bootAuthProbe;
   // or fails - never leave it stuck over the shell.
   const modelsReady = refreshModels().then(() => populateSetupModels());
   // Server persistence depends on knowing the privacy state first.
-  const convReady = refreshCtxLimit().then(initServerConversations).then(restoreDrafts);
+  const convReady = refreshCtxLimit().then(connectStore);
   // AUD-INSTANCEID (see helpers.js reconcileInstanceId): the startup overlay is
   // position:fixed/inset:0/opaque, fully covering #app and the conversation
   // sidebar. A browser confirmed for a DIFFERENT prior backend (instanceCacheTrusted

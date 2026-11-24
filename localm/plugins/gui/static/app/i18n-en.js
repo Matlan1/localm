@@ -204,6 +204,8 @@ export const I18N_EN = {
   "chat.conv.privacyKept.other": "The {count} chats from privacy mode stay in this tab only and are not saved.",
   "chat.conv.saveFailed": "Could not save the change to a chat: its saved copy could not be loaded.",
   "chat.conv.tabOnly.title": "Kept in this tab only and not saved.",
+  "chat.conv.openFailed": "This chat could not be loaded, so nothing was sent.",
+  "chat.conv.restored": "Chats that were missing from the data folder were saved again from this browser's copy.",
   "chat.conv.noMatches": "no matching chats",
   "chat.conv.unsaved": "not saved - history is only in this tab",
   "chat.conv.unsaved.title":
@@ -263,6 +265,8 @@ export const I18N_EN = {
   "chat.privacyLeftovers.one": "{count} chat saved earlier is still on disk",
   "chat.privacyLeftovers.other": "{count} chats saved earlier are still on disk",
   "chat.privacyLeftovers.title": "Privacy mode does not delete conversations or session records saved before it was turned on. They are in the chats and sessions folders of the data folder. Switch to log or full mode to see the chats again and delete them, or delete those folders.",
+  "chat.privacy.wipeFailed": "saved text still in this browser - retrying",
+  "chat.privacy.wipeFailed.title": "Privacy mode could not remove chats or unsent text this browser kept before. It tries again until it can; clearing this site's data in the browser settings removes it at once.",
   "chat.privacyHint": "privacy mode - this session only",
   "chat.privacyHint.title":
     "Chat runs in privacy mode: conversations are not saved (here or on disk) and vanish on reload. Export still works.",
@@ -348,6 +352,7 @@ export const I18N_EN = {
   "chat.status.visionCpuRetry": "GPU vision encode failed; retrying on CPU (this may take longer)…",
   "chat.status.waiting": "Waiting for another request to finish…",
   "chat.queuedToast": "Message queued - will send after the current reply",
+  "chat.queuedMaybeSent": "Queued, may have been sent already",
   "chat.queuedBadge": "Queued",
   "chat.cancel": "Cancel",
   "chat.switchedTo": "switched to {model}",
@@ -1903,6 +1908,7 @@ export const I18N_EN = {
   "chat.edit.replaceDraft.body": "The message box holds text or attachments you have not sent. They are replaced by the message you picked.",
   "chat.edit.replaceDraft.confirm": "Replace",
   "chat.edit.replaceDraft.title": "Replace what is in the message box?",
+  "chat.drafts.clearFailed": "Chats and unsent text of the previous key could not be removed from this browser. Clear this site's data in the browser settings.",
   "chat.revert.title": "Revert conversation",
   "chat.revert.body.one": "This permanently deletes {count} alternative branch and everything after this message - it can't be undone. Revert anyway?",
   "chat.revert.body.other": "This permanently deletes {count} alternative branches and everything after this message - it can't be undone. Revert anyway?",

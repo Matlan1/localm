@@ -77,15 +77,21 @@ Notes:
   key, whose requests follow the global mode, it is recorded under that mode).
 - The chat page reads the mode from the server before it writes anything to the
   browser's storage, so a mode changed from a terminal applies to the next thing
-  the page would save. While the server cannot be reached, the last mode it
-  reported stands.
+  the page would save. While the server cannot be reached, or does not answer
+  within 4 seconds, the last mode it reported stands.
 - In `log` and `full` mode the browser's storage holds a copy of recent
-  conversations and what you have typed, attached or queued but not sent. Privacy
-  mode keeps none of it there and empties what an earlier mode left.
-- When you delete a conversation in `log` or `full` mode, its id (a short
-  code made from the time it was started, no title or text) is added to `chats/deleted-ids.txt`, so that another
-  browser that still holds the conversation does not save it again. The newest
-  5000 ids are kept.
+  conversations and what you have typed, attached or queued but not sent. Each
+  entry belongs to one install and one key: another install at the same address
+  or another key does not see, save or remove it. Signing out, or signing in with
+  another key, removes what was kept for the old one. Privacy mode keeps none of
+  it there and empties what an earlier mode left; if the browser refuses that, the
+  app says so and tries again until it succeeds.
+- When you delete a conversation in `log` or `full` mode, its id (a short code
+  made from the time it was started, no title or text) is added to
+  `chats/deleted-ids.txt`, so that another browser that still holds the
+  conversation does not save it again. A conversation whose file is missing
+  without such an entry is saved again from a browser that holds it. The newest
+  5000 to 10000 ids are kept.
 - In privacy mode, the interactive `localm run` chat and the coder REPL also
   suppress Python's own `readline` history, so what you type is not left
   behind in `~/.python_history` either. This is separate from and in addition

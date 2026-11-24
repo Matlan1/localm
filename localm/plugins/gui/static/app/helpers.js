@@ -66,6 +66,7 @@ export function safeStorageSet(key, value) {
 // of actual write-gated call sites) cannot drift apart unnoticed again.
 export const INSTANCE_SCOPED_KEYS = [
   "localm.conversations",
+  "localm.chatOwner",
   "localm.activeView",
   "localm.coderCwd",
   "localm.kbAddPath",
