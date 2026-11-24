@@ -658,10 +658,12 @@ def test_a_complete_malformed_or_foreign_call_is_not_unfinished(text):
 
 def test_a_flood_of_openers_stays_cheap():
     import time
-    text = '<tool_call>{"name": "write_file", "args": {"x": "' * 4000
+    nested = '<tool_call>{"name": "write_file", "a": ' * 4000 + "}" * 4000
+    unclosed = '<tool_call>{"name": "write_file", "args": {"x": "' * 4000
     start = time.monotonic()
-    unfinished_call(text, {"write_file"})
-    invented_result_at(text, {"write_file"})
+    unfinished_call(nested, {"write_file"})
+    unfinished_call(unclosed, {"write_file"})
+    invented_result_at(unclosed, {"write_file"})
     assert time.monotonic() - start < 5
 
 
@@ -1073,8 +1075,12 @@ def test_the_session_record_says_when_command_changes_are_unknown(tmp_path):
 
 
 def test_a_read_only_command_leaves_the_record_at_no_files_changed(tmp_path):
+    from localm.plugins.coder.parser import ToolCall
     agent = _agent(tmp_path, _Backend([]))
-    assert agent._grounding_footer() == "\n\n[session record: no files changed]"
+    call = ToolCall(name="run_shell", args={"command": "git status"}, raw="", start=0, end=0)
+    with patch.object(agent, "_git_status_map", return_value=None):
+        agent._execute_tool(call, interactive=False)
+        assert agent._grounding_footer() == "\n\n[session record: no files changed]"
 
 
 def test_the_session_record_counts_the_files_read(tmp_path):
