@@ -110,7 +110,8 @@ def _record_paths(site: Path, base: Path, folder: str, name: str) -> dict:
     for row in rows:
         text = row[0].replace("\\", "/") if os.name == "nt" else row[0]
         rel = posixpath.normpath(posixpath.join(inner, text))
-        if posixpath.isabs(text) or rel == ".." or rel.startswith("../") or ":" in rel[:2]:
+        if (posixpath.isabs(text) or rel == ".." or rel.startswith("../")
+                or (os.name == "nt" and ":" in text)):
             raise Refused(f"the package {name} lists a file outside the Python environment: "
                           f"{row[0][:200]}")
         if disk.PYCACHE not in rel.split("/"):
@@ -129,8 +130,8 @@ def plan_packages(root, update_id: str, argv: Iterable, *, env: Mapping, project
     (:func:`command`) in *root*, or None when uv has nothing to do. Changes nothing.
 
     Raises :class:`Refused`, naming the package, for one without a RECORD, with a
-    file outside the venv, or for localm itself without *project*; also when uv
-    cannot make its plan. Raises OSError."""
+    file outside the venv or behind a link, or for localm itself without *project*;
+    also when uv cannot make its plan. Raises OSError."""
     venv = mover.venv_of(root)
     code, output = run([*command(argv, project=project), "--dry-run"], str(root),
                        _environment(env))
@@ -144,6 +145,7 @@ def plan_packages(root, update_id: str, argv: Iterable, *, env: Mapping, project
         raise Refused(f"{venv} has no site-packages")
     if not project and any(name == _OWN for name, _v in removed + installed):
         raise Refused("uv would replace localm itself")
+    a = mover.area(root, update_id, PACKAGES)
     before = listing(venv)
     infos = shared.updater_components.dist_infos(site)
     paths: dict = {}
@@ -153,7 +155,13 @@ def plan_packages(root, update_id: str, argv: Iterable, *, env: Mapping, project
             raise Refused(f"the package {name} has no list of its files (RECORD), so it cannot "
                           "be replaced safely")
         for folder in have:
-            paths.update(_record_paths(site, venv, folder, name))
+            found = _record_paths(site, venv, folder, name)
+            try:
+                for rel in found:
+                    a.find(rel)
+            except Unsafe as e:
+                raise Refused(f"the package {name} cannot be replaced safely: {e}") from None
+            paths.update(found)
     ops = [Op(rel, REMOVE, old=before["files"][rel])
            for rel in sorted(paths) if rel in before["files"]]
     return Plan(PACKAGES, mover.next_number(root, update_id), ops, [], before)

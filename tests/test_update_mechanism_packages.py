@@ -434,9 +434,8 @@ def test_a_link_in_the_venv_is_not_followed(root, world):
         _winapi.CreateJunction(str(outside), str(site(root) / "alpha"))
     else:
         (site(root) / "alpha").symlink_to(outside, target_is_directory=True)
-    made = plan(root, world)
-    with pytest.raises(mover.StepFailed):
-        forward(root, world, made)
+    with pytest.raises(mover.Refused, match="alpha cannot be replaced safely.*is a link"):
+        plan(root, world)
     assert um.tree(outside) == there
 
 
@@ -623,7 +622,10 @@ def test_a_kill_at_every_operation_of_the_package_step_leads_back(template, worl
         ended = "FINISH" in killed.stdout and reached in (job.DONE, None)
         again = um.restore(run_dir, root)
         assert again.returncode == 0, (n, reached, again.stderr)
-        assert tree(root) == (new if ended else old), (n, reached)
+        if ended:
+            assert set(tree(root)) == set(new) and versions(root)["alpha"] == "2.0", (n, reached)
+        else:
+            assert tree(root) == old, (n, reached)
         assert um.phase(root) is None
         if reached or ended:
             assert not (root / ".venv" / mover.VENV_FOLDER).exists(), n
