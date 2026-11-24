@@ -136,9 +136,10 @@ In the GUI:
   requests in a row ("Remember that X. Remember that Y.") store one fact each, at
   most 8 per message, from the paragraph the message opens with. Text after a
   paragraph break, a quotation, or words you introduce as somebody else's ("Bob
-  wrote me this:") adds no further fact. A fact runs to the end of its sentence; a
-  line break inside it is a space, unless the next line starts a quotation, a code
-  fence, a list item, a "Name:" line or another request. The reply says for each
+  wrote me this:") adds no further fact. A fact runs to the end of its sentence, and
+  a line break inside it is a space, so end a fact with a full stop before the next
+  request. A line that starts a quotation, a code fence, a list item or "Word:" ends
+  the requests. The reply says for each
   fact whether it was saved, was already there, or was not stored; a long fact is
   shown cut there.
 - `/memory` opens the memory manager: view and edit your facts (one per line;

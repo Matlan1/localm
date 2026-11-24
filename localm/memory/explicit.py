@@ -75,13 +75,11 @@ _MIN_FACT_CHARS = 6
 _MAX_SCAN_CHARS = 4000
 _MAX_FACTS = 8
 
-# What ends a fact at a line break: a line that starts a quotation, a fence or
-# separator, a list item, or a "Name:" line, each read at the start of the line.
-_QUOTED_LINE_RE = re.compile(
-    "(?:[>\"\u201c\u201e\u00ab]|['\u2018](?!\\d)|`{3,}|~{3,}|-{3,}|={3,})")
-_LIST_ITEM_RE = re.compile("[-*+\u2022]\\s")
-_NUMBERED_LINE_RE = re.compile(r"\d{1,3}[.)]\s")
-_NAME_LINE_RE = re.compile(r"[^\W\d_][^\s:]*(?: [^\s:]+){0,3}:(?:\s|$)")
+# A line that starts a quotation, a fence or separator, a list item, or a "Word:"
+# line. No further request is taken from it or after it.
+_FOREIGN_LINE_RE = re.compile(
+    "[>\"\u201c\u201e\u00ab]|['\u2018](?!\\d)|`{3}|~{3}|-{3}|={3}|[-*+\u2022]\\s|"
+    "\\d{1,3}[.)]\\s|[^\\W\\d_][^:.!?]*:(?:\\s|$)")
 # Words that announce somebody else's text after them.
 _SOURCE = (
     r"(?:wrote|writes|written|says|said|saying|texted|texts|mailed|emailed|e-mailed|"
@@ -110,42 +108,59 @@ def _plain_breaks(text: str) -> str:
     return _LINE_BREAKS_RE.sub("\n", text.replace("\u2029", "\n\n"))
 
 
-def _opens_request(line: str, before: str) -> bool:
-    """True when *line*, after the line *before*, starts a request of its own. In
-    lower case, and with no "that", "dass" or ":" after the verb, it is one only when
-    *before* ended a sentence: "I never" / "remember my dreams" is one sentence."""
-    m = _EN_RE.match(line) or _DE_RE.match(line)
-    if m is None:
-        return False
-    if line[:1].isupper() or before.endswith((".", "!", "?")):
-        return True
-    connect = _CONNECT_RE.match(m.group("rest"))
-    return bool(connect and (connect.group("kw") or connect.group("punct")))
+def _opens_request(line: str) -> bool:
+    return bool(_EN_RE.match(line) or _DE_RE.match(line))
 
 
-def _logical_lines(para: str) -> list[str]:
-    """The paragraph *para* with its line breaks read as spaces, cut only before a
-    line that starts a quotation, a fence, a list item, a "Name:" line or a new
-    request. After a first line that announces a list of the user's own ("my
-    hobbies are:"), list items and "Name:" lines continue it."""
+def _is_foreign(line: str) -> bool:
+    return bool(_FOREIGN_LINE_RE.match(line)) and not _opens_request(line)
+
+
+def _ends_sentence(line: str) -> bool:
+    """True when the text line *line* ends a sentence."""
+    return (line.endswith((".", "!", "?"))
+            and not (line.endswith(".") and _is_abbreviation(line.rstrip(".!?"))))
+
+
+def _is_abbreviation(text: str) -> bool:
+    return text[text.rfind(" ") + 1:].lower().strip("\"'([") in _ABBREVIATIONS
+
+
+def _sentence_and_rest(para: str, on_new_line: bool) -> tuple:
+    """``(sentence, rest)`` of the paragraph *para*: its first sentence, with its line
+    breaks read as spaces, and what a further request may be taken from.
+
+    Text with no sentence end runs on over any line. Text that has one ends at a line
+    that starts a quotation, a fence, a list item, a "Word:" line or a request. The
+    rest is "" when such a foreign line (the first line too, when *on_new_line*) was
+    reached, when more text follows on a line the sentence ran on into, when it ran on
+    past a line that ended a sentence (a lower-case word after a full stop), or when
+    nothing is left; it ends before the first foreign line."""
     lines = [line for line in (" ".join(raw.split()) for raw in para.split("\n")) if line]
-    numbered = sum(1 for line in lines if _NUMBERED_LINE_RE.match(line)) > 1
-    out: list[list[str]] = []
-    own_list = False
-    for n, line in enumerate(lines):
-        if not n or _QUOTED_LINE_RE.match(line) or _opens_request(line, lines[n - 1]):
-            starts = True
-        elif own_list:
-            starts = False
-        else:
-            starts = bool(_LIST_ITEM_RE.match(line)
-                          or (numbered and _NUMBERED_LINE_RE.match(line))
-                          or (line[0].isupper() and _NAME_LINE_RE.match(line)))
-        if starts:
-            out.append([])
-            own_list = not n and line.endswith(":") and not _INTRODUCES_RE.search(line)
-        out[-1].append(line)
-    return [" ".join(parts) for parts in out]
+    if not lines:
+        return "", ""
+    own = next((n for n, line in enumerate(lines)
+                if (n or on_new_line) and _is_foreign(line)), len(lines))
+    stop = next((n for n in range(1, len(lines)) if _ends_sentence(lines[n - 1])
+                 and (n == own or _opens_request(lines[n]))), len(lines))
+    first = " ".join(lines[:stop])
+    sentence = _first_sentence(first)
+    last, end = 0, len(lines[0])
+    while end < len(sentence):
+        last += 1
+        end += 1 + len(lines[last])
+    tail = lines[last][len(lines[last]) - (end - len(sentence)):].strip()
+    if (last >= own or (last and _without_courtesies(tail + "\n").strip())
+            or any(_ends_sentence(line) for line in lines[:last])):
+        return sentence, ""
+    return sentence, "\n".join([tail, *lines[last + 1:own]]).strip()
+
+
+def _without_courtesies(text: str) -> str:
+    """*text* without the "Thanks!" and the like it opens with."""
+    while (polite := _COURTESY_RE.match(text)) is not None:
+        text = text[polite.end():]
+    return text
 
 
 def _quotes_open(text: str) -> bool:
@@ -175,9 +190,8 @@ def _first_sentence(text: str) -> str:
         end = m.start()
         if end and para[end - 1] == " ":
             end -= 1
-        word = para[para.rfind(" ", 0, end) + 1:end].lower().strip("\"'([")
         nxt = m.end() + 1 if para[m.end():m.end() + 1] == " " else m.end()
-        if m.group().startswith(".") and (word in _ABBREVIATIONS
+        if m.group().startswith(".") and (_is_abbreviation(para[:end])
                                           or para[nxt:nxt + 1].islower()):
             continue
         return para[:m.end()]
@@ -193,12 +207,13 @@ def explicit_fact(message: str) -> Optional[str]:
 
 def explicit_facts(message: str) -> list[str]:
     """Every fact a chat *message* asks to remember, in order, or [] when it is not
-    such a request. A sentence or line of the same paragraph that directly follows
-    a fact and is itself a request ("Remember that X. Remember that Y.", with at
-    most a "Thanks!" between) adds its own fact, up to _MAX_FACTS. The chain ends at
-    a paragraph break, at anything that is not such a request, and after a fact that
-    announces or opens somebody else's words ("Bob wrote me this:", an unclosed
-    quotation).
+    such a request. A sentence of the same paragraph that directly follows the
+    sentence of a fact and is itself a request ("Remember that X. Remember that Y.",
+    with at most a "Thanks!" between) adds its own fact, up to _MAX_FACTS; on a line
+    the fact ran on into it does not. The chain ends at a paragraph break, at a line
+    that starts a quotation, a fence, a list item or a "Word:" line, at anything that
+    is not such a request, and after a fact that announces or opens somebody else's
+    words ("Bob wrote me this:", an unclosed quotation).
 
     The rules below apply to each request in turn.
 
@@ -217,7 +232,7 @@ def explicit_facts(message: str) -> list[str]:
     followed by a task on it ("... . Fix it."). Only the first _MAX_SCAN_CHARS
     characters of *message* are read. The fact is the first sentence after the
     request, trailing punctuation removed, cut to MAX_TEXT_LEN. A line break in it is
-    a space unless the next line starts something of its own (see _logical_lines)."""
+    a space (see _sentence_and_rest)."""
     text = _plain_breaks(message[:_MAX_SCAN_CHARS]).strip() if isinstance(message, str) else ""
     facts: list[str] = []
     while text and len(facts) < _MAX_FACTS:
@@ -227,8 +242,7 @@ def explicit_facts(message: str) -> list[str]:
         fact, text = got
         if fact not in facts:
             facts.append(fact)
-        while (polite := _COURTESY_RE.match(text)) is not None:
-            text = text[polite.end():]
+        text = _without_courtesies(text)
         if _LETTER_OPENING_RE.match(text):
             break
     return facts
@@ -256,9 +270,9 @@ def _one_request(text: str) -> Optional[tuple]:
                 return None
         elif not keyword and verb.split()[0] in ("vergiss", "denk", "denke", "erinnere"):
             return None
-        lines = _logical_lines(_PARAGRAPH_RE.split(rest.strip())[0])
-        first = lines[0] if lines else ""
-        sentence = _first_sentence(first)
+        sentence, after = _sentence_and_rest(
+            _PARAGRAPH_RE.split(rest.strip())[0],
+            "\n" in m.group("rest")[:connect.end()])
         if sentence.endswith("?") and not (_ASKED_RE.match(text) and keyword):
             return None
         fact = sentence.strip("\"'").rstrip(".!?,;: ").strip()
@@ -275,6 +289,5 @@ def _one_request(text: str) -> Optional[tuple]:
         if (_ends_chain(sentence)
                 or _PARAGRAPH_RE.search(m.group("rest")[:connect.end()])):
             return fact[:MAX_TEXT_LEN], ""
-        after = "\n".join([first[len(sentence):].strip(), *lines[1:]]).strip()
         return fact[:MAX_TEXT_LEN], after
     return None

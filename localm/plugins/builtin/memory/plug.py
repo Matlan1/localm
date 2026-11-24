@@ -384,7 +384,8 @@ def _migrate_legacy(store, before_embed=None, *, embed: bool = True) -> bool:
     Gated on the chat session mode (privacy skips - a migration materialises new
     durable records, which is a write) and on a per-namespace marker file so it
     never re-imports. Best-effort: a failure is logged, never fatal, and never
-    reported as a success it did not perform.
+    reported as a success it did not perform. A switch to privacy mode while the
+    bullets are embedded imports nothing.
 
     This batches several ``add(..., save=False)`` calls into ONE save, so it must
     hold the namespace lock across the WHOLE batch (a reload + loop + one final
@@ -415,6 +416,8 @@ def _migrate_legacy(store, before_embed=None, *, embed: bool = True) -> bool:
             ef = store.embed_ahead(_embed_fn(), missing)
         added = False
         with store.lock():
+            if not _persist_enabled():
+                return False
             store._load()
             existing = {r.text.casefold() for r in store.all()}
             for bullet in bullets:
@@ -1437,6 +1440,7 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
             _advance(mt, f.stem)                    # a real attempt was made -> advance past it
             if not summ:
                 continue
+            summ = summ.strip()
             lo = summ.lower()
             # ONE episode PER SESSION: a resumed session's later summary supersedes its
             # earlier record rather than adding a second one. _session_text reads the
@@ -1461,9 +1465,10 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
                 # update() re-embeds on a text change, so the vector cannot go stale
                 # against the superseded text.
                 _ensure_embedder(ef)
+                ahead = store.embed_ahead(ef, [summ])
                 if not allowed():
                     return stored
-                store.update(keep.id, text=summ, embed_fn=ef,
+                store.update(keep.id, text=summ, embed_fn=ahead,
                              meta={"session": f.stem, "session_mtime": mt,
                                    "judged": True})
                 continue
@@ -1474,13 +1479,14 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
                    for r in store.all()):
                 continue                           # already have this episode
             _ensure_embedder(ef)
+            ahead = store.embed_ahead(ef, [summ])
             if not allowed():
                 return stored
             store.add(MemoryRecord(text=summ, kind="episodic", source="synth",
                                    importance=0.4,
                                    meta={"session": f.stem, "session_mtime": mt,
                                          "judged": True}),
-                      embed_fn=ef)
+                      embed_fn=ahead)
             stored += 1
         if not allowed():
             return stored
