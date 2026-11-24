@@ -1310,6 +1310,116 @@ test("a stored copy that cannot be read after a refused save is asked for again 
   assert.equal(server.files.size, 1);
 });
 
+test("a chat whose stored file cannot be read keeps what is typed here as a copy, once, on one timer", async () => {
+  const server = makeServer();
+  server.put("c1", { title: "One", messages: [user("a")] });
+  const win = await boot(server);
+  const c = await open(win, "One");
+  server.unreadable.add("c1");
+  runScript(win, `window.__timers = 0; { const real = window.setTimeout;
+    window.setTimeout = (f, ms) => { if (String(f).includes("pushConversation(conv)")) window.__timers++; return real(f, ms); }; }`);
+  say(win, c, "typed here");
+  assert.ok(await waitFor(() => server.files.size === 2, 9000));
+  const copy = [...server.files.values()].find((x) => x.id !== "c1");
+  assert.deepEqual(texts(copy), ["a", "typed here"]);
+  assert.match(copy.title, /copy/);
+  assert.equal(win.__toasts.filter((m) => /Both versions are kept/.test(m)).length, 1);
+  assert.equal(win.__timers, 2);
+  say(win, c, "and more");
+  await settle(1500);
+  assert.equal(server.files.size, 2);
+});
+
+test("several edits of a chat whose save is put off wait on one timer", async () => {
+  const server = makeServer();
+  server.put("c1", { title: "One", messages: [user("a")] });
+  const win = await boot(server);
+  const c = await open(win, "One");
+  server.put("c1", { title: "One", messages: [user("a"), reply("theirs")] });
+  win.__live = new Set();
+  runScript(win, `{ const set = window.setTimeout, clear = window.clearTimeout;
+    window.setTimeout = (f, ms) => { const id = set(() => { window.__live.delete(id); f(); }, ms);
+      if (String(f).includes("pushConversation(conv)")) window.__live.add(id); return id; };
+    window.clearTimeout = (id) => { window.__live.delete(id); clear(id); }; }`);
+  win.chat.busy = true;
+  for (let i = 0; i < 4; i++) {
+    c.title = "Renamed " + i;
+    win.saveConversations(c);
+    await settle(800);
+    assert.ok(win.__live.size <= 1, String(win.__live.size));
+  }
+  win.chat.busy = false;
+});
+
+test("a chat with unsaved text whose stored file cannot be read becomes a copy at the next load", async () => {
+  const server = makeServer();
+  server.put("c1", { title: "One", messages: [user("a")] });
+  server.unreadable.add("c1");
+  const win = await boot(server, { cached: [{ id: "c1", title: "One", updated_at: 5, rev: "r1", unsaved: true,
+    messages: [user("a"), user("typed here")] }] });
+  assert.ok(await waitFor(() => server.files.size === 2));
+  assert.deepEqual(texts([...server.files.values()].find((x) => x.id !== "c1")), ["a", "typed here"]);
+  await settle(400);
+  assert.equal(win.__toasts.filter((m) => /Both versions are kept/.test(m)).length, 1);
+  assert.equal(win.document.getElementById("conv-browser-only"), null);
+});
+
+test("text the last page could not save is shown as unsaved after a reload, and never cut from the cache", async () => {
+  const server = makeServer();
+  server.put("c1", { title: "One", updated_at: 1, messages: [user("a")] });
+  const rev = server.files.get("c1").rev;
+  server.failPut = 500;
+  const newer = Array.from({ length: 60 }, (_, i) => ({ id: "n" + i, title: "N" + i, updated_at: 1000 + i, rev: "x",
+    messages: [user("n")] }));
+  for (const n of newer) n.rev = server.put(n.id, { ...n });
+  const win = await boot(server, { cached: [...newer.slice(0, 55), { id: "c1", title: "One", updated_at: 2, rev, unsaved: true,
+    messages: [user("a"), user("typed here")] }] });
+  assert.ok(win.document.getElementById("conv-browser-only"), "shown as unsaved");
+  assert.equal(win.document.getElementById("persist-hint"), null);
+  win.saveConversations();
+  await settle(300);
+  assert.ok(cache(win).some((x) => x.id === "c1" && x.messages.length === 2));
+  assert.ok(cache(win).length <= 51, String(cache(win).length));
+  server.failPut = 0;
+  say(win, conv(win, "One"), "more");
+  assert.ok(await waitFor(() => !win.document.getElementById("conv-browser-only")));
+});
+
+test("another page's unsaved turn stays in the cache after this page saved the copy it read from it", async () => {
+  const server = makeServer();
+  server.put("c1", { title: "One", updated_at: 1, messages: [user("a")] });
+  const rev = server.files.get("c1").rev;
+  const fromA = { id: "c1", title: "One", updated_at: 5, rev, unsaved: true, page: "page-a", inst: "backend-x", prin: "owner",
+    messages: [user("a"), user("turn 1")] };
+  const win = await boot(server, { cached: [fromA] });
+  assert.ok(await waitFor(() => server.files.get("c1").messages.length === 2));
+  assert.ok(await waitFor(() => cache(win).some((x) => x.id === "c1" && !x.unsaved)));
+  server.failPut = 500;
+  // Page A adds a turn it cannot save.
+  const turn2 = { ...fromA, updated_at: 9, messages: [...fromA.messages, user("turn 2")] };
+  win.localStorage.setItem("localm.conversations", JSON.stringify([turn2, ...cache(win).filter((x) => x.id !== "c1")]));
+  win.saveConversations();
+  await settle(300);
+  assert.ok(JSON.stringify(cache(win)).includes("turn 2"));
+});
+
+test("a turn another page added to the row this page read before it wrote anything is kept", async () => {
+  const server = makeServer();
+  server.put("c1", { title: "One", updated_at: 5, messages: [user("a"), user("turn 1")] });
+  const rev = server.files.get("c1").rev;
+  const fromA = { id: "c1", title: "One", updated_at: 5, rev, page: "page-a", inst: "backend-x", prin: "owner",
+    messages: [user("a"), user("turn 1")] };
+  const release = gate(server, (method, url) => url === "/v1/config");
+  const win = await boot(server, { cached: [fromA], wait: false });
+  win.localStorage.setItem("localm.conversations", JSON.stringify([
+    { ...fromA, unsaved: true, updated_at: 9, messages: [...fromA.messages, user("turn 2")] }]));
+  release();
+  assert.ok(await waitFor(() => win.chat.persist));
+  win.saveConversations();
+  await settle(400);
+  assert.ok(JSON.stringify(cache(win)).includes("turn 2"));
+});
+
 test("a save put off again and again waits longer each time", async () => {
   const server = makeServer();
   server.put("c1", { title: "One", messages: [user("a")] });

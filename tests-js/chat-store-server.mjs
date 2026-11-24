@@ -43,7 +43,8 @@ function wouldLose(stored, body) {
 export function makeServer({ instance = "backend-x", principal = "owner" } = {}) {
   const s = { files: new Map(), deleted: new Set(), puts: [], mode: "full", calls: [], failPut: 0,
               gui: [], chatReply: null, instance, principal, pageSize: 0, hold: null, loseAnswer: 0,
-              chatPosts: [], active: "", refuseKey: false, failGet: 0 };
+              chatPosts: [], active: "", refuseKey: false, failGet: 0,
+              unreadable: new Set() };
   let n = 0;
   const res = (status, body) => ({ ok: status < 400, status, statusText: String(status),
     headers: { get: () => null }, text: async () => JSON.stringify(body), json: async () => plain(body) });
@@ -62,6 +63,10 @@ export function makeServer({ instance = "backend-x", principal = "owner" } = {})
   /** The answer of the store to one request. */
   s.store = (method, id, body, headers = {}) => {
     const stored = s.files.get(id);
+    if (s.unreadable.has(id) && method !== "DELETE") {
+      return method === "GET" ? res(500, { detail: "unreadable" })
+        : res(409, { detail: { error: "stale", rev: "0", row: { id, rev: "0" }, deleted: false } });
+    }
     if (s.mode === "privacy") return res(403, { detail: "privacy" });
     const meant = headers["X-LocaLM-Chat-Store"];
     if (method === "DELETE" && meant != null && meant !== s.instance + " " + s.principal) {
@@ -98,10 +103,10 @@ export function makeServer({ instance = "backend-x", principal = "owner" } = {})
     if (u.startsWith("/api/conversations?")) {
       const who = { instance: s.instance, principal: s.principal };
       if (s.mode === "privacy") return res(200, { enabled: false, conversations: [], stored: s.files.size, ...who });
-      const all = [...s.files.values()].map(row);
+      const all = [...s.files.values()].filter((r) => !s.unreadable.has(r.id)).map(row);
       const offset = Number(/offset=(\d+)/.exec(u)?.[1] || 0);
       const rows = s.pageSize ? all.slice(offset, offset + s.pageSize) : all;
-      return res(200, { enabled: true, conversations: rows, total: all.length, unreadable: [], ...who });
+      return res(200, { enabled: true, conversations: rows, total: all.length, unreadable: [...s.unreadable], ...who });
     }
     const m = /^\/api\/conversations\/([^?]+)$/.exec(u);
     if (m) {

@@ -133,12 +133,24 @@ const _bootInstance = (() => {
 })();
 const _bootOwner = readStoredJSON("localm.chatOwner", null);
 
+// The cache row a conversation was read from, as cacheRowKey names it, until this
+// page has written its own.
+const _readRow = new WeakMap();
+
+/** The page that wrote the cache row *c* and the time of its newest change. */
+function cacheRowKey(c) {
+  return (c.page || "") + " " + (c.updated_at || 0);
+}
+
 /** The conversations this browser cached, marked as read from its cache. */
 function cachedConversations() {
   const list = readStoredJSON("localm.conversations", []);
   if (!Array.isArray(list)) return [];
   return migrateConversations(list.filter((c) => c && typeof c === "object"))
-    .map((c) => Object.assign(c, { _cached: true }));
+    .map((c) => {
+      _readRow.set(c, cacheRowKey(c));
+      return Object.assign(c, { _cached: true });
+    });
 }
 
 export const chat = {
@@ -1226,9 +1238,9 @@ function cacheableConversations() {
   const tag = cacheTag();
   const own = chat.conversations.filter((c) => !c._meta && convPersistable(c));
   const unsavedHere = new Set(own.filter((c) => c.unsaved).map((c) => c.id));
-  const readFrom = new Map(own.map((c) => [c.id, c.page]));
-  // A row this page wrote, or the one it read its copy from.
-  const mineBefore = (c) => !!c.page && (c.page === PAGE || c.page === readFrom.get(c.id));
+  const readFrom = new Map(own.map((c) => [c.id, _readRow.get(c)]));
+  // A row this page wrote, or the very one it read its copy from.
+  const mineBefore = (c) => !!c.page && (c.page === PAGE || readFrom.get(c.id) === cacheRowKey(c));
   const stored = readStoredJSON("localm.conversations", []);
   const others = [];
   const foreign = [];
@@ -1249,18 +1261,24 @@ function cacheableConversations() {
   return { mine, foreign };
 }
 
+/** The newest *n* of *rows*, and those holding a change that is not stored. */
+function cutRows(rows, n) {
+  let left = n;
+  return rows.filter((c) => left-- > 0 || (c.unsaved && ((c.messages || []).length || (c.branches || []).length)));
+}
+
 function _writeConversationCache() {
   if (_cleared) return;
   const { mine, foreign } = cacheableConversations();
   let localOk = true;
-  let kept = mine.slice(0, 50);
+  let kept = cutRows(mine, 50);
   try {
-    localStorage.setItem("localm.conversations", JSON.stringify([...kept, ...foreign.slice(0, 50)]));
+    localStorage.setItem("localm.conversations", JSON.stringify([...kept, ...cutRows(foreign, 50)]));
   } catch {
     // Quota: drop image-heavy older conversations and retry once
-    kept = mine.slice(0, 10);
+    kept = cutRows(mine, 10);
     try {
-      localStorage.setItem("localm.conversations", JSON.stringify([...kept, ...foreign.slice(0, 50)]));
+      localStorage.setItem("localm.conversations", JSON.stringify([...kept, ...cutRows(foreign, 50)]));
     } catch (e2) {
       localOk = false;
       kept = [];
@@ -1269,7 +1287,10 @@ function _writeConversationCache() {
   }
   _localSaveOk = localOk;
   _localSavedIds.clear();
-  for (const c of kept) _localSavedIds.add(c.id);
+  for (const c of kept) {
+    _localSavedIds.add(c.id);
+    if (c.page === PAGE) _readRow.delete(chat.conversations.find((x) => x.id === c.id));
+  }
   _updateUnsavedIndicator();
 }
 
@@ -1579,7 +1600,7 @@ async function _putConversation(conv) {
       _saveFailed.delete(conv.id);
       const saved = await r.json().catch(() => null);
       if (conv.deleted) return;
-      _saveRetries.delete(conv);
+      retriesOver(conv);
       if (saved && typeof saved.rev === "string") {
         conv.rev = saved.rev;
         conv.sync = sent;
@@ -1642,14 +1663,27 @@ function rekeyConversation(conv, id) {
   rekeyDraft(old, id);
 }
 
-// How often the save of a conversation was put off in a row.
+// Of a conversation whose save was put off: how often in a row (`n`), how often
+// its stored copy answered 5xx in a row (`unreadable`), and the timer of the next
+// try.
 const _saveRetries = new WeakMap();
 
-/** Tries the save of *conv* again, after a pause that grows with each time. */
-function retrySave(conv) {
-  const n = _saveRetries.get(conv) || 0;
-  _saveRetries.set(conv, n + 1);
-  setTimeout(() => pushConversation(conv), Math.min(60000, 1000 * 2 ** n));
+// After this many 5xx in a row the stored copy counts as unreadable.
+const UNREADABLE_AFTER = 3;
+
+/** Tries the save of *conv* again, after a pause that grows with each time. A
+ *  conversation has one such try at a time. */
+function retrySave(conv, unreadable = 0) {
+  const was = _saveRetries.get(conv);
+  const n = was ? was.n : 0;
+  if (was) clearTimeout(was.timer);
+  const timer = setTimeout(() => pushConversation(conv), Math.min(60000, 1000 * 2 ** n));
+  _saveRetries.set(conv, { n: n + 1, unreadable, timer });
+}
+
+function retriesOver(conv) {
+  clearTimeout(_saveRetries.get(conv)?.timer);
+  _saveRetries.delete(conv);
 }
 
 /** Settles a save of *conv* the store refused because it holds another
@@ -1662,22 +1696,29 @@ function retrySave(conv) {
  *  messages changed both here and there, or the stored copy is an older one that
  *  lacks messages saved from here, the copy here becomes a conversation of its
  *  own and the stored one is listed beside it. While the stored copy cannot be
- *  read, nothing is decided and the save is tried again. */
+ *  asked for, nothing is decided and the save is tried again; one the server
+ *  cannot read makes the copy here a conversation of its own too. */
 async function resolveStaleSave(conv, detail) {
   if (!convPersistable(conv)) return;
   if (!detail.rev) { settleNotStored(conv, !!detail.deleted); return; }
   if (recogniseOwnSave(conv, detail.row)) { pushConversation(conv); return; }
   let data = null;
+  let unreadable = _saveRetries.get(conv)?.unreadable || 0;
   try {
     const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id),
                           { headers: authHeaders() });
     if (r.status === 410 || r.status === 404) { settleNotStored(conv, r.status === 410); return; }
+    unreadable = r.status >= 500 ? unreadable + 1 : 0;
     if (r.ok) data = await r.json();
   } catch { /* tried again below */ }
   if (!convPersistable(conv)) return;
   if (!data || typeof data !== "object") {
+    if (unreadable >= UNREADABLE_AFTER || (unreadable && _index && _index.unreadable.has(conv.id))) {
+      keepAsCopy(conv, null);
+      return;
+    }
     _saveFailed.add(conv.id);
-    retrySave(conv);
+    retrySave(conv, unreadable);
     return;
   }
   migrateConversation(data);
@@ -1800,10 +1841,12 @@ function takeStoredCopy(conv, data, { body }) {
 function keepAsCopy(conv, row) {
   const name = shownTitle(conv);
   const oldId = conv.id;
+  retriesOver(conv);
   rekeyConversation(conv, newConvId());
   conv.title = t("chat.conv.copyTitle", { name });
   delete conv.rev;
   delete conv.sync;
+  delete conv.tries;
   const at = chat.conversations.indexOf(conv);
   if (row && at !== -1 && !chat.conversations.some((c) => c.id === oldId)) {
     chat.conversations.splice(at + 1, 0, rowPlaceholder({ title: name, ...row, id: oldId }));
@@ -2008,6 +2051,7 @@ function applyStoredConversation(conv, data) {
     conv.sync = syncPoint(conv);
   }
   delete conv.unsaved;
+  _saveFailed.delete(conv.id);
 }
 // The index last read from the store this page is connected to.
 let _index = null;
@@ -2057,6 +2101,15 @@ async function fetchServerIndex() {
  *  stored any more was deleted elsewhere. One never stored is uploaded. */
 export async function initServerConversations() {
   if (chat.privacy) return;
+  if (!chat.persist) {
+    // What the last page could not save is not saved until the store takes it.
+    for (const c of chat.conversations) {
+      if (!c.unsaved || !_readRow.has(c)) continue;
+      _saveFailed.add(c.id);
+      _localSavedIds.add(c.id);
+    }
+    _updateUnsavedIndicator();
+  }
   try {
     const shown = _listPrint();
     const index = await fetchServerIndex();
@@ -2086,10 +2139,14 @@ export async function initServerConversations() {
       .map((c) => [c.id, rowPlaceholder(c)]));
     const stale = [];
     const gone = [];
+    const unreadable = [];
     for (const local of chat.conversations) {
       const remote = index.byId.get(local.id);
       const keep = () => byId.set(local.id, local);
-      const keepRow = () => byId.set(local.id, rowPlaceholder(remote));
+      const keepRow = () => {
+        byId.set(local.id, rowPlaceholder(remote));
+        _saveFailed.delete(local.id);
+      };
       if (local.tabOnly) keep();
       else if (!remote) {
         // A conversation this backend's index does not know may belong to
@@ -2097,11 +2154,11 @@ export async function initServerConversations() {
         // a confirmed mismatch, and uploaded only for a confirmed match.
         if (chat.instanceState === "mismatched") continue;
         keep();
-        if (local.rev && index.complete && chat.instanceMatch &&
-            !index.unreadable.has(local.id)) gone.push(local);
-        if (!local.rev && chat.instanceMatch && !index.unreadable.has(local.id)) {
-          pushConversation(local);
-        }
+        if (!chat.instanceMatch) continue;
+        if (index.unreadable.has(local.id)) {
+          if (local.unsaved && !local._meta && !chatBusy()) unreadable.push(local);
+        } else if (!local.rev) pushConversation(local);
+        else if (index.complete) gone.push(local);
       } else if (local._meta) {
         const { messages, _touched: touched } = local;
         Object.assign(local, rowPlaceholder(remote), { messages });
@@ -2148,6 +2205,7 @@ export async function initServerConversations() {
     if (!chat.conversations.some((c) => c.id === chat.activeId)) {
       chat.activeId = chat.conversations[0]?.id || null;
     }
+    for (const conv of unreadable) if (conv.unsaved && convPersistable(conv)) keepAsCopy(conv, null);
     for (const [conv, row] of stale) await refreshStored(conv, row);
     if (boot || stale.length || before !== _listPrint()) {
       saveConversations();

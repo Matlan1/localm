@@ -107,7 +107,7 @@ def test_a_delete_of_a_chat_that_is_not_stored_is_recorded_too(store):
 def test_the_record_of_deleted_chats_is_appended_to(store, monkeypatch):
     client, chats, _ = store
     client.delete("/api/conversations/a")
-    monkeypatch.setattr(plug, "atomic_write", lambda *a, **k: pytest.fail("rewritten"))
+    monkeypatch.setattr(plug, "_write_deleted", lambda *a, **k: pytest.fail("rewritten"))
     client.delete("/api/conversations/b")
     assert _deleted(chats) == ["a", "b"]
 
@@ -119,7 +119,23 @@ def test_the_record_of_deleted_chats_is_cut_to_the_newest_when_it_is_long(store,
         client.delete(f"/api/conversations/c{i}")
     assert _deleted(chats) == [f"c{i}" for i in range(6)]
     client.delete("/api/conversations/c6")
-    assert _deleted(chats) == ["c4", "c5", "c6"]
+    assert (chats / "deleted-ids.txt").read_bytes() == b"c4\nc5\nc6\n"
+    for cid in ("c4", "c5", "c6"):
+        assert _put(client, cid, "late").status_code == 409, cid
+    client.delete("/api/conversations/c7")
+    assert (chats / "deleted-ids.txt").read_bytes() == b"c4\nc5\nc6\nc7\n"
+
+
+@pytest.mark.parametrize("end", [b"\r\n", b"\n", b"\r"])
+def test_a_list_saved_with_other_line_ends_keeps_every_deletion(store, end):
+    client, chats, _ = store
+    chats.mkdir(parents=True)
+    path = chats / "deleted-ids.txt"
+    path.write_bytes(end.join([b"d0", b"d1", b"!d1", b"d2", b""]))
+    assert [_put(client, c, "x").status_code for c in ("d0", "d1", "d2")] == [409, 200, 409]
+    client.delete("/api/conversations/d3")
+    assert _put(client, "d3", "x").status_code == 409
+    assert _put(client, "d2", "x").status_code == 409
 
 
 def test_a_bad_byte_or_a_torn_line_loses_no_other_deletion(store):

@@ -38,6 +38,7 @@ import math
 import os
 import re
 import secrets
+import threading
 import time
 from collections import Counter
 from pathlib import Path
@@ -49,7 +50,7 @@ from pydantic import BaseModel, Field
 from localm import model_ids
 from localm.config import model_index
 from localm.storekit import (_REPLACE_RETRIES, NamespaceLockRegistry, _is_transient_permission_error,
-                             _transient_backoff, atomic_write)
+                             _transient_backoff, atomic_write, replace_atomic)
 
 _router = APIRouter()
 
@@ -414,7 +415,8 @@ def _deleted_ids(principal: str | None) -> list[str]:
                        "be read (%s)", type(e).__name__)
         raise _DeletedIdsUnreadable from e
     ids: dict[str, None] = {}
-    for line in raw.decode("ascii", errors="replace").split("\n"):
+    for part in raw.splitlines():
+        line = part.decode("ascii", errors="replace")
         if _CONV_ID.match(line[1:] if line.startswith("!") else line):
             ids.pop(line.lstrip("!"), None)
             if not line.startswith("!"):
@@ -431,6 +433,17 @@ def _is_deleted(conv_id: str, principal: str | None) -> bool:
         raise HTTPException(
             503, "The list of deleted conversations cannot be read, so this was "
                  "not saved.") from e
+
+
+def _write_deleted(path: Path, ids: list[str]) -> None:
+    """Replace the list of deleted conversations *path* with *ids*, one per LF
+    line on every platform. Raises OSError when it cannot be written."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp.write_bytes("".join(f"{i}\n" for i in ids).encode("ascii"))
+        replace_atomic(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _remember_deleted(conv_id: str, principal: str | None, *, take_back: bool = False) -> None:
@@ -457,7 +470,7 @@ def _remember_deleted(conv_id: str, principal: str | None, *, take_back: bool = 
             return
         if len(ids) > 2 * _DELETED_MAX:
             try:
-                atomic_write(path, "\n".join(ids[-_DELETED_MAX:]) + "\n")
+                _write_deleted(path, ids[-_DELETED_MAX:])
             except OSError as e:
                 from localm.debuglog import logger
                 logger.warning("chat store: the list of deleted conversations could "
