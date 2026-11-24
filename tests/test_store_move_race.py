@@ -16,6 +16,7 @@ import pytest
 
 from localm import model_manager as mm
 from localm.config import load_registry
+from localm.model_manager import placing
 from localm.model_manager import registry as _registry
 from localm.model_manager.gguf import TRANSFER_TEMP_PREFIX, _find_model_units
 from tests import test_folder_import_progress as _progress
@@ -129,7 +130,7 @@ class TestTemporaryFolders:
 
 class TestRenameRefusedWhileTheFolderIsFree:
     def _flaky_rename(self, monkeypatch, times):
-        real = os.rename
+        real = placing.rename_new
         calls = {"n": 0}
 
         def _rename(src, dst):
@@ -138,7 +139,7 @@ class TestRenameRefusedWhileTheFolderIsFree:
                 if calls["n"] <= times:
                     raise PermissionError(5, "Access is denied")
             return real(src, dst)
-        monkeypatch.setattr(_registry.os, "rename", _rename)
+        monkeypatch.setattr(placing, "rename_new", _rename)
         monkeypatch.setattr(_registry, "_RENAME_RETRY_SECONDS", 0)
         return calls
 

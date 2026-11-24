@@ -6,12 +6,12 @@ folder reports its models as already registered."""
 
 from __future__ import annotations
 
-import os
 import shutil
 from pathlib import Path
 
 from localm import model_manager as mm
 from localm.config import load_registry
+from localm.model_manager import placing
 from localm.model_manager import registry as _registry
 from localm.model_manager.gguf import TRANSFER_TEMP_PREFIX
 from tests import test_adopt_hub_cache as _hub
@@ -228,13 +228,13 @@ class TestMovingAHfFolderAgain:
 
 
 def _cross_device(monkeypatch):
-    real = os.rename
+    real = placing.rename_new
 
     def _rename(src, dst):
         if not Path(src).name.startswith(TRANSFER_TEMP_PREFIX):
             raise OSError("cross-device")
         return real(src, dst)
-    monkeypatch.setattr(_registry.os, "rename", _rename)
+    monkeypatch.setattr(placing, "rename_new", _rename)
 
 
 def _failing_copytree(monkeypatch, name, *, corrupt=False):

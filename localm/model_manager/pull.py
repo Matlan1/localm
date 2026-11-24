@@ -42,7 +42,6 @@ from ._transfer import meter_tqdm_class
 from .gguf import _safe_models_filename
 from .gguf import first_split_part
 from .gguf import gguf_n_embd
-from .gguf import TRANSFER_TEMP_PREFIX
 from .gguf import logical_model_path
 from .gguf import split_gguf_parts
 from .registry import _detect_local_model_type, _media_component_type, _sanitize_name
@@ -50,6 +49,7 @@ from .registry import find_aliases_by_path
 from .registry import model_owners
 from .registry import names_using_projector
 from .registry import SNAPSHOT_CLAIM as _SNAPSHOT_CLAIM
+from . import placing
 
 # HF_ENDPOINT / HF_HUB_ENDPOINT are ambient env vars localm never exposes as a
 # setting anywhere (no settings_schema.py key, no CLI flag, no docs). Pinned
@@ -1862,7 +1862,8 @@ def _record_mmproj_origin(dest: Path, repo_id: str, remote_name: str,
     from ..storekit import atomic_write
     try:
         atomic_write(_mmproj_origin_path(dest), json.dumps(
-            {"source": f"hf:{repo_id}", "file": remote_name, "sha256": sha256}))
+            {"source": f"hf:{repo_id}", "file": remote_name, "sha256": sha256,
+             "stamp": list(placing.stamp(dest) or ())}))
     except OSError as e:
         logger.warning("could not record where %s came from: %s", dest, e)
 
@@ -1892,6 +1893,26 @@ def _recorded_from_elsewhere(dest: Path, repo_id: str) -> bool:
             and not _mmproj_origin_is(dest, repo_id, dest.name))
 
 
+def _own_old_projector(dest: Path, repo_id: str, remote_name: str) -> "tuple | None":
+    """The :func:`placing.stamp` of the file *dest* when it is proven to be the one
+    downloaded as *repo_id*'s *remote_name*: its recorded origin says so, and it still
+    is the recorded file or still has the recorded sha256. Else None."""
+    now = placing.stamp(dest)
+    if now is None or not _mmproj_origin_is(dest, repo_id, remote_name):
+        return None
+    try:
+        rec = json.loads(_mmproj_origin_path(dest).read_text(encoding="utf-8"))
+        if rec.get("stamp") == list(now):
+            return now
+        digest = rec.get("sha256")
+        if digest and _verify_digest(
+                dest, purpose="to check the projector already here").lower() == digest:
+            return now
+    except (OSError, ValueError, RecursionError):
+        return None
+    return None
+
+
 def _mmproj_download_dest(base_dir: Path, candidate: str, repo_id: str,
                           model_path: "Path | None") -> "tuple[Path | None, bool]":
     """Where to place *candidate* (a vision projector from *repo_id*) under
@@ -1904,9 +1925,10 @@ def _mmproj_download_dest(base_dir: Path, candidate: str, repo_id: str,
     returned instead, and the occupied file is never read from beyond that
     one comparison or written to; it may be another entry's own correctly
     recorded projector. When the occupied file differs from the digest the repo
-    publishes and the origin recorded beside it says it came from *repo_id* as
-    *candidate*, it is that repo's own damaged or outdated copy: the plain name is
-    returned for a fresh download, which replaces it once verified. A numbered name that already holds this
+    publishes and is proven to be *repo_id*'s own *candidate* (see
+    :func:`_own_old_projector`), it is that repo's damaged or outdated copy: the plain
+    name is returned for a fresh download, which replaces it once verified. One that
+    was changed since it was downloaded stays. A numbered name that already holds this
     repo's own *candidate* (origin recorded, digest confirmed) is returned with
     the download skipped. A name a registry entry from another source records is
     never returned for a download, also when its file is missing. Returns
@@ -1923,10 +1945,15 @@ def _mmproj_download_dest(base_dir: Path, candidate: str, repo_id: str,
     if (dest.exists() and not foreign and _mm._hf_file_sha256(repo_id, candidate)
             and _mmproj_origin_is(dest, repo_id, candidate)):
         from rich.markup import escape
+        if _own_old_projector(dest, repo_id, candidate) is not None:
+            console.print(
+                f"[yellow]{escape(dest.name)} does not match the digest {escape(repo_id)} "
+                "publishes - fetching it again.[/yellow]")
+            return dest, False
         console.print(
-            f"[yellow]{escape(dest.name)} does not match the digest {escape(repo_id)} "
-            "publishes - fetching it again.[/yellow]")
-        return dest, False
+            f"[yellow]{escape(dest.name)} was changed since it was downloaded from "
+            f"{escape(repo_id)} and stays as it is; the published file gets another name. "
+            "To use that one, attach it with localm attach-mmproj.[/yellow]")
     for free in _numbered_mmproj_names(base_dir / candidate):
         if not free.exists():
             if _recorded_from_elsewhere(free, repo_id):
@@ -1942,11 +1969,14 @@ def _download_mmproj_file(repo_id: str, remote_name: str, dest: Path, base_dir: 
     """Download *remote_name* from *repo_id* to *dest* and return where it is. May
     raise; every call site wraps this in its own try/except.
 
-    Downloads into the hidden staging folder under *base_dir* and verifies there;
-    *dest* is written, or replaced, only with a verified file. An existing *dest*
-    that cannot be replaced (in use) stays, and the file takes a free numbered
-    name. Called through :func:`_fetch_projector`, which holds the name's lock."""
+    Downloads into the hidden staging folder under *base_dir* and verifies there. The
+    verified file replaces *dest* only when that is still this repo's own old file
+    (:func:`_own_old_projector`, as it was when the download started); a *dest* that
+    was free must still be. Otherwise, or when *dest* is in use, the file takes the
+    next free numbered name. Called through :func:`_fetch_projector`, which holds the
+    name's lock."""
     from huggingface_hub import hf_hub_download
+    old = _own_old_projector(dest, repo_id, remote_name)
     _ensure_hf_resumable_download()
     stage_dir = base_dir / _REPO_FOLDER_STAGING
     expected = _mm._hf_file_sha256(repo_id, remote_name)
@@ -1973,14 +2003,15 @@ def _download_mmproj_file(repo_id: str, remote_name: str, dest: Path, base_dir: 
                     f"got {actual[:16]}... - the file was deleted")
         os.utime(path)
         try:
-            os.replace(path, dest)
+            placing.put(path, dest, old)
         except OSError:
-            free = next((f for f in _numbered_mmproj_names(dest) if not f.exists()), None)
-            if free is None or not os.path.lexists(dest):
+            if not os.path.lexists(dest):
                 raise
-            logger.warning("%s could not be replaced; the new file is %s", dest, free)
-            os.replace(path, free)
-            dest = free
+            taken = dest
+            dest = placing.put_first_free(path, (
+                f for f in _numbered_mmproj_names(base_dir / remote_name)
+                if not _recorded_from_elsewhere(f, repo_id)))
+            logger.warning("%s could not be used; the new file is %s", taken, dest)
     _record_mmproj_origin(dest, repo_id, remote_name, actual)
     return dest
 
@@ -2424,77 +2455,6 @@ class _HeldDownloads:
             _unlink_quiet(held)
 
 
-def _second_name(path: Path, folder: Optional[Path]) -> Path:
-    """Keep the bytes of *path* under a hidden name in *folder* (None: beside it) and
-    return that name. Where hard links work, *path* itself stays; elsewhere it is
-    renamed."""
-    tag = uuid.uuid4().hex[:8]
-    if folder is not None:
-        folder.mkdir(parents=True, exist_ok=True)
-    folder = folder or path.parent
-    linked = folder / f"{TRANSFER_TEMP_PREFIX}{path.name}.{os.getpid()}.{tag}"
-    try:
-        os.link(path, linked)
-        return linked
-    except OSError as e:
-        logger.debug("cannot link %s (%s); renaming it", path, e)
-    renamed = folder / f".{path.name}.{tag}.old"
-    os.rename(path, renamed)
-    return renamed
-
-
-def _place_downloads(held: "dict[str, Path]", base_dir: Path,
-                     aside_dir: Optional[Path] = None) -> None:
-    """Move the verified files *held* (name to temp file) into *base_dir* under
-    their names, replacing what is there. When one cannot be placed, the ones
-    already placed and the files they replaced go back and OSError is raised; a
-    process that is killed between two of the renames leaves some files new and
-    some old. The first part of a split model is placed last, so a scan never
-    sees it without the others. What is replaced is kept in *aside_dir* (None:
-    beside it) until all are placed."""
-    if len(held) == 1:
-        (name, src), = held.items()
-        (base_dir / name).parent.mkdir(parents=True, exist_ok=True)
-        os.utime(src)
-        os.replace(src, base_dir / name)
-        return
-    placed: list[tuple[Path, Path]] = []
-    aside: list[tuple[Path, Path]] = []
-    try:
-        for name, src in reversed(list(held.items())):
-            final = base_dir / name
-            if os.path.lexists(final):
-                aside.append((_second_name(final, aside_dir), final))
-            final.parent.mkdir(parents=True, exist_ok=True)
-            os.utime(src)
-            os.replace(src, final)
-            placed.append((src, final))
-    except BaseException:
-        for src, final in reversed(placed):
-            with contextlib.suppress(OSError):
-                try:
-                    os.link(final, src)
-                except OSError:
-                    os.replace(final, src)
-                else:
-                    if not any(f == final for _old, f in aside):
-                        os.unlink(final)
-        for old, final in reversed(aside):
-            try:
-                if os.path.lexists(final) and os.path.samefile(old, final):
-                    os.unlink(old)
-                else:
-                    os.replace(old, final)
-            except OSError as e:
-                logger.error("could not put %s back to %s: %s", old, final, e)
-                from rich.markup import escape
-                console.print(f"[red]{escape(str(final))} could not be put back; it is "
-                              f"at {escape(str(old))}.[/red]")
-        raise
-    for old, _final in aside:
-        _unlink_quiet(old)
-
-
 def _take_over_partials(old_base: Path, new_base: Path, rel: str) -> None:
     """Move the temp files of *rel* that a localm which staged it in *old_base* left
     there to *new_base*, so a pull continues from them. Only temp files whose
@@ -2510,9 +2470,10 @@ def _take_over_partials(old_base: Path, new_base: Path, rel: str) -> None:
         target = get_local_download_paths(new_base, rel).metadata_path.parent
         with _hold_download_lock(get_local_download_paths(old_base, rel).lock_path):
             for f in found:
-                if not _partial_owner_is_gone(f, lock_held=True):
+                if (not _partial_owner_is_gone(f, lock_held=True)
+                        or os.path.lexists(target / f.name)):
                     continue
-                os.replace(f, target / f.name)
+                placing.put_new(f, target / f.name)
                 _unlink_quiet(_partial_owner_path(f))
     except (OSError, PullInFlight, ImportError, AttributeError) as e:
         logger.debug("not taking over the partial data of %s in %s: %s", rel, old_base, e)
@@ -2776,6 +2737,8 @@ def _pull_gguf_file_locked(
     if unchecked:
         _note_unverified(repo_id, unchecked)
 
+    placing.put_back(base_dir, all_parts)
+    stamps = {p: placing.stamp(base_dir / p) for p in all_parts}
     present = [p for p in all_parts if os.path.lexists(base_dir / p)]
     if redownload and present and _redownload_refused(
             present, base_dir, repo_id, digests, revision, model_name):
@@ -3100,16 +3063,17 @@ def _pull_gguf_file_locked(
                 console.print(f"[red]Not replaced:[/red] {escape(filename)}\n{escape(unusable)}")
                 held.discard()
                 return False
-        if not redownload and any(os.path.lexists(base_dir / p) and p not in replaced
-                                  for p in held.files):
+        try:
+            with _digest_forgotten(dest if filename in replaced else None):
+                placing.place_files(held.files, base_dir,
+                                    {p: stamps[p] for p in held.files if p in replaced})
+        except FileExistsError as e:
             console.print(
-                f"[red]Download kept aside:[/red] a file named {escape(filename)} appeared in "
+                f"[red]Download kept aside:[/red] a file named "
+                f"{escape(Path(e.filename or filename).name)} appeared or changed in "
                 f"{escape(str(base_dir))} meanwhile and was left as it is. Pull again to "
                 "compare the two.")
             return False
-        try:
-            with _digest_forgotten(dest if filename in replaced else None):
-                _place_downloads(held.files, base_dir)
         except OSError as e:
             console.print(
                 f"[red]Could not move the download into place:[/red] {escape(str(e))}\n"
@@ -3386,6 +3350,7 @@ def _refetch_snapshot_files(repo_id: str, dest: Path, names: list[str], repo_sib
     for the next pull."""
     import glob
     stage = dest / _SNAPSHOT_STAGING
+    stamps = {n: placing.stamp(dest / n) for n in names}
     wanted = set(names)
     listed = [s for s in repo_siblings or [] if str(s.rfilename) in wanted]
     total = sum(getattr(s, "size", None) or 0 for s in listed)
@@ -3413,7 +3378,10 @@ def _refetch_snapshot_files(repo_id: str, dest: Path, names: list[str], repo_sib
         return (f"{', '.join(wrong[:3])} of {repo_id} did not arrive as Hugging Face "
                 "publishes it (wrong size or digest); pull again to fetch it")
     try:
-        _place_downloads({n: stage / n for n in names}, dest, stage / ".old")
+        placing.place_files({n: stage / n for n in names}, dest, stamps)
+    except FileExistsError as e:
+        return (f"{Path(e.filename or dest).name} appeared or changed meanwhile and was left "
+                "as it is; pull again")
     except OSError as e:
         return (f"the new files could not be moved into place ({e}): a running model or "
                 "another program may be using the old ones. Unload the model and pull "
@@ -3465,6 +3433,7 @@ def _delete_hf_temp_files(base_dir: Path, rels: "list[str] | None") -> int:
         freed = _unlink_temp_files(
             [f for f in root.rglob("*.incomplete")
              if _partial_owner_is_gone(f, lock_held=False)])
+        placing.put_back(Path(base_dir))
         stage = Path(base_dir) / _SNAPSHOT_STAGING
         if stage.is_dir() and not any(stage.rglob("*.incomplete")):
             freed += _snapshot_bytes_on_disk(stage)
@@ -3616,6 +3585,7 @@ def discard_partial_download(spec: str, name: Optional[str] = None) -> int:
         with contextlib.ExitStack() as locks:
             for p in parts:
                 locks.enter_context(_part_lock(p))
+            placing.put_back(_mm.MODELS_DIR, parts)
             freed = _delete_hf_temp_files(stage_dir, rels)
             if not in_folder:
                 # Where an earlier localm kept the partial data of such a file.
@@ -3884,6 +3854,7 @@ def _pull_hf_snapshot_locked(
         logger.debug("could not fetch file listing for %s (%s); falling back "
                      "to a config.json-only completeness check", repo_id, e)
 
+    placing.put_back(dest)
     damaged: list[str] = []
     if dest.exists() and repo_siblings is not None:
         damaged = _snapshot_files_damaged(dest, repo_siblings, repo_id)
@@ -4126,7 +4097,9 @@ def _pull_hf_snapshot_locked(
             "read, so the downloaded files are not checked against them.")
         logger.warning("no file digests for %s; the snapshot is not integrity-checked", repo_id)
     else:
-        damaged = _snapshot_files_failing_digest(dest, repo_siblings, repo_id)
+        # Files that replace others were checked before they were placed.
+        damaged = ([] if keep_until_complete
+                   else _snapshot_files_failing_digest(dest, repo_siblings, repo_id))
         if damaged:
             shown = ", ".join(escape(n) for n in damaged[:3]) + (" ..." if len(damaged) > 3 else "")
             console.print(
@@ -4823,6 +4796,7 @@ def _pull_url_locked(
     dest      = _mm.MODELS_DIR / filename
     part_file = _mm.MODELS_DIR / (filename + ".part")
 
+    old = placing.stamp(dest)
     present = os.path.lexists(dest)
     if present and not redownload:
         return _register_present_url_file(url, name, dest, expected_sha256, model_type,
@@ -4890,7 +4864,7 @@ def _pull_url_locked(
         console.print(f"Every byte of [bold cyan]{escape(url)}[/bold cyan] is already here; "
                       "checking the file.")
         return _finish_url_pull(url, name, dest, part_file, identity, expected_sha256,
-                                redownload, model_type, type_user_set, type_is_auto)
+                                redownload, model_type, type_user_set, type_is_auto, old)
 
     from . import pending_pulls
     pending_pulls.note_source(source="url", url=url,
@@ -4921,7 +4895,7 @@ def _pull_url_locked(
             if _is_whole_file(r, already_have):
                 return _finish_url_pull(url, name, dest, part_file, identity,
                                         expected_sha256, redownload, model_type,
-                                        type_user_set, type_is_auto)
+                                        type_user_set, type_is_auto, old)
             already_have = 0
             headers.pop("Range", None)
             _discard_part(part_file)
@@ -5011,7 +4985,7 @@ def _pull_url_locked(
         return False
 
     return _finish_url_pull(url, name, dest, part_file, identity, expected_sha256,
-                            redownload, model_type, type_user_set, type_is_auto)
+                            redownload, model_type, type_user_set, type_is_auto, old)
 
 
 def _url_owners(dest: Path, url: str) -> "list[tuple[str, str]]":
@@ -5108,14 +5082,14 @@ def _finished_record(part_file: Path, url: str) -> Optional[str]:
 
 def _finish_url_pull(url: str, name: str, dest: Path, part_file: Path, identity: dict,
                      expected_sha256: Optional[str], redownload: bool, model_type: str,
-                     type_user_set: bool, type_is_auto: bool) -> bool:
-    """Verify the complete partial *part_file* of *url*, move it to *dest* and
-    register it. A partial that fails the check is deleted; anything else that
+                     type_user_set: bool, type_is_auto: bool, old: "tuple | None") -> bool:
+    """Verify the complete partial *part_file* of *url*, move it to *dest*, in place of
+    the file *old* (its :func:`placing.stamp` when the pull started), and register it. A partial that fails the check is deleted; anything else that
     fails keeps it and leaves *dest* as it was."""
     from rich.markup import escape
 
     from ..storekit import atomic_write
-    replacing = os.path.lexists(dest)
+    replacing = old is not None
     # SHA256 verification. `actual` is a hashlib hexdigest; expected_sha256 is
     # the raw --sha256 value, with no charset validation upstream. Both are
     # escaped.
@@ -5185,18 +5159,20 @@ def _finish_url_pull(url: str, name: str, dest: Path, part_file: Path, identity:
         console.print(f"[red]Not replaced:[/red] {escape(dest.name)}\n{escape(unusable)}")
         _discard_part(part_file)
         return False
-    if not redownload and os.path.lexists(dest):
-        console.print(
-            f"[red]Download kept aside:[/red] a file named {escape(dest.name)} appeared in "
-            "the models folder meanwhile and was left as it is. Pull again to compare "
-            "the two.")
-        return False
     record = _part_record_path(part_file)
     try:
         atomic_write(record, json.dumps({**identity, "finished_sha256": actual.lower()}))
         os.utime(part_file)
         with _digest_forgotten(dest if replacing else None):
-            os.replace(part_file, dest)
+            placing.put(part_file, dest, old)
+    except FileExistsError:
+        with contextlib.suppress(OSError):
+            atomic_write(record, json.dumps(identity))
+        console.print(
+            f"[red]Download kept aside:[/red] a file named {escape(dest.name)} appeared or "
+            "changed in the models folder meanwhile and was left as it is. Pull again to "
+            "compare the two.")
+        return False
     except OSError as e:
         with contextlib.suppress(OSError):
             atomic_write(record, json.dumps(identity))
@@ -5312,6 +5288,7 @@ def _pull_civitai_file_locked(
 
     filename = dest.name
     dest_dir = dest.parent
+    old = placing.stamp(dest)
     part_file = dest_dir / (filename + ".part")
     identity = _civitai_part_identity(version_id, resolved, verify_digest)
     # Read under the part lock. See
@@ -5353,7 +5330,7 @@ def _pull_civitai_file_locked(
             allow_when_off=netpolicy.downloads_allowed_when_off())
         if already_have and r.status_code == 416 and _is_whole_file(r, already_have):
             return _finish_civitai_pull(part_file, dest, verify_digest, register,
-                                        model_name, reg_type, resolved, type_user_set)
+                                        model_name, reg_type, resolved, type_user_set, old)
         if already_have and r.status_code == 416:
             already_have = 0
             headers.pop("Range", None)
@@ -5407,7 +5384,7 @@ def _pull_civitai_file_locked(
         _prog.ok()
 
     return _finish_civitai_pull(part_file, dest, verify_digest, register, model_name,
-                                reg_type, resolved, type_user_set)
+                                reg_type, resolved, type_user_set, old)
 
 
 def _is_whole_file(resp: Any, have: int) -> bool:
@@ -5419,9 +5396,9 @@ def _is_whole_file(resp: Any, have: int) -> bool:
 
 def _finish_civitai_pull(part_file: Path, dest: Path, verify_digest: Optional[str],
                          register: bool, model_name: str, reg_type: str, resolved: Any,
-                         type_user_set: bool) -> bool:
-    """Verify the complete CivitAI partial *part_file*, move it to *dest* and
-    register it; see :func:`_pull_civitai_file_locked`."""
+                         type_user_set: bool, old: "tuple | None") -> bool:
+    """Verify the complete CivitAI partial *part_file*, move it to *dest*, in place of
+    the file *old* (its :func:`placing.stamp` when the pull started), and register it; see :func:`_pull_civitai_file_locked`."""
     from rich.markup import escape
     filename = dest.name
     actual = _verify_digest(part_file)
@@ -5433,10 +5410,15 @@ def _finish_civitai_pull(part_file: Path, dest: Path, verify_digest: Optional[st
         _discard_part(part_file)
         return False
 
-    replacing = os.path.lexists(dest)
+    replacing = old is not None
     try:
         with _digest_forgotten(dest if replacing else None):
-            os.replace(part_file, dest)
+            placing.put(part_file, dest, old)
+    except FileExistsError:
+        console.print(
+            f"[red]Download kept aside:[/red] a file named {escape(filename)} appeared or "
+            "changed there meanwhile and was left as it is.")
+        return False
     except OSError as e:
         console.print(f"[red]Could not move the download into place:[/red] "
                       f"{escape(str(e))}")

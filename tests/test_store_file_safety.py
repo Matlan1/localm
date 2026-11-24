@@ -17,6 +17,7 @@ import pytest
 
 from localm import model_manager as mm
 from localm.config import load_registry
+from localm.model_manager import placing
 from localm.model_manager import pull as pull_mod
 from localm.model_manager import registry as _registry
 from localm.model_manager.gguf import TRANSFER_TEMP_PREFIX
@@ -43,13 +44,13 @@ def _no_links(monkeypatch) -> None:
 
 def _other_volume(monkeypatch) -> None:
     _no_links(monkeypatch)
-    real = os.rename
+    real = placing.rename_new
 
-    def _rename(src, dst, **kw):
+    def _rename(src, dst):
         if Path(dst).parent.name == "models" and Path(src).parent != Path(dst).parent:
             raise OSError(errno.EXDEV, "cross-device")
-        return real(src, dst, **kw)
-    monkeypatch.setattr(_registry.os, "rename", _rename)
+        return real(src, dst)
+    monkeypatch.setattr(placing, "rename_new", _rename)
 
 
 class TestAByteIdenticalFile:
@@ -314,7 +315,7 @@ class TestASecondPathToALibraryFile:
         f = _gguf(home / "models" / "m.gguf")
         alias = _alias(f, monkeypatch, home / "models")
         with pytest.raises(OSError):
-            _registry._drop_name(alias, f, lambda temp: _registry._same_inode(temp, f))
+            placing.drop_name(alias, f, lambda temp: placing.same_file(temp, f))
         assert f.is_file() and _names(home) == ["m.gguf"]
 
     def test_an_external_file_moved_by_a_second_path_takes_its_entry_along(
@@ -327,6 +328,100 @@ class TestASecondPathToALibraryFile:
         assert set(reg) == {"m"}
         assert Path(reg["m"]["path"]) == (home / "models" / "m.gguf").resolve()
         assert not src.exists()
+
+
+class TestPathsThatAreNotTheSameFile:
+    def test_names_that_differ_in_case_are_two_files_unless_they_are_one(self, monkeypatch):
+        monkeypatch.setattr(placing.os.path, "normcase", lambda p: p)
+        one = [False]
+        monkeypatch.setattr(placing, "same_file",
+                            lambda a, b: one[0] or Path(a).name == Path(b).name)
+        assert placing.same_entry(Path("x/M.gguf"), Path("x/m.gguf")) is False
+        one[0] = True
+        assert placing.same_entry(Path("x/M.gguf"), Path("x/m.gguf")) is True
+
+    def test_two_files_whose_names_differ_in_case_are_both_registered(
+            self, home, tmp_path, printed):
+        folder = tmp_path / "mine"
+        big = _gguf(folder / "M.gguf", payload=b"big" * 30)
+        small = _gguf(folder / "m.gguf", payload=b"small" * 30)
+        if placing.same_file(big, small):
+            pytest.skip("this file system does not tell the names apart")
+        assert mm.add_local(str(big), "upper") is True
+        assert mm.add_local(str(small), "lower") is True
+        assert {Path(e["path"]).name for e in load_registry().values()} == {"M.gguf", "m.gguf"}
+
+    @pytest.mark.parametrize("number", [(1, 7), (1, 0)])
+    def test_a_volume_without_file_numbers_has_no_identity(self, home, tmp_path, printed,
+                                                           monkeypatch, number):
+        src = _gguf(tmp_path / "mine" / "m.gguf")
+        monkeypatch.setattr(os.path, "samefile", lambda a, b: True)
+        monkeypatch.setattr(placing, "_device_and_number", lambda p: os.stat(p) and number)
+        assert placing.file_id(src) is None
+        assert placing.same_file(src, home / "models") is False
+        assert placing.same_file(src, src) is True
+        assert mm.add_local(str(src)) is True
+        assert Path(load_registry()["m"]["path"]) == src.resolve()
+
+    def test_a_hub_cache_inside_the_models_folder_registers_the_snapshot_file(
+            self, home, printed):
+        repo = home / "models" / "hub" / "models--o--r"
+        digest = "ab" * 32
+        blob = _gguf(repo / "blobs" / "x.gguf")
+        blob = blob.rename(repo / "blobs" / digest)
+        link = repo / "snapshots" / ("c" * 40) / "hm.gguf"
+        link.parent.mkdir(parents=True)
+        try:
+            link.symlink_to(os.path.join("..", "..", "blobs", digest))
+        except OSError:
+            pytest.skip("symlinks are not available here")
+        assert mm.add_local(str(link)) is True
+        (entry,) = load_registry().values()
+        assert Path(entry["path"]).name == "hm.gguf"
+
+
+class TestADropThatWasKilled:
+    def _killed(self, tmp_path, notes, *, same, copy=False):
+        import shutil
+        victim, keeper = tmp_path / "victim.gguf", tmp_path / "keeper.gguf"
+        victim.write_bytes(b"body" * 50)
+        if copy:
+            shutil.copyfile(victim, keeper)
+        elif same:
+            os.link(victim, keeper)
+        else:
+            keeper.write_bytes(b"else")
+        code = ("import os, sys; from pathlib import Path; "
+                "from localm.model_manager import placing as p; "
+                "p.drop_name(Path(sys.argv[1]), Path(sys.argv[2]), lambda t: os._exit(3), "
+                "Path(sys.argv[3]), copy=sys.argv[4] == '1')")
+        run = subprocess.run([sys.executable, "-c", code, str(victim), str(keeper), str(notes),
+                              "1" if copy else "0"], cwd=Path(__file__).resolve().parents[1])
+        assert run.returncode == 3
+        assert not victim.exists() and len(list(tmp_path.glob(".localm-moving-*"))) == 1
+        return victim, keeper
+
+    @pytest.mark.parametrize("same, copy", [(True, False), (False, False), (False, True)])
+    def test_the_next_scan_finishes_it(self, home, tmp_path, printed, same, copy):
+        work = tmp_path / "work"
+        work.mkdir()
+        notes = home / "locks" / "moving"
+        victim, keeper = self._killed(work, notes, same=same, copy=copy)
+        mm.sync_models_dir(backfill_mmproj=False)
+        assert list(work.glob(".localm-moving-*")) == [] and list(notes.iterdir()) == []
+        assert keeper.is_file()
+        assert victim.exists() is not (same or copy)
+
+    def test_a_drop_that_is_running_is_left_alone(self, home, tmp_path, printed):
+        victim, keeper = tmp_path / "v", tmp_path / "k"
+        victim.write_bytes(b"body")
+        os.link(victim, keeper)
+
+        def _scan(temp):
+            mm.sync_models_dir(backfill_mmproj=False)
+            return temp.exists()
+        placing.drop_name(victim, keeper, _scan, home / "locks" / "moving")
+        assert not victim.exists() and keeper.read_bytes() == b"body"
 
 
 class TestTwoAddsOfOneFile:
@@ -410,6 +505,23 @@ class TestIdenticalBytesUnderTheSameName:
         assert mine.is_file() and _names(home) == ["m.gguf"] and set(load_registry()) == {"m"}
         assert not any("different file" in line for line in printed), printed
         assert any("same content" in line for line in printed), printed
+
+    @pytest.mark.parametrize("on_duplicate", ["register", "copy", "move"])
+    def test_an_explicit_answer_is_not_skipped(self, home, tmp_path, printed, on_duplicate):
+        _gguf(home / "models" / "m.gguf")
+        mm._register("m", home / "models" / "m.gguf")
+        mine = _gguf(tmp_path / "mine" / "m.gguf")
+        assert mm.add_local(str(mine), on_duplicate=on_duplicate) is False
+        assert mine.is_file() and _names(home) == ["m.gguf"]
+        assert any("Pick another name" in line for line in printed), printed
+
+    def test_a_type_given_with_it_is_applied(self, home, tmp_path, printed):
+        _gguf(home / "models" / "m.gguf")
+        mm._register("m", home / "models" / "m.gguf", model_type="llm")
+        mine = _gguf(tmp_path / "mine" / "m.gguf")
+        assert mm.add_local(str(mine), model_type="embedding") is True
+        entry = load_registry()["m"]
+        assert entry["model_type"] == "embedding" and entry["type_user_set"] is True
 
     def test_a_different_file_still_is_one(self, home, tmp_path, printed):
         there = _gguf(home / "models" / "m.gguf", payload=b"a" * 64)

@@ -17,6 +17,7 @@ import zipfile
 import zlib
 from contextlib import ExitStack
 from contextlib import contextmanager
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -32,6 +33,7 @@ from ..config import REGISTRY_FILE
 from ..config import load_config
 from ..config import update_config
 from ..debuglog import logger
+from . import placing
 from ._shared import _emit_progress
 from ._shared import _verify_digest
 from ._shared import console
@@ -2036,34 +2038,23 @@ def library_path(path) -> Optional[Path]:
     """The path of *path* inside the models folder, or None when it lies outside.
     The folder is recognised by identity, so a path that reaches it another way
     (a ``\\\\?\\`` prefix, a bind mount, a second mount of one volume) is inside
-    too and is returned as its path under MODELS_DIR."""
+    too and is returned as its path under MODELS_DIR. A link inside the models
+    folder is kept as it is, not replaced by what it points to."""
     try:
-        p = Path(path).resolve()
-        root = _mm.MODELS_DIR.resolve()
-    except OSError:
+        given = _under_models_dir(logical_model_path(Path(path)))
+        return given if _under_models_dir(Path(path).resolve()) is not None else None
+    except (OSError, ValueError):
         return None
+
+
+def _under_models_dir(p: Path) -> Optional[Path]:
+    root = _mm.MODELS_DIR.resolve()
     if p.is_relative_to(root):
         return p
     for folder in (p, *p.parents):
-        if _same_inode(folder, root):
+        if placing.same_file(folder, root):
             return root / p.relative_to(folder)
     return None
-
-
-def _same_inode(a: Path, b: Path) -> bool:
-    """True when *a* and *b* are one file or folder on disk, under whatever names."""
-    try:
-        return os.path.samefile(a, b)
-    except (OSError, ValueError):
-        return False
-
-
-def _same_entry(a: Path, b: Path) -> bool:
-    """True when *a* and *b* are the same name in the same folder, whatever path
-    leads to that folder. Names differing only in case count as the same."""
-    if os.path.normcase(str(a)) == os.path.normcase(str(b)):
-        return True
-    return a.name.casefold() == b.name.casefold() and _same_inode(a.parent, b.parent)
 
 
 def model_is_external(name: str) -> bool:
@@ -2303,7 +2294,7 @@ def _reaches(path: Path, target: Path) -> bool:
     """True when *path* resolves to *target* (already resolved), or both are the
     same name in the same folder."""
     resolved = path.resolve()
-    return str(resolved) == str(target) or _same_entry(resolved, target)
+    return str(resolved) == str(target) or placing.same_entry(resolved, target)
 
 
 def names_using_projector(path: Path, reg: Optional[dict] = None) -> list[str]:
@@ -3011,6 +3002,25 @@ def _in_unfinished_pull(path: Path) -> bool:
     return False
 
 
+def _put_back_replacements() -> None:
+    """Put right what pulls that were killed while replacing files left in the models
+    folder or in a model folder in it (:func:`placing.put_back`), unless a pull of
+    these names is running. Never raises."""
+    from .pull import PullInFlight, _part_lock, _snapshot_dest_lock
+    try:
+        for _root, names in placing.unfinished(_mm.MODELS_DIR):
+            with suppress(PullInFlight), ExitStack() as locks:
+                for name in names:
+                    locks.enter_context(_part_lock(name))
+                placing.put_back(_mm.MODELS_DIR, names)
+        for folder in _mm.MODELS_DIR.iterdir():
+            if placing.unfinished(folder):
+                with suppress(PullInFlight), _snapshot_dest_lock(folder.name):
+                    placing.put_back(folder)
+    except OSError as e:
+        logger.warning("could not check for unfinished replacements: %s", e)
+
+
 def sync_models_dir(prune: Optional[bool] = None, *,
                      backfill_mmproj: bool = True) -> ModelSyncResult:
     """Reconcile the registry with the models directory.
@@ -3045,6 +3055,8 @@ def sync_models_dir(prune: Optional[bool] = None, *,
         prune = bool(load_config().get("autoprune_missing_models", False))
 
     _mm.ensure_dirs()
+    placing.finish_dropped(_drop_notes())
+    _put_back_replacements()
     reg = _mm.load_registry()
 
     known = set()
@@ -3693,7 +3705,7 @@ def _rename_into_place(temp: Path, dest: Path, action: str, source: Path) -> Opt
         if dest.exists():
             break
         try:
-            os.rename(temp, dest)
+            placing.rename_new(temp, dest)
             return None
         except PermissionError as e:
             last = e
@@ -3722,16 +3734,12 @@ class _Placed(NamedTuple):
     how: str
     removes_source: bool
     unit: Path
-    stamp: "tuple[int, int] | None"
+    stamp: "tuple | None"
 
 
-def _stamp(path: Path) -> "tuple[int, int] | None":
-    """The device and file number of *path*, or None when it does not exist."""
-    try:
-        st = os.stat(path)
-    except (OSError, ValueError):
-        return None
-    return st.st_dev, st.st_ino
+def _drop_notes() -> Path:
+    """Where :func:`placing.drop_name` keeps its notes."""
+    return _mm.MODELS_DIR.parent / "locks" / "moving"
 
 
 class _Placement:
@@ -3752,7 +3760,7 @@ class _Placement:
     until the placement is settled, so two adds, or an add and a pull, of one name
     do not see each other's unfinished work.
 
-    A name is deleted only through :func:`_drop_name`, which proves first that the
+    A name is deleted only through :func:`placing.drop_name`, which proves first that the
     file is kept.
 
     :meth:`repoint` makes registry entries that named a moved file name its new
@@ -3811,23 +3819,23 @@ class _Placement:
             removes = mode == "move" and how != "rename"
         if mode == "move" or follow:
             self._moved[old] = str(dest.resolve())
-        self._placed.append(_Placed(src, dest, how, removes, unit, _stamp(dest)))
+        self._placed.append(_Placed(src, dest, how, removes, unit, placing.stamp(dest)))
 
     def _transfer(self, src: Path, dest: Path, mode: str) -> str:
         if mode == "move":
             if not src.is_symlink():
                 try:
-                    os.link(src, dest)
+                    placing.second_name(src, dest)
                     return "link"
                 except FileExistsError:
                     raise RuntimeError(f"Cannot move: {dest} already exists") from None
                 except OSError as e:
                     logger.debug("cannot link %s to %s (%s); renaming it", src, dest, e)
-            if os.path.lexists(dest):
-                raise RuntimeError(f"Cannot move: {dest} already exists")
             try:
-                os.rename(src, dest)
+                placing.rename_new(src, dest)
                 return "rename"
+            except FileExistsError:
+                raise RuntimeError(f"Cannot move: {dest} already exists") from None
             except OSError as e:
                 logger.debug("cannot rename %s to %s (%s); copying it", src, dest, e)
         _copy_verified(src, dest, mode)
@@ -3840,7 +3848,7 @@ class _Placement:
         if action == "move" or follow:
             self._moved[old] = str(dest.resolve())
         self._placed.append(_Placed(src, dest, "rename" if renamed else "copy",
-                                    action == "move" and not renamed, dest, _stamp(dest)))
+                                    action == "move" and not renamed, dest, placing.stamp(dest)))
 
     def repoint(self) -> None:
         """Point the registry entries that named a moved file or folder at its new
@@ -3956,11 +3964,11 @@ class _Placement:
 
 def _what_is_at(src: Path, dest: Path) -> str:
     """See :meth:`_Placement.held`, for a *dest* that exists."""
-    if _same_entry(src, dest):
+    if placing.same_entry(src, dest):
         return "here"
     if not src.is_file() or not dest.is_file():
         return "other"
-    if _same_inode(src, dest):
+    if placing.same_file(src, dest):
         return "link"
     purpose = "to compare it with the file already in the models folder"
     try:
@@ -3976,15 +3984,17 @@ def _remove_moved_source(p: _Placed) -> None:
     """Delete the source of the finished move *p*, once its destination is proven
     to hold the file. Raises OSError, with the source left, when it does not."""
     if p.src.is_dir() and not p.src.is_symlink():
-        if not p.dest.is_dir() or _stamp(p.dest) != p.stamp or _same_inode(p.src, p.dest):
+        if (not p.dest.is_dir() or placing.stamp(p.dest) != p.stamp
+                or placing.same_file(p.src, p.dest)):
             raise OSError(f"{p.dest} does not hold the folder")
         shutil.rmtree(p.src)
-        return
-    if p.how == "copy":
-        _drop_name(p.src, p.dest, lambda temp: (_stamp(p.dest) == p.stamp
-                                                and not _same_inode(temp, p.dest)))
+    elif p.how == "copy":
+        placing.drop_name(p.src, p.dest, lambda temp: (
+            placing.stamp(p.dest) == p.stamp and not placing.same_file(temp, p.dest)),
+            _drop_notes(), copy=True)
     else:
-        _drop_name(p.src, p.dest, lambda temp: _same_inode(temp, p.dest))
+        placing.drop_name(p.src, p.dest, lambda temp: placing.same_file(temp, p.dest),
+                          _drop_notes())
 
 
 def _take_back(p: _Placed) -> None:
@@ -3993,58 +4003,20 @@ def _take_back(p: _Placed) -> None:
     source would not hold the file afterwards."""
     if not os.path.lexists(p.dest) and os.path.lexists(p.src):
         return
-    if _stamp(p.dest) != p.stamp:
+    if placing.stamp(p.dest) != p.stamp:
         raise OSError(f"{p.dest} is not the file that was put there")
     if p.how == "rename":
-        if os.path.lexists(p.src):
-            raise FileExistsError(f"{p.src} exists again")
-        os.rename(p.dest, p.src)
+        placing.rename_new(p.dest, p.src)
     elif p.dest.is_dir() and not p.dest.is_symlink():
-        if not p.src.is_dir() or _same_inode(p.src, p.dest):
+        if not p.src.is_dir() or placing.same_file(p.src, p.dest):
             raise FileNotFoundError(f"{p.src} is gone")
         shutil.rmtree(p.dest)
     elif p.how == "link":
-        _drop_name(p.dest, p.src, lambda temp: _same_inode(temp, p.src))
+        placing.drop_name(p.dest, p.src, lambda temp: placing.same_file(temp, p.src),
+                          _drop_notes())
     else:
-        _drop_name(p.dest, p.src, lambda temp: (p.src.is_file()
-                                                and not _same_inode(temp, p.src)))
-
-
-def _drop_name(victim: Path, keeper: Path, kept: "Callable[[Path], bool]") -> None:
-    """Delete the name *victim* of a file, when *kept* (given the name *victim* has
-    meanwhile) shows that *keeper* still holds the file without it. *victim* is
-    renamed first, so when both paths reach one name, *keeper* is gone at that
-    moment and *victim* is renamed back. A read-only file is deleted too, and
-    *keeper* keeps its attributes. Raises OSError with *victim* left."""
-    temp = victim.with_name(f".localm-moving-{victim.name[:80]}.{secrets.token_hex(4)}")
-    os.rename(victim, temp)
-    try:
-        if not kept(temp):
-            raise OSError(f"{keeper} does not hold the file")
-        _unlink_read_only_too(temp, keeper)
-    except BaseException:
-        if os.path.lexists(temp) and not os.path.lexists(victim):
-            os.rename(temp, victim)
-        raise
-
-
-def _unlink_read_only_too(path: Path, keeper: Path) -> None:
-    try:
-        path.unlink()
-        return
-    except PermissionError:
-        mode = path.stat().st_mode
-        if mode & _stat.S_IWRITE:
-            raise
-    shared = _same_inode(path, keeper)
-    os.chmod(path, mode | _stat.S_IWRITE)
-    try:
-        path.unlink()
-    finally:
-        if os.path.lexists(path):
-            os.chmod(path, mode)
-        elif shared:
-            os.chmod(keeper, mode)
+        placing.drop_name(p.dest, p.src, lambda temp: (
+            p.src.is_file() and not placing.same_file(temp, p.src)), _drop_notes(), copy=True)
 
 
 def _copy_verified(src: Path, dest: Path, mode: str) -> None:
@@ -4093,7 +4065,7 @@ def _transfer_model_dir(path: Path, dest: Path, action: str) -> bool:
     _remove_stale_transfer_folders()
     if action == "move":
         try:
-            os.rename(path, dest)
+            placing.rename_new(path, dest)
         except OSError:
             if dest.exists():
                 raise RuntimeError(f"Cannot {action}: {dest} already exists") from None
@@ -4479,9 +4451,9 @@ def _register_with_dedup(
         return stored
 
     if store and (aliases or (store == "move" and p.is_file()
-                              and _same_inode(p, _mm.MODELS_DIR / p.name))):
+                              and placing.same_file(p, _mm.MODELS_DIR / p.name))):
         taken = _name_collision(model_name, p, reg)
-        if taken is None or _same_inode(Path(taken), p):
+        if taken is None or placing.same_file(Path(taken), p):
             stored = _bring_in(store, True)
             followed = aliases
             p, store = stored.path, None
@@ -4568,7 +4540,14 @@ def _register_with_dedup(
     # Same name, DIFFERENT file - real conflict, never overwrite silently
     old_path = _name_collision(model_name, p, reg)
     if (old_path is not None and digest and Path(old_path).exists()
+            and on_duplicate in ("ask", "skip", "alias")
             and model_name in _mm.find_by_sha256(digest, reg)):
+        if type_user_set:
+            def _type(r: dict) -> None:
+                if isinstance(r.get(model_name), dict):
+                    r[model_name]["model_type"] = model_type
+                    r[model_name]["type_user_set"] = True
+            _mm.update_registry(_type)
         console.print(
             f"[yellow]'{escape(model_name)}' is already registered with the same content"
             f"[/yellow] [dim]({escape(str(old_path))})[/dim]\n"
@@ -5227,7 +5206,7 @@ def _registered_twins(first_parts: list[Path], on_duplicate: str, no_hash: bool,
             continue
         for name in names:
             held = _entry_path(_mm.load_registry().get(name))
-            if held is None or not Path(held).exists() or _same_inode(Path(held), gguf):
+            if held is None or not Path(held).exists() or placing.same_file(Path(held), gguf):
                 continue
             action = (on_duplicate if on_duplicate != "ask"
                       else _prompt_duplicate_action([name], f"{gguf.name}: {reason}"))
@@ -5915,13 +5894,17 @@ def _extract_gguf_member(archive: zipfile.ZipFile, info: zipfile.ZipInfo,
             raise RuntimeError(f"{filename} in {source_name} is not a GGUF file")
         sha = digest.hexdigest()
         dest = existing
-        if existing.exists():
-            if _mm._sha256_file(existing) == sha:
-                part.unlink()
-                return existing, sha
-            dest = _free_models_name(filename)
-        os.replace(part, dest)
-        return dest, sha
+        while True:
+            if dest.exists():
+                if _mm._sha256_file(dest) == sha:
+                    part.unlink()
+                    return dest, sha
+                dest = _free_models_name(filename)
+            try:
+                placing.put_new(part, dest)
+                return dest, sha
+            except FileExistsError:
+                continue
     except (zipfile.BadZipFile, zlib.error, EOFError, OSError, NotImplementedError) as e:
         raise RuntimeError(f"Could not extract {filename} from {source_name}: {e}") from e
     finally:
@@ -6395,6 +6378,7 @@ def add_local(
     """
     from rich.markup import escape
 
+    placing.finish_dropped(_drop_notes())
     p = logical_model_path(Path(path_str))
     if not p.exists():
         console.print(f"[red]Not found:[/red] {escape(path_str)}")

@@ -64,6 +64,17 @@ DAMAGED_WEIGHTS = b"w" * 499 + b"X" + b"w" * 500
 CONFIG = b"{}"
 
 
+def _corrupt(path: Path) -> bytes:
+    """Change bytes of *path* as a failing disk does: size and time stay."""
+    st = path.stat()
+    data = path.read_bytes()
+    data = data[:-7] + b"DAMAGED"
+    with open(path, "r+b") as fh:
+        fh.write(data)
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+    return data
+
+
 def _snapshot_hub(monkeypatch, downloaded: list):
     siblings = [
         SimpleNamespace(rfilename="config.json", size=len(CONFIG), lfs=None),
@@ -267,7 +278,7 @@ class TestProjectorRepull:
             ("o/r", "main.gguf"): model, ("o/r", "mmproj-main-f16.gguf"): right})
         assert mm._pull_gguf_file("o/r:main.gguf", None) is True
         projector = models_dir / "mmproj-main-f16.gguf"
-        projector.write_bytes(right + b"damaged")
+        _corrupt(projector)
         downloaded.clear()
 
         assert mm._pull_gguf_file("o/r:main.gguf", None) is True
@@ -370,7 +381,7 @@ class TestProjectorRepull:
             ("o/r", "main.gguf"): model, ("o/r", "mmproj-main-f16.gguf"): right})
         assert mm._pull_gguf_file("o/r:main.gguf", None) is True
         projector = models_dir / "mmproj-main-f16.gguf"
-        projector.write_bytes(right + b"damaged")
+        damaged = _corrupt(projector)
         real_replace = os.replace
 
         def _locked(src, dst):
@@ -382,7 +393,7 @@ class TestProjectorRepull:
 
         assert mm._pull_gguf_file("o/r:main.gguf", None) is True
 
-        assert projector.read_bytes() == right + b"damaged"
+        assert projector.read_bytes() == damaged
         assert (models_dir / "mmproj-main-f16-2.gguf").read_bytes() == right
 
 

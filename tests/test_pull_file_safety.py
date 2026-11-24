@@ -21,10 +21,12 @@ import pytest
 
 from localm import model_manager as mm
 from localm.model_manager import pending_pulls
+from localm.model_manager import placing
 from localm.model_manager import pull as pull_mod
 from localm.model_manager import registry as registry_mod
 from tests import test_folder_import_progress as _progress
-from tests.test_cached_download_reverify import _snapshot_hub, CONFIG, DAMAGED_WEIGHTS, GOOD_WEIGHTS
+from tests.test_cached_download_reverify import (
+    _corrupt, _snapshot_hub, CONFIG, DAMAGED_WEIGHTS, GOOD_WEIGHTS)
 from tests.test_mmproj_discovery import _real_mmproj_gguf, _real_text_model_gguf
 from tests.test_url_pull_resume import _RangeServer, _resp
 
@@ -91,6 +93,10 @@ def _held(models: Path) -> list[Path]:
     return sorted((models / ".cache").rglob("*.incomplete"))
 
 
+def _names_and_text(base: Path) -> dict:
+    return {p.relative_to(base).as_posix(): p.read_text() for p in base.rglob("*") if p.is_file()}
+
+
 class TestAHuggingFaceFileIsPlacedOnlyVerified:
     def test_stopping_the_check_leaves_partial_data_and_no_model(self, hub, monkeypatch):
         hub.files[NAME] = GOOD
@@ -139,16 +145,16 @@ class TestAHuggingFaceFileIsPlacedOnlyVerified:
         for p in parts:
             hub.files[p] = _gguf(hub.models.parent / "x" / p).read_bytes() + p.encode()
         seen, order = [], []
+        real_put = placing.put_new
         real = pull_mod._verify_digest
         monkeypatch.setattr(pull_mod, "_verify_digest",
                             lambda path, **kw: seen.append(_visible(hub.models)) or real(path, **kw))
-        real_replace = os.replace
 
-        def _replace(src, dst):
+        def _put(src, dst):
             if Path(dst).parent == hub.models:
                 order.append(Path(dst).name)
-            return real_replace(src, dst)
-        monkeypatch.setattr(pull_mod.os, "replace", _replace)
+            return real_put(src, dst)
+        monkeypatch.setattr(placing, "put_new", _put)
         assert _pull("o/r:" + parts[0], model_type="llm") is True
         assert seen == [[], []] and order == parts[::-1]
 
@@ -359,9 +365,9 @@ class TestRedownloadOfAHuggingFaceFile:
         assert _pull() is True
         hub.files[NAME] = OTHER
 
-        def _full(held, base):
+        def _full(files, base, old):
             raise OSError(errno.ENOSPC, "No space left on device")
-        monkeypatch.setattr(pull_mod, "_place_downloads", _full)
+        monkeypatch.setattr(placing, "place_files", _full)
         assert _pull(redownload=True) is False
         assert mm.load_registry()["weights.safetensors"]["sha256"] == _sha(GOOD)
 
@@ -424,9 +430,9 @@ class TestRedownloadOfAHuggingFaceFile:
             seen.append(Path(dst).read_text() if Path(dst).exists() else None)
             return real(src, dst)
         monkeypatch.setattr(pull_mod.os, "replace", _replace)
-        pull_mod._place_downloads(held, base)
+        placing.place_files(held, base, {n: placing.stamp(base / n) for n in held})
         assert seen == ["old b", "old a"]
-        assert {p.name: p.read_text() for p in base.iterdir()} == {"a": "new a", "b": "new b"}
+        assert _names_and_text(base) == {"a": "new a", "b": "new b"}
 
     @pytest.mark.parametrize("links", [True, False])
     def test_when_one_part_cannot_be_replaced_the_others_go_back(self, tmp_path, monkeypatch, links):
@@ -434,6 +440,13 @@ class TestRedownloadOfAHuggingFaceFile:
             def _link(src, dst, **kw):
                 raise OSError(errno.EPERM, "links are not supported here")
             monkeypatch.setattr(pull_mod.os, "link", _link)
+            real_put = placing.put_new
+
+            def _put(src, dst):
+                if Path(src) == tmp_path / "new-a":
+                    raise PermissionError(13, "in use")
+                return real_put(src, dst)
+            monkeypatch.setattr(placing, "put_new", _put)
         base = tmp_path / "models"
         base.mkdir()
         held = {}
@@ -449,8 +462,8 @@ class TestRedownloadOfAHuggingFaceFile:
             return real(src, dst)
         monkeypatch.setattr(pull_mod.os, "replace", _replace)
         with pytest.raises(PermissionError):
-            pull_mod._place_downloads(held, base)
-        assert {p.name: p.read_text() for p in base.iterdir()} == {"a": "old a", "b": "old b"}
+            placing.place_files(held, base, {n: placing.stamp(base / n) for n in held})
+        assert _names_and_text(base) == {"a": "old a", "b": "old b"}
         assert held["a"].read_text() == "new a" and held["b"].read_text() == "new b"
 
 
@@ -709,6 +722,65 @@ class TestAVisionProjector:
         mm._register("modelA", model, source, model_type="llm", mmproj=hub.models / self.MM)
         assert self._fetch(hub).name == name
 
+    @pytest.mark.parametrize("how", ["import", "by hand"])
+    def test_a_name_that_is_taken_during_the_download_is_not_overwritten(
+            self, hub, tmp_path, monkeypatch, how):
+        (hub.models / "mmproj-F16.gguf").write_bytes(_real_mmproj_gguf(tmp_path / "x", 32).read_bytes())
+        pull_mod._record_mmproj_origin(hub.models / "mmproj-F16.gguf", "other/repo",
+                                       "mmproj-F16.gguf", None)
+        hub.files["mmproj-F16.gguf"] = GOOD
+        (tmp_path / "mine").mkdir()
+        mine = _real_mmproj_gguf(tmp_path / "mine" / "mmproj-F16.gguf", 99)
+        with open(mine, "ab") as fh:
+            fh.write(bytes(4096))
+        body = mine.read_bytes()
+        real = huggingface_hub.hf_hub_download
+
+        def _meanwhile(**kw):
+            if how == "import":
+                t = threading.Thread(
+                    target=lambda: mm.add_local(str(mine.parent), store="move"))
+                t.start()
+                t.join(60)
+            else:
+                (hub.models / "mmproj-F16-2.gguf").write_bytes(body)
+            return real(**kw)
+        monkeypatch.setattr(huggingface_hub, "hf_hub_download", _meanwhile)
+        landed = pull_mod._fetch_projector("o/r", "mmproj-F16.gguf", hub.models, None, "x")
+        assert (hub.models / "mmproj-F16-2.gguf").read_bytes() == body
+        assert landed == hub.models / "mmproj-F16-3.gguf" and landed.read_bytes() == GOOD
+        assert mine.exists() is (how == "by hand")
+
+    def test_a_free_name_that_is_taken_during_the_download_is_not_overwritten(
+            self, hub, monkeypatch):
+        hub.files[self.MM] = GOOD
+        real = huggingface_hub.hf_hub_download
+
+        def _meanwhile(**kw):
+            (hub.models / self.MM).write_bytes(OTHER)
+            return real(**kw)
+        monkeypatch.setattr(huggingface_hub, "hf_hub_download", _meanwhile)
+        landed = self._fetch(hub)
+        assert (hub.models / self.MM).read_bytes() == OTHER
+        assert landed.name == "mmproj-f16-2.gguf" and landed.read_bytes() == GOOD
+
+    def test_a_file_put_there_by_hand_is_not_taken_for_the_old_download(self, hub, capsys):
+        hub.files[self.MM] = GOOD
+        self._fetch(hub)
+        (hub.models / self.MM).unlink()
+        (hub.models / self.MM).write_bytes(OTHER)
+        landed = self._fetch(hub)
+        assert (hub.models / self.MM).read_bytes() == OTHER
+        assert landed.name == "mmproj-f16-2.gguf" and landed.read_bytes() == GOOD
+        assert "attach-mmproj" in _text(capsys)
+
+    def test_an_outdated_download_is_replaced(self, hub):
+        hub.files[self.MM] = OTHER
+        self._fetch(hub)
+        hub.files[self.MM] = GOOD
+        assert self._fetch(hub) == hub.models / self.MM
+        assert (hub.models / self.MM).read_bytes() == GOOD
+
     def test_a_backfill_does_not_wait_for_another_download(self, hub):
         with pull_mod._part_lock(self.MM):
             done = []
@@ -743,8 +815,7 @@ class TestAVisionProjector:
         right = _real_mmproj_gguf(tmp_path / "p.gguf", 64).read_bytes()
         hub.files[self.MM] = right
         self._fetch(hub)
-        damaged = right + b"damaged"
-        (hub.models / self.MM).write_bytes(damaged)
+        damaged = _corrupt(hub.models / self.MM)
         hub.fail = OSError("offline")
         dest, skip = pull_mod._mmproj_download_dest(hub.models, self.MM, "o/r", None)
         assert (dest, skip) == (hub.models / self.MM, False)
@@ -949,9 +1020,9 @@ class TestAFullRepository:
 def test_a_failed_placement_errno_is_reported_like_any_other(hub, capsys, monkeypatch):
     hub.files[NAME] = GOOD
 
-    def _full(held, base):
+    def _full(files, base, old):
         raise OSError(errno.ENOSPC, "No space left on device")
-    monkeypatch.setattr(pull_mod, "_place_downloads", _full)
+    monkeypatch.setattr(placing, "place_files", _full)
     assert _pull() is False
     assert mm.load_registry() == {} and [p.read_bytes() for p in _held(hub.models)] == [GOOD]
     assert "No space left on device" in _text(capsys)
