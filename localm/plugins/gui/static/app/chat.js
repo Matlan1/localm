@@ -266,6 +266,12 @@ export function compactionCut(messages, from) {
   return 0;
 }
 
+/** The text of *m* a digest or summary reads: a reply without its reasoning
+ *  blocks, any other message as it stands. */
+function spokenText(m) {
+  return m.role === "assistant" ? stripThink(msgText(m)) : msgText(m);
+}
+
 export const DIGEST_MAX_CHARS = 4096;
 const DIGEST_MIN_EXCERPT = 160;
 
@@ -279,7 +285,7 @@ export function compactionDigest(older) {
   for (let i = older.length - 1; i >= 0; i--) {
     const m = older[i];
     const line = `${isToolEvent(m) ? "WEB" : String(m.role || "user").toUpperCase()}: ` +
-      truncateAtWord(stripThink(msgText(m)), per);
+      truncateAtWord(spokenText(m), per);
     if (lines.length && used + line.length > DIGEST_MAX_CHARS) break;
     lines.unshift(line);
     used += line.length;
@@ -414,11 +420,12 @@ export function planSummaryPasses(entries, ctxMax, reply, overhead) {
 /** One summariser request for *content*: the visible reply text, or "" when
  *  the request fails, is aborted through *signal*, is refused, or ends with
  *  a finish reason other than "stop" or "length". Never rejects. */
-async function summaryPass(content, maxTokens, signal, pinnedModel) {
+async function summaryPass(content, maxTokens, signal, conv) {
+  const pinnedModel = pinnedModelName(conv);
   try {
     const r = await fetch("/v1/chat/completions", {
       method: "POST",
-      headers: authHeaders(CHAT_SURFACE_HEADERS),
+      headers: authHeaders(chatSurfaceHeaders(conv)),
       body: JSON.stringify({
         model: pinnedModel || modelSelect.value || modelCache.active,
         pin_model: !!pinnedModel,
@@ -468,7 +475,7 @@ export function compactionText(m) {
   for (const clip of msgAudioClips(m)) {
     notes.push(clip.name ? `[audio clip attached: ${clip.name}]` : "[audio clip attached]");
   }
-  const text = stripThink(msgText(m));
+  const text = spokenText(m);
   return notes.length ? (text ? text + "\n" : "") + notes.join("\n") : text;
 }
 
@@ -479,7 +486,9 @@ export function compactionText(m) {
  *  when the window is unknown or too small for a rolling pass (see
  *  planSummaryPasses). A failed pass makes the
  *  bridge a digest of the older turns. An aborted *signal* cancels the
- *  summary requests and leaves the conversation unchanged. */
+ *  summary requests and leaves the conversation unchanged, and so does a change
+ *  of the older turns while the summary was written; messages added after them
+ *  meanwhile are kept. */
 export async function compactConversation(conv, signal = null) {
   if (conv.messages.length <= COMPACT_KEEP) return false;
   // R44: keep as many of the most-recent turns verbatim as fit in COMPACT_TARGET
@@ -500,7 +509,6 @@ export async function compactConversation(conv, signal = null) {
   const cut = compactionCut(conv.messages, conv.messages.length - keepCount);
   if (cut <= 0) return false;
   const older = conv.messages.slice(0, cut);
-  const recent = conv.messages.slice(cut);
 
   // R44: feed whole messages truncated at a word boundary, with reasoning blocks
   // stripped, so the summariser never sees half-words or display-only <think>.
@@ -521,7 +529,6 @@ export async function compactConversation(conv, signal = null) {
 
   // The summary is written by the model that answers the conversation: its
   // pinned model, pinned, else the selected model as a preference.
-  const pinnedModel = pinnedModelName(conv);
   let summary = earlier;
   // A placeholder assistant row shows "Compacting conversation..." until the
   // summary requests settle.
@@ -540,7 +547,7 @@ export async function compactConversation(conv, signal = null) {
         ? ROLLING_SUMMARY_INSTRUCTION + "\n\nSummary of the earlier part:\n" +
           fitTokens(summary, earlierSummaryTokens(reply)) + "\n\nLater turns:\n" + excerpt
         : SUMMARY_INSTRUCTION + "\n\n" + excerpt;
-      summary = await summaryPass(content, reply, signal, pinnedModel);
+      summary = await summaryPass(content, reply, signal, conv);
       if (!summary) break;
     }
   } finally {
@@ -550,6 +557,7 @@ export async function compactConversation(conv, signal = null) {
     }
   }
   if (signal && signal.aborted) return false;
+  if (older.some((m, i) => conv.messages[i] !== m)) return false;
 
   // The removed turns are archived on the bridge message (text only, with an
   // earlier bridge's own archive kept nested) and listed by exportConversation.
@@ -568,7 +576,7 @@ export async function compactConversation(conv, signal = null) {
     : [{ role: "user", content: compactionDigest(older), compacted: archived, bridge: true },
        { role: "assistant", content: "Understood. Continuing from these excerpts.", bridge: true }];
 
-  conv.messages = [...bridge, ...recent];
+  conv.messages = [...bridge, ...conv.messages.slice(cut)];
   // Forks anchored in the summarised-away region can no longer be reached by
   // the ‹ › navigation; archive their content and DISCLOSE the count instead
   // of deleting them silently (memory-audit 2026-07-02).
@@ -687,6 +695,7 @@ export async function refreshCtxLimit() {
   // confirmed "mismatched" to "unknown" - that would re-permit rendering the
   // foreign cache the mismatch branch exists to remove.
   let reconciled = false;
+  const upTo = _writeSeq;
   try {
     const r = await fetch("/v1/config", { headers: authHeaders() });
     if (!r.ok) {
@@ -759,85 +768,7 @@ export async function refreshCtxLimit() {
         showView("chat");
       }
 
-      // Privacy mode: conversations live in memory only - wipe anything a
-      // previous non-privacy session left behind (in-memory AND on disk) and
-      // show the hint. The server applies a Settings change of the mode at
-      // once, so this also handles a switch while the page is open.
-      const wasPrivacy = chat.modeKnown && chat.privacy;
-      chat.privacy = (cfg.effective_chat_mode ?? cfg.effective_mode) === "privacy";
-      chat.serverPrivacy = cfg.effective_mode === "privacy";
-      chat.modeKnown = true;
-      settlePendingScopedWrites();
-      for (const key of INSTANCE_SCOPED_KEYS) {
-        if (scopedKeyPrivate(key)) localStorage.removeItem(key);
-      }
-      _syncRecentErrorsStore();
-      if (chat.serverPrivacy) {
-        // The Coder tab's "Project directory" input was filled from
-        // "localm.coderCwd" at boot; clear it once per privacy confirmation.
-        if (!chat.serverPrivacyWiped) {
-          chat.serverPrivacyWiped = true;
-          const cwdInputPriv = $("setup-cwd");
-          if (cwdInputPriv) cwdInputPriv.value = "";
-        }
-      } else {
-        chat.serverPrivacyWiped = false;
-      }
-      if (chat.privacy) {
-        chat.persist = false;
-        document.getElementById("persist-hint")?.remove();
-        // GUI-LIVE-WIPE: the destructive in-memory reset below must run only
-        // the FIRST time privacy mode is confirmed for this page load, not on
-        // every refreshCtxLimit() call - this function is also polled every
-        // 30s for the tab's whole lifetime (init.js). Re-running it against a
-        // LIVE conversation (the user's own current chat, not a leftover from
-        // a previous non-privacy session) wipes an in-flight or just-answered
-        // message out of the transcript with no error, before the user ever
-        // gets to read the reply.
-        if (!chat.privacyWiped) {
-          chat.privacyWiped = true;
-          // The localStorage wipe above used to leave the already-populated
-          // in-memory chat.conversations (and the sidebar list already painted
-          // from it) untouched, so the stale list stayed on screen for the
-          // whole session even though the on-disk wipe "succeeded" (AUD-PRIV-2).
-          chat.conversations = [];
-          chat.activeId = null;
-          convUI.collapsed = new Set();
-          _localSaveOk = true;
-          _remoteSaveOk = true;
-          _updateUnsavedIndicator();
-          setWebAskSession(null);                        // R27: forget the session choice
-          renderConvList();
-          renderChat();
-        }
-        const h = document.querySelector("#conversations h3");
-        if (h && !document.getElementById("privacy-hint")) {
-          const hint = document.createElement("div");
-          hint.id = "privacy-hint";
-          hint.className = "privacy-hint";
-          hint.dataset.i18n = "chat.privacyHint";
-          hint.dataset.i18nTitle = "chat.privacyHint.title";
-          hint.textContent = t("chat.privacyHint");
-          hint.title = t("chat.privacyHint.title");
-          h.after(hint);
-        }
-      } else {
-        // GUI-LIVE-WIPE re-arm: privacyWiped only guards against re-wiping a LIVE
-        // conversation while privacy mode stays on for this page load (the 30s
-        // poll). Once the server leaves privacy mode, any leftovers painted here
-        // are non-privacy content the next privacy-mode confirmation is supposed
-        // to wipe (AUD-PRIV-2) - without this reset, a later restart back into
-        // privacy mode would suppress that wipe and leave them on screen for the
-        // rest of the tab's life.
-        chat.privacyWiped = false;
-        document.getElementById("privacy-hint")?.remove();
-        // Left privacy mode while this page was open: save what is on screen
-        // now and connect to the server's conversation store.
-        if (wasPrivacy) {
-          saveConversations();
-          initServerConversations();
-        }
-      }
+      applySessionMode(cfg, upTo);
       hydrateChatToggles(cfg);   // R34: reflect saved choice / global net policy
     }
   } catch (e) {
@@ -850,28 +781,215 @@ export async function refreshCtxLimit() {
   }
 }
 
-// LM-DA-047: privacy mode's "no traces, not even localStorage" guarantee used
-// to rest on two independently hand-maintained mechanisms - a per-call-site
-// `if (!chat.privacy) localStorage.setItem(...)` guard at every write site,
-// and helpers.js's INSTANCE_SCOPED_KEYS wipe list - with nothing checking they
-// agreed, and two keys had drifted (write-gated but never wiped). Every
-// instance-scoped write now goes through this one function instead, so the
-// write-gate decision lives in exactly one place.
+/** Applies the session mode of the /v1/config payload *cfg*, asked for when the
+ *  newest queued write had sequence number *upTo*, to the page. In
+ *  privacy mode conversations live in memory only: anything an earlier
+ *  non-privacy session left in this browser is wiped and the hint is shown. The
+ *  server applies a change of the mode at once, so this also handles a switch
+ *  while the page is open. */
+function applySessionMode(cfg, upTo) {
+  const wasPrivacy = chat.modeKnown && chat.privacy;
+  chat.privacy = (cfg.effective_chat_mode ?? cfg.effective_mode) === "privacy";
+  chat.serverPrivacy = cfg.effective_mode === "privacy";
+  chat.modeKnown = true;
+  for (const key of INSTANCE_SCOPED_KEYS) {
+    if (scopedKeyPrivate(key)) localStorage.removeItem(key);
+  }
+  if (chat.privacy) wipeStoredDrafts();
+  settlePendingScopedWrites(upTo);
+  _syncRecentErrorsStore();
+  if (chat.serverPrivacy) {
+    // The Coder tab's "Project directory" input was filled from
+    // "localm.coderCwd" at boot; clear it once per privacy confirmation.
+    if (!chat.serverPrivacyWiped) {
+      chat.serverPrivacyWiped = true;
+      const cwdInputPriv = $("setup-cwd");
+      if (cwdInputPriv) cwdInputPriv.value = "";
+    }
+  } else {
+    chat.serverPrivacyWiped = false;
+  }
+  if (chat.privacy) {
+    chat.persist = false;
+    // GUI-LIVE-WIPE: the in-memory reset runs only the first time privacy mode
+    // is confirmed; the mode is read again for the tab's whole lifetime.
+    if (!chat.privacyWiped) {
+      chat.privacyWiped = true;
+      enterPrivacyMode();
+    }
+    const h = document.querySelector("#conversations h3");
+    if (h && !document.getElementById("privacy-hint")) {
+      const hint = document.createElement("div");
+      hint.id = "privacy-hint";
+      hint.className = "privacy-hint";
+      hint.dataset.i18n = "chat.privacyHint";
+      hint.dataset.i18nTitle = "chat.privacyHint.title";
+      hint.textContent = t("chat.privacyHint");
+      hint.title = t("chat.privacyHint.title");
+      h.after(hint);
+      showPrivacyLeftovers();
+    }
+  } else {
+    // GUI-LIVE-WIPE re-arm: the next time privacy mode is confirmed, what this
+    // page shows from a non-privacy session is wiped again.
+    chat.privacyWiped = false;
+    document.getElementById("privacy-hint")?.remove();
+    document.getElementById("privacy-leftovers")?.remove();
+    if (wasPrivacy) leavePrivacyMode();
+  }
+  _updateUnsavedIndicator();
+  _flushPendingWrites();
+}
 
-// Writes attempted before /v1/config has answered (chat.modeKnown false).
-// settlePendingScopedWrites() replays them once a non-privacy mode is
-// confirmed and discards them when privacy mode is. Last write per key wins.
+/** Privacy mode was confirmed: the conversations on screen leave it. One that
+ *  holds something not saved yet, or whose reply is being written, stays in
+ *  this tab only, and so does what is typed in the message box. */
+function enterPrivacyMode() {
+  const live = chatBusy() ? currentConv() : null;
+  const held = chat.conversations.filter((c) => c.tabOnly || c.unsaved || c === live);
+  for (const c of held) keepInTabOnly(c);
+  chat.conversations = held;
+  if (!held.some((c) => c.id === chat.activeId)) {
+    chat.activeId = null;
+    releaseComposer();
+  }
+  convUI.collapsed = new Set();
+  _localSaveOk = true;
+  _localSavedIds.clear();
+  _saveFailed.clear();
+  setWebAskSession(null);                        // R27: forget the session choice
+  renderConvList();
+  if (!live || live.id !== chat.activeId) renderChat();
+}
+
+/** Privacy mode was left while this page was open: the conversations held under
+ *  it and what is typed in a message box stay in this tab and are never
+ *  written; a conversation started after this is saved as usual. */
+function leavePrivacyMode() {
+  let held = 0;
+  for (const c of chat.conversations) {
+    if (!(c.messages || []).length && !(c.branches || []).length && !c.params &&
+        c.title === "New chat") continue;
+    keepInTabOnly(c);
+    held++;
+  }
+  holdDraftsInTab();
+  if (held) toast(tn("chat.conv.privacyKept", held));
+  renderConvList();
+  initServerConversations();
+}
+
+/** Marks *conv* as held in this tab only: it is never written to this browser
+ *  or the server store (convPersistable), and what is sent from it asks the
+ *  server to handle it in privacy mode (chatSurfaceHeaders). It gets an id of
+ *  its own, so a stored conversation of the same id is another one. */
+function keepInTabOnly(conv) {
+  if (conv.tabOnly) return;
+  rekeyConversation(conv, newConvId());
+  conv.tabOnly = true;
+  delete conv.rev;
+  delete conv.sync;
+  delete conv.unsaved;
+}
+
+/** The headers that name the chat surface on a request made for *conv*. */
+export function chatSurfaceHeaders(conv) {
+  return chat.privacy || (conv && conv.tabOnly)
+    ? { ...CHAT_SURFACE_HEADERS, "X-Localm-Session-Mode": "privacy" }
+    : CHAT_SURFACE_HEADERS;
+}
+
+/** In privacy mode, asks the server how many conversations saved before are
+ *  still on disk and, when there are any, shows a note under the privacy hint.
+ *  Shows nothing when the count cannot be read. */
+export async function showPrivacyLeftovers() {
+  let stored = 0;
+  try {
+    const r = await fetch("/api/conversations?meta=true&limit=1&offset=0",
+                          { headers: authHeaders() });
+    if (r.ok) stored = Number((await r.json()).stored) || 0;
+  } catch { /* no count: no note */ }
+  document.getElementById("privacy-leftovers")?.remove();
+  const anchor = document.getElementById("privacy-hint");
+  if (!chat.privacy || stored <= 0 || !anchor) return;
+  const note = el("div", "privacy-hint", tn("chat.privacyLeftovers", stored));
+  note.id = "privacy-leftovers";
+  note.title = t("chat.privacyLeftovers.title");
+  anchor.after(note);
+}
+document.addEventListener("localm:language", () => {
+  if (document.getElementById("privacy-leftovers")) showPrivacyLeftovers();
+});
+
+let _modeCheck = null;
+
+/** Reads the session mode from the server and applies it. Calls made while a
+ *  read is in flight share it. An unreachable server, a refused read or an
+ *  answer that names no mode leaves the last confirmed mode standing. Never
+ *  throws. */
+export function confirmSessionMode() {
+  if (!_modeCheck) {
+    const upTo = _writeSeq;
+    _modeCheck = (async () => {
+      try {
+        const r = await fetch("/v1/config", { headers: authHeaders() });
+        if (!r.ok) return;
+        const cfg = await r.json();
+        if (cfg && (cfg.effective_chat_mode ?? cfg.effective_mode)) applySessionMode(cfg, upTo);
+      } catch { /* the last confirmed mode stands */ }
+    })().finally(() => { _modeCheck = null; });
+  }
+  return _modeCheck;
+}
+
+// LM-DA-047: privacy mode writes nothing to localStorage. Every instance-scoped
+// write goes through lsSetScoped, saveConversations or the draft store, and all
+// three queue here: a queued write lands only after the server confirmed, later
+// than the write was queued, that the mode allows it.
+
+// Queued lsSetScoped writes by key, as { value, seq }. Last write per key wins.
 const _pendingScopedWrites = new Map();
-let _pendingConversationSave = false;
+// The sequence number of the queued conversation cache write, 0 for none.
+let _pendingConversationSave = 0;
+// The sequence number of the queued draft write, 0 for none.
+let _pendingDraftSave = 0;
+let _writeSeq = 0;
+let _flushing = false;
 
-export function settlePendingScopedWrites() {
+/** Writes what was queued up to sequence number *upTo* and is allowed under the
+ *  confirmed mode; what the mode forbids is discarded. */
+export function settlePendingScopedWrites(upTo = Infinity) {
   if (!chat.modeKnown) return;
-  const writes = [..._pendingScopedWrites];
-  const saveConv = _pendingConversationSave;
-  _pendingScopedWrites.clear();
-  _pendingConversationSave = false;
-  for (const [key, value] of writes) _writeScoped(key, value);
-  if (saveConv && !chat.privacy) saveConversations();
+  for (const [key, w] of [..._pendingScopedWrites]) {
+    if (w.seq > upTo) continue;
+    _pendingScopedWrites.delete(key);
+    _writeScoped(key, w.value);
+  }
+  if (_pendingConversationSave && _pendingConversationSave <= upTo) {
+    _pendingConversationSave = 0;
+    if (!chat.privacy) _writeConversationCache();
+  }
+  if (_pendingDraftSave && _pendingDraftSave <= upTo) {
+    _pendingDraftSave = 0;
+    if (!chat.privacy) _writeDrafts();
+  }
+}
+
+/** Confirms the mode and settles what is queued, until nothing is. Before the
+ *  first confirmation the queue waits for refreshCtxLimit. */
+async function _flushPendingWrites() {
+  if (_flushing || !chat.modeKnown) return;
+  _flushing = true;
+  try {
+    while (_pendingScopedWrites.size || _pendingConversationSave || _pendingDraftSave) {
+      if (_modeCheck) await _modeCheck;
+      const upTo = _writeSeq;
+      await confirmSessionMode();
+      settlePendingScopedWrites(upTo);
+    }
+  } finally {
+    _flushing = false;
+  }
 }
 
 // Instance-scoped keys holding chat conversations or chat settings. They follow
@@ -904,8 +1022,9 @@ function _syncRecentErrorsStore() {
 }
 
 export function lsSetScoped(key, value) {
-  if (!chat.modeKnown) { _pendingScopedWrites.set(key, value); return; }
-  _writeScoped(key, value);
+  if (chat.modeKnown && scopedKeyPrivate(key)) return;
+  _pendingScopedWrites.set(key, { value, seq: ++_writeSeq });
+  _flushPendingWrites();
 }
 
 function _writeScoped(key, value) {
@@ -947,66 +1066,92 @@ export function hydrateChatToggles(cfg) {
 }
 window.hydrateChatToggles = hydrateChatToggles;
 
-// Whether the last attempt to persist chat.conversations actually landed
-// anywhere: the localStorage blob (one shared key covers every conversation)
-// and the debounced per-conversation server PUT are tracked separately, so a
-// message about one path must never assume the other one succeeded.
+// Whether the last write of the conversation cache landed in localStorage, and
+// the ids of the conversations it holds.
 let _localSaveOk = true;
-let _remoteSaveOk = true;
+const _localSavedIds = new Set();
+// The ids of the conversations whose last save the server did not take.
+const _saveFailed = new Set();
 
-/** Shows or clears the conversations-sidebar "not saved" banner. Visible
- *  only while both the local cache write and the server push are failing;
- *  clears the moment either one confirms a real write. */
-function _updateUnsavedIndicator() {
-  const atRisk = !_localSaveOk && !_remoteSaveOk;
-  const existing = document.getElementById("conv-unsaved-warning");
-  if (!atRisk) {
-    if (existing) existing.remove();
-    return;
-  }
+/** One hint line under the conversations heading, shown when *on*. */
+function _convHint(id, cls, key, on) {
+  const existing = document.getElementById(id);
+  if (!on) { existing?.remove(); return; }
   if (existing) return;
   const h = document.querySelector("#conversations h3");
   if (!h) return;
-  const warn = document.createElement("div");
-  warn.id = "conv-unsaved-warning";
-  warn.className = "unsaved-warning";
-  warn.dataset.i18n = "chat.conv.unsaved";
-  warn.dataset.i18nTitle = "chat.conv.unsaved.title";
-  warn.textContent = t("chat.conv.unsaved");
-  warn.title = t("chat.conv.unsaved.title");
-  h.after(warn);
+  const hint = document.createElement("div");
+  hint.id = id;
+  hint.className = cls;
+  hint.dataset.i18n = key;
+  hint.dataset.i18nTitle = key + ".title";
+  hint.textContent = t(key);
+  hint.title = t(key + ".title");
+  h.after(hint);
 }
 
+/** Says under the conversations heading where the conversations are saved: on
+ *  this machine, only in this browser (the server did not take a save), or
+ *  nowhere but this tab (neither did). */
+function _updateUnsavedIndicator() {
+  const known = new Set(chat.conversations.map((c) => c.id));
+  for (const id of [..._saveFailed]) if (!known.has(id)) _saveFailed.delete(id);
+  const failed = _saveFailed.size > 0;
+  const tabOnly = [..._saveFailed].some((id) => !_localSaveOk || !_localSavedIds.has(id));
+  _convHint("conv-unsaved-warning", "unsaved-warning", "chat.conv.unsaved", failed && tabOnly);
+  _convHint("conv-browser-only", "unsaved-warning", "chat.conv.browserOnly", failed && !tabOnly);
+  _convHint("persist-hint", "privacy-hint", "chat.persistHint",
+            chat.persist && !chat.privacy && !failed);
+}
+
+/** True when *conv* may be written to this browser or the server store. */
+export function convPersistable(conv) {
+  return !!conv && !conv.tabOnly && !conv.deleted;
+}
+
+// How often each conversation was changed in this page, so a save that ends
+// after another change does not count that change as saved.
+const _editCount = new WeakMap();
+
+function _markChanged(conv) {
+  conv.updated_at = Date.now();
+  conv.unsaved = true;
+  _editCount.set(conv, (_editCount.get(conv) || 0) + 1);
+}
+
+/** Saves the conversations to this browser and, when *changed* names one, that
+ *  one to the server store. The browser write waits until the session mode is
+ *  confirmed. */
 export function saveConversations(changed) {
-  if (chat.privacy) return;   // privacy mode: no traces, not even localStorage
-  if (!chat.modeKnown) {
-    // The mode is not confirmed yet: the localStorage write waits for
-    // settlePendingScopedWrites(); the server push gates itself on chat.persist.
-    _pendingConversationSave = true;
-    if (changed) pushConversation(changed);
-    return;
-  }
-  // R40: do NOT cache server index-only rows (_meta) - they carry no messages, so
-  // caching them would shadow a real local copy and show empty conversations
-  // offline. Only full conversations are cached locally.
-  const cacheable = chat.conversations.filter((c) => !c._meta);
+  if (chat.privacy || (changed && !convPersistable(changed))) return;
+  if (changed) _markChanged(changed);
+  _pendingConversationSave = ++_writeSeq;
+  if (changed) pushConversation(changed);
+  _flushPendingWrites();
+}
+
+function _writeConversationCache() {
+  // R40: server index-only rows (_meta) carry no messages and are not cached.
+  const cacheable = chat.conversations.filter((c) => !c._meta && convPersistable(c));
   let localOk = true;
+  let kept = cacheable.slice(0, 50);
   try {
-    localStorage.setItem("localm.conversations",
-      JSON.stringify(cacheable.slice(0, 50)));
+    localStorage.setItem("localm.conversations", JSON.stringify(kept));
   } catch {
     // Quota: drop image-heavy older conversations and retry once
-    const slim = cacheable.slice(0, 10);
+    kept = cacheable.slice(0, 10);
     try {
-      localStorage.setItem("localm.conversations", JSON.stringify(slim));
+      localStorage.setItem("localm.conversations", JSON.stringify(kept));
     } catch (e2) {
       localOk = false;
+      kept = [];
       console.error("localm: could not save conversations to localStorage:", e2);
     }
   }
   _localSaveOk = localOk;
+  _localSavedIds.clear();
+  for (const c of kept) _localSavedIds.add(c.id);
   _updateUnsavedIndicator();
-  if (changed) pushConversation(changed);
 }
 
 /* ---- server-side conversation store (non-privacy modes only) ---- */
@@ -1015,59 +1160,272 @@ export const _convPushTimers = new Map();
 let _convPushWarned = false;   // one warning per breakage, re-armed on success
 const _convTooLargeWarned = new Set();   // conversation ids already toasted for a 413
 
-/** Debounced upsert of one conversation to the server store. An edit stamps
- *  updated_at; a sync of an unchanged copy (keepStamp) leaves the stamp alone,
- *  so a reload does not reorder the list. */
-export function pushConversation(conv, { keepStamp = false } = {}) {
-  if (!chat.persist || conv.deleted) return;
+// The save of each conversation in flight: the next one of the same conversation
+// waits for it, so it names the revision that save returned.
+const _convPushChain = new WeakMap();
+
+/** Debounced upsert of one conversation to the server store. The save names the
+ *  stored revision it replaces (`conv.rev`); when the store holds another one,
+ *  resolveStaleSave decides. An index row's messages are loaded first. */
+export function pushConversation(conv) {
+  if (!chat.persist || !convPersistable(conv)) return;
+  if (conv._meta) { saveIndexRowChange(conv); return; }
   // Brand-new conversations with nothing in them yet aren't worth a file.
-  if (!conv.messages.length && conv.title === "New chat") return;
-  if (!keepStamp || !conv.updated_at) conv.updated_at = Date.now();
+  if (!conv.messages.length && !(conv.branches || []).length && conv.title === "New chat") return;
+  if (!conv.updated_at) conv.updated_at = Date.now();
   clearTimeout(_convPushTimers.get(conv.id));
-  _convPushTimers.set(conv.id, setTimeout(async () => {
+  _convPushTimers.set(conv.id, setTimeout(() => {
     _convPushTimers.delete(conv.id);
-    if (!chat.persist || conv.deleted) return;   // privacy mode, or the chat was deleted, while this waited
-    try {
-      const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id), {
-        method: "PUT",
-        headers: authHeaders(),
-        body: JSON.stringify({ title: conv.title,
-                               updated_at: conv.updated_at,
-                               pinned: !!conv.pinned,
-                               folder: conv.folder || null,
-                               pinned_model: pinnedModelName(conv) || null,
-                               branches: conv.branches || [],
-                               messages: conv.messages }),
-      });
-      if (!r.ok) {
-        _remoteSaveOk = false;
-        if (r.status === 413 && !_convTooLargeWarned.has(conv.id)) {
-          _convTooLargeWarned.add(conv.id);
-          toast(t(_localSaveOk ? "chat.conv.tooLarge" : "chat.conv.tooLargeTabOnly"), true);
-        }
-        if (!_convPushWarned) {
-          _convPushWarned = true;
-          console.error("conversation save failed (HTTP " + r.status + ") - " +
-            (_localSaveOk
-              ? "server-side persistence may be stale; the local copy is intact"
-              : "server-side persistence may be stale, and the local copy " +
-                "could not be saved either"));
-        }
-      } else {
-        _convPushWarned = false;
-        _remoteSaveOk = true;
+    const run = (_convPushChain.get(conv) || Promise.resolve()).then(() => _putConversation(conv));
+    _convPushChain.set(conv, run);
+  }, 600));
+}
+
+/** Saves a change of title, pin, folder, pinned model or drawer values made on
+ *  *conv*, an index row whose messages are not loaded: loads the stored copy,
+ *  puts the change back on it and saves it. Says so when it cannot be loaded. */
+async function saveIndexRowChange(conv) {
+  const mine = convMeta(conv);
+  const ok = await hydrateConversation(conv, { keep: mine });
+  if (ok && !conv._meta) {
+    saveConversations(conv);
+    renderConvList();
+    if (conv === currentConv()) renderChat();
+  } else {
+    toast(t("chat.conv.saveFailed", { name: shownTitle(conv) }), true);
+  }
+}
+
+/** The title of *conv* as the list shows it. */
+export function shownTitle(conv) {
+  return !conv.title || conv.title === "New chat" ? t("chat.conv.newTitle") : conv.title;
+}
+
+/** The fields of *conv* a save carries beside its messages. */
+function convMeta(conv) {
+  return { title: conv.title, pinned: !!conv.pinned, folder: conv.folder || null,
+           pinned_model: pinnedModelName(conv) || null, params: conv.params || {} };
+}
+
+function applyConvMeta(conv, meta) {
+  if (meta.title != null) conv.title = meta.title;
+  if (meta.pinned) conv.pinned = true; else delete conv.pinned;
+  if (meta.folder) conv.folder = meta.folder; else delete conv.folder;
+  if (meta.pinned_model !== conv.pinnedModel) {
+    delete conv.pinnedModelId;
+    if (meta.pinned_model) conv.pinnedModel = meta.pinned_model; else delete conv.pinnedModel;
+  }
+  if (meta.params && Object.keys(meta.params).length) conv.params = { ...meta.params };
+  else delete conv.params;
+  if (conv.id === _paramsOwner) showConvParams(conv.params);
+}
+
+const _sameJSON = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+/** A short fingerprint of the messages and branches of *data*. */
+function bodyPrint(data) {
+  const text = JSON.stringify([data.messages || [], data.branches || []]);
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  return `${text.length}.${(h1 >>> 0).toString(36)}.${(h2 >>> 0).toString(36)}`;
+}
+
+/** What *conv* looked like when it was last the same as the stored copy. */
+function syncPoint(conv) {
+  return { ...convMeta(conv), body: bodyPrint(conv) };
+}
+
+/** The PUT body of *conv*. `base_rev` is left out for a conversation whose
+ *  stored revision this browser does not know. */
+function putBody(conv) {
+  const body = { ...convMeta(conv), updated_at: conv.updated_at,
+                 branches: conv.branches || [], messages: conv.messages };
+  if (conv.rev) body.base_rev = conv.rev;
+  return JSON.stringify(body);
+}
+
+/** The PUT of one conversation (see pushConversation). Never throws. */
+async function _putConversation(conv) {
+  if (!chat.persist || !convPersistable(conv) || conv._meta) return;   // privacy mode, or the chat was deleted, while this waited
+  const edits = _editCount.get(conv) || 0;
+  const sent = syncPoint(conv);
+  const failed = () => { if (convPersistable(conv)) _saveFailed.add(conv.id); };
+  try {
+    const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id), {
+      method: "PUT", headers: authHeaders(), body: putBody(conv),
+    });
+    if (r.ok) {
+      _convPushWarned = false;
+      _saveFailed.delete(conv.id);
+      const saved = await r.json().catch(() => null);
+      if (saved && typeof saved.rev === "string") {
+        conv.rev = saved.rev;
+        conv.sync = sent;
       }
-    } catch (e) {
-      _remoteSaveOk = false;
+      if ((_editCount.get(conv) || 0) === edits) delete conv.unsaved;
+      saveConversations();
+    } else if (r.status === 409) {
+      const data = await r.json().catch(() => null);
+      await resolveStaleSave(conv, (data && data.detail) || {});
+    } else {
+      failed();
+      if (r.status === 403) refreshCtxLimit();   // the mode, or this key's rights, changed
+      if (r.status === 413 && !_convTooLargeWarned.has(conv.id)) {
+        _convTooLargeWarned.add(conv.id);
+        toast(t(_localSaveOk && _localSavedIds.has(conv.id)
+          ? "chat.conv.tooLarge" : "chat.conv.tooLargeTabOnly"), true);
+      }
       if (!_convPushWarned) {
         _convPushWarned = true;
-        console.error("conversation save: could not reach the server" +
-          (_localSaveOk ? " - the local copy is intact"
-                        : " - and the local copy could not be saved either") + ":", e);
+        console.error("conversation save failed (HTTP " + r.status + ") - " +
+          (_localSaveOk
+            ? "server-side persistence may be stale; the local copy is intact"
+            : "server-side persistence may be stale, and the local copy " +
+              "could not be saved either"));
       }
     }
-    _updateUnsavedIndicator();
-  }, 600));
+  } catch (e) {
+    failed();
+    if (!_convPushWarned) {
+      _convPushWarned = true;
+      console.error("conversation save: could not reach the server" +
+        (_localSaveOk ? " - the local copy is intact"
+                      : " - and the local copy could not be saved either") + ":", e);
+    }
+  }
+  _updateUnsavedIndicator();
+}
+
+/** A fresh conversation id. */
+export function newConvId() {
+  return Date.now().toString(36) + Math.floor(Math.random() * 1296).toString(36).padStart(2, "0");
+}
+
+/** Gives *conv* the id *id*; everything kept under its old id moves along. */
+function rekeyConversation(conv, id) {
+  const old = conv.id;
+  clearTimeout(_convPushTimers.get(old));
+  _convPushTimers.delete(old);
+  _saveFailed.delete(old);
+  conv.id = id;
+  if (chat.activeId === old) chat.activeId = id;
+  for (const q of chat.queue) if (q.convId === old) q.convId = id;
+  if (_paramsOwner === old) _paramsOwner = id;
+  rekeyDraft(old, id);
+}
+
+/** Settles a save of *conv* the store refused because it holds another
+ *  revision. *detail* is the 409's detail: `rev` null when the conversation is
+ *  not stored any more. A conversation deleted elsewhere stays in this tab only
+ *  when it holds something not saved, else it goes here too. Changes of the
+ *  title, pin, folder, pinned model and drawer values are merged. When the
+ *  messages changed both here and there, the copy here becomes a conversation
+ *  of its own and the stored one is listed beside it. */
+async function resolveStaleSave(conv, detail) {
+  if (!detail.rev) { dropDeletedElsewhere(conv); return; }
+  let data = null;
+  try {
+    const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id),
+                          { headers: authHeaders() });
+    if (r.status === 404) { dropDeletedElsewhere(conv); return; }
+    if (r.ok) data = await r.json();
+  } catch { /* kept as a copy below */ }
+  if (!convPersistable(conv)) return;
+  if (data && typeof data === "object") {
+    migrateConversation(data);
+    const base = conv.sync;
+    const mine = bodyPrint(conv);
+    const theirs = bodyPrint(data);
+    const changedHere = mine !== theirs && (!base || mine !== base.body);
+    const changedThere = mine !== theirs && (!base || theirs !== base.body);
+    if (!(changedHere && changedThere)) {
+      if (changedThere && chatBusy() && conv === currentConv()) {
+        setTimeout(() => pushConversation(conv), 1000);
+        return;
+      }
+      takeStoredCopy(conv, data, { body: changedThere });
+      return;
+    }
+  }
+  keepAsCopy(conv, detail.row);
+}
+
+/** Merges the stored copy *data* into *conv*: the messages when *body*, and
+ *  each other field this page did not change since the last sync. What then
+ *  differs from the stored copy is saved on top of it. */
+function takeStoredCopy(conv, data, { body }) {
+  const base = conv.sync;
+  const mine = convMeta(conv);
+  const stored = { title: data.title ?? mine.title, pinned: !!data.pinned,
+                   folder: data.folder || null, pinned_model: data.pinned_model || null,
+                   params: data.params || {} };
+  const merged = {};
+  for (const key of Object.keys(stored)) {
+    const changedHere = base && !_sameJSON(mine[key], base[key]);
+    merged[key] = changedHere ? mine[key] : stored[key];
+  }
+  if (body) {
+    conv.messages = data.messages || [];
+    conv.branches = data.branches || [];
+  }
+  applyConvMeta(conv, merged);
+  conv.rev = data.rev;
+  conv.sync = { ...stored, body: bodyPrint(data) };
+  delete conv._meta;
+  if (!_sameJSON(merged, stored) || (!body && conv.sync.body !== bodyPrint(conv))) {
+    saveConversations(conv);
+  } else {
+    delete conv.unsaved;
+    if (Number.isFinite(data.updated_at)) conv.updated_at = data.updated_at;
+    _saveFailed.delete(conv.id);
+    saveConversations();
+  }
+  renderConvList();
+  if (body && conv === currentConv()) renderChat();
+}
+
+/** Makes *conv*, changed both here and in the store, a conversation of its own
+ *  and lists the stored one (its index row *row*) beside it. */
+function keepAsCopy(conv, row) {
+  const name = shownTitle(conv);
+  const oldId = conv.id;
+  rekeyConversation(conv, newConvId());
+  conv.title = t("chat.conv.copyTitle", { name });
+  delete conv.rev;
+  delete conv.sync;
+  const at = chat.conversations.indexOf(conv);
+  if (row && at !== -1 && !chat.conversations.some((c) => c.id === oldId)) {
+    chat.conversations.splice(at + 1, 0, { title: name, ...row, id: oldId, _meta: true, messages: [] });
+  }
+  saveConversations(conv);
+  renderConvList();
+  toast(t("chat.conv.keptAsCopy", { name, copy: conv.title }), true);
+}
+
+/** Takes *conv* out of the list here: it was deleted in another tab or browser.
+ *  With something in it that was never saved, it stays in this tab only. */
+function dropDeletedElsewhere(conv, { quiet = false } = {}) {
+  const name = shownTitle(conv);
+  if (conv.unsaved && !conv._meta) {
+    keepInTabOnly(conv);
+    toast(t("chat.conv.deletedElsewhereKept", { name }), true);
+  } else {
+    conv.deleted = true;
+    clearTimeout(_convPushTimers.get(conv.id));
+    _convPushTimers.delete(conv.id);
+    chat.conversations = chat.conversations.filter((c) => c !== conv);
+    if (chat.activeId === conv.id) chat.activeId = chat.conversations[0]?.id || null;
+    chat.queue = chat.queue.filter((q) => q.convId !== conv.id);
+    forgetDrafts([conv.id]);
+    if (!quiet) toast(t("chat.conv.deletedElsewhere", { name }));
+  }
+  saveConversations();
+  renderConvList();
+  if (!chatBusy()) renderChat();
 }
 
 export function deleteConversationRemote(convId) {
@@ -1137,29 +1495,29 @@ export function retainConversations(keep) {
     chat.activeId = chat.conversations[0]?.id || null;
   }
   chat.queue = chat.queue.filter((q) => chat.conversations.some((c) => c.id === q.convId));
+  forgetDrafts(null, (id) => !chat.conversations.some((c) => c.id === id));
   saveConversations();
   renderConvList();
   renderChat();
 }
 
 /** R40: fetch a full conversation's body on demand and replace its index-only
- *  ("_meta") placeholder in chat.conversations. Returns true on success. */
-export async function hydrateConversation(conv) {
+ *  ("_meta") placeholder in chat.conversations. *keep* (a convMeta) puts those
+ *  values back over the stored ones. Returns true on success. */
+export async function hydrateConversation(conv, { keep = null } = {}) {
   if (!conv || !conv._meta) return true;
   try {
     const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id),
                           { headers: authHeaders() });
     if (!r.ok) return false;
-    const data = await r.json();
-    conv.messages = data.messages || [];
-    conv.branches = data.branches || [];
-    if (data.title != null) conv.title = data.title;
-    conv.pinned = !!data.pinned;
-    conv.folder = data.folder || null;
-    delete conv.pinnedModelId;
-    if (data.pinned_model) conv.pinnedModel = data.pinned_model;
-    else delete conv.pinnedModel;
-    migrateConversation(conv);
+    applyStoredConversation(conv, await r.json());
+    if (keep) {
+      const stored = convMeta(conv);
+      for (const key of ["pinned_model", "params"]) {
+        if (!keep[key] || !Object.keys(keep[key]).length) keep[key] = stored[key];
+      }
+      applyConvMeta(conv, keep);
+    }
     delete conv._meta;
     saveConversations();   // cache the now-full conversation locally
     return true;
@@ -1167,88 +1525,184 @@ export async function hydrateConversation(conv) {
     return false;   // offline - keep the placeholder; renderChat shows the hint
   }
 }
+
+/** Takes the stored copy of *conv*, whose messages this page holds, unless it
+ *  was changed here meanwhile. */
+async function refreshStored(conv) {
+  try {
+    const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id),
+                          { headers: authHeaders() });
+    if (r.ok) {
+      const data = await r.json();
+      if (!conv.unsaved && convPersistable(conv)) applyStoredConversation(conv, data);
+    }
+  } catch { /* the next sync tries again */ }
+}
+
+/** Copies the stored conversation *data* into *conv*. A file saved without
+ *  drawer values leaves the ones held here. */
+function applyStoredConversation(conv, data) {
+  conv.messages = data.messages || [];
+  conv.branches = data.branches || [];
+  migrateConversation(conv);
+  applyConvMeta(conv, { title: data.title, pinned: data.pinned, folder: data.folder,
+                        pinned_model: data.pinned_model || null,
+                        params: data.params || conv.params });
+  if (Number.isFinite(data.updated_at)) conv.updated_at = data.updated_at;
+  if (typeof data.rev === "string") {
+    conv.rev = data.rev;
+    conv.sync = syncPoint(conv);
+  }
+  delete conv.unsaved;
+}
 window.hydrateConversation = hydrateConversation;
 
-/** Load the server store and merge with the localStorage cache: the newer copy
- *  of each conversation wins; local-only ones are uploaded. R40: the server
- *  list is a lightweight index (no message bodies); each conversation's messages
- *  load lazily on open via hydrateConversation. */
+/** The server store's index: the rows of its first page (`rows`, what the list
+ *  shows), every stored row by id (`byId`), whether that is all of them
+ *  (`complete`) and the ids of unreadable files. Null when it cannot be read. */
+async function fetchServerIndex() {
+  const page = async (offset) => {
+    const r = await fetch(`/api/conversations?meta=true&limit=200&offset=${offset}`,
+                          { headers: authHeaders() });
+    if (!r.ok) return null;
+    const data = await r.json();
+    return data.enabled ? data : null;
+  };
+  const first = await page(0);
+  if (!first) return null;
+  const rows = first.conversations || [];
+  const byId = new Map(rows.map((c) => [c.id, c]));
+  const total = Number.isInteger(first.total) ? first.total : rows.length;
+  let complete = true;
+  for (let offset = rows.length; offset < total;) {
+    const more = await page(offset);
+    const got = (more && more.conversations) || [];
+    if (!got.length) { complete = false; break; }
+    for (const c of got) byId.set(c.id, c);
+    offset += got.length;
+  }
+  return { rows, byId, complete, unreadable: new Set(first.unreadable || []) };
+}
+
+/** Loads the server store and merges it with what this page holds. R40: the
+ *  server list is a lightweight index (no message bodies); each conversation's
+ *  messages load when it is opened. A conversation this browser holds with the
+ *  stored revision is kept, and saved when it holds a change; with another
+ *  revision the stored copy is taken, unless it holds a change, in which case
+ *  its save settles it (resolveStaleSave). One that was stored and is not
+ *  stored any more was deleted elsewhere. One never stored is uploaded. */
 export async function initServerConversations() {
   if (chat.privacy) return;
   try {
-    // R40: lightweight, paginated index - no message bodies or data-URI images.
-    const r = await fetch("/api/conversations?meta=true&limit=200&offset=0",
-                          { headers: authHeaders() });
-    if (!r.ok) return;
-    const data = await r.json();
-    if (!data.enabled) return;
+    const index = await fetchServerIndex();
+    if (!index || chat.privacy) return;
+    const boot = !chat.persist;
     chat.persist = true;
-    const unreadable = (data.unreadable || []).length;
-    if (unreadable) toast(tn("chat.conv.unreadable", unreadable), true);
-    // Remote rows are index-only placeholders until opened.
-    const byId = new Map((data.conversations || []).map(
-      (c) => [c.id, { ...c, _meta: true, messages: [] }]));
+    if (boot && index.unreadable.size) {
+      toast(tn("chat.conv.unreadable", index.unreadable.size), true);
+    }
+    const before = _listPrint();
+    const byId = new Map(index.rows.map((c) => [c.id, { ...c, _meta: true, messages: [] }]));
+    const stale = [];
+    const gone = [];
     for (const local of chat.conversations) {
-      const remote = byId.get(local.id);
-      if (!remote) {
-        // AUD-INSTANCEID residual 2: a cached conversation THIS backend's own
-        // index does not know about is either (a) a real local-only chat not
-        // yet synced back to the SAME instance after a restart (legitimate -
-        // keep + push), or (b) a conversation that belongs to an entirely
-        // DIFFERENT backend data directory that happens to share this browser
-        // origin. Keeping (b) would show foreign chat history in the sidebar,
-        // and pushConversation would PERMANENTLY WRITE it into this install's
-        // own data directory - the worst part of the cross-instance leak.
-        //
-        // RENDERING and UPLOADING are different risk levels, so they are
-        // gated separately. A CONFIRMED "mismatched" state (chat.instanceState,
-        // set by refreshCtxLimit's reconcileInstanceId) already wiped
-        // chat.conversations entirely before this ever runs (see refreshCtxLimit),
-        // so there is nothing foreign left in this loop to render by the time
-        // we get here - the check below is a defensive belt for that same
-        // property, not a coincidence this code relies on silently. An
-        // "unknown" state (an old server with no instance_id field, or a
-        // failed /v1/config round trip) is NOT a confirmed mismatch, so it may
-        // keep rendering whatever was already cached (an old server, or an
-        // offline boot, must still work) - but only a CONFIRMED match
-        // (chat.instanceMatch) may write it into the backend's own store.
-        if (chat.instanceState !== "mismatched") byId.set(local.id, local);
-        if (chat.instanceMatch) pushConversation(local, { keepStamp: true });
-        continue;
-      }
-      // Keep the local FULL copy unless the server has a strictly newer version
-      // (>= keeps it on a tie, so an already-cached conversation is not demoted to
-      // an index-only placeholder that would need a needless re-fetch / break offline).
-      // Only a strictly newer local copy is uploaded, with its own stamp.
-      const localAt = local.updated_at || 0;
-      const remoteAt = remote.updated_at || 0;
-      if (localAt >= remoteAt) {
-        byId.set(local.id, local);
-        if (localAt > remoteAt) pushConversation(local, { keepStamp: true });
+      const remote = index.byId.get(local.id);
+      const keep = () => byId.set(local.id, local);
+      const keepRow = () => byId.set(local.id, { ...remote, _meta: true, messages: [] });
+      if (local.tabOnly) keep();
+      else if (!remote) {
+        // AUD-INSTANCEID residual 2: a conversation this backend's index does
+        // not know may belong to another backend at the same origin. Showing it
+        // and uploading it are gated separately: only a confirmed match may
+        // upload, and a confirmed mismatch has emptied the list before this.
+        if (chat.instanceState === "mismatched") continue;
+        if (local.rev && index.complete && chat.instanceMatch &&
+            !index.unreadable.has(local.id)) {
+          if (local.unsaved && !local._meta) keep();
+          gone.push(local);
+          continue;
+        }
+        keep();
+        if (!local.rev && chat.instanceMatch && !index.unreadable.has(local.id)) {
+          pushConversation(local);
+        }
+      } else if (local._meta) {
+        Object.assign(local, remote);
+        keep();
+      } else if (!local.rev || typeof remote.rev !== "string") {
+        // Held since before conversations had a revision: the newer copy wins,
+        // and the server refuses a save that would lose messages.
+        const localAt = local.updated_at || 0;
+        const remoteAt = remote.updated_at || 0;
+        if (localAt < remoteAt) { keepRow(); continue; }
+        keep();
+        if (localAt > remoteAt) pushConversation(local);
+        else if (typeof remote.rev === "string") {
+          local.rev = remote.rev;
+          local.sync = syncPoint(local);
+        }
+      } else if (local.rev === remote.rev) {
+        keep();
+        if (local.unsaved) pushConversation(local);
+      } else if (local.unsaved) {
+        keep();
+        pushConversation(local);
+      } else if (boot) {
+        keepRow();
+      } else {
+        keep();
+        stale.push(local);
       }
     }
     chat.conversations = [...byId.values()]
       .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
-    if (!chat.activeId && chat.conversations.length) {
-      chat.activeId = chat.conversations[0].id;
+    for (const conv of gone) dropDeletedElsewhere(conv, { quiet: boot });
+    if (!chat.conversations.some((c) => c.id === chat.activeId)) {
+      chat.activeId = chat.conversations[0]?.id || null;
     }
+    for (const conv of stale) await refreshStored(conv);
     await hydrateConversation(currentConv());   // load the active conversation's body
     saveConversations();
-    renderConvList();
-    renderChat();
-    const h = document.querySelector("#conversations h3");
-    if (h && !document.getElementById("persist-hint")) {
-      const hint = document.createElement("div");
-      hint.id = "persist-hint";
-      hint.className = "privacy-hint";
-      hint.dataset.i18n = "chat.persistHint";
-      hint.dataset.i18nTitle = "chat.persistHint.title";
-      hint.textContent = t("chat.persistHint");
-      hint.title = t("chat.persistHint.title");
-      h.after(hint);
+    if (boot || stale.length || before !== _listPrint()) {
+      renderConvList();
+      if (!chatBusy()) renderChat();
     }
+    _updateUnsavedIndicator();
   } catch { /* store unavailable - localStorage keeps working */ }
 }
+
+/** A fingerprint of what the conversation list shows. */
+function _listPrint() {
+  return JSON.stringify([chat.activeId, chat.conversations.map(
+    (c) => [c.id, c.title, !!c.pinned, c.folder || "", c.rev || "", !!c.tabOnly])]);
+}
+
+let _syncing = false;
+
+/** Brings this page up to date with the server: the session mode first, then
+ *  the conversations changed or deleted in another tab or browser. Does nothing
+ *  while a reply is being written. */
+export async function syncConversations() {
+  if (_syncing || !chat.modeKnown || chatBusy()) return;
+  _syncing = true;
+  try {
+    await confirmSessionMode();
+    if (chat.persist && !chat.privacy && !chatBusy()) await initServerConversations();
+  } finally {
+    _syncing = false;
+  }
+}
+
+// A page that goes away sends the saves it was about to make.
+window.addEventListener("pagehide", () => {
+  for (const id of _convPushTimers.keys()) {
+    const conv = chat.conversations.find((c) => c.id === id);
+    if (!conv || conv._meta || !chat.persist || !convPersistable(conv)) continue;
+    fetch("/api/conversations/" + encodeURIComponent(id), {
+      method: "PUT", headers: authHeaders(), body: putBody(conv), keepalive: true,
+    }).catch(() => { /* too large for a closing page: the copy in this browser is saved when it opens again */ });
+  }
+});
 
 export function currentConv() {
   return chat.conversations.find((c) => c.id === chat.activeId) || null;
@@ -1395,6 +1849,15 @@ export function showPinnedGone(conv) {
   return row;
 }
 
+/** The name a model called *name* when it answered has now. */
+export function modelNameNow(name) {
+  if (!name || name === "MODEL") return name;
+  const models = (modelCache && modelCache.models) || [];
+  if (models.some((m) => m.name === name)) return name;
+  const row = models.find((m) => (m.former_names || []).includes(name));
+  return row ? row.name : name;
+}
+
 /** After a model was renamed: the chats pinned to it (in this page, its
  *  browser copy and the server) and its avatar follow the new name. */
 export function applyModelRename(from, to) {
@@ -1411,6 +1874,25 @@ export function applyModelRename(from, to) {
   }
   syncPinModelToggle(currentConv());
 }
+/** The title a conversation gets from its first message *text*. */
+export function titleFromText(text) {
+  return text.slice(0, 42) + (text.length > 42 ? "\u2026" : "");
+}
+
+/** Whether the title of *conv* came from a first message (or it has none yet),
+ *  so a new first message may replace it; a title the user typed may not. */
+export function titleIsAutomatic(conv) {
+  if (conv.title === "New chat") return true;
+  const root = (conv.branches || []).find((b) => b.parent === "root");
+  return ((root && root.tails) || []).some((tail) => {
+    const first = (tail || []).find((m) => m.role === "user" && !m.tag);
+    if (!first) return false;
+    const text = msgText(first);
+    const clip = msgAudioClips(first)[0];
+    return conv.title === (titleFromText(text) || (clip ? clip.name.slice(0, 42) : "Document chat"));
+  });
+}
+
 window.addEventListener("localm:model-renamed", (e) => applyModelRename(e.detail.from, e.detail.to));
 window.addEventListener("localm:models-refreshed", () => syncPinModelToggle(currentConv()));
 
@@ -1473,11 +1955,11 @@ function showConvParams(params) {
 }
 
 /** Stores the drawer's current per-conversation values on the conversation
- *  they are showing, locally. Call after a programmatic write into the fields. */
+ *  they are showing. Call after a programmatic write into the fields. */
 export function persistChatParams() {
   const conv = currentConv();
   if (!conv || conv.id !== _paramsOwner) return;
-  if (captureConvParams(conv)) saveConversations();
+  if (captureConvParams(conv)) saveConversations(conv);
 }
 
 /** Makes the drawer show the active conversation's own values: the outgoing
@@ -1489,11 +1971,382 @@ function syncChatParams(conv) {
   if (id === _paramsOwner) return;
   const prev = _paramsOwner
     ? chat.conversations.find((c) => c.id === _paramsOwner) : null;
-  if (prev && captureConvParams(prev)) saveConversations();
-  if (conv && _paramsOwner === null && !conv.params) captureConvParams(conv);
-  else showConvParams(conv ? conv.params : null);
+  if (prev && captureConvParams(prev)) saveConversations(prev);
+  if (conv && _paramsOwner === null && !conv.params && !conv._meta) {
+    if (captureConvParams(conv)) saveConversations(conv);
+  } else {
+    showConvParams(conv ? conv.params : null);
+  }
   _paramsOwner = id;
 }
+
+/* ---- the message box of each conversation ---- */
+
+// The id of the conversation the message box and the attachment lists belong
+// to; null when no conversation is open.
+let _composerOwner = null;
+// What each other conversation's message box held when it was left, by id:
+// { text, attachments, docs, clips, held }. *held*: typed under privacy mode, so
+// it is never written to this browser.
+const _drafts = new Map();
+let _composerHeld = false;
+
+function emptyDraft() {
+  return { text: "", attachments: [], docs: [], clips: [], held: false };
+}
+
+function draftIsEmpty(d) {
+  return !d.text.trim() && !d.attachments.length && !d.docs.length && !d.clips.length;
+}
+
+/** What the message box and the attachment lists hold. */
+function liveDraft() {
+  const input = $("chat-input");
+  return { text: input ? input.value : "", attachments: chat.attachments,
+           docs: chat.docs, clips: chat.clips, held: _composerHeld };
+}
+
+function showDraft(d) {
+  const input = $("chat-input");
+  if (input) {
+    input.value = d.text;
+    autoGrow(input);
+  }
+  chat.attachments = d.attachments;
+  chat.docs = d.docs;
+  chat.clips = d.clips;
+  _composerHeld = !!d.held;
+  renderAttachChips();
+}
+
+/** The draft of the conversation with id *owner*, for adding to it: the live
+ *  lists when the message box belongs to it, else the one kept for it. */
+function draftOf(owner) {
+  if (owner === _composerOwner || owner === null) return chat;
+  if (!_drafts.has(owner)) _drafts.set(owner, emptyDraft());
+  return _drafts.get(owner);
+}
+
+/** Makes the message box belong to *conv*: what the outgoing conversation held
+ *  is kept for it, the incoming one gets back what it held. What was typed with
+ *  no conversation open stays for the first one that appears. */
+export function syncComposer(conv) {
+  const id = conv ? conv.id : null;
+  if (id === _composerOwner) return;
+  if (_composerOwner !== null) {
+    const d = liveDraft();
+    if (draftIsEmpty(d)) _drafts.delete(_composerOwner);
+    else _drafts.set(_composerOwner, d);
+    showDraft((id !== null && _drafts.get(id)) || emptyDraft());
+  } else if (_drafts.has(id)) {
+    showDraft(joinDrafts(_drafts.get(id), liveDraft()));
+  }
+  _drafts.delete(id);
+  _composerOwner = id;
+  for (const key of [..._drafts.keys()]) {
+    if (!chat.conversations.some((c) => c.id === key)) _drafts.delete(key);
+  }
+  saveDraftsSoon();
+}
+
+function joinDrafts(a, b) {
+  return { text: [a.text, b.text].filter((x) => x.trim()).join("\n"),
+           attachments: [...a.attachments, ...b.attachments],
+           docs: [...a.docs, ...b.docs], clips: [...a.clips, ...b.clips],
+           held: !!(a.held || b.held) };
+}
+
+/** Takes what the message box of *conv* holds, leaving it empty. */
+export function takeComposer(conv) {
+  let d = _drafts.get(conv.id) || emptyDraft();
+  if (conv.id === _composerOwner || _composerOwner === null) {
+    d = liveDraft();
+    showDraft(emptyDraft());
+  }
+  _drafts.delete(conv.id);
+  saveDraftsSoon();
+  return { text: d.text.trim(), attachments: d.attachments, docs: d.docs, clips: d.clips };
+}
+
+/** The message box keeps what it holds and belongs to no conversation. */
+function releaseComposer() {
+  _composerOwner = null;
+  _drafts.clear();
+}
+
+function rekeyDraft(old, id) {
+  if (_composerOwner === old) _composerOwner = id;
+  if (_drafts.has(old)) {
+    _drafts.set(id, _drafts.get(old));
+    _drafts.delete(old);
+  }
+}
+
+/** What is typed now is never written to this browser. */
+function holdDraftsInTab() {
+  if (!draftIsEmpty(liveDraft())) _composerHeld = true;
+  for (const d of _drafts.values()) d.held = true;
+}
+
+/* Drafts in this browser. Outside privacy mode what is typed, attached or
+   queued is kept in IndexedDB, so a reload or a server restart does not lose it.
+   A row's key is "<conversation id>|<tab id>|text", "...|media" or "|<tab id>|queue":
+   each tab writes its own rows, and a conversation opened in a new tab takes the
+   newest rows a closed tab left. Writes wait for the session mode like every
+   other (see _flushPendingWrites); privacy mode empties the store. */
+
+const DRAFT_DB = "localm-drafts";
+const TAB_ID_KEY = "localm.tabId";
+const DRAFT_KEEP_MS = 30 * 24 * 3600 * 1000;
+
+let _draftDb = null;
+
+function draftDb() {
+  if (!_draftDb) {
+    _draftDb = new Promise((resolve, reject) => {
+      const req = window.indexedDB.open(DRAFT_DB, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore("drafts");
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    _draftDb.catch(() => { _draftDb = null; });
+  }
+  return _draftDb;
+}
+
+/** The IndexedDB rows of the drafts. */
+export const draftStore = {
+  available() { return !!window.indexedDB; },
+  async all() {
+    const db = await draftDb();
+    return new Promise((resolve, reject) => {
+      const rows = new Map();
+      const req = db.transaction("drafts").objectStore("drafts").openCursor();
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        const cur = req.result;
+        if (!cur) { resolve(rows); return; }
+        rows.set(cur.key, cur.value);
+        cur.continue();
+      };
+    });
+  },
+  async write(puts, dels) {
+    const db = await draftDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction("drafts", "readwrite");
+      const store = tx.objectStore("drafts");
+      for (const [key, value] of puts) store.put(value, key);
+      for (const key of dels) store.delete(key);
+      tx.oncomplete = () => resolve();
+      tx.onabort = tx.onerror = () => reject(tx.error);
+    });
+  },
+  async clear() {
+    const db = await draftDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction("drafts", "readwrite");
+      tx.objectStore("drafts").clear();
+      tx.oncomplete = () => resolve();
+      tx.onabort = tx.onerror = () => reject(tx.error);
+    });
+  },
+};
+
+// What this tab's rows held when they were last written, by key.
+const _draftsWritten = new Map();
+let _draftWarned = false;
+let _draftsWiped = false;
+let _draftsRestored = false;
+let _draftTimer = 0;
+let _tabId = "";
+// The draft store's calls run one after another.
+let _draftChain = Promise.resolve();
+
+function draftCall(work) {
+  _draftChain = _draftChain.then(work).catch((e) => {
+    if (_draftWarned) return;
+    _draftWarned = true;
+    console.warn("localm: unsent text and attachments cannot be kept in this browser:", e);
+  });
+  return _draftChain;
+}
+
+function tabId() {
+  if (_tabId) return _tabId;
+  try {
+    _tabId = sessionStorage.getItem(TAB_ID_KEY) || "";
+    if (!_tabId) {
+      _tabId = newConvId() + newConvId();
+      sessionStorage.setItem(TAB_ID_KEY, _tabId);
+    }
+  } catch { _tabId = _tabId || newConvId() + newConvId(); }
+  return _tabId;
+}
+
+// While this tab is open it holds a lock of its name, so another tab can tell
+// its rows from those a closed tab left.
+const TAB_LOCK = "localm-tab:";
+let _tabLocked = false;
+function holdTabLock() {
+  if (_tabLocked || !navigator.locks) return;
+  _tabLocked = true;
+  navigator.locks.request(TAB_LOCK + tabId(), () => new Promise(() => {})).catch(() => {});
+}
+async function openTabs() {
+  try {
+    const held = (await navigator.locks.query()).held || [];
+    return new Set(held.filter((l) => l.name.startsWith(TAB_LOCK)).map((l) => l.name.slice(TAB_LOCK.length)));
+  } catch { return new Set(); }
+}
+
+/** Queues a write of the drafts; text typed in quick succession is one write. */
+export function saveDraftsSoon() {
+  if (chat.privacy || !_draftsRestored || _draftTimer) return;
+  _draftTimer = setTimeout(saveDraftsNow, 250);
+}
+
+function saveDraftsNow() {
+  clearTimeout(_draftTimer);
+  _draftTimer = 0;
+  if (chat.privacy || !_draftsRestored) return;
+  _pendingDraftSave = ++_writeSeq;
+  _flushPendingWrites();
+}
+
+/** The rows this tab's drafts make, by key, each with a short *print* that
+ *  differs when its value does. */
+function draftRows() {
+  const rows = new Map();
+  const media = (list, size) => list.map((x) => x.name + ":" + size(x)).join("/");
+  const add = (id, d) => {
+    if (d.held || draftIsEmpty(d)) return;
+    const conv = chat.conversations.find((c) => c.id === id);
+    if (conv ? !convPersistable(conv) : id !== null) return;
+    const key = `${id || ""}|${tabId()}|`;
+    if (d.text) rows.set(key + "text", { print: d.text, value: { text: d.text } });
+    if (d.attachments.length || d.docs.length || d.clips.length) {
+      const end = (x) => x.length + x.slice(-24);
+      rows.set(key + "media", {
+        print: [media(d.attachments, (x) => end(x.dataUri)), media(d.docs, (x) => end(x.text)),
+                media(d.clips, (x) => end(x.data) + x.seconds)].join("|"),
+        value: { attachments: d.attachments, docs: d.docs, clips: d.clips } });
+    }
+  };
+  add(_composerOwner, liveDraft());
+  for (const [id, d] of _drafts) add(id, d);
+  const queued = chat.queue.filter((q) => !q.held &&
+    convPersistable(chat.conversations.find((c) => c.id === q.convId)));
+  if (queued.length) {
+    rows.set(`|${tabId()}|queue`, {
+      print: queued.map((q) => [q.convId, q.text, q.attachments.length, q.docs.length, q.clips.length].join(":")).join("|"),
+      value: { items: queued.map(({ convId, text, attachments, docs, clips }) =>
+        ({ convId, text, attachments, docs, clips })) } });
+  }
+  return rows;
+}
+
+function _writeDrafts() {
+  if (!draftStore.available()) return;
+  const rows = draftRows();
+  const puts = [];
+  const dels = [];
+  for (const [key, row] of rows) {
+    if (_draftsWritten.get(key) === row.print) continue;
+    puts.push([key, { ...row.value, at: Date.now() }]);
+    _draftsWritten.set(key, row.print);
+  }
+  for (const key of [..._draftsWritten.keys()]) {
+    if (rows.has(key)) continue;
+    dels.push(key);
+    _draftsWritten.delete(key);
+  }
+  if (!puts.length && !dels.length) return;
+  _draftsWiped = false;
+  draftCall(() => draftStore.write(puts, dels));
+}
+
+/** Empties the draft store of this browser (privacy mode). */
+function wipeStoredDrafts() {
+  if (_draftsWiped) return;
+  _draftsWiped = true;
+  _draftsWritten.clear();
+  try { sessionStorage.removeItem(TAB_ID_KEY); } catch { /* nothing is stored there */ }
+  if (draftStore.available()) draftCall(() => draftStore.clear());
+}
+
+/** Removes the stored drafts, of every tab, of the conversations with the ids
+ *  *ids*, or of those *gone* answers true for. */
+function forgetDrafts(ids, gone = (id) => ids.includes(id)) {
+  for (const id of [..._drafts.keys()]) if (gone(id)) _drafts.delete(id);
+  if (chat.privacy || !draftStore.available()) return;
+  draftCall(async () => {
+    const keys = [...(await draftStore.all()).keys()].filter((k) => {
+      const id = k.split("|")[0];
+      return id && gone(id);
+    });
+    for (const k of keys) _draftsWritten.delete(k);
+    if (keys.length) await draftStore.write([], keys);
+  });
+}
+
+/** Puts the drafts and queued messages this browser kept back: those of this
+ *  tab, else the newest a closed tab left for a conversation. A queued message
+ *  stays queued until something is sent. Call once the mode is known. */
+export async function restoreDrafts() {
+  if (_draftsRestored || !chat.modeKnown) return;
+  _draftsRestored = true;
+  if (chat.privacy || !draftStore.available()) return;
+  await draftCall(async () => {
+    const rows = await draftStore.all();
+    if (chat.privacy) return;
+    const own = tabId();
+    holdTabLock();
+    const open = await openTabs();
+    const found = new Map();
+    const drop = [];
+    const entries = [...rows].map(([key, value]) => {
+      const [id, tab, kind] = key.split("|");
+      return { key, id, tab, kind, value };
+    }).filter((r) => r.tab === own || !open.has(r.tab))
+      .sort((a, b) => (b.tab === own) - (a.tab === own) || (b.value.at || 0) - (a.value.at || 0));
+    const from = new Map();
+    for (const r of entries) {
+      const age = Date.now() - (r.value.at || 0);
+      if (age > DRAFT_KEEP_MS) { drop.push(r.key); continue; }
+      if (r.kind === "queue") {
+        for (const item of r.value.items || []) {
+          if (chat.conversations.some((c) => c.id === item.convId)) chat.queue.push(item);
+        }
+        if (r.tab !== own) drop.push(r.key);
+        continue;
+      }
+      if (r.id && !chat.conversations.some((c) => c.id === r.id)) continue;
+      if (!from.has(r.id)) from.set(r.id, r.tab);
+      if (from.get(r.id) !== r.tab) continue;
+      const d = found.get(r.id) || emptyDraft();
+      if (r.kind === "text") d.text = r.value.text || "";
+      else Object.assign(d, { attachments: r.value.attachments || [], docs: r.value.docs || [],
+                              clips: r.value.clips || [] });
+      found.set(r.id, d);
+      if (r.tab !== own) drop.push(r.key);
+    }
+    if (drop.length) await draftStore.write([], drop);
+    for (const [id, d] of found) {
+      if (id === (_composerOwner || "") || !id) showDraft(joinDrafts(d, liveDraft()));
+      else _drafts.set(id, _drafts.has(id) ? joinDrafts(d, _drafts.get(id)) : d);
+    }
+  });
+  renderQueuedIndicator();
+  saveDraftsNow();
+}
+
+$("chat-input").addEventListener("input", saveDraftsSoon);
+window.addEventListener("pagehide", saveDraftsNow);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden" && _draftTimer) saveDraftsNow();
+});
+
 
 for (const evt of ["input", "change"]) {
   $("params").addEventListener(evt, (e) => {
@@ -1505,7 +2358,7 @@ for (const evt of ["input", "change"]) {
  *  (no messages, default title, no folder, pin or model pin) is reused and
  *  moved to the top instead of adding another. */
 export function newConversation() {
-  const idle = chat.conversations.find((c) => c.title === "New chat" &&
+  const idle = chat.conversations.find((c) => c.title === "New chat" && !c.tabOnly &&
     !(c.messages || []).length && !(c.branches || []).length && !c.folder && !c.pinned && !c.pinnedModel && !c.params);
   if (idle) {
     chat.conversations.splice(chat.conversations.indexOf(idle), 1);
@@ -1515,7 +2368,7 @@ export function newConversation() {
     renderChat();
     return;
   }
-  const conv = { id: Date.now().toString(36), title: "New chat", messages: [] };
+  const conv = { id: newConvId(), title: "New chat", messages: [] };
   chat.conversations.unshift(conv);
   chat.activeId = conv.id;
   saveConversations(conv);
@@ -1617,11 +2470,12 @@ function attachedParts(conv, type, latestOnly) {
 }
 
 /** Record that *model* refused the images (*type* "image_url") or audio clips
- *  (*type* "input_audio") of *conv*: later requests to *model* leave those of
- *  earlier turns out (wireParts). The conversation keeps every part. Returns
+ *  (*type* "input_audio") of *conv*, or with *latestOnly* those of the turn
+ *  just sent: later requests to *model* leave them out once they belong to an
+ *  earlier turn (wireParts). The conversation keeps every part. Returns
  *  the number of parts marked. */
-export function markRefusedBy(conv, type, model) {
-  const parts = attachedParts(conv, type, false);
+export function markRefusedBy(conv, type, model, latestOnly = false) {
+  const parts = attachedParts(conv, type, latestOnly);
   for (const p of parts) {
     const by = p.refusedBy || (p.refusedBy = []);
     const name = model || "";
@@ -1672,6 +2526,12 @@ export function elideAudioForWire(messages) {
 export function modelCannotHearAudio(name) {
   const row = ((modelCache && modelCache.models) || []).find((m) => m.name === name);
   return !!row && row.audio_input === false;
+}
+
+/** True when the registry row of the model *name* says it reads images. */
+export function modelReadsImages(name) {
+  const row = ((modelCache && modelCache.models) || []).find((m) => m.name === name);
+  return !!row && row.vision === true;
 }
 
 /** True when the wire *messages* carry both an image part and an audio clip. */
@@ -1732,6 +2592,10 @@ export function searchSnippet(conv, term) {
 
 export function buildConvItem(conv, snippet) {
   const item = el("div", "conv-item" + (conv.id === chat.activeId ? " active" : ""));
+  if (conv.tabOnly) {
+    item.classList.add("conv-tab-only");
+    item.title = t("chat.conv.tabOnly.title");
+  }
   const title = el("span", "title");
   title.appendChild(document.createTextNode(
     conv.title === "New chat" ? t("chat.conv.newTitle") : conv.title));
@@ -1798,7 +2662,8 @@ export function buildConvItem(conv, snippet) {
     chat.conversations = chat.conversations.filter((c) => c.id !== conv.id);
     if (chat.activeId === conv.id) chat.activeId = chat.conversations[0]?.id || null;
     chat.queue = chat.queue.filter((q) => q.convId !== conv.id);
-    deleteConversationRemote(conv.id);
+    if (!conv.tabOnly) deleteConversationRemote(conv.id);
+    forgetDrafts([conv.id]);
     saveConversations();
     renderConvList();
     renderChat();
@@ -1815,9 +2680,12 @@ export function buildConvItem(conv, snippet) {
   item.appendChild(del);
 
   item.onclick = async () => {
-    const alreadyActive = chat.activeId === conv.id;
     chat.activeId = conv.id;
-    if (!alreadyActive) renderConvList();
+    // The row stays in place, so a double-click on its title reaches it.
+    for (const row of document.querySelectorAll("#conv-list .conv-item.active")) {
+      if (row !== item) row.classList.remove("active");
+    }
+    item.classList.add("active");
     if (conv._meta) await hydrateConversation(conv);   // R40: load the body on open
     renderChat();
     showView("chat");
@@ -2184,12 +3052,28 @@ function speakToggle(btn, text) {
   setSpeakButtonActive(btn, started);
 }
 
+/** The ‹ k/N › control of a fork point. *variant* is { k, n, prev, next }. */
+function buildVariantNav(variant) {
+  const nav = el("span", "variant");
+  const prev = el("button", "action", "‹");
+  prev.title = t("chat.variant.previous");
+  prev.onclick = variant.prev;
+  const next = el("button", "action", "›");
+  next.title = t("chat.variant.next");
+  next.onclick = variant.next;
+  nav.appendChild(prev);
+  nav.appendChild(el("span", "k", `${variant.k}/${variant.n}`));
+  nav.appendChild(next);
+  return nav;
+}
+
 export function addMessageRow(container, role, text, opts = {}) {
   // A note row (opts.cls set: injected web/kb/doc results, a queued-task
   // marker) is not something the human typed, so it must not carry the role
   // class and inherit the user turn's right-aligned bubble layout.
   const row = el("div", "msg-row " + (opts.cls || role));
-  const mName = opts.model && opts.model !== "MODEL" ? opts.model : (modelCache.active || t("chat.row.model"));
+  const mName = opts.model && opts.model !== "MODEL" ? opts.model
+    : (modelCache.active || modelCache.resumable || t("chat.row.model"));
   const roleEl = el("div", "msg-role", opts.label || (role === "user" ? (chat.userName || t("chat.row.you")) : mName));
   const avatarEl = buildAvatarEl(avatarInfoFor(role, mName));
   if (avatarEl) {
@@ -2305,19 +3189,7 @@ export function addMessageRow(container, role, text, opts = {}) {
     }
   };
   meta.appendChild(copy);
-  if (opts.variant) {
-    const nav = el("span", "variant");
-    const prev = el("button", "action", "‹");
-    prev.title = t("chat.variant.previous");
-    prev.onclick = opts.variant.prev;
-    const next = el("button", "action", "›");
-    next.title = t("chat.variant.next");
-    next.onclick = opts.variant.next;
-    nav.appendChild(prev);
-    nav.appendChild(el("span", "k", `${opts.variant.k}/${opts.variant.n}`));
-    nav.appendChild(next);
-    meta.appendChild(nav);
-  }
+  if (opts.variant) meta.appendChild(buildVariantNav(opts.variant));
   for (const [label, fn, icon] of opts.actions || []) {
     const btn = el("button", "action");
     if (icon) { btn.appendChild(iconEl(icon, "ic")); btn.title = label; }
@@ -2500,19 +3372,7 @@ function appendToolEventMeta(row, ev, opts) {
     }
   };
   meta.appendChild(copy);
-  if (opts.variant) {
-    const nav = el("span", "variant");
-    const prev = el("button", "action", "‹");
-    prev.title = t("chat.variant.previous");
-    prev.onclick = opts.variant.prev;
-    const next = el("button", "action", "›");
-    next.title = t("chat.variant.next");
-    next.onclick = opts.variant.next;
-    nav.appendChild(prev);
-    nav.appendChild(el("span", "k", `${opts.variant.k}/${opts.variant.n}`));
-    nav.appendChild(next);
-    meta.appendChild(nav);
-  }
+  if (opts.variant) meta.appendChild(buildVariantNav(opts.variant));
   row.appendChild(meta);
 }
 
@@ -2672,6 +3532,7 @@ export function renderChat() {
   pruneClipUrls(conv);
   syncPinModelToggle(conv);
   syncChatParams(conv);
+  syncComposer(conv);
   // R40: a not-yet-loaded conversation (server index row) hydrates its body on
   // first render, then re-renders. Try once per row (a failed/offline load sets
   // _hydrateFailed so we never spin).
@@ -2683,9 +3544,11 @@ export function renderChat() {
       else conv._hydrateFailed = true;
     });
   }
-  if (!conv || conv.messages.length === 0) {
+  const pending = conv && !chatBusy() ? pendingBranch(conv) : null;
+  if (!conv || (conv.messages.length === 0 && !pending)) {
     box.appendChild(buildEmptyHint());
     updateUsageDisplay(null);
+    if (typeof renderQueuedIndicator === "function") renderQueuedIndicator();
     return;
   }
   // NEW-1 model-switch-indication: track the model of the previous assistant turn
@@ -2693,7 +3556,7 @@ export function renderChat() {
   let lastAssistantModel = null;
   conv.messages.forEach((m, i) => {
     if (m.role === "assistant" && m.model) {
-      const currentModel = m.model === "MODEL" ? (modelCache.active || m.model) : m.model;
+      const currentModel = m.model === "MODEL" ? (modelCache.active || m.model) : modelNameNow(m.model);
       if (lastAssistantModel && currentModel !== lastAssistantModel) {
         box.appendChild(el("div", "model-switch", t("chat.switchedTo", { model: currentModel })));
       }
@@ -2748,7 +3611,7 @@ export function renderChat() {
       video: m.video ? [m.video] : [],
       actions,
       variant,
-      model: m.model,
+      model: modelNameNow(m.model),
       memory: m.memory,           // F11: "used N memories" chip (assistant turns)
       routed: m.routed,
       cls: tag ? "web-note" : "",
@@ -2758,6 +3621,7 @@ export function renderChat() {
       final: true,
     });
   });
+  if (pending) box.appendChild(buildPendingBranchRow(pending));
   for (const entry of liveRows) if (entry.conv === conv) box.appendChild(entry.row);
   // R31: only re-pin to the bottom when the user has not scrolled up. This tail
   // runs on every re-render (incl mid-stream web/finalize), so an unconditional
@@ -2770,6 +3634,28 @@ export function renderChat() {
   const lastMsg = conv.messages[conv.messages.length - 1];
   updateUsageDisplay(lastMsg && lastMsg.role === "assistant" ? lastMsg.usage : null);
   if (typeof renderQueuedIndicator === "function") renderQueuedIndicator();
+}
+
+/** The fork at the end of the live timeline of *conv* (an edit that parked the
+ *  old messages and is not sent yet) as { k, n, prev, next }, or null. */
+export function pendingBranch(conv) {
+  const n = conv.messages.length;
+  const pid = n ? conv.messages[n - 1].id : "root";
+  const rec = pid && (conv.branches || []).find((b) => b.parent === pid);
+  if (!rec || rec.tails.length < 2) return null;
+  return { k: rec.current + 1, n: rec.tails.length,
+           prev: () => switchBranch(conv, n, -1), next: () => switchBranch(conv, n, +1) };
+}
+
+/** The row shown where an edited message will go until it is sent: it says the
+ *  earlier version is kept and carries the arrows back to it. */
+function buildPendingBranchRow(variant) {
+  const row = el("div", "msg-row tool-event tool-notice-row branch-pending");
+  row.appendChild(el("div", "tool-notice", t("chat.branch.pending")));
+  const meta = el("div", "msg-meta");
+  meta.appendChild(buildVariantNav(variant));
+  row.appendChild(meta);
+  return row;
 }
 
 /* ---- message branching ----
@@ -2877,14 +3763,44 @@ export function editMessage(conv, index) {
   // state. Bail while a reply streams, like switchBranch / regenerate do.
   if (chatBusy()) { toast(t("chat.waitForReply"), true); return; }
   const m = conv.messages[index];
-  $("chat-input").value = msgText(m);
-  autoGrow($("chat-input"));
-  // Fork instead of destroy: the old timeline (this message and everything
-  // after it) stays reachable via ‹ › once the edited version is sent.
-  forkAt(conv, index);
-  saveConversations(conv);
-  renderChat();
-  $("chat-input").focus();
+  confirmReplaceComposer(m, () => {
+    if (chatBusy() || conv.messages[index] !== m || conv !== currentConv()) return;
+    fillComposerFrom(m);
+    // Fork instead of destroy: the old timeline (this message and everything
+    // after it) stays reachable via ‹ ›, also before the edit is sent.
+    forkAt(conv, index);
+    saveConversations(conv);
+    renderChat();
+    $("chat-input").focus();
+  });
+}
+
+/** Puts the text, pictures and audio clips of message *m* into the message box
+ *  and the attachment lists, in place of what they held. */
+function fillComposerFrom(m) {
+  showDraft({
+    text: msgText(m),
+    attachments: msgImages(m).filter((url) => url.startsWith("data:"))
+      .map((dataUri) => ({ name: imageFilename(dataUri), dataUri })),
+    docs: [],
+    clips: msgAudioClips(m).map((c) => ({ name: c.name, data: c.data, format: c.format,
+      size: Math.floor(c.data.length * 3 / 4), seconds: c.seconds })),
+    held: _composerHeld,
+  });
+  saveDraftsSoon();
+}
+
+/** Runs *apply* when the message box holds nothing *m* would not put back, else
+ *  asks first whether to replace what it holds. */
+function confirmReplaceComposer(m, apply) {
+  const d = liveDraft();
+  if ((!d.text.trim() || d.text === msgText(m)) &&
+      !d.attachments.length && !d.docs.length && !d.clips.length) {
+    apply();
+    return;
+  }
+  confirmDanger(t("chat.edit.replaceDraft.title"), t("chat.edit.replaceDraft.body"),
+    t("chat.edit.replaceDraft.confirm"), apply);
 }
 
 export function regenerate(conv) {
@@ -2920,10 +3836,11 @@ export function branchesLostByRevert(conv, index) {
 export function revertTo(conv, index) {
   if (chatBusy()) { toast(t("chat.waitForReply"), true); return; }
   if (index < 0 || index >= conv.messages.length) return;
-  const text = msgText(conv.messages[index]);
+  const m = conv.messages[index];
   const lost = branchesLostByRevert(conv, index);
 
   const apply = () => {
+    if (chatBusy() || conv.messages[index] !== m || conv !== currentConv()) return;
     const orig = conv.messages;
     // Keep only forks that diverge STRICTLY before the revert point. A fork at
     // or after it (parent inside the removed region, or the live tail being
@@ -2937,21 +3854,22 @@ export function revertTo(conv, index) {
     });
     conv.messages = orig.slice(0, index);
     pruneBranches(conv);
-    $("chat-input").value = text;
-    autoGrow($("chat-input"));
+    fillComposerFrom(m);
     saveConversations(conv);
     renderChat();
     $("chat-input").focus();
   };
 
-  if (lost > 0) {
-    confirmDanger(
-      t("chat.revert.title"),
-      tn("chat.revert.body", lost),
-      t("chat.revert.confirm"), apply);
-  } else {
-    apply();
-  }
+  confirmReplaceComposer(m, () => {
+    if (lost > 0) {
+      confirmDanger(
+        t("chat.revert.title"),
+        tn("chat.revert.body", lost),
+        t("chat.revert.confirm"), apply);
+    } else {
+      apply();
+    }
+  });
 }
 
 export function chatParams() {
@@ -2986,6 +3904,7 @@ export function chatParams() {
 export function renderAttachChips() {
   const box = $("attach-chips");
   box.replaceChildren();
+  saveDraftsSoon();
   chat.attachments.forEach((att, i) => {
     const chip = el("span", "chip");
     const img = document.createElement("img");
@@ -3144,6 +4063,7 @@ export function wavSeconds(blob) {
  *  server's limit is removed again. Other formats show no length and the server
  *  judges them. */
 export async function attachAudio(file) {
+  const owner = _composerOwner;
   if (file.size > AUDIO_MAX_BYTES) {
     throw new Error(t("chat.audio.tooLarge", {
       name: file.name, size: (file.size / 1e6).toFixed(1),
@@ -3162,12 +4082,13 @@ export async function attachAudio(file) {
   const data = uri.split(",", 2)[1] || "";
   if (!data) throw new Error(t("chat.audio.readError", { name: file.name }));
   const clip = { name: file.name, data, format, size: file.size, seconds: 0 };
-  chat.clips.push(clip);
+  draftOf(owner).clips.push(clip);
   renderAttachChips();
   const seconds = await wavSeconds(file);
-  if (chat.clips.indexOf(clip) === -1) return;
+  const { clips } = draftOf(owner);
+  if (clips.indexOf(clip) === -1) return;
   if (seconds > AUDIO_MAX_SECONDS) {
-    chat.clips.splice(chat.clips.indexOf(clip), 1);
+    clips.splice(clips.indexOf(clip), 1);
     renderAttachChips();
     throw new Error(t("chat.audio.tooLong", {
       name: file.name, minutes: String(Math.ceil(seconds / 60)),
@@ -3179,6 +4100,7 @@ export async function attachAudio(file) {
 /** Document attachment → text via /api/chat/extract. The file is converted
  *  in memory on the server and never written to disk (privacy-clean). */
 export async function attachDocument(file) {
+  const owner = _composerOwner;
   const b64 = await new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
@@ -3193,8 +4115,8 @@ export async function attachDocument(file) {
   // below is the clean statusText, not a JSON parse error.
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.detail || r.statusText);
-  chat.docs.push({ name: data.filename, text: data.text,
-                   chars: data.chars, truncated: data.truncated });
+  draftOf(owner).docs.push({ name: data.filename, text: data.text,
+                             chars: data.chars, truncated: data.truncated });
   renderAttachChips();
 }
 
@@ -3202,11 +4124,12 @@ export async function attachDocument(file) {
  *  input_audio clips, every other type extracted to text server-side. Shared by the file picker and the
  *  drag-and-drop zone so both behave identically. */
 export function addAttachedFiles(files) {
+  const owner = _composerOwner;
   for (const file of files) {
     if (file.type.startsWith("image/")) {
       const reader = new FileReader();
       reader.onload = () => {
-        chat.attachments.push({ name: file.name, dataUri: reader.result });
+        draftOf(owner).attachments.push({ name: file.name, dataUri: reader.result });
         renderAttachChips();
       };
       reader.readAsDataURL(file);
@@ -3247,7 +4170,12 @@ export async function ingestSharedFiles() {
   try {
     const r = await fetch("/api/share/pending", { headers: authHeaders() });
     if (!r.ok) return;
-    items = (await r.json()).items || [];
+    const data = await r.json();
+    items = data.items || [];
+    const skipped = data.skipped || [];
+    if (skipped.length) {
+      toast(tn("chat.share.skipped", skipped.length, { names: skipped.join(", ") }), true);
+    }
   } catch { return; }
   if (!items.length) return;
   const ids = [];

@@ -523,17 +523,26 @@ function maskCode(text) {
  *  The opening `<think>` is searched with code masked, so a tag quoted in code
  *  is not an opener. The closing `</think>` is searched in the raw text, so an
  *  unbalanced backtick inside the reasoning cannot hide it.
+ *  A tag set off inside a line of text (a space, quote or bracket before it) is
+ *  a mention, not an opener, unless its block is closed and a line break follows
+ *  the tag.
  *  Returns {start, bodyStart, bodyEnd, end, closed}; an unclosed block runs to
  *  the end of *src*. See test "an unbalanced backtick in the reasoning does not
  *  swallow the answer". */
 function findThinkBlock(src, from) {
-  const i = maskCode(src.slice(from)).indexOf("<think>");
-  if (i < 0) return null;
-  const start = from + i;
-  const bodyStart = start + 7;
-  const close = src.indexOf("</think>", bodyStart);
-  if (close < 0) return { start, bodyStart, bodyEnd: src.length, end: src.length, closed: false };
-  return { start, bodyStart, bodyEnd: close, end: close + 8, closed: true };
+  const masked = maskCode(src.slice(from));
+  for (let i = masked.indexOf("<think>"); i >= 0; i = masked.indexOf("<think>", i + 7)) {
+    const start = from + i;
+    const bodyStart = start + 7;
+    const close = src.indexOf("</think>", bodyStart);
+    const line = src.slice(Math.max(from, src.lastIndexOf("\n", start - 1) + 1), start);
+    const mention = line.trim() && /[\s"'\u201c\u2018([{*_]$/.test(line) &&
+      (close < 0 || !/^[ \t]*\r?\n/.test(src.slice(bodyStart)));
+    if (mention) continue;
+    if (close < 0) return { start, bodyStart, bodyEnd: src.length, end: src.length, closed: false };
+    return { start, bodyStart, bodyEnd: close, end: close + 8, closed: true };
+  }
+  return null;
 }
 
 /** Reply text with reasoning blocks removed - what gets sent back to the

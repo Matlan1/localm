@@ -34,6 +34,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import secrets
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -60,6 +62,12 @@ class ConversationUpsert(BaseModel):
     pinned_model: str | None = Field(None, max_length=256)
     branches: list = []           # parked message-branch tails (fork points)
     messages: list = []
+    # The conversation's own system prompt and sampling fields, by field name.
+    # Omitted, the stored ones are kept.
+    params: dict = Field(default_factory=dict)
+    # The stored revision this save replaces; null for a conversation the caller
+    # has never seen stored. Omitted, see conversation_upsert.
+    base_rev: str | None = Field(None, max_length=64)
 
 
 class AttachmentExtractRequest(BaseModel):
@@ -157,6 +165,30 @@ def _conv_path(conv_id: str, principal: str | None = None) -> Path:
 _META_CACHE: dict = {}
 
 
+# The revision of a file saved before conversations had one.
+_NO_REV = "0"
+
+
+def _rev_of(data) -> str:
+    """The stored revision of conversation *data*: an opaque string, replaced on
+    every save."""
+    rev = data.get("rev") if isinstance(data, dict) else None
+    return rev if isinstance(rev, str) and rev else _NO_REV
+
+
+def _meta_row(conv_id: str, data: dict) -> dict:
+    """The index row of conversation *data* stored under *conv_id*."""
+    return {
+        "id": conv_id,
+        "title": data.get("title", "Untitled"),
+        "updated_at": data.get("updated_at", 0),
+        "pinned": bool(data.get("pinned", False)),
+        "folder": data.get("folder"),
+        "n_messages": len(data.get("messages") or []),
+        "rev": _rev_of(data),
+    }
+
+
 def _conv_meta(p: Path) -> dict:
     """Lightweight index row for one chat file (no message bodies / images)."""
     st = p.stat()
@@ -164,17 +196,117 @@ def _conv_meta(p: Path) -> dict:
     cached = _META_CACHE.get(str(p))
     if cached and cached[0] == key:
         return dict(cached[1])
-    data = json.loads(p.read_text(encoding="utf-8"))
-    meta = {
-        "id": p.stem,
-        "title": data.get("title", "Untitled"),
-        "updated_at": data.get("updated_at", 0),
-        "pinned": bool(data.get("pinned", False)),
-        "folder": data.get("folder"),
-        "n_messages": len(data.get("messages") or []),
-    }
+    meta = _meta_row(p.stem, json.loads(p.read_text(encoding="utf-8")))
     _META_CACHE[str(p)] = (key, meta)
     return dict(meta)
+
+
+def _remember_meta(p: Path, data: dict) -> None:
+    """Put the index row of *data*, just written to *p*, in the cache."""
+    try:
+        st = p.stat()
+    except OSError:
+        _META_CACHE.pop(str(p), None)
+        return
+    _META_CACHE[str(p)] = ((st.st_mtime, st.st_size), _meta_row(p.stem, data))
+
+
+def _stored_row(path: Path) -> dict | None:
+    """The index row of the conversation stored at *path*, None when no file is
+    there. A file that cannot be read or parsed has revision ``_NO_REV``."""
+    try:
+        return _conv_meta(path)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, RecursionError, AttributeError, TypeError):
+        return {"id": path.stem, "rev": _NO_REV}
+
+
+def _stored_data(path: Path) -> dict | None:
+    """The conversation stored at *path*, None when it cannot be read."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _turn_keys(messages, out: set) -> set:
+    """Add one key per message of *messages* to *out*, those archived by a
+    compaction included: who wrote it and its text (a search or page read: what
+    it asked for)."""
+    for m in messages if isinstance(messages, list) else ():
+        if not isinstance(m, dict):
+            continue
+        if m.get("kind"):
+            out.add((str(m.get("kind")), str(m.get("query") or m.get("url") or "")))
+        else:
+            out.add((str(m.get("role")), _message_text(m)))
+        _turn_keys(m.get("compacted"), out)
+    return out
+
+
+def _all_turn_keys(messages, branches) -> set:
+    out = _turn_keys(messages, set())
+    for rec in branches if isinstance(branches, list) else ():
+        for tail in (rec.get("tails") or ()) if isinstance(rec, dict) else ():
+            _turn_keys(tail, out)
+    return out
+
+
+def _would_lose_turns(stored: dict | None, req: ConversationUpsert) -> bool:
+    """True when the *stored* conversation holds a message *req* does not, or
+    cannot be read."""
+    if stored is None:
+        return True
+    return bool(_all_turn_keys(stored.get("messages"), stored.get("branches"))
+                - _all_turn_keys(req.messages, req.branches))
+
+
+# ---- ids of deleted conversations -------------------------------------- #
+# A browser that still holds a deleted conversation and does not know the
+# revision it was stored under must not store it again.
+
+_DELETED_MAX = 5000
+
+
+def _deleted_path(principal: str | None) -> Path:
+    return _chats_root(principal) / "deleted-ids.txt"
+
+
+def _deleted_ids(principal: str | None) -> list[str]:
+    """The ids of conversations deleted from this store, oldest first."""
+    try:
+        text = _deleted_path(principal).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as e:
+        from localm.debuglog import logger
+        logger.warning("chat store: the list of deleted conversations could not "
+                       "be read (%s)", type(e).__name__)
+        return []
+    return [line for line in text.split("\n") if _CONV_ID.match(line)]
+
+
+def _remember_deleted(conv_id: str, principal: str | None) -> None:
+    path = _deleted_path(principal)
+    with _LOCKS.get(str(path)):
+        ids = [i for i in _deleted_ids(principal) if i != conv_id] + [conv_id]
+        try:
+            atomic_write(path, "\n".join(ids[-_DELETED_MAX:]) + "\n")
+        except OSError as e:
+            from localm.debuglog import logger
+            logger.warning("chat store: a deletion could not be recorded (%s); "
+                           "a browser that still holds that conversation may save "
+                           "it again", type(e).__name__)
+
+
+def _count_chat_files(principal: str | None) -> int:
+    """How many conversation files the caller's store holds."""
+    chats_dir = _chats_root(principal)
+    if not chats_dir.is_dir():
+        return 0
+    return sum(1 for _ in chats_dir.glob("*.json"))
 
 
 def _message_text(m) -> str:
@@ -231,7 +363,12 @@ async def conversations_list(request: Request, meta: bool = False,
 
     A chat file that cannot be read or parsed is left out of ``conversations``
     and ``total`` and its id is listed in ``unreadable``; a warning naming the
-    id is logged once per file version.
+    id is logged once per file version. Each row carries ``rev``, the stored
+    revision.
+
+    In privacy mode the store is off: the answer is ``{"enabled": false,
+    "conversations": [], "stored": n}``, where ``n`` counts the conversation
+    files saved earlier that are still on disk. None of them is opened.
 
     ``q`` (with ``meta=true``) keeps only the conversations whose title or
     message text contains it, case-insensitively, and adds a ``snippet`` to the
@@ -239,7 +376,8 @@ async def conversations_list(request: Request, meta: bool = False,
     the browser has not loaded.
     """
     if not _persist_enabled():
-        return {"enabled": False, "conversations": []}
+        return {"enabled": False, "conversations": [],
+                "stored": _count_chat_files(_principal_dir(request))}
     term = q.strip().lower() if meta else ""
     chats_dir = _chats_root(_principal_dir(request))
     rows = []
@@ -259,6 +397,7 @@ async def conversations_list(request: Request, meta: bool = False,
                 else:
                     data = json.loads(p.read_text(encoding="utf-8"))
                     data["id"] = p.stem
+                    data["rev"] = _rev_of(data)
                     rows.append(_conv_with_current_pin(data))
             except FileNotFoundError:
                 continue
@@ -294,44 +433,88 @@ async def conversation_get(conv_id: str, request: Request):
     if not isinstance(data, dict):
         raise HTTPException(500, "Conversation file is unreadable")
     data["id"] = conv_id
+    data["rev"] = _rev_of(data)
     return _conv_with_current_pin(data)
+
+
+def _stale(row: dict | None, message: str) -> HTTPException:
+    return HTTPException(409, {"error": "stale", "message": message,
+                               "rev": row["rev"] if row else None, "row": row})
 
 
 @_router.put("/api/conversations/{conv_id}")
 async def conversation_upsert(conv_id: str, req: ConversationUpsert,
                               request: Request):
+    """Store one conversation, replacing the stored copy. Answers with the new
+    revision as ``rev``; every save gets a new one.
+
+    ``base_rev`` names the stored revision this save replaces, and null says the
+    caller has never seen the conversation stored. When the store holds another
+    revision (the conversation was saved or deleted by someone else since, or one
+    is stored already), nothing is written and the answer is 409 with
+    ``{"detail": {"error": "stale", "message": ..., "rev": <stored revision or
+    null>, "row": <its index row or null>}}``; a null ``rev`` means the
+    conversation is not stored any more.
+
+    A request without ``base_rev`` is written when no conversation is stored
+    under this id and none was deleted, or when every message of the stored one
+    is in the request; otherwise it is refused with the same 409.
+
+    403 in privacy mode, 413 when the conversation is larger than the store
+    accepts."""
     if not _persist_enabled():
         raise HTTPException(
             403, "Chat persistence is off (privacy mode). "
                  "Set mode/chat_mode to 'log' or 'full' to enable it.")
-    path = _conv_path(conv_id, _principal_dir(request))
+    principal = _principal_dir(request)
+    path = _conv_path(conv_id, principal)
     record = {"id": conv_id, "title": req.title,
               "updated_at": req.updated_at,
               "pinned": req.pinned, "folder": req.folder,
               "pinned_model": req.pinned_model,
+              "params": {k: v for k, v in req.params.items()
+                         if isinstance(v, (str, int, float))
+                         and not isinstance(v, bool)},
+              "rev": secrets.token_hex(8),
               "branches": req.branches,
               "messages": req.messages}
     if req.pinned_model:
         index = model_index()
         record["pinned_model"] = model_ids.stored_to_current(req.pinned_model, None, index)
         model_ids.attach_refs(record, (record["pinned_model"],), index)
-    payload = json.dumps(record, ensure_ascii=False)
-    if len(payload.encode("utf-8")) > _CONV_MAX_BYTES:
-        raise HTTPException(413, "Conversation too large to persist")
-    path.parent.mkdir(parents=True, exist_ok=True)
     with _LOCKS.get(str(path)):
+        row = _stored_row(path)
+        if "base_rev" in req.model_fields_set:
+            if (row["rev"] if row else None) != req.base_rev:
+                raise _stale(row, "This conversation was changed or deleted elsewhere.")
+        elif row and _would_lose_turns(_stored_data(path), req):
+            raise _stale(row, "The stored conversation holds messages this save would "
+                              "remove. Send base_rev with the revision it replaces.")
+        if row is None and conv_id in _deleted_ids(principal):
+            raise _stale(None, "This conversation was deleted.")
+        if row and "params" not in req.model_fields_set:
+            stored = (_stored_data(path) or {}).get("params")
+            record["params"] = stored if isinstance(stored, dict) else {}
+        payload = json.dumps(record, ensure_ascii=False)
+        if len(payload.encode("utf-8")) > _CONV_MAX_BYTES:
+            raise HTTPException(413, "Conversation too large to persist")
+        path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write(path, payload)
-    return {"status": "saved", "id": conv_id}
+        _remember_meta(path, record)
+    return {"status": "saved", "id": conv_id, "rev": record["rev"]}
 
 
 @_router.delete("/api/conversations/{conv_id}")
 async def conversation_delete(conv_id: str, request: Request):
     if not _persist_enabled():
         raise HTTPException(403, "Chat persistence is off (privacy mode)")
-    path = _conv_path(conv_id, _principal_dir(request))
+    principal = _principal_dir(request)
+    path = _conv_path(conv_id, principal)
     with _LOCKS.get(str(path)):
         if path.is_file():
             path.unlink()
+            _META_CACHE.pop(str(path), None)
+            _remember_deleted(conv_id, principal)
             return {"status": "deleted", "id": conv_id}
     return {"status": "absent", "id": conv_id}
 
@@ -358,17 +541,15 @@ def relabel_pinned_model(old_name: str, new_name: str) -> tuple[list, list]:
     """Rewrite ``pinned_model`` from *old_name* to *new_name* in every stored
     conversation (the owner's and every principal's) that carries it.
 
-    A rewritten conversation gets a fresh ``updated_at`` so that a browser
-    holding an older cached copy takes this one rather than uploading its own
-    over it. Each file is rewritten under its per-file lock, and a file whose
+    A rewritten conversation gets a fresh ``updated_at`` and keeps its ``rev``:
+    a later save naming *old_name* is stored under *new_name* anyway. Each file
+    is rewritten under its per-file lock, and a file whose
     ``updated_at`` changed since it was read is left as it is and listed in
     ``failed``. A rewritten conversation's ``model_refs`` is set for *new_name*.
     Returns ``(rewritten, failed)``: the ids rewritten, and the ids
     of files that name *old_name* but were not rewritten. A file that does not
     contain *old_name* is not parsed. Works in every session mode: it edits
     files that already exist and creates none."""
-    import time
-
     needle = json.dumps(old_name, ensure_ascii=False)[1:-1]
     index = model_index()
     rewritten: list = []

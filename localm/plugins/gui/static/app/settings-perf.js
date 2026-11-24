@@ -7,8 +7,8 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
-import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, elideAudioForWire, elideImagesForWire, isToolEvent, latestTurnHasAudio, latestTurnIsAudioOnly, lsSetScoped, markNotSent, markRefusedBy, maybeCompactConversation, memorySavedText, modelCannotHearAudio, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, persistChatParams, pinnedModelName, refreshWebPolicy, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, resolvePinnedModel, saveConversations, scopedKeyPrivate, setConversationPin, showPinnedGone, syncPinModelToggle, updateStatusIndicator, wireHasImageAndAudio, wireParts } from "./chat.js";
-import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, localizeServerNotes, autoGrow, confirmDanger, confirmDangerAsync, el, liveThinkText, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setCanvasNavigationAllowed, setPreviewAllowed, splitThink, streamJob, stripAsrPrefix, stripThink, toast } from "./helpers.js";
+import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, chatSurfaceHeaders, compactConversation, currentConv, elideAudioForWire, elideImagesForWire, isToolEvent, latestTurnHasAudio, latestTurnIsAudioOnly, lsSetScoped, markNotSent, markRefusedBy, maybeCompactConversation, memorySavedText, modelCannotHearAudio, modelReadsImages, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, persistChatParams, pinnedModelName, refreshWebPolicy, removeStatusIndicator, renderChat, renderConvList, resolvePinnedModel, saveConversations, saveDraftsSoon, scopedKeyPrivate, setConversationPin, showPinnedGone, syncPinModelToggle, takeComposer, titleFromText, titleIsAutomatic, updateStatusIndicator, wireHasImageAndAudio, wireParts } from "./chat.js";
+import { $, GIB, TOOL_CALL_DELIM, authHeaders, localizeServerNotes, autoGrow, confirmDanger, confirmDangerAsync, el, liveThinkText, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setCanvasNavigationAllowed, setPreviewAllowed, splitThink, streamJob, stripAsrPrefix, stripThink, toast } from "./helpers.js";
 import { onLanguageReload, t, tn } from "./i18n.js";
 import { announcedLoadingModel, isPeerSelected, modelCache, modelSelect, refreshModels, reloadModel, toastLoadResult, waitForModelLoad } from "./models-sidebar.js";
 import { pickPath, saveTextFs } from "./picker.js";
@@ -2929,6 +2929,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   let audioRejected = false;
   let mediaOffer = null;
   let requestFailed = false;   // a generic (non-vision, non-abort) send failure
+  let unreachable = false;   // the request or its stream ended without an answer from the server
   let pinGone = false;   // the chat's pinned model is no longer registered
   let memUsed = null;   // F11: server's "used N memories" summary (X-Localm-Memory)
   let routing = null;   // which model answered, when not the one asked for
@@ -2946,7 +2947,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   async function postChatCompletions(reqBody) {
     const r = await fetch("/v1/chat/completions", {
       method: "POST",
-      headers: authHeaders(CHAT_SURFACE_HEADERS),
+      headers: authHeaders(chatSurfaceHeaders(conv)),
       body: JSON.stringify(reqBody),
       signal: reqCtl.signal,
     });
@@ -3151,6 +3152,16 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       toast(n
         ? t("chat.image.rejectedServer", { detail: e.detail || e.message })
         : t("chat.requestFailed", { message: e.message }), true);
+    } else if (sentImage && e.status === 400 && e.refusal === "image" && !e.routing &&
+               modelReadsImages(modelName) && !full.trim()) {
+      // The model reads images and could not read this one: only the images just
+      // sent are left out of later requests to it.
+      visionRejected = true;
+      const n = markRefusedBy(conv, "image_url", modelName, true);
+      saveConversations(conv);
+      toast(n
+        ? t("chat.image.rejectedServer", { detail: e.detail || e.message })
+        : t("chat.requestFailed", { message: e.message }), true);
     } else if (sentImage && e.status === 400 && e.refusal === "image" && !full.trim()) {
       // VIS-1: a text-only model refused the images. Later requests to that
       // model leave earlier turns' images out, so the chat stays usable; the
@@ -3172,6 +3183,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       pinGone = true;
     } else {
       requestFailed = true;
+      unreachable = e.status === undefined;
       renderMarkdown(liveBody, full + "\n\n*[error: " + localizeServerNotes(e.message) + "]*");
       toast(t("chat.requestFailed", { message: e.message }), true);
       const suggest = !pinnedModel && e.routing && e.routing.suggested;
@@ -3184,7 +3196,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // A compacted reply that was read to its end (or cut at its first tool call)
   // marks the conversation as server-compacted unless the reply failed.
   if (serverCompacted && readOk && finishReason !== "error") conv.serverCompacted = true;
-  const outcome = { stopped: aborted, liveRow };
+  const outcome = { stopped: aborted, unreachable, liveRow };
   if (pinGone) {
     renderChat();
     outcome.liveRow = showPinnedGone(conv);
@@ -3697,6 +3709,7 @@ export function renderQueuedIndicator() {
         [t("chat.cancel") || "Cancel", () => {
           const at = chat.queue.indexOf(item);
           if (at !== -1) chat.queue.splice(at, 1);
+          saveDraftsSoon();
           renderQueuedIndicator();
         }, "close"],
       ],
@@ -3718,6 +3731,7 @@ export async function processChatQueue() {
   const idx = chat.queue.findIndex((item) => !item.convId || item.convId === conv.id);
   if (idx === -1) return;
   const [item] = chat.queue.splice(idx, 1);
+  saveDraftsSoon();
   renderQueuedIndicator();
   await dispatchChatTurn(conv, item.text, item.attachments, item.docs, item.clips);
 }
@@ -3728,8 +3742,8 @@ export async function processChatQueue() {
  *  streaming, web rounds) uses that one signal. Afterwards it clears both,
  *  restores Send and re-renders the transcript, keeping an unsaved live
  *  bubble (an error or an empty stopped reply) on screen. A finished turn
- *  then dispatches the next queued message; a stopped turn leaves the queue
- *  as it is. Returns `{ stopped }`. */
+ *  then dispatches the next queued message; a stopped turn, and one that did
+ *  not reach the server, leaves the queue as it is. Returns `{ stopped }`. */
 export async function runChatTurn(work) {
   const ctrl = new AbortController();
   chat.busy = true;
@@ -3743,9 +3757,11 @@ export async function runChatTurn(work) {
   }
   document.querySelectorAll(".message-actions button").forEach((b) => (b.disabled = true));
   let stopped = false;
+  let unreachable = false;
   try {
     const out = await work(ctrl.signal);
     stopped = !!(out && out.stopped) || ctrl.signal.aborted;
+    unreachable = !!(out && out.unreachable);
     const liveRow = out && out.liveRow;
     const keep = liveRow && liveRow.isConnected ? liveRow : null;
     chat.busy = false;
@@ -3766,7 +3782,7 @@ export async function runChatTurn(work) {
       sendBtn.title = t("chat.send");
     }
     document.querySelectorAll(".message-actions button").forEach((b) => (b.disabled = false));
-    if (!stopped) processChatQueue();
+    if (!stopped && !unreachable) processChatQueue();
   }
   return { stopped };
 }
@@ -3799,8 +3815,8 @@ export async function dispatchChatTurn(conv, text, attachments = [], docs = [], 
   conv.messages.push(continues ? { role: "user", content, continues: true }
                                : { role: "user", content });
 
-  if (isFirstMessage) {
-    conv.title = text.slice(0, 42) + (text.length > 42 ? "…" : "") ||
+  if (isFirstMessage && titleIsAutomatic(conv)) {
+    conv.title = titleFromText(text) ||
       (hasClips ? clips[0].name.slice(0, 42) : "Document chat");
     renderConvList();
   }
@@ -3906,21 +3922,7 @@ export async function sendChat() {
     return;
   }
 
-  const item = {
-    text,
-    attachments: [...chat.attachments],
-    docs: [...chat.docs],
-    clips: [...chat.clips],
-    convId: conv.id,
-  };
-  chat.attachments = [];
-  chat.docs = [];
-  chat.clips = [];
-  renderAttachChips();
-  if (input) {
-    input.value = "";
-    autoGrow(input);
-  }
+  const item = { ...takeComposer(conv), convId: conv.id };
 
   if (chatBusy()) {
     chat.queue.push(item);
@@ -4116,8 +4118,9 @@ $("compact-conv").onclick = async () => {
     toast(t("chat.nothingToCompact"), true);
     return;
   }
-  if (chat.abort) { toast(t("chat.waitForReply"), true); return; }
-  await compactConversation(conv);
+  if (chatBusy()) { toast(t("chat.waitForReply"), true); return; }
+  // A turn of its own: a message sent meanwhile is queued, and Stop cancels it.
+  await runChatTurn(async (signal) => { await compactConversation(conv, signal); });
 };
 $("new-conv").onclick = () => { newConversation(); showView("chat"); };
 // Mobile top-bar new-chat button mirrors the sidebar +; also closes the drawer

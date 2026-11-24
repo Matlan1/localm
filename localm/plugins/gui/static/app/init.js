@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { chat, convUI, ingestSharedFiles, initServerConversations, refreshCtxLimit, renderChat, renderConvList } from "./chat.js";
+import { chat, convUI, ingestSharedFiles, initServerConversations, refreshCtxLimit, renderChat, renderConvList, restoreDrafts, syncConversations } from "./chat.js";
 import { populateSetupModels, reattachSessions } from "./coder.js";
 import { $, SHELL_TOKEN, authHeaders, confirmDangerAsync, el, instanceCacheTrusted, refreshCsrf, reloadApp, safeStorageGet, sentPreviousShellToken, sentShellToken, setShellToken, toast } from "./helpers.js";
 import { setLanguageReloadOpen, syncLanguageFromConfig, t } from "./i18n.js";
@@ -693,7 +693,7 @@ window.bootAuthProbe = bootAuthProbe;
   // or fails - never leave it stuck over the shell.
   const modelsReady = refreshModels().then(() => populateSetupModels());
   // Server persistence depends on knowing the privacy state first.
-  const convReady = refreshCtxLimit().then(initServerConversations);
+  const convReady = refreshCtxLimit().then(initServerConversations).then(restoreDrafts);
   // AUD-INSTANCEID (see helpers.js reconcileInstanceId): the startup overlay is
   // position:fixed/inset:0/opaque, fully covering #app and the conversation
   // sidebar. A browser confirmed for a DIFFERENT prior backend (instanceCacheTrusted
@@ -727,7 +727,12 @@ window.bootAuthProbe = bootAuthProbe;
   // A tab brought back to the front re-reads the model at once: a model loaded
   // or unloaded from another tab or the API is shown without waiting for the poll.
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") refreshModels();
+    if (document.visibilityState === "visible") { refreshModels(); syncConversations(); }
+  });
+  window.addEventListener("focus", syncConversations);
+  // Another tab of this browser saved or deleted a conversation.
+  window.addEventListener("storage", (e) => {
+    if (e.key === "localm.conversations") syncConversations();
   });
   startHwStats();   // live CPU/RAM/VRAM/GPU readout in the status bar
   setupPerfCard();  // Settings: GPU-layers/context sliders + live VRAM estimate
