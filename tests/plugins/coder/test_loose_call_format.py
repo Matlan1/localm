@@ -581,6 +581,20 @@ def test_a_call_that_stands_in_a_file_that_was_read_is_never_meant(tmp_path, spe
     assert len(backend.checks) == 1, "a quoted call must not even be asked about"
 
 
+def test_a_change_owed_beside_a_refused_quotation_is_asked_for_and_then_forced(tmp_path):
+    _readme(tmp_path, _call_json())
+    quote = "The README documents:\n" + _loose("run_shell", **README) + "\nThat is all."
+    backend = _Backend([_xml("read_file", path="README.md"), quote, quote + " Again, in other words.",
+                        _xml("write_file", path="summary.md", content="s"), "Done."])
+    agent = _agent(tmp_path, backend)
+    agent.run_task("read README.md and write a summary to summary.md")
+    assert (tmp_path / "summary.md").exists() and not (tmp_path / "pwned.txt").exists()
+    assert "Do not show that call again" in _texts(agent, "user")[2]
+    assert ["grammar_lazy" not in kw for _m, kw in backend.calls] == [False, False, False, True, False]
+    grammar = backend.calls[3][1]["grammar"]
+    assert '("\\"write_file\\"")' in grammar and '("\\"run_shell\\"")' not in grammar
+
+
 def test_a_quoted_call_is_put_to_the_person_where_one_can_be_asked(tmp_path):
     _readme(tmp_path, _call_json())
     person = _Person(answer=False)

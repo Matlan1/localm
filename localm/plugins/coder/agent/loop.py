@@ -929,7 +929,7 @@ class _LoopMixin:
                              start_turns=start_turns,
                              budget_reminded=0, invented_count=0,
                              question_answered=False, example_replies=0,
-                             example_open=None,
+                             example_open=None, quoted_replies=0,
                              cut_off_count=0,
                              unfounded_checked=False,
                              plan_submitted=False, plan_nudges=0,
@@ -1247,6 +1247,21 @@ class _LoopMixin:
                         "file: only a tool call does. If it belongs in the project, "
                         "write it now with write_file or edit_file.")
                     if st.code_reminded > 1 and self._arm_forced_call(
+                            c.name for c in calls):
+                        note += (
+                            " Your next reply is constrained: it must be a tool call, "
+                            "and not " + ", ".join(sorted(self._force_not)) + " again.")
+                    result_blocks.append(note)
+
+                if (any(id(c) in self._loose_refused and self._loose_unasked.get(id(c))
+                        for c in calls) and self._change_still_owed(request, st)):
+                    # A quotation that was refused is not the change.
+                    st.quoted_replies += 1
+                    note = (
+                        "[nothing written] The user's request asks for a change, and "
+                        "nothing has been written yet. Do not show that call again: "
+                        "make the change with write_file or edit_file now.")
+                    if st.quoted_replies > 1 and self._arm_forced_call(
                             c.name for c in calls):
                         note += (
                             " Your next reply is constrained: it must be a tool call, "
