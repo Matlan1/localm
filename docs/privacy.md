@@ -68,6 +68,35 @@ Notes:
 - "Nothing written automatically" is the promise privacy mode makes; anything you
   do explicitly (saving a conversation, filing a bug report, `--debug`) is a
   deliberate action, not an automatic trace.
+- Changing the mode does not move anything across it. Switching the chat to
+  `privacy` does not delete conversations or session records saved earlier (the
+  app's chat sidebar says how many saved chats are still on disk). Switching from
+  `privacy` to `log` or `full` while the app is open does not save the
+  conversations held under privacy mode: they stay in that browser tab only, and
+  a message sent from one of them is still handled in privacy mode (with a scoped
+  key, whose requests follow the global mode, it is recorded under that mode).
+- The chat page reads the mode from the server before it writes anything to the
+  browser's storage, so a mode changed from a terminal applies to the next thing
+  the page would save. While the server cannot be reached, or does not answer
+  within 4 seconds, the last mode it reported stands.
+- In `log` and `full` mode the browser's storage holds a copy of recent
+  conversations and what you have typed, attached or queued but not sent. Each
+  entry belongs to one install and one key: another install at the same address
+  or another key does not see, save or remove it. Signing out, or signing in with
+  another key, removes what was kept for the old one; the other open tabs drop
+  what they hold and write none of it again. When the server no longer accepts
+  the key, an open tab also drops what it holds and writes nothing more; what was
+  kept before waits for the next sign-in. Privacy mode keeps none of it there and
+  empties what an earlier mode left; if the browser refuses that or does not
+  answer, the app says so and tries again until it succeeds.
+- When you delete a conversation in `log` or `full` mode, its id (a short code
+  made from the time it was started, no title or text) is added to
+  `chats/deleted-ids.txt`, so that another browser that still holds the
+  conversation does not save it again. If the file then cannot be removed, the
+  entry is taken back and the app says that the chat was not deleted. A
+  conversation whose file is missing
+  without such an entry is saved again from a browser that holds it. The newest
+  5000 to 10000 ids are kept.
 - In privacy mode, the interactive `localm run` chat and the coder REPL also
   suppress Python's own `readline` history, so what you type is not left
   behind in `~/.python_history` either. This is separate from and in addition
@@ -138,6 +167,19 @@ mode, when it reports one), a routed job fails saying so, and the MCP server
 loads the model itself. Reached with any other key, that instance records at
 its own mode as checked before each request, so a change it makes to its own
 mode while a request is running is not covered.
+
+### The list of running processes
+
+In every session mode each running localm process, and each long-lived program it
+starts (ComfyUI, a coder shell, an MCP server), has one small file in `.localm-run/`
+in the install folder: its process id, when it started, what kind of process it is,
+the process that started it and the process ids of programs it opened for you (a web
+browser), never a command line, an environment or any content; the file also holds one
+number made from the ids of this machine and this folder, which is the same for no
+other folder; the file stays when the process ends and is deleted by a localm process
+that starts later, or that asks which processes run (one written by another machine or
+container, copied here with the folder, or, on a Linux system without a machine id,
+left from before a restart, stays).
 
 ---
 

@@ -47,6 +47,22 @@ def test_a_revoke_in_this_process_discards_the_running_jobs_output(revocable, mo
     assert runner._LIVE_RUNS == {}
 
 
+def test_a_revoked_run_that_ends_in_an_error_keeps_none_of_its_output(
+        revocable, monkeypatch, tmp_path):
+    job = Job(name="j", task_kind="coder", prompt="p", schedule_kind="interval",
+              schedule=60, owner="k" * 64, cwd=str(tmp_path))
+
+    def coder(j, engine=None):
+        auth._credentials_changed(j.owner)
+        raise RuntimeError("The coder run did not finish its task.\n\nnotes of the owner")
+
+    monkeypatch.setattr(runner, "_run_coder", coder)
+    out = runner.run_job(job)
+    assert out["status"] == "error" and out["output"] == ""
+    assert "revoked" in out["error"] and "RuntimeError" in out["error"]
+    assert "notes of the owner" not in str(out)
+
+
 def test_another_keys_revoke_leaves_the_run_alone(revocable, monkeypatch):
     job = _job()
 

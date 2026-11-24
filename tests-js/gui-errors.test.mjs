@@ -165,16 +165,19 @@ test("outside privacy mode the list persists, and turning privacy on wipes the s
   await flush(8);
   await window.refreshCtxLimit();
   window.toast("kept error", true);
+  await flush(8);
   const stored = JSON.parse(window.localStorage.getItem("localm.recentErrors"));
   assert.equal(stored[0].text, "kept error");
   mode = "privacy";
   await window.refreshCtxLimit();
   assert.equal(window.localStorage.getItem("localm.recentErrors"), null);
   window.toast("private one", true);
+  await flush(8);
   assert.equal(window.localStorage.getItem("localm.recentErrors"), null);
   mode = "full";
   await window.refreshCtxLimit();
   window.toast("after privacy", true);
+  await flush(8);
   assert.equal(JSON.parse(window.localStorage.getItem("localm.recentErrors"))[0].text, "after privacy");
 });
 
@@ -185,6 +188,7 @@ test("a stored list is restored once the server mode is known (not privacy)", as
   const items = [...doc.querySelectorAll("#recent-errors-list .recent-error-text")].map((n) => n.textContent);
   assert.deepEqual(items, ["from last time"]);
   window.toast("new one", true);
+  await flush(8);
   assert.deepEqual(JSON.parse(window.localStorage.getItem("localm.recentErrors")).map((e) => e.text),
     ["new one", "from last time"]);
 });
@@ -355,6 +359,7 @@ test("dismissing one recent error leaves the others in order and updates storage
   assert.equal(btn.getAttribute("aria-label"), "Dismiss this error");
   btn.click();
   assert.deepEqual(texts(), ["e3", "e1"]);
+  await flush(8);
   assert.deepEqual(JSON.parse(window.localStorage.getItem("localm.recentErrors")).map((e) => e.text), ["e3", "e1"]);
   doc.getElementById("recent-errors-clear").click();
   assert.deepEqual(texts(), []);

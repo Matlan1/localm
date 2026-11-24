@@ -114,7 +114,7 @@ _TOOL_EXAMPLES: dict = {
 _TYPE_PLACEHOLDERS = {"string": "...", "int": 1, "float": 1.0, "bool": False, "array": []}
 
 
-def _tool_params(tool) -> dict:
+def tool_params(tool) -> dict:
     """The tool's param schema - {} for stand-ins without one (e.g. test mocks)."""
     params = getattr(tool, "params", None)
     return params if isinstance(params, dict) else {}
@@ -127,7 +127,7 @@ def _example_args(name: str, tool) -> dict:
         return ex
     return {
         pname: _TYPE_PLACEHOLDERS.get(spec.get("type", "string"), "...")
-        for pname, spec in _tool_params(tool).items() if spec.get("required")
+        for pname, spec in tool_params(tool).items() if spec.get("required")
     }
 
 
@@ -148,7 +148,7 @@ def tool_doc_block(name: str, tool) -> str:
                          ensure_ascii=False)
     lines = [f"## {name} - {tool.description}", example]
     optional = [f"{n} ({s.get('type', 'string')})"
-                for n, s in _tool_params(tool).items() if not s.get("required")]
+                for n, s in tool_params(tool).items() if not s.get("required")]
     if optional:
         lines.append(f"optional args: {', '.join(optional)}")
     return "\n".join(lines)
@@ -216,7 +216,7 @@ def _brief_tool_docs(disabled: frozenset = frozenset(),
     for name, tool in TOOL_REGISTRY.items():
         if name in disabled or name in deferred:
             continue
-        params = _tool_params(tool)
+        params = tool_params(tool)
         req = [n for n, s in params.items() if s.get("required")]
         opt = [f"[{n}]" for n, s in params.items() if not s.get("required")]
         sig = ", ".join(req + opt)

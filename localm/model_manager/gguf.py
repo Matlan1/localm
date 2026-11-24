@@ -25,6 +25,7 @@ from rich.progress import TimeRemainingColumn
 from rich.table import Column
 from ..debuglog import logger
 from ..kv_cache import kv_bytes_for_type
+from . import placing
 from ._shared import console
 from .unsupported import GGUF_IMATRIX_REFUSAL, gguf_file_refusal, gguf_header_refusal, gguf_version_supported
 
@@ -266,7 +267,8 @@ def _safe_models_filename(filename: str, base_dir: Optional[Path] = None) -> Opt
     Stream name, which stays confined to *base_dir* and so is invisible to a
     pure escape check, but hides its content behind an innocuous-looking,
     apparently-empty sibling file - see ``_WINDOWS_RESERVED_CHARS``), a
-    reserved device stem (``_WINDOWS_RESERVED_STEMS``), and a trailing '.' or
+    reserved device stem (``_WINDOWS_RESERVED_STEMS``), a name localm keeps its
+    own data under (:func:`placing.reserved`), and a trailing '.' or
     ' ' (Windows silently strips these when resolving a path, so
     ``evil.gguf.`` and ``evil.gguf`` name the SAME file).
     """
@@ -285,7 +287,7 @@ def _safe_models_filename(filename: str, base_dir: Optional[Path] = None) -> Opt
     # the reserved-character check above; this additionally catches a lone
     # '.'/'..' and any OS-specific separator quirk Path.name normalises away.
     name = Path(filename).name
-    if name != filename or name in ("", ".", ".."):
+    if name != filename or name in ("", ".", "..") or placing.reserved(name):
         return None
     try:
         dest = (base_dir / name).resolve()

@@ -9,6 +9,7 @@ that also holds ``consolidated*`` files, a ``pytorch_model.bin`` of an HF folder
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import struct
@@ -718,8 +719,9 @@ class TestPulledFile:
 
     def test_a_file_already_in_the_models_folder_is_not_registered_either(
             self, home, tmp_path, monkeypatch, printed):
-        _gguf(home / "models" / "pulled.gguf", version=1)
+        f = _gguf(home / "models" / "pulled.gguf", version=1)
         self._fake_hub(monkeypatch, tmp_path, lambda p: pytest.fail("downloaded again"))
+        monkeypatch.setattr(mm, "_hf_file_sha256", lambda *a, **k: _sha256_of(f))
         assert mm.pull_model("owner/repo:pulled.gguf") is False
         assert mm.load_registry() == {}
         assert V1_SENTENCE in "\n".join(printed)
@@ -728,6 +730,10 @@ class TestPulledFile:
 # --------------------------------------------------------------------------- #
 #  Other registration paths                                                    #
 # --------------------------------------------------------------------------- #
+
+def _sha256_of(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
 
 def _ollama_manifest(root: Path, blob_writer) -> Path:
     digest = "a" * 64
@@ -808,9 +814,9 @@ class TestUrlPull:
 
     def test_a_file_already_in_the_models_folder_is_not_registered(
             self, url_env, home, monkeypatch, printed):
-        _gguf(home / "models" / "pulled.gguf", version=1)
+        f = _gguf(home / "models" / "pulled.gguf", version=1)
         self._serve(monkeypatch, b"unused")
-        assert mm.pull_model(self.URL) is False
+        assert mm.pull_model(self.URL, expected_sha256=_sha256_of(f)) is False
         assert mm.load_registry() == {}
         assert V1_SENTENCE in "\n".join(printed)
 

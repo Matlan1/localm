@@ -3,9 +3,9 @@
 "use strict";
 
 // --- ES module imports ---
-import { addMessageRow, chat, chatBusy, currentConv, newConversation, newToolEvent, renderChat, renderConvList, saveConversations, trackLiveRow } from "./chat.js";
+import { addMessageRow, chat, chatBusy, chatSurfaceHeaders, currentConv, newConversation, newToolEvent, renderChat, renderConvList, saveConversations, trackLiveRow } from "./chat.js";
 import { activeSession, exportCoderSession, openFilesModal, switchActiveSessionModel } from "./coder.js";
-import { $, CHAT_SURFACE_HEADERS, authHeaders, autoGrow, checkModelsBeforeGenerate, createMissingModelOffer, el, jobStatusWord, nearBottom, openModal, streamJob, toast } from "./helpers.js";
+import { $, authHeaders, autoGrow, checkModelsBeforeGenerate, createMissingModelOffer, el, jobStatusWord, nearBottom, openModal, streamJob, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 import { GROUNDING_PAGE_BACKED, applyPersona, exportConversation, openMemoryModal, personaCache, pluginSuggestion, refuseWithoutModel, rememberFact, requestWebTool, runCompletion } from "./settings-perf.js";
 
@@ -85,7 +85,7 @@ async function runGenerationInChat(spec, promptText) {
       return;
     }
     const r = await fetch(spec.endpoint, {
-      method: "POST", headers: authHeaders(CHAT_SURFACE_HEADERS),
+      method: "POST", headers: authHeaders(chatSurfaceHeaders(conv)),
       body: JSON.stringify(spec.body(promptText, picked)),
     });
     const data = await r.json();

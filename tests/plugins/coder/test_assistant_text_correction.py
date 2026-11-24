@@ -42,6 +42,7 @@ def _make_agent(tmp_path: Path, **kwargs) -> object:
         MockPM.build.return_value.file_count.return_value = 0
         agent = Agent(backend=backend, cwd=tmp_path, on_event=events.append, **kwargs)
     agent._events = events
+    agent._ask_aside = lambda *a, **k: "[run]"
     return agent
 
 

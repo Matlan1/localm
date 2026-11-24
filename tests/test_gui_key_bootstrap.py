@@ -78,7 +78,7 @@ class TestShellRoute:
         assert "localStorage.setItem('localm.apiKey'" not in r.text
         cookies = _set_cookies(r)
         assert "REALKEY123" not in cookies
-        assert "localm_session=" not in cookies, (
+        assert "localm_session" not in cookies, (
             "a credential-free GET / on a keyed install still minted a session")
 
     def test_loopback_open_mode_seeds_shell_token_global(self, monkeypatch):
@@ -92,7 +92,7 @@ class TestShellRoute:
         assert r.status_code == 200
         assert SHELL_GLOBAL in r.text
         assert "SHELLTOK123" in r.text
-        assert "localm_session=" not in _set_cookies(r)
+        assert "localm_session" not in _set_cookies(r)
 
     def test_corrupt_session_store_serves_the_shell_not_a_500(self, monkeypatch):
         # A corrupt or unreadable sessions.json serves the shell with NO session
@@ -108,7 +108,7 @@ class TestShellRoute:
         # fail-safe under test.
         r = TestClient(_app("127.0.0.1")).get("/", headers={"Host": "127.0.0.1"})
         assert r.status_code == 200                      # shell served, not 500
-        assert "localm_session=" not in _set_cookies(r)  # fail-safe: no cookie/access
+        assert "localm_session" not in _set_cookies(r)  # fail-safe: no cookie/access
 
     def test_lan_bind_never_seeds(self, monkeypatch):
         # A non-loopback bind seeds nothing: no key in the page, no auth cookie,
@@ -117,7 +117,7 @@ class TestShellRoute:
         r = TestClient(_app("0.0.0.0")).get("/")
         assert r.status_code == 200
         assert "REALKEY123" not in r.text
-        assert "localm_session=" not in _set_cookies(r)
+        assert "localm_session" not in _set_cookies(r)
         assert SHELL_GLOBAL not in r.text
 
     def test_cross_origin_open_mode_does_not_leak_shell_token(self, monkeypatch):
@@ -201,7 +201,7 @@ class TestKeyedShellNeverMintsForAnAnonymousCaller:
             r = self._get(monkeypatch, {"Host": host})
             assert r.status_code == 200, host
             cookies = _set_cookies(r)
-            assert "localm_session=" not in cookies, host
+            assert "localm_session" not in cookies, host
             assert self.KEY not in cookies, host
             assert self.KEY not in r.text, host
 
@@ -209,13 +209,13 @@ class TestKeyedShellNeverMintsForAnAnonymousCaller:
         r = self._get(monkeypatch,
                       {"Origin": "http://127.0.0.1:8642", "Host": "127.0.0.1:8642"})
         assert r.status_code == 200
-        assert "localm_session=" not in _set_cookies(r)
+        assert "localm_session" not in _set_cookies(r)
 
     def test_cross_origin_mints_nothing(self, monkeypatch):
         r = self._get(monkeypatch, {"Origin": "https://evil.example"})
         assert r.status_code == 200
         cookies = _set_cookies(r)
-        assert "localm_session=" not in cookies
+        assert "localm_session" not in cookies
         assert self.KEY not in cookies and self.KEY not in r.text
 
     def test_local_process_shaped_request_mints_nothing(self, monkeypatch):
@@ -225,12 +225,12 @@ class TestKeyedShellNeverMintsForAnAnonymousCaller:
         from the legitimate browser navigation above. Neither gets a session now."""
         r = self._get(monkeypatch, {"Host": "127.0.0.1:8642"})
         assert r.status_code == 200
-        assert "localm_session=" not in _set_cookies(r)
+        assert "localm_session" not in _set_cookies(r)
 
     def test_lan_bind_mints_nothing(self, monkeypatch):
         r = self._get(monkeypatch, {"Host": "127.0.0.1"}, bind="0.0.0.0")
         assert r.status_code == 200
-        assert "localm_session=" not in _set_cookies(r)
+        assert "localm_session" not in _set_cookies(r)
 
 
 class TestKeyedShellStillSupportsEveryLEGITIMATEPath:
@@ -254,7 +254,7 @@ class TestKeyedShellStillSupportsEveryLEGITIMATEPath:
         sid = None
         for part in _set_cookies(r).split(";"):
             part = part.strip()
-            if part.startswith("localm_session="):
+            if part.startswith("localm_session_"):
                 sid = part.split("=", 1)[1]
         assert sid, "precondition: redeeming the grant must set a session"
         return sid
@@ -274,7 +274,7 @@ class TestKeyedShellStillSupportsEveryLEGITIMATEPath:
         r = TestClient(app, cookies={"localm_session": sid}).get(
             "/", headers={"Host": "127.0.0.1"})
         assert r.status_code == 200
-        assert "localm_session=" not in _set_cookies(r)     # not re-minted
+        assert "localm_session" not in _set_cookies(r)     # not re-minted
         from localm import sessions as _sessions
         assert _sessions.lookup(sid) is not None            # and not invalidated
 
@@ -289,7 +289,7 @@ class TestKeyedShellStillSupportsEveryLEGITIMATEPath:
         r = TestClient(app, cookies={"localm_session": sid}).get(
             "/", headers={"Host": "127.0.0.1"})
         assert r.status_code == 200
-        assert "localm_session=" not in _set_cookies(r)
+        assert "localm_session" not in _set_cookies(r)
         from localm import sessions as _sessions
         assert _sessions.lookup(sid) is not None, (
             "an owner-key roll signed the browser out - the exact regression the "
@@ -319,7 +319,7 @@ class TestLaunchGrantHandoff:
         assert r.status_code == 303
         assert r.headers["location"] == "/"          # token stripped from the URL
         cookies = _set_cookies(r)                     # joined "set-cookie" string
-        assert "localm_session=" in cookies
+        assert "localm_session_" in cookies
         assert "REALKEY123" not in cookies            # opaque id, never the key
 
     def test_grant_is_single_use(self, monkeypatch):
@@ -358,7 +358,7 @@ class TestLaunchGrantHandoff:
         grant = self._grant(app)
         r = TestClient(app).get(f"/?localm_token={grant}", follow_redirects=False)
         assert r.status_code == 303                          # redeemed on the LAN bind
-        assert "localm_session=" in _set_cookies(r)
+        assert "localm_session_" in _set_cookies(r)
         assert "REALKEY123" not in _set_cookies(r)           # opaque session, not the key
 
 

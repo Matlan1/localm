@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Minting a key: a non-owner caller may only grant scopes it holds, and an
-identifier scope that nothing owns warns with the closest known scope."""
+"""Minting a key: a non-owner caller may only grant scopes it holds, and a scope
+that nothing owns is refused, naming the closest known one."""
 from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
 
-from localm import scopes
 from localm.inference.http_server import create_app
 
 OWNER_KEY = "owner-admin-key-subset-0123456789"
@@ -61,26 +60,28 @@ def test_the_owner_key_can_mint_any_scope(env):
     assert resp.status_code == 200, resp.text
 
 
-def test_a_near_miss_scope_warns_with_the_closest_known_scope(env):
+def test_a_misspelled_scope_is_refused_naming_the_closest_one(env):
     c, _ = env
-    resp = _mint(c, OWNER_KEY, ["modles_write"])
-    assert resp.status_code == 200, resp.text
-    warns = resp.json().get("warnings", [])
-    assert any("closest known scope" in w for w in warns), warns
+    from localm import auth
+    for wrong in (["modles_write"], ["chat", "chatt"], ["CHAT"]):
+        resp = _mint(c, OWNER_KEY, wrong)
+        assert resp.status_code == 400, resp.text
+    assert "did you mean 'chat'" in _mint(c, OWNER_KEY, ["chatt"]).text
+    assert [k["name"] for k in auth.list_keys()] == ["minter"]
 
 
-def test_a_known_scope_does_not_warn_about_being_unknown(env):
+def test_a_known_scope_mints_without_a_scope_note(env):
     c, _ = env
     resp = _mint(c, OWNER_KEY, ["rag"])
-    assert not any("closest known scope" in w or "is not a localm scope" in w
-                   for w in resp.json().get("warnings", []))
+    assert resp.status_code == 200
+    assert not any("Unknown" in w for w in resp.json().get("warnings", []))
 
 
-def test_unknown_scope_warning_names_the_closest_scope():
-    out = scopes.unknown_scope_warnings(["broswer"])
-    assert len(out) == 1 and "'browser'" in out[0]
-
-
-def test_unknown_scope_warning_skips_known_and_installed_scopes():
-    assert scopes.unknown_scope_warnings(["rag", "models:write", "myplug"],
-                                         installed={"myplug"}) == []
+def test_an_installed_plugins_scope_is_minted(env, monkeypatch):
+    c, _ = env
+    from localm.plugins.engine import PluginManager
+    assert _mint(c, OWNER_KEY, ["myplug"]).status_code == 400
+    monkeypatch.setattr(PluginManager, "installed_scopes", lambda self: {"myplug"})
+    resp = _mint(c, OWNER_KEY, ["myplug"])
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["scopes"] == ["myplug"]

@@ -141,6 +141,33 @@ def _call_key(call) -> str:
         return repr(getattr(call, "args", None))
 
 
+# Why a loosely written call was not asked about (see context._never_meant).
+_QUOTED = " and also stands in text that did not come from the user"
+_UNREAD = (" and its tool is named in text that did not come from the user and "
+           "holds more calls than are read")
+_FOREIGN = (_QUOTED, _UNREAD)
+_IN_REASONING = " and stands only in the reasoning of the reply"
+# The most lines of one tool's output a --verbose run prints.
+_PROGRESS_OUTPUT_LINES = 40
+
+
+def print_progress_tool_output(result) -> None:
+    """The summary and output of a finished tool call, on stderr, for a
+    ``--verbose`` run without a live display."""
+    from ..display import print_progress
+    print_progress(f"  {'ok' if result.ok else 'failed'}: {result.summary}")
+    output = getattr(result, "output", "")
+    lines = output.splitlines() if isinstance(output, str) else []
+    for line in lines[:_PROGRESS_OUTPUT_LINES]:
+        print_progress("    " + line)
+    if len(lines) > _PROGRESS_OUTPUT_LINES:
+        print_progress(f"    ... ({len(lines) - _PROGRESS_OUTPUT_LINES} more lines)")
+
+
+class _CaptureRefused(Exception):
+    """A change patch mode did not capture, with the reason as its text."""
+
+
 class _ExecutionMixin:
     if TYPE_CHECKING:
         # Set by Agent (core.py), which this class is mixed into.
@@ -158,6 +185,23 @@ class _ExecutionMixin:
         patch_mode: bool
         _user_declines: int
         _lenient_denials: int
+        _writing_commands: int
+        _answered_with_example: set
+        _loose_answers: dict
+        _loose_unasked: dict
+        _loose_refused: set
+        _refused_quotations: list
+        dry_run: bool
+        _files_read: set
+        _denied_unconfirmed: list
+        _consecutive_errors: dict[str, int]
+        verbose: bool
+        report_progress: bool
+        on_event: Any
+        progress_sink: Any
+
+        def _record_error(self, tool: str, output: str) -> None: ...
+
         _patch_overlay: PatchOverlay
         _patch_chunks: list[str]
 
@@ -564,6 +608,7 @@ class _ExecutionMixin:
         # Refuse a call whose arguments cannot bind to the tool's function.
         bad_args = bad_args_message(call.name, tool_def, call.args)
         if bad_args is not None:
+            self._answered_with_example.add(id(call))
             result = self._track_tool_failure(call, ToolResult.error(bad_args))
             if interactive:
                 print_tool_error(call.name, result.output)
@@ -621,7 +666,11 @@ class _ExecutionMixin:
         # pre-call snapshot _UNDOABLE_TOOLS uses.
         if self.patch_mode and call.name in _PATCH_MODE_ELIGIBLE_TOOLS:
             t_start = time.monotonic()
-            chunk = self._patch_mode_intercept(call)
+            refused = ""
+            try:
+                chunk = self._patch_mode_intercept(call)
+            except _CaptureRefused as exc:
+                chunk, refused = None, str(exc)
             duration_s = time.monotonic() - t_start
             if chunk is not None:
                 # Name the files the DIFF covers, not every path the call
@@ -640,15 +689,20 @@ class _ExecutionMixin:
                     summary=f"[patch-mode] {call.name}",
                 )
                 if interactive:
-                    console.print("    [dim cyan][patch-mode] diff captured[/dim cyan]")
+                    console.print("    [dim cyan]\\[patch-mode] diff captured[/dim cyan]")
             else:
-                result = ToolResult.error(
-                    f"[patch-mode] {call.name} cannot be captured as a diff "
-                    "(no change, or unsupported operation) - skipped. Use "
-                    "write_file/edit_file/patch_file in patch mode."
-                )
+                if refused:
+                    result = ToolResult.error(
+                        f"[patch-mode] {call.name} was not captured: {refused}")
+                else:
+                    result = ToolResult.error(
+                        f"[patch-mode] {call.name} cannot be captured as a diff "
+                        "(no change, or unsupported operation) - skipped. Use "
+                        "write_file/edit_file/patch_file in patch mode."
+                    )
+                result = self._track_tool_failure(call, result)
                 if interactive:
-                    console.print("    [dim yellow][patch-mode] skipped[/dim yellow]")
+                    console.print("    [dim yellow]\\[patch-mode] skipped[/dim yellow]")
             # A real duration: unlike the never-ran paths below,
             # _patch_mode_intercept does the diffing work, so the elapsed time is
             # a fact about this call.
@@ -662,7 +716,7 @@ class _ExecutionMixin:
                 f"[patch-mode] {call.name} writes a file that cannot be captured as "
                 "a diff - skipped. Turn patch mode off to run it.")
             if interactive:
-                console.print("    [dim yellow][patch-mode] skipped[/dim yellow]")
+                console.print("    [dim yellow]\\[patch-mode] skipped[/dim yellow]")
             # No duration_s: never reached tool_def.fn.
             self._emit("tool_result", tool=call.name, ok=False,
                        summary=f"[patch-mode] {call.name} skipped")
@@ -706,7 +760,7 @@ class _ExecutionMixin:
                 summary=f"[dry-run] {call.name}",
             )
             if interactive:
-                console.print("    [dim yellow][dry-run] skipped[/dim yellow]")
+                console.print("    [dim yellow]\\[dry-run] skipped[/dim yellow]")
             # No duration_s: skipped, never reached tool_def.fn.
             self._emit("tool_result", tool=call.name, ok=True,
                        summary=result.summary)
@@ -730,22 +784,17 @@ class _ExecutionMixin:
                            summary="blocked by network policy (net_mode=off)")
                 return result
 
-        # Project pre_tool_use hooks run before confirmation, so a call a hook
-        # blocks never reaches the prompt.
-        hook_block = self._run_pre_tool_hooks(call, interactive)
-        if hook_block is not None:
-            return hook_block
-
         # Confirmation for destructive tools (diff preview for write_file), for
         # network tools when net_mode is "ask", and for a non-mutating tool that
         # opts in via ask_by_default (see ToolDef.ask_by_default, registry.py).
         #
-        # call.lenient forces confirmation too, same as always_confirm: a call
-        # recovered only via parser.py's name-gated fallback (a bare JSON object
-        # or an unlabelled fence) never engaged the lazy-grammar trigger, so
-        # nothing constrained its content. auto_approve does not skip the human
-        # look for such a call on a destructive/network/ask-by-default tool.
-        # See ToolCall.lenient.
+        # call.lenient: a call recovered only via parser.py's name-gated fallback
+        # (a bare JSON object or an unlabelled fence) may be a quotation. The
+        # model is asked about each such call whether it meant it: a call it
+        # meant counts as normally written, an example does not run and is not
+        # asked about, and without a clear answer, or when the call also stands
+        # in text the user did not write, it needs confirmation even under
+        # auto_approve. See ToolCall.lenient and _loose_call_meant.
         #
         # isinstance-gated rather than a bare call.lenient or getattr(call,
         # "lenient", False): a ToolCall-shaped MagicMock auto-vivifies any
@@ -793,15 +842,27 @@ class _ExecutionMixin:
         )
         # net_mode "ask" asks under auto_approve too, unless waived above.
         net_ask = net_gated
-        needs_confirm = shell_unchecked or data_hit is not None or tainted or net_ask or (
-            gated and (not self.auto_approve or forced or lenient_call)
-        )
+        # A reason to confirm the call has however it is written.
+        must_confirm = (
+            shell_unchecked or data_hit is not None or tainted or net_ask
+            or (gated and (not self.auto_approve or forced)))
+        if lenient_call:
+            meant = self._loose_call_meant(call)
+            if meant is False:
+                return self._refuse_example(call, interactive)
+            if meant is True:
+                lenient_call = False
+
+        # Project pre_tool_use hooks run before confirmation, so a call a hook
+        # blocks never reaches the prompt.
+        hook_block = self._run_pre_tool_hooks(call, interactive)
+        if hook_block is not None:
+            return hook_block
+
+        needs_confirm = must_confirm or (gated and lenient_call)
         # True when the loose call format is the ONLY reason confirmation is
         # required: the same call in the <tool_call> wrapper would run.
-        lenient_only = (
-            lenient_call and gated and not shell_unchecked and data_hit is None
-            and not tainted and not net_ask and self.auto_approve and not forced
-        )
+        lenient_only = lenient_call and gated and not must_confirm
         # A session allow ("a" at an interactive prompt) never waives a
         # shell-guard verdict, a lenient call or a configured always_confirm.
         # See test_session_allow_never_waives_always_confirm_or_lenient.
@@ -831,6 +892,27 @@ class _ExecutionMixin:
             session_allowed = self._session_allowed = set()
         if needs_confirm and session_allowable and allow_key in session_allowed:
             needs_confirm = False
+        # A call certain to fail is answered, not put to a person. Never for one
+        # that reaches localm's own data: the answer quotes the file.
+        if (needs_confirm and data_hit is None
+                and call.name in ("edit_file", "edit_files")):
+            from ..tools.files import edit_call_refusal
+            doomed = edit_call_refusal(self.cwd, call.name, call.args)
+            if doomed is not None:
+                result = self._track_tool_failure(call, ToolResult.error(doomed))
+                if interactive:
+                    print_tool_error(call.name, result.output)
+                self._emit("tool_result", tool=call.name, ok=False,
+                           summary="not run: the call cannot succeed")
+                return result
+        unasked = self._loose_unasked.get(id(call), "")
+        if needs_confirm and lenient_call and unasked in _FOREIGN and self._refused_already(call):
+            self._loose_refused.add(id(call))
+            self._emit("tool_result", tool=call.name, ok=False,
+                       summary="not run: refused already in this task")
+            return ToolResult.error(
+                f"{call.name} was not run: this call was refused already in this task, "
+                "and it is not asked about again. Go on without it.")
         if needs_confirm and data_hit is not None:
             note = (f"{call.name} reaches {data_hit}, so it needs your approval "
                     "for this exact call.")
@@ -839,7 +921,8 @@ class _ExecutionMixin:
             self._emit("info", text=note)
             self._audit.notice("data_guard_confirm", note)
         if needs_confirm and lenient_call and gated and can_ask:
-            note = (f"{call.name} was not written in the <tool_call> format, so "
+            note = (f"{call.name} was not written in the <tool_call> format"
+                    + unasked + ", so "
                     "it is asked about as an exact approval"
                     + (", even with auto-approve on" if lenient_only else "")
                     + " and cannot be always-allowed.")
@@ -889,22 +972,35 @@ class _ExecutionMixin:
                         "run is non-interactive with no approval handler - denied.")
                     reason = "untrusted-content"
                 elif lenient_only:
-                    result = ToolResult.error(
-                        f"{call.name} requires confirmation: the call was not "
-                        "written in the <tool_call> format, and a loosely "
-                        "formatted call needs a confirmation this "
-                        "non-interactive run cannot give - denied. Re-emit it "
-                        "with the same arguments, exactly as\n"
+                    again = (
+                        "Re-emit it with the same arguments, exactly as\n"
                         '<tool_call>\n{"name": "' + call.name + '", "args": '
                         "{...}}\n</tool_call>\nand it will run.")
+                    if unasked in _FOREIGN:
+                        again = (
+                            "Do not try to get it done another way: go on with the "
+                            "request, and say in your answer, without writing the "
+                            "call out, that it was not run. If the user asked for "
+                            "it, say that it needs the user's approval.")
+                    result = ToolResult.error(
+                        f"{call.name} requires confirmation: the call was not "
+                        f"written in the <tool_call> format{unasked}, and a loosely "
+                        "formatted call needs a confirmation this "
+                        f"non-interactive run cannot give - denied. {again}")
                     reason = "lenient"
                     self._lenient_denials += 1
+                    self._loose_refused.add(id(call))
                 else:
                     result = ToolResult.error(
                         f"{call.name} requires confirmation, but this run is "
-                        "non-interactive with no approval handler - denied. Run "
-                        "interactively, or use the restricted coder for unattended runs.")
+                        "non-interactive with no approval handler - denied. "
+                        f"{call.name} is denied every time in this run, so do not "
+                        "call it again: continue without it, and say in your "
+                        "final answer what could not be done. (The user can run "
+                        "interactively, or use the restricted coder for "
+                        "unattended runs.)")
                     reason = "unconfirmable"
+                self._remember_refusal(call)
                 with self._denied_lock:
                     self._denied_unconfirmed.append((call.name, _call_key(call), reason))
                 self._audit.notice("confirmation_denied", result.output)
@@ -916,6 +1012,7 @@ class _ExecutionMixin:
                 unanswered = consume_unanswered()
                 if not unanswered:
                     self._user_declines += 1
+                self._remember_refusal(call, asked_again=unanswered)
                 if unanswered:
                     err_msg = (
                         f"{call.name} was not run: nobody answered the approval "
@@ -960,15 +1057,15 @@ class _ExecutionMixin:
                     "call_id": undo_call_id,
                 })
 
-        # Episodic change-detection baseline: snapshot the git work-tree state just
-        # before the FIRST run_shell, pre-execution, so a mutating shell command's
-        # writes (git apply, a formatter, codegen) can be attributed to this session
-        # at close - the write-tool tracker never sees them. Captured before the
-        # shell runs so the shell's own changes are the delta rather than part of
-        # the baseline. Episodic sessions only.
-        if (call.name in _SHELL_EXEC_TOOLS and self._episodic
-                and not self._shell_baseline_captured):
+        # Change-detection baseline: snapshot the git work-tree state just before
+        # the FIRST run_shell, pre-execution, so a mutating shell command's writes
+        # (git apply, a formatter, codegen) can be attributed to this session - the
+        # write-tool tracker never sees them. Captured before the shell runs so the
+        # shell's own changes are the delta rather than part of the baseline. Read
+        # by the session record and the close-time episode.
+        if call.name in _SHELL_EXEC_TOOLS and not self._shell_baseline_captured:
             self._shell_baseline_captured = True
+            self._writing_commands = 0
             self._git_baseline = self._git_status_paths()
 
         # Inject hidden runtime args into specific tools, AFTER the copy so a
@@ -1039,10 +1136,16 @@ class _ExecutionMixin:
 
         if snapshots and not result.ok:
             self._drop_unchanged_undo_entries(undo_call_id)
+        if call.name in _SHELL_EXEC_TOOLS:
+            from .loop import _may_write_files
+            if _may_write_files(call, self.cwd):
+                self._writing_commands += 1
+        elif call.name == "read_file" and result.ok:
+            self._files_read.add(str(call.args.get("path", "")).replace("\\", "/"))
 
         result = self._run_post_tool_hooks(call, result, interactive)
         result = self._track_tool_failure(call, result)
-        if result.ok and self._denied_unconfirmed:
+        if self._denied_unconfirmed:
             key = _call_key(call)
             with self._denied_lock:
                 self._denied_unconfirmed[:] = [
@@ -1055,6 +1158,9 @@ class _ExecutionMixin:
                 call.name, result, verbose=self.verbose,
                 elapsed=duration_s, args=call.args,
             )
+        elif (self.verbose and self.report_progress and self.on_event is None
+              and self.progress_sink is None):
+            print_progress_tool_output(result)
         self._emit("tool_result", tool=call.name, ok=result.ok,
                    summary=result.summary, output=_event_output(result.output),
                    duration_s=duration_s)
@@ -1065,6 +1171,62 @@ class _ExecutionMixin:
 
         self._post_tool_success(call, result, snapshots)
 
+        return result
+
+    def _remember_refusal(self, call: ToolCall, asked_again: bool = False) -> None:
+        """A call that also stands in foreign text was refused: it did not run,
+        and unless it may be *asked_again* it stays refused for this task."""
+        if self._loose_unasked.get(id(call)) not in _FOREIGN:
+            return
+        self._loose_refused.add(id(call))
+        if not asked_again:
+            self._refused_quotations.append(call)
+
+    def _refused_already(self, call: ToolCall) -> bool:
+        from .context import same_call
+        return any(same_call(call, other) for other in self._refused_quotations)
+
+    def _loose_calls_to_check(self, calls: list) -> list:
+        """The loosely written calls of *calls* the model is asked about before
+        one of them runs or is offered: those that can need a confirmation.
+        Calls that only read, and calls plan mode, patch mode or dry-run takes
+        instead of running them, are left out."""
+        found = []
+        for call in calls:
+            tool_def = _agent.TOOL_REGISTRY.get(call.name)
+            if not isinstance(call, ToolCall) or not call.lenient or tool_def is None:
+                continue
+            runs_code = getattr(tool_def, "executes_project_code", False) is True
+            if self.patch_mode and call.name in _PATCH_MODE_ELIGIBLE_TOOLS:
+                continue
+            if self.plan_mode and plan_mode_refusal(call.name, tool_def) is not None:
+                continue
+            if self.dry_run and (tool_def.destructive or runs_code):
+                continue
+            if (tool_def.destructive or tool_def.ask_by_default or runs_code
+                    or call.name in _NETWORK_TOOLS
+                    or self._data_guard_verdict(call) is not None):
+                found.append(call)
+        return found
+
+    def _loose_call_meant(self, call: ToolCall) -> Optional[bool]:
+        """The model's answer on whether *call*, a loosely written call of the
+        reply being executed, was meant to run: True, or False for an example.
+        None when it gave neither answer or was not asked about this call."""
+        return self._loose_answers.get(id(call))
+
+    def _refuse_example(self, call: ToolCall, interactive: bool) -> ToolResult:
+        """The result of a loosely written call the model called an example."""
+        self._loose_refused.add(id(call))
+        result = ToolResult.error(
+            f"{call.name} was not run: you said it was an example, not a call. If "
+            "it should run after all, write it as\n"
+            '<tool_call>\n{"name": "' + call.name + '", "args": {...}}\n</tool_call>')
+        self._audit.notice("loose_call_example", result.output)
+        if interactive:
+            print_info(f"  ({call.name} was not run: the model called it an example)")
+        self._emit("tool_result", tool=call.name, ok=False,
+                   summary="not run: an example, not a call")
         return result
 
     def _drop_unchanged_undo_entries(self, call_id: int) -> None:
@@ -1348,6 +1510,16 @@ class _ExecutionMixin:
         # Track consecutive failures and inject escalating recovery hints;
         # at 4 identical failures the circuit breaker stops the task after
         # this batch (checked in _loop).
+        if not result.ok and call.name == "run_tests" and str(
+                result.summary).startswith("tests failed"):
+            # The tests ran: their failures are this call's answer. Repeating it
+            # with nothing changed still counts (_post_tool_success clears it).
+            self._record_error(call.name, result.output)
+            streak = self._consecutive_errors.get(call.name, 0) + 1
+            self._consecutive_errors[call.name] = streak
+            if streak >= 4:
+                self._abort_streak_tool = call.name
+            return result
         if not result.ok:
             # Record the ORIGINAL error, before the hint augmentation below, into
             # the bounded session error trace that feeds the close-time episode
@@ -1394,6 +1566,11 @@ class _ExecutionMixin:
         # Self-verification bookkeeping: remember code files changed on disk,
         # forget them once the agent runs the test suite (or a test command)
         if result.ok and not self.dry_run and not self.patch_mode:
+            if call.name in _MUTATING_TOOLS:
+                # A changed file makes the next run of the tests or a command a
+                # different attempt.
+                for name in (*_SHELL_EXEC_TOOLS, "run_tests"):
+                    self._consecutive_errors.pop(name, None)
             if call.name in _UNDOABLE_TOOLS:
                 for path_arg, snapshot_old in snapshots.items():
                     self._record_changed_file(path_arg, snapshot_old, call.name)
@@ -1438,6 +1615,9 @@ class _ExecutionMixin:
 
         Returns the diff this call alone contributed (used to name the files it
         covered), or None when the call changes nothing or cannot be captured.
+        Raises :class:`_CaptureRefused` with the reason for a change the tool
+        itself would refuse, such as a hunk that does not apply: nothing of it
+        enters the patch.
         The patch handed to the user is built from the overlay, one diff per
         file, so repeated edits of one file stay applicable.
         """
@@ -1464,9 +1644,8 @@ class _ExecutionMixin:
             from .._patch import apply_diff, PatchError
             try:
                 new_text = apply_diff(old_text, diff)
-            except PatchError:
-                self._patch_chunks.append(diff)
-                return diff
+            except PatchError as e:
+                raise _CaptureRefused(str(e)) from e
         else:
             new_text = resolve_new_content(call.name, call.args, old_text)
         if new_text is None or new_text == old_text:
@@ -1480,7 +1659,7 @@ class _ExecutionMixin:
         from ..tools.files import plan_edit_files
         plan = plan_edit_files(self.cwd, edits, read=self._patch_overlay.read)
         if isinstance(plan, str):
-            return None
+            raise _CaptureRefused(plan)
         return self._capture_changes(
             [(plan.labels[p], plan.after[p]) for p in plan.targets])
 

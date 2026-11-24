@@ -408,7 +408,8 @@ def test_second_rung_binds_the_forcing_grammar_from_the_first_token(tmp_path):
     agent = _make_agent(tmp_path)
     agent._force_tool_grammar = True
     kw = agent._llm_kwargs()
-    assert kw["grammar"] == TOOL_CALLS_AFTER_THINK
+    assert kw["grammar"].startswith("root ::= opt-think")
+    assert "<tool_call>" in kw["grammar"]
     assert "grammar_triggers" not in kw
     assert not kw.get("grammar_lazy")
 

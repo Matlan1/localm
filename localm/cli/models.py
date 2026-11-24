@@ -720,7 +720,9 @@ def spec_drafts(model):
               help="Expected SHA256 hex digest (direct-URL, HF single-GGUF and CivitAI pulls; "
                    "refused for full-repo snapshots). Download is deleted on mismatch.")
 @click.option("--redownload", is_flag=True,
-              help="Download even when an identical model is already registered.")
+              help="Download even when an identical model is already registered or the "
+                   "file is already there; it is replaced once the new one is complete "
+                   "and verified. Refused while a model from another source uses that file.")
 @click.option("--mmproj", default=None, metavar="FILE",
               help="Download an associated mmproj file alongside the main model.")
 @click.option("--type", default="auto",

@@ -197,10 +197,9 @@ class TestUrlPull:
 
     def test_range_not_satisfiable_resets_and_retries(self, url_env, monkeypatch):
         models, _ = url_env
-        # Every byte landed but the rename never ran: the next Range starts at
-        # the end of the file.
+        # No known size, and a 416 that does not say the file ends there.
         _interrupt_pull(monkeypatch, models, "http://example.com/model.gguf",
-                        10, b"0123456789")
+                        0, b"0123456789")
         calls = []
         on_disk_at_retry = []
 
@@ -208,7 +207,7 @@ class TestUrlPull:
             if method == "HEAD":
                 h = MagicMock()
                 h.status_code = 200
-                h.headers = {"content-length": "10"}
+                h.headers = {}
                 return h
             calls.append(dict(kwargs.get("headers") or {}))
             if len(calls) == 1:
@@ -229,9 +228,12 @@ class TestUrlPull:
     def test_already_downloaded_skips_network(self, url_env, monkeypatch):
         models, _ = url_env
         (models / "model.gguf").write_bytes(b"already here")
+        entry = {"path": str((models / "model.gguf").resolve()), "model_type": "llm",
+                 "source": "http://example.com/model.gguf"}
+        monkeypatch.setattr(mm, "load_registry", lambda: {"mymodel": entry})
         pin_spy = MagicMock()
         monkeypatch.setattr("localm.netpolicy.pinned_request", pin_spy)
-        mm._pull_url("http://example.com/model.gguf", "mymodel")
+        assert mm._pull_url("http://example.com/model.gguf", "mymodel") is True
         pin_spy.assert_not_called()
 
 
@@ -529,9 +531,12 @@ class TestUrlPullResult:
         _wire_http(monkeypatch, 10, _resp(200, b"0123456789"))
         assert mm._pull_url("http://example.com/model.gguf", "m") is True
 
-    def test_already_downloaded_returns_true(self, url_env):
+    def test_already_downloaded_returns_true(self, url_env, monkeypatch):
         models, _ = url_env
         (models / "model.gguf").write_bytes(b"already here")
+        entry = {"path": str((models / "model.gguf").resolve()), "model_type": "llm",
+                 "source": "http://example.com/model.gguf"}
+        monkeypatch.setattr(mm, "load_registry", lambda: {"m": entry})
         assert mm._pull_url("http://example.com/model.gguf", "m") is True
 
     def test_empty_stem_url_returns_false(self, url_env, monkeypatch):

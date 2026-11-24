@@ -292,7 +292,7 @@ def test_code_left_unwritten_after_the_nudge_is_reported_not_finished(tmp_path):
     (tmp_path / "calc.py").write_text("# calc\n", encoding="utf-8")
     agent = _make_agent(tmp_path, max_turns=8)
     with _scripted(agent, [_call("read_file", {"path": "calc.py"}),
-                           _CODE_REPLY, _CODE_REPLY + "\nDone."]):
+                           _CODE_REPLY, _CODE_REPLY + "\nDone.", _CODE_REPLY]):
         result = agent.run_task("implement add and sub in calc.py")
     assert "[not finished: nothing was written to any file" in result
     assert agent.last_run_ok is False

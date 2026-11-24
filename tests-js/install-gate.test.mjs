@@ -94,6 +94,7 @@ test("show/dismiss: gate covers the app, Continue reveals it and remembers", asy
   window.dismissInstallGate();
   assert.equal(app.style.display, "", "app revealed on Continue");
   assert.equal(gateEls(window).gate.style.display, "none", "gate hidden");
+  await drain();
   assert.equal(window.localStorage.getItem("localm.onboarded"), "1");
 });
 

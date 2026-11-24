@@ -98,24 +98,22 @@ def is_valid_scope(scope: str, *, extra: set[str] | None = None) -> bool:
     return scope.replace("-", "_").isidentifier()
 
 
-def unknown_scope_warnings(scope_list, installed=()) -> list[str]:
-    """Warnings for each scope in *scope_list* that is a bare identifier but
-    neither a kernel/first-party scope nor one of the *installed* plugin scopes.
-    Each names the closest known scope. Such a key grants nothing today and is
-    inherited by any plugin installed later under that name."""
+def unknown_scope_refusal(scope_list, installed=()) -> str | None:
+    """Why a key must not be minted with *scope_list*, or None when every scope
+    in it is localm's own or one of the *installed* plugin scopes. Names each
+    unknown scope with the closest known one."""
     import difflib
     known = all_known_scopes() | set(installed or ())
-    out: list[str] = []
+    named: list[str] = []
     for sc in normalize(scope_list or ()):
-        if sc in known or not is_valid_scope(sc):
+        if sc in known:
             continue
         close = difflib.get_close_matches(sc, sorted(known), n=1, cutoff=0.6)
-        hint = f"; closest known scope: '{close[0]}'" if close else ""
-        out.append(
-            f"scope '{sc}' is not a localm scope or an installed plugin's scope"
-            f"{hint}. It grants nothing now, and a plugin installed later "
-            f"under that name would inherit it.")
-    return out
+        named.append(f"{sc} (did you mean '{close[0]}'?)" if close else sc)
+    if not named:
+        return None
+    return (f"Unknown scope(s): {', '.join(named)}. A key can hold localm's own "
+            "scopes and those of installed plugins.")
 
 
 def grants(held: set[str], required: str) -> bool:
