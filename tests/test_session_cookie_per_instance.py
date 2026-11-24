@@ -690,7 +690,7 @@ def test_a_login_whose_earlier_session_cannot_be_ended_is_refused(
     with monkeypatch.context() as m:
         _unreadable(m)
         r = browser.req("POST", "/api/session", json={"key": limited["key"]})
-    assert r.status_code == 503 and "not signed in" in r.json()["detail"]
+    assert r.status_code == 503 and "earlier login" in r.json()["detail"]
     assert browser.jar == jar
     assert sessions.sessions_file().read_text(encoding="utf-8") == rows
     browser.login(limited["key"])
