@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from localm import procs
+
 from . import pins
 
 MARKER = "localm-koboldcpp.json"
@@ -274,8 +276,9 @@ def _unpack(binary: Path, staging: Path, tmp: Path,
         kwargs["start_new_session"] = True
     try:
         with open(log, "w", encoding="utf-8", errors="replace") as out:
-            proc = subprocess.Popen(
-                [str(binary), "--unpack", str(staging)], cwd=str(tmp),
+            proc = procs.start(
+                [str(binary), "--unpack", str(staging)],
+                purpose="koboldcpp unpack", cwd=str(tmp),
                 env=_private_temp_env(tmp), stdin=subprocess.DEVNULL,
                 stdout=out, stderr=subprocess.STDOUT, **kwargs)
             deadline = time.monotonic() + UNPACK_TIMEOUT

@@ -39,6 +39,9 @@ class _Job:
         self.pushed = []
         self.progressed = []
 
+    def raise_if_cancelled(self):
+        pass
+
     def push(self, event):
         self.pushed.append(event)
 

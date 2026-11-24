@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from localm import netpolicy
+from localm import netpolicy, procs
 from localm.http_ssl import verified_urlopen
 from localm.pathsafe import confined_under, is_unc_or_device_path
 
@@ -2563,7 +2563,7 @@ def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
     else:
         _popen_kw["start_new_session"] = True
     try:
-        proc = subprocess.Popen(argv, cwd=workdir,
+        proc = procs.start(argv, purpose="comfyui", cwd=workdir,
                          env=comfy_child_env(cfg),
                          stdout=launch_out,
                          stderr=subprocess.STDOUT,

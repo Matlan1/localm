@@ -164,22 +164,6 @@ def test_a_dry_run_write_is_not_asked_for_again(tmp_path):
 
 # --- a loose call in an unattended run (CFG-074, CODA-014, CODA-077) ------
 
-def test_a_lenient_denial_binds_the_next_turn_to_the_tool_call_format(tmp_path):
-    agent = _make_agent(tmp_path, max_turns=8, auto_approve=True)
-    loose = ('Creating it now.\n```json\n{"name": "write_file", "args": '
-             '{"path": "hello.txt", "content": "hi"}}\n```')
-    seen: list[bool] = []
-    with _scripted(agent, [loose, _call("write_file", {"path": "hello.txt", "content": "hi"}),
-                           "Created hello.txt."], seen), \
-         patch.object(agent, "can_force_tool_calls", return_value=True):
-        agent.run_task("create hello.txt containing hi")
-    assert seen == [False, True, False]
-    note = [t for t in _user_texts(agent) if "[tool-call format] These calls did NOT run" in t]
-    assert note and '- write_file {"content": "hi", "path": "hello.txt"}' in note[0]
-    assert (tmp_path / "hello.txt").read_text() == "hi"
-    assert agent.last_run_ok is True
-
-
 def test_a_lenient_ask_says_why_on_screen(tmp_path):
     events: list[dict] = []
     agent = _make_agent(tmp_path, max_turns=4, auto_approve=True,

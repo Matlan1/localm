@@ -23,7 +23,7 @@ import requests
 
 from localm import model_manager as mm
 from localm.model_manager import pending_pulls
-from localm.model_manager.pull import PullInFlight, _partial_owner_path
+from localm.model_manager.pull import PullInFlight, _partial_owner_path, _REPO_FOLDER_STAGING
 from tests._process_identity import spawn_on_this_tree, this_pid_space
 
 URL = "http://host1.example/tiny.gguf"
@@ -712,7 +712,7 @@ class TestGuiRoutes:
         downloads = TestSecondPullOfOneHfFile()._fakes(monkeypatch, dead_pid)
         child = subprocess.Popen(
             [sys.executable, "-I", "-c", textwrap.dedent(HOLD_A_HF_LOCK),
-             str(home), "tiny-Q4.gguf"],
+             str(home / _REPO_FOLDER_STAGING), "tiny-Q4.gguf"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             assert child.stdout.readline().strip() == "HOLDING", child.stderr.read()
@@ -1319,7 +1319,7 @@ class TestSecondPullOfOneHfFile:
         downloads = self._fakes(monkeypatch, dead_pid)
         child = subprocess.Popen(
             [sys.executable, "-I", "-c", __import__("textwrap").dedent(HOLD_A_HF_LOCK),
-             str(home), "tiny-Q4.gguf"],
+             str(home / _REPO_FOLDER_STAGING), "tiny-Q4.gguf"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             assert child.stdout.readline().strip() == "HOLDING", child.stderr.read()
@@ -1344,12 +1344,12 @@ class TestSecondPullOfOneHfFile:
                             lambda *a: False)
         child = subprocess.Popen(
             [sys.executable, "-I", "-c", textwrap.dedent(HOLD_A_HF_LOCK),
-             str(home), "tiny-Q4.gguf"],
+             str(home / _REPO_FOLDER_STAGING), "tiny-Q4.gguf"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             assert child.stdout.readline().strip() == "HOLDING", child.stderr.read()
-            running = _hf_temp(home, "tiny-Q4.gguf", "etag1", b"r" * 500, child.pid,
-                               process_start_identity(child.pid))
+            running = _hf_temp(home / _REPO_FOLDER_STAGING, "tiny-Q4.gguf", "etag1", b"r" * 500,
+                               child.pid, process_start_identity(child.pid))
 
             def stopped(repo_id, filename, local_dir, **kw):
                 downloads.append(filename)

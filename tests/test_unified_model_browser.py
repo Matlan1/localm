@@ -293,7 +293,7 @@ def test_pull_type_forwarding(temp_registry, monkeypatch):
     _, models_dir, _ = temp_registry
     
     # Mock HF snapshots / GGUF download to just call register
-    monkeypatch.setattr(mm.pull, "_pull_url", lambda url, name, expected_sha256=None, redownload=False, model_type="llm", type_user_set=False: 
+    monkeypatch.setattr(mm.pull, "_pull_url", lambda url, name, model_type="llm", type_user_set=False, **_kwargs:
         mm._register(name, models_dir / "url_model.gguf", url, model_type=model_type, type_user_set=type_user_set)
     )
 

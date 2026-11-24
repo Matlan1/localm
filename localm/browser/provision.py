@@ -18,6 +18,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -177,12 +178,14 @@ def download_allowed() -> bool:
     return network_mode() != "off" or downloads_allowed_when_off()
 
 
-def _stream_install(cmd: list, *, on_progress: ProgressCb,
-                    timeout: int) -> tuple[Optional[int], list]:
+def _stream_install(cmd: list, *, on_progress: ProgressCb, timeout: int,
+                    should_cancel: Optional[Callable[[], bool]] = None,
+                    kill: Callable[[subprocess.Popen], None] = subprocess.Popen.kill,
+                    ) -> tuple[Optional[int], list]:
     """Run *cmd*, streaming its combined output to *on_progress* as each line
     arrives. Returns ``(returncode, lines)``; returncode is None only when the
-    process was killed after *timeout* (the timeout itself is then the last
-    entry in *lines*).
+    process was killed, with *kill*, after *timeout* or because *should_cancel*
+    returned True (the reason is then the last entry in *lines*).
 
     Same shape as managed_comfy_provision._run: a background reader thread
     does the line I/O while this thread enforces the timeout via
@@ -209,20 +212,32 @@ def _stream_install(cmd: list, *, on_progress: ProgressCb,
 
     reader = threading.Thread(target=_read_stdout, daemon=True)
     reader.start()
-    try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        reader.join(timeout=5)
-        lines.append(f"(installer timed out after {timeout}s and was killed)")
-        return None, lines
+    deadline = time.monotonic() + timeout
+    while proc.poll() is None:
+        stop = ""
+        if should_cancel is not None and should_cancel():
+            stop = "(the download was cancelled)"
+        elif time.monotonic() >= deadline:
+            stop = f"(installer timed out after {timeout}s and was killed)"
+        if stop:
+            kill(proc)
+            proc.wait()
+            reader.join(timeout=5)
+            lines.append(stop)
+            return None, lines
+        try:
+            proc.wait(timeout=0.25)
+        except subprocess.TimeoutExpired:
+            pass
     reader.join(timeout=5)
     return proc.returncode, lines
 
 
 def install_chromium(*, force: bool = False,
-                     on_progress: ProgressCb = None) -> ProvisionResult:
+                     on_progress: ProgressCb = None,
+                     should_cancel: Optional[Callable[[], bool]] = None,
+                     kill: Callable[[subprocess.Popen], None] = subprocess.Popen.kill,
+                     ) -> ProvisionResult:
     """Download the Chromium build via ``python -m playwright install
     chromium``, in THIS interpreter's venv, honestly reporting whether it
     actually worked.
@@ -240,6 +255,8 @@ def install_chromium(*, force: bool = False,
     ``localm.inference.embedder``, ``localm.model_manager.pull``) - rather
     than letting playwright's own downloader attempt the fetch and surface a
     raw Node stack trace for what is, from here, a policy refusal.
+
+    The installer is killed, with *kill*, once *should_cancel* returns True.
 
     *force* is passed through as playwright's own ``--force``. NOTE this
     makes playwright remove the existing build BEFORE it redownloads, so a
@@ -277,14 +294,17 @@ def install_chromium(*, force: bool = False,
         cmd.append("--force")
     try:
         returncode, lines = _stream_install(
-            cmd, on_progress=on_progress, timeout=_INSTALL_TIMEOUT_S)
+            cmd, on_progress=on_progress, timeout=_INSTALL_TIMEOUT_S,
+            should_cancel=should_cancel, kill=kill)
     except OSError as e:
         return ProvisionResult(
             ok=False, message=f"Could not start the playwright installer: {e}")
 
     now_installed = is_chromium_installed()
     if returncode != 0 or not now_installed:
-        if returncode is None:
+        if returncode is None and should_cancel is not None and should_cancel():
+            reason = "the download was cancelled"
+        elif returncode is None:
             reason = f"the installer did not finish within {_INSTALL_TIMEOUT_S}s"
         elif returncode != 0:
             reason = f"the installer exited with code {returncode}"

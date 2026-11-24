@@ -245,7 +245,7 @@ class TestFirstKeyDoesNotLockTheLocalBrowserOut:
         assert r.status_code == 200, r.text
         assert auth.any_key_configured() is True
         from localm.inference.http_server import SESSION_COOKIE
-        assert SESSION_COOKIE in r.cookies, (
+        assert any(n.startswith(SESSION_COOKIE) for n in r.cookies), (
             "no cookie means the browser that just set the key is now locked out")
         # And it is a REAL owner session, not merely a cookie-shaped string.
         assert c.get("/api/session").json()["authed"] is True
@@ -260,7 +260,7 @@ class TestFirstKeyDoesNotLockTheLocalBrowserOut:
 
         assert r.status_code == 200, r.text
         from localm.inference.http_server import SESSION_COOKIE
-        assert SESSION_COOKIE not in r.cookies
+        assert not any(n.startswith(SESSION_COOKIE) for n in r.cookies)
 
     def test_open_mode_without_local_proof_is_refused(self):
         """The ADMIN dependency cannot gate open mode: ``_enforce_request``

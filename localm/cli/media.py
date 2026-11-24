@@ -27,13 +27,15 @@ def _open_file(path: Path) -> None:
     import subprocess as _sp
 
     from rich.markup import escape
+
+    from localm import procs
     try:
         if sys.platform == "win32":
-            _os.startfile(str(path))  # type: ignore[attr-defined]
+            procs.open_for_user(_os.startfile, str(path))  # type: ignore[attr-defined]
         elif sys.platform == "darwin":
-            _sp.Popen(["open", str(path)])
+            procs.open_for_user(_sp.Popen, ["open", str(path)])
         else:
-            _sp.Popen(["xdg-open", str(path)])
+            procs.open_for_user(_sp.Popen, ["xdg-open", str(path)])
     except Exception as e:
         console.print(f"[dim]Could not open it automatically: {escape(str(e))}[/dim]")
 

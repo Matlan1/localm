@@ -38,6 +38,7 @@ def two_names_one_file(monkeypatch):
         downloads.append(dest.name)
         dest.write_bytes(b"new projector bytes")
         pull._record_mmproj_origin(dest, repo_id, remote_name, "ab" * 32)
+        return dest
 
     monkeypatch.setattr(pull, "_hf_repo_files",
                         lambda repo_id: ["model-Q4_K_M.gguf", "mmproj-F16.gguf"])

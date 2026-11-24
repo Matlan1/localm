@@ -460,6 +460,37 @@ class Agent(
         # work tree.
         self._shell_baseline_captured: bool = False
         self._git_baseline: Optional[frozenset] = None
+        # For the session record: shell commands run since the baseline above
+        # that may have written files, and the paths read_file read this run.
+        self._writing_commands: int = 0
+        self._files_read: set[str] = set()
+        # What the model answered about each loosely written call of the reply
+        # being executed, and why one was not asked about, by id of the call;
+        # empty outside a reply (see execution._loose_call_meant).
+        self._loose_answers: dict[int, Optional[bool]] = {}
+        self._loose_unasked: dict[int, str] = {}
+        # Ids of the calls of that reply that were refused for their format or as
+        # an example.
+        self._loose_refused: set[int] = set()
+        # The calls of this task that also stand in foreign text and were refused.
+        self._refused_quotations: list = []
+        # Calls that stand in text that did not come from the user: tool -> the
+        # arguments of each, and whether some text held more than were read (see
+        # context._note_foreign_text).
+        self._foreign_calls: dict[str, list] = {}
+        self._foreign_unread: set[str] = set()
+        self._foreign_read: list[dict] = []
+        # Ids of the calls of the reply being executed that localm answered
+        # itself with an example call.
+        self._answered_with_example: set[int] = set()
+        # The user's own words in the message that is added next.
+        self._typed_now = ""
+        # Tools a forced turn may not name (see context._forced_call_grammar);
+        # set and cleared with _force_tool_grammar.
+        self._force_not: frozenset = frozenset()
+        # The reply limit of the rest of this run when a call was cut off at
+        # the default one (see loop._raise_reply_limit); None leaves it alone.
+        self._reply_limit: Optional[int] = None
         # Mid-task steering: messages queued (possibly from another thread)
         # while the loop runs, delivered at the next turn boundary.
         self._queued_messages: list[str] = []

@@ -153,6 +153,24 @@ def test_create_key_rejects_unknown_scope(auth):
         auth.create_key("x", ["bad scope"])
 
 
+def test_create_key_refuses_a_misspelled_scope_and_mints_nothing(auth):
+    with pytest.raises(ValueError, match="chatt .did you mean 'chat'"):
+        auth.create_key("x", ["chatt"])
+    assert auth.list_keys() == []
+
+
+def test_create_key_takes_an_installed_plugins_scope(auth):
+    with pytest.raises(ValueError):
+        auth.create_key("x", ["myplug"])
+    assert auth.create_key("x", ["myplug"], plugin_scopes={"myplug"})["scopes"] == ["myplug"]
+
+
+def test_key_hash_of_is_the_stored_hash(auth):
+    made = auth.create_key("x", ["chat"])
+    assert auth.key_hash_of(made["id"]) == auth._hash_key(made["key"])
+    assert auth.key_hash_of("nope") is None
+
+
 def test_any_key_configured(auth):
     assert auth.any_key_configured() is False
     auth.create_key("k", ["chat"])
@@ -1328,7 +1346,9 @@ def test_a_failed_last_used_stamp_is_logged_not_raised(auth, monkeypatch, caplog
 def test_create_key_names_every_refused_scope(auth):
     with pytest.raises(ValueError) as bad:
         auth.create_key("n", ["bad one", "bad two"])
-    assert str(bad.value) == "Unknown scope(s): bad one, bad two"
+    assert str(bad.value) == (
+        "Unknown scope(s): bad one, bad two. A key can hold localm's own scopes "
+        "and those of installed plugins.")
     with pytest.raises(PermissionError) as priv:
         auth.create_key("n", ["admin", "config:write"])
     assert str(priv.value) == (

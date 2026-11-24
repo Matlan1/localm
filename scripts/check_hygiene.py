@@ -1332,7 +1332,8 @@ def _child_process_console_print_violations() -> list[str]:
 # unit under localm/ in exactly one of them. A module-level import may target
 # only a unit in a LOWER tier. Units that share a tier are peers and do not
 # import each other at module level. The package's own __init__ sits below every
-# tier. Function-local imports are not counted, as in check 7.
+# tier; it may import only _ROOT_IMPORT, which then imports nothing of localm.
+# Function-local imports are not counted, as in check 7.
 #
 # A tier carries exactly the keys name, role and units. An unknown key, a
 # repeated tier name, a unit placed twice, a placed unit that is not on disk and
@@ -1340,6 +1341,7 @@ def _child_process_console_print_violations() -> list[str]:
 
 _LAYERING_MAP = "docs/layering.toml"
 _LAYERING_TIER_KEYS = {"name", "role", "units"}
+_ROOT_IMPORT = "procs"
 
 
 def _layering_tiers(text: str) -> tuple[list[tuple[str, list[str]]], list[str]]:
@@ -1464,6 +1466,12 @@ def _import_direction_violations(tracked: list[Path] | None = None) -> list[str]
         for v, loc in sorted(edges[u].items()):
             if v == "<unparseable>":
                 problems.append(f"could not parse {loc}")
+                continue
+            if u == "<root>" and v == _ROOT_IMPORT:
+                for w, at in sorted(edges.get(v, {}).items()):
+                    problems.append(
+                        f"{v}, which the package root imports, imports {w} ({at}); it "
+                        "runs before anything else of localm and imports none of it")
                 continue
             if v == "<root>":
                 continue

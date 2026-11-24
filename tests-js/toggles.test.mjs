@@ -75,6 +75,7 @@ test("R34: toggling persists the choice across loads", async () => {
   const web = w.document.getElementById("p-web");
   web.checked = true;
   web.dispatchEvent(new w.Event("change"));
+  await drain();
   assert.equal(w.localStorage.getItem("localm.webAccess"), "1", "the choice was persisted");
 });
 

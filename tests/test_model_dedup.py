@@ -227,11 +227,9 @@ class TestAddLocalDedup:
 
     def test_move_registry_update_is_atomic_on_failure(
             self, fake_registry, tmp_path, monkeypatch):
-        """A move updates the registry in ONE atomic write. When that write
-        fails after the file is physically moved, the registry is left FULLY
-        pre-move, never half-updated with the pre-existing alias repointed and
-        the new name missing. The file still lands under MODELS_DIR, where a
-        launch-time sync_models_dir recovers it."""
+        """When the registry write of a move fails, the file is back where it was
+        and the registry is FULLY pre-move, never half-updated with the
+        pre-existing alias repointed and the new name missing."""
         store, models_dir = fake_registry
         f = _file(tmp_path, "m.gguf")
         mm.add_local(str(f), "first", on_duplicate="register")   # 'first' -> external f
@@ -241,13 +239,9 @@ class TestAddLocalDedup:
             raise RuntimeError("registry write failed mid-move")
         monkeypatch.setattr(mm, "update_registry", _boom)
 
-        with pytest.raises(RuntimeError):
-            mm.add_local(str(f), "moved", on_duplicate="move")
+        assert mm.add_local(str(f), "moved", on_duplicate="move") is False
 
-        # The file DID move (it must land under MODELS_DIR so sync can recover it).
-        assert (models_dir / "m.gguf").is_file()
-        # But the registry is fully pre-move: no partial 'first'-repointed state,
-        # and 'moved' was never added.
+        assert f.is_file() and list(models_dir.iterdir()) == []
         assert store == before
         assert "moved" not in store
 

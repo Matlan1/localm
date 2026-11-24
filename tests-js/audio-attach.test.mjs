@@ -293,7 +293,7 @@ test("style.css gives a player bubble a floor width that never exceeds its row",
 
 test("a clip with no typed text still sends, as the audio part alone", async () => {
   const { window, fetchCalls } = setup();
-  const conv = { id: "c1", title: "t", messages: [] };
+  const conv = { id: "c1", title: "New chat", messages: [] };
   activate(window, conv);
   await attachWav(window, wavFile(window, "memo.mp3", "audio/mpeg"));
   await sendText(window, "");

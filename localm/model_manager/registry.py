@@ -15,7 +15,9 @@ import sys
 import time
 import zipfile
 import zlib
+from contextlib import ExitStack
 from contextlib import contextmanager
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -31,6 +33,7 @@ from ..config import REGISTRY_FILE
 from ..config import load_config
 from ..config import update_config
 from ..debuglog import logger
+from . import placing
 from ._shared import _emit_progress
 from ._shared import _verify_digest
 from ._shared import console
@@ -2048,11 +2051,30 @@ def is_external_path(path) -> bool:
     user referenced from elsewhere (e.g. a shared drive), vs one localm downloaded
     into MODELS_DIR. External models can go 'missing' when their real location
     moves, and are the case `localm relocate` re-points."""
+    return library_path(path) is None
+
+
+def library_path(path) -> Optional[Path]:
+    """The path of *path* inside the models folder, or None when it lies outside.
+    The folder is recognised by identity, so a path that reaches it another way
+    (a ``\\\\?\\`` prefix, a bind mount, a second mount of one volume) is inside
+    too and is returned as its path under MODELS_DIR. A link inside the models
+    folder is kept as it is, not replaced by what it points to."""
     try:
-        Path(path).resolve().relative_to(_mm.MODELS_DIR.resolve())
-        return False
-    except (ValueError, OSError):
-        return True
+        given = _under_models_dir(logical_model_path(Path(path)))
+        return given if _under_models_dir(Path(path).resolve()) is not None else None
+    except (OSError, ValueError):
+        return None
+
+
+def _under_models_dir(p: Path) -> Optional[Path]:
+    root = _mm.MODELS_DIR.resolve()
+    if p.is_relative_to(root):
+        return p
+    for folder in (p, *p.parents):
+        if placing.same_file(folder, root):
+            return root / p.relative_to(folder)
+    return None
 
 
 def model_is_external(name: str) -> bool:
@@ -2272,20 +2294,53 @@ def names_same_model(a: str, b: str, reg: Optional[dict] = None) -> bool:
 
 
 def find_aliases_by_path(path: Path, reg: Optional[dict] = None) -> list[str]:
-    """Registered names whose path resolves to the same file/dir as *path*."""
+    """Registered names whose path reaches the same file/dir as *path*."""
     reg = reg if reg is not None else _mm.load_registry()
-    target = str(Path(path).resolve())
+    target = Path(path).resolve()
     out: list[str] = []
     for name, info in reg.items():
         epath = _entry_path(info)   # skip a malformed sibling entry, never crash
         if epath is None:
             continue
         try:
-            if str(Path(epath).resolve()) == target:
+            if _reaches(Path(epath), target):
                 out.append(name)
         except OSError:
             continue
     return sorted(out)
+
+
+def _reaches(path: Path, target: Path) -> bool:
+    """True when *path* resolves to *target* (already resolved), or both are the
+    same name in the same folder."""
+    resolved = path.resolve()
+    return str(resolved) == str(target) or placing.same_entry(resolved, target)
+
+
+def names_using_projector(path: Path, reg: Optional[dict] = None) -> list[str]:
+    """Registered names that record the file *path* as their projector."""
+    reg = reg if reg is not None else _mm.load_registry()
+    target = Path(path).resolve()
+    out: list[str] = []
+    for name, info in reg.items():
+        epath = _entry_path(info, "mmproj")
+        if epath is None:
+            continue
+        try:
+            if _reaches(Path(epath), target):
+                out.append(name)
+        except OSError:
+            continue
+    return sorted(out)
+
+
+def model_owners(path: Path, reg: Optional[dict] = None) -> list[str]:
+    """Registered names whose model is the file *path*, or has it as one of the
+    parts of its split GGUF."""
+    reg = reg if reg is not None else _mm.load_registry()
+    path = Path(path)
+    first = path.with_name(first_split_part(path.name))
+    return sorted({*find_aliases_by_path(path, reg), *find_aliases_by_path(first, reg)})
 
 
 
@@ -2950,6 +3005,79 @@ def _import_max_depth() -> int:
 
 
 
+# The marker a full-repo pull keeps in its folder until the folder is registered.
+SNAPSHOT_CLAIM = ".localm-revision.json"
+
+
+def _in_unfinished_pull(path: Path) -> bool:
+    """True when *path* (a file or folder under the models folder) is, or lies in,
+    a folder a full-repo pull has not finished: it still holds
+    :data:`SNAPSHOT_CLAIM`, so its files may be missing or unverified."""
+    root = _mm.MODELS_DIR
+    for folder in (path, *path.parents):
+        if folder == root:
+            return False
+        if (folder / SNAPSHOT_CLAIM).is_file():
+            return True
+    return False
+
+
+def _put_back_replacements() -> None:
+    """Put right what pulls that were killed while replacing files left in the models
+    folder or in a model folder in it (:func:`placing.put_back`), unless a pull of
+    these names is running. Never raises."""
+    from .pull import PullInFlight
+    for found in placing.unfinished(replacement_records()):
+        try:
+            with suppress(PullInFlight):
+                _put_back_replacement(found)
+        except OSError as e:
+            logger.warning("could not check the replacement noted in %s: %s", found.record, e)
+
+
+def _put_back_replacement(found: placing.Unfinished) -> bool:
+    """:func:`placing.put_back` for what *found* places, under the locks of a pull of it.
+    Raises PullInFlight when one is held."""
+    from .pull import _part_lock, _snapshot_dest_lock
+    if found.folder is None:
+        return False
+    with ExitStack() as locks:
+        if found.folder:
+            locks.enter_context(_snapshot_dest_lock(found.folder))
+        else:
+            for name in found.names:
+                locks.enter_context(_part_lock(name))
+        return placing.put_back(_mm.MODELS_DIR, replacement_records(), found.folder, found.names)
+
+
+def _removal_refused(target: Path) -> Optional[str]:
+    """Why the model *target*, a file or folder in the models folder, must not be deleted
+    now, or None: what an interrupted pull was replacing there is put right first."""
+    from .pull import _NOT_PUT_BACK, PullInFlight
+    found = placing.unfinished(replacement_records())
+    if any(u.folder is None for u in found):
+        return _NOT_PUT_BACK
+    parts = split_gguf_parts(target.name) or [target.name]
+    for u in placing.matching(found, "", parts) + placing.matching(found, target.name):
+        if target.parent != _mm.MODELS_DIR.resolve() or u.folder and not target.is_dir():
+            continue
+        try:
+            if not _put_back_replacement(u):
+                return _NOT_PUT_BACK
+        except PullInFlight as e:
+            return str(e)
+    return None
+
+
+def _being_replaced(path: Path) -> bool:
+    """True when a pull is replacing the file *path* (or a file in the model folder
+    *path*), or was stopped while it did and that could not be put right yet. Its name
+    may be without a file for now."""
+    here = os.path.normcase(str(path.parent.resolve() / path.name))
+    return any(here in (p, os.path.dirname(p)) for p in placing.being_replaced(
+        _mm.MODELS_DIR.resolve(), replacement_records()))
+
+
 def sync_models_dir(prune: Optional[bool] = None, *,
                      backfill_mmproj: bool = True) -> ModelSyncResult:
     """Reconcile the registry with the models directory.
@@ -2962,6 +3090,8 @@ def sync_models_dir(prune: Optional[bool] = None, *,
     directory as one model without looking inside it. A GGUF whose mtime is too
     fresh (may still be mid-copy) is skipped for this call and picked up on a
     later one, once it has been quiet for a bit - see ``_gguf_recently_written``.
+    A folder a full-repo pull has not finished (``_in_unfinished_pull``) is left to
+    that pull.
 
     Registry entries whose file has gone missing are, by default, **flagged**
     (``"missing": true``) rather than deleted, so a temporarily-unavailable model
@@ -2982,6 +3112,7 @@ def sync_models_dir(prune: Optional[bool] = None, *,
         prune = bool(load_config().get("autoprune_missing_models", False))
 
     _mm.ensure_dirs()
+    _put_back_replacements()
     reg = _mm.load_registry()
 
     known = set()
@@ -3005,7 +3136,7 @@ def sync_models_dir(prune: Optional[bool] = None, *,
         for child in hf_dirs:
             try:
                 resolved = str(child.resolve())
-                if resolved in known:
+                if resolved in known or _in_unfinished_pull(child) or _being_replaced(child):
                     continue
                 mtype, _gmeta = _detect_local_model_type(child, is_gguf=False, is_hf=True)
                 _mm._register(_unique_registry_name(reg, child.name), child,
@@ -3019,7 +3150,7 @@ def sync_models_dir(prune: Optional[bool] = None, *,
         for child in gguf_first_parts:
             try:
                 resolved = str(child.resolve())
-                if resolved in known:
+                if resolved in known or _in_unfinished_pull(child) or _being_replaced(child):
                     continue
                 # Skip a file that is not actually a GGUF (foreign file renamed
                 # .gguf, an empty/partial copy): registering it would pollute the
@@ -3075,10 +3206,7 @@ def sync_models_dir(prune: Optional[bool] = None, *,
     backfilled = 0
     retyped = 0
     cap_backfilled = 0
-    mmproj_backfilled = 0
-    mmproj_attempts = 0    # network round-trips spent this call (cap input);
-                            # mmproj_backfilled counts only real SUCCESSES -
-                            # see the increment site below
+    mmproj_wanted: list[tuple[str, dict, Path]] = []    # (name, entry, path)
     note = ""
     backed_up = False
     # Architecture/expert_count backfill: an entry registered before those
@@ -3107,7 +3235,7 @@ def sync_models_dir(prune: Optional[bool] = None, *,
 
     def _reconcile(reg: dict) -> None:
         nonlocal flagged, restored, pruned, note, backed_up, backfilled, retyped
-        nonlocal mmproj_backfilled, mmproj_attempts, cap_backfilled
+        nonlocal cap_backfilled
 
         # Managed models = those whose file lives under the models folder.
         managed = [
@@ -3188,9 +3316,8 @@ def sync_models_dir(prune: Optional[bool] = None, *,
                 # carries. Cheap candidacy check first (mmproj_backfill_candidate,
                 # no I/O) so the cap is spent only on entries that could
                 # possibly qualify.
-                if backfill_mmproj and mmproj_attempts < _MMPROJ_BACKFILL_CAP:
-                    from localm.model_manager.pull import (
-                        backfill_mmproj_for_entry, mmproj_backfill_candidate)
+                if backfill_mmproj and len(mmproj_wanted) < _MMPROJ_BACKFILL_CAP:
+                    from localm.model_manager.pull import mmproj_backfill_candidate
                     if mmproj_backfill_candidate(entry, path):
                         from localm.netpolicy import (
                             downloads_allowed_when_off, network_mode)
@@ -3201,38 +3328,15 @@ def sync_models_dir(prune: Optional[bool] = None, *,
                             # chat-time surface is vision_input_guidance, which
                             # names net_mode when the user tries to use the
                             # feature and finds it still missing. Not counted
-                            # against mmproj_attempts: it costs no network
-                            # round-trip, so it must not starve the budget the
-                            # cap protects.
+                            # against the cap: it costs no network round-trip.
                             net_blocked_mmproj.append(name)
                         else:
-                            mmproj_attempts += 1
-                            found = backfill_mmproj_for_entry(entry, path, reg)
-                            if found is not None:
-                                # found's own path already passed
-                                # _safe_models_filename inside
-                                # _maybe_fetch_repo_mmproj several call-frames
-                                # away (pull.py) - re-verified locally, at the
-                                # point this HF-repo-derived path is actually
-                                # written into the registry. Same
-                                # resolve-then-compare idiom as
-                                # is_owned_model_path above; a raw string prefix
-                                # check would wrongly accept a sibling directory
-                                # like <dir>-evil.
-                                resolved = found.resolve()
-                                if resolved.parent == path.resolve().parent:
-                                    # Only a genuine attach counts as
-                                    # "backfilled" - a repo that was checked
-                                    # and genuinely has no projector (found is
-                                    # None) must NOT count: nothing was
-                                    # written, and ModelSyncResult.changed
-                                    # must not fire for a no-op reconciliation
-                                    # pass.
-                                    entry["mmproj"] = str(resolved)
-                                    mmproj_backfilled += 1
+                            mmproj_wanted.append((name, dict(entry), path))
                 continue
 
             # File is gone.
+            if _being_replaced(path) or path.exists():
+                continue
             if prune and not suspicious and _under_models_dir(path):
                 if not backed_up:
                     # Snapshot the registry before the first deletion so the
@@ -3255,6 +3359,7 @@ def sync_models_dir(prune: Optional[bool] = None, *,
             )
 
     _mm.update_registry(_reconcile)
+    mmproj_backfilled = sum(_backfill_projector(*wanted) for wanted in mmproj_wanted)
 
     if net_blocked_mmproj:
         # Precise per constraint: which model(s), that the projector is
@@ -3278,6 +3383,32 @@ def sync_models_dir(prune: Optional[bool] = None, *,
     )
 
 
+
+
+def _backfill_projector(name: str, entry: dict, path: Path) -> bool:
+    """Fetch the projector *entry* (registered as *name*, its file *path*) lacks
+    and record it. True only when one was attached. Runs without the registry
+    lock; the registry is updated only once the file is there."""
+    from localm.model_manager.pull import backfill_mmproj_for_entry
+    found = backfill_mmproj_for_entry(entry, path)
+    if found is None:
+        return False
+    # Re-verified where the HF-repo-derived path is written into the registry:
+    # resolve-then-compare, as in is_owned_model_path.
+    resolved = found.resolve()
+    if resolved.parent != path.resolve().parent:
+        return False
+    attached = False
+
+    def _attach(reg: dict) -> None:
+        nonlocal attached
+        current = reg.get(name)
+        if (isinstance(current, dict) and current.get("path") == entry.get("path")
+                and not current.get("mmproj")):
+            current["mmproj"] = str(resolved)
+            attached = True
+    _mm.update_registry(_attach)
+    return attached
 
 
 def _same_volume(a: Path, b: Path) -> bool:
@@ -3497,55 +3628,71 @@ def _projector_dest(src: Path, taken: set) -> tuple:
                        f"{_mm.MODELS_DIR} is taken by a different file")
 
 
-def _repoint_projector_references(moved: dict) -> None:
-    """Point every registry entry whose ``path`` or ``mmproj`` names a projector
-    that was just moved at its new location, in one atomic registry update.
+def _repoint_references(moved: dict) -> None:
+    """Point every registry entry whose ``path`` or ``mmproj`` resolves to a file
+    or folder that was brought into the models folder at its new location, in one
+    atomic registry update. An entry that loses its place this way keeps every
+    other key.
 
-    *moved* maps ``os.path.normcase`` of a projector's old resolved path to its
-    new resolved path. Prints the names of the entries it changed.
-    """
+    *moved* maps an old resolved path to the new resolved path. Prints the names
+    of the entries it changed."""
     from rich.markup import escape
 
-    repointed: list[str] = []
+    paths: list[str] = []
+    projectors: list[str] = []
 
     def _repoint(reg: dict) -> None:
-        repointed.clear()
+        paths.clear()
+        projectors.clear()
         for entry_name, entry in reg.items():
             if not isinstance(entry, dict):
                 continue
-            for field in ("path", "mmproj"):
-                value = entry.get(field)
-                if isinstance(value, str) and os.path.normcase(value) in moved:
-                    entry[field] = moved[os.path.normcase(value)]
-                    repointed.append(entry_name)
+            for field, changed in (("path", paths), ("mmproj", projectors)):
+                value = _entry_path(entry, field)
+                if value is None:
+                    continue
+                try:
+                    new = next((n for old, n in moved.items() if _reaches(Path(value), old)),
+                               None)
+                except OSError:
+                    continue
+                if new is not None and value != new:
+                    entry[field] = new
+                    changed.append(entry_name)
 
     _mm.update_registry(_repoint)
-    if repointed:
-        # repointed: registry names, not restricted to a safe charset.
-        names = ", ".join(escape(n) for n in dict.fromkeys(repointed))
-        console.print(f"[dim]Updated the projector path recorded for {names}.[/dim]")
+    # entry names: not restricted to a safe charset.
+    for changed, what in ((paths, "path"), (projectors, "projector path")):
+        if changed:
+            names = ", ".join(escape(n) for n in dict.fromkeys(changed))
+            console.print(f"[dim]Updated the {what} recorded for {names}.[/dim]")
 
 
-def _remove_partial_dir(dest: Path) -> str:
-    """Remove *dest*, a directory a failed transfer left behind. Returns ``""``
-    when it is gone, else a sentence saying it could not be removed (also
+def _remove_partial(dest: Path) -> str:
+    """Remove *dest*, a file or directory a failed transfer left behind. Returns
+    ``""`` when it is gone, else a sentence saying it could not be removed (also
     logged)."""
+    what = "folder" if dest.is_dir() else "file"
     try:
-        shutil.rmtree(dest)
+        if dest.is_dir():
+            shutil.rmtree(dest)
+        else:
+            dest.unlink()
     except FileNotFoundError:
         return ""
     except OSError as e:
-        logger.warning("_transfer_model_dir: could not remove the partial folder %s: %s",
-                       dest, e)
-        return f" The partial folder {dest} could not be removed ({e}); delete it by hand."
+        logger.warning("could not remove the partial %s %s: %s", what, dest, e)
+        return f" The partial {what} {dest} could not be removed ({e}); delete it by hand."
     return ""
 
 
-def _verify_dir_copy(src: Path, dest: Path) -> Optional[str]:
-    """Compare the file tree under *src* with the copy under *dest*: the same
-    relative paths, the same sizes and the same SHA-256 per file. None when
-    they match, else a sentence naming the first difference."""
-    src_files = sorted(f.relative_to(src) for f in src.rglob("*") if f.is_file())
+def _verify_dir_copy(src: Path, dest: Path,
+                     left_out: "Callable[[str], bool]" = lambda rel: False) -> Optional[str]:
+    """Compare the file tree under *src*, without the files *left_out* names, with the
+    copy under *dest*: the same relative paths, the same sizes and the same SHA-256 per
+    file. None when they match, else a sentence naming the first difference."""
+    src_files = sorted(f.relative_to(src) for f in src.rglob("*") if f.is_file()
+                       and not left_out(f.relative_to(src).as_posix()))
     dest_files = sorted(f.relative_to(dest) for f in dest.rglob("*") if f.is_file())
     if src_files != dest_files:
         missing = sorted(set(src_files) - set(dest_files))
@@ -3562,46 +3709,6 @@ def _verify_dir_copy(src: Path, dest: Path) -> Optional[str]:
     return None
 
 
-def _repoint_directory_references(old: Path, new: Path) -> None:
-    """Point every registry entry whose ``path`` resolves to the directory *old*,
-    which was just moved to *new*, at *new*, in one atomic registry update.
-    Prints the names of the entries it changed. Never raises: a registry that
-    cannot be updated is logged and printed, and the entries keep naming *old*."""
-    from rich.markup import escape
-
-    target = os.path.normcase(str(old.resolve()))
-    new_path = str(new.resolve())
-    repointed: list[str] = []
-
-    def _repoint(reg: dict) -> None:
-        repointed.clear()
-        for entry_name, entry in reg.items():
-            value = _entry_path(entry)
-            if value is None:
-                continue
-            try:
-                if os.path.normcase(str(Path(value).resolve())) == target:
-                    entry["path"] = new_path
-                    repointed.append(entry_name)
-            except OSError:
-                continue
-
-    try:
-        _mm.update_registry(_repoint)
-    except Exception as e:  # noqa: BLE001 - reported below, the move itself succeeded
-        logger.warning("_repoint_directory_references: could not update the registry "
-                       "entries recording %s: %s", old, e)
-        console.print(
-            f"[yellow]The folder is now at {escape(str(new))}, but the registry entries "
-            f"that record {escape(str(old))} could not be updated: {escape(str(e))}. "
-            "They still name the old location.[/yellow]")
-        return
-    if repointed:
-        # repointed: registry names, not restricted to a safe charset.
-        names = ", ".join(escape(n) for n in repointed)
-        console.print(f"[dim]Updated the path recorded for {names}.[/dim]")
-
-
 _TRANSFER_TEMP_RE = re.compile(
     re.escape(TRANSFER_TEMP_PREFIX) + r".+\.(?P<pid>\d+)\.[0-9a-f]{8}")
 _RENAME_ATTEMPTS = 5
@@ -3609,16 +3716,16 @@ _RENAME_RETRY_SECONDS = 0.25
 
 
 def _remove_stale_transfer_folders() -> None:
-    """Remove the temporary folders (``TRANSFER_TEMP_PREFIX`` names directly under
-    ``MODELS_DIR``) that an import left behind when its process ended before
-    finishing. A folder whose process is alive, or that a registry entry names,
-    is left alone. Never raises."""
+    """Remove the temporary folders and files (``TRANSFER_TEMP_PREFIX`` names
+    directly under ``MODELS_DIR``) that an import left behind when its process
+    ended before finishing. One whose process is alive, or that a registry entry
+    names, is left alone. Never raises."""
     from localm.instances import pid_alive
     from rich.markup import escape
 
     try:
         candidates = [d for d in _mm.MODELS_DIR.iterdir()
-                      if d.is_dir() and not d.is_symlink()
+                      if (d.is_dir() or d.is_file()) and not d.is_symlink()
                       and (m := _TRANSFER_TEMP_RE.fullmatch(d.name)) is not None
                       and not pid_alive(int(m.group("pid")))]
     except (OSError, OverflowError) as e:
@@ -3641,8 +3748,9 @@ def _remove_stale_transfer_folders() -> None:
                 continue
         except OSError:
             continue
-        if not _remove_partial_dir(folder):
-            console.print("[dim]Removed a half-copied folder an interrupted import left "
+        what = "folder" if folder.is_dir() else "file"
+        if not _remove_partial(folder):
+            console.print(f"[dim]Removed a half-copied {what} an interrupted import left "
                           f"behind: {escape(folder.name)}[/dim]")
 
 
@@ -3657,7 +3765,7 @@ def _rename_into_place(temp: Path, dest: Path, action: str, source: Path) -> Opt
         if dest.exists():
             break
         try:
-            os.rename(temp, dest)
+            placing.put_new(temp, dest)
             return None
         except PermissionError as e:
             last = e
@@ -3673,35 +3781,360 @@ def _rename_into_place(temp: Path, dest: Path, action: str, source: Path) -> Opt
     return f"Cannot {action} {source} into {_mm.MODELS_DIR}: {last}."
 
 
-def _transfer_model_dir(path: Path, dest: Path, action: str) -> None:
-    """Copy or move the directory *path* to *dest*, which must not exist.
+class _Placed(NamedTuple):
+    """One file or folder an add brought into the models folder, or found there.
+
+    ``how`` is ``"link"`` (a second name for the same file, made by this add),
+    ``"rename"``, ``"copy"``, or ``"present"`` (the file was there before).
+    ``removes_source`` is True when finishing a move has to delete ``src``.
+    ``unit`` is the model the file belongs to, as its path in the models folder.
+    ``stamp`` identifies what this add put at ``dest``."""
+    src: Path
+    dest: Path
+    how: str
+    removes_source: bool
+    unit: Path
+    stamp: "tuple | None"
+
+
+def replacement_records() -> Path:
+    """Where :func:`placing.place_files` keeps its records."""
+    return _mm.MODELS_DIR.parent / "locks" / "replacing"
+
+
+class _Placement:
+    """What one add or import brings into the models folder, until it is settled.
+
+    :meth:`place_file` and :meth:`place_dir` put a file or folder at its
+    destination without taking anything away from the source while that can be
+    avoided: a move inside one volume makes a second name (a hard link) for the
+    file and the old name is removed only when the move is finished. Where links
+    do not work the file is renamed, and a move to another volume copies it. A
+    copy is written under a ``TRANSFER_TEMP_PREFIX`` name, hashed against the
+    source and only then renamed, so a half-written file never has a model's name.
+
+    A file that is already at its destination is used when it is the same file or
+    has the same content, and is never counted as placed: an undo leaves it, and
+    only a second name of the same file is taken away from the source. Every name
+    is locked (the pull lock of that file name) from the moment it is looked at
+    until the placement is settled, so two adds, or an add and a pull, of one name
+    do not see each other's unfinished work.
+
+    A name is deleted only through :func:`placing.drop_name`, which proves first that the
+    file is kept.
+
+    :meth:`repoint` makes registry entries that named a moved file name its new
+    place. :meth:`commit` finishes the moves and :meth:`rollback` puts everything
+    back; :meth:`settle` does one or the other per model, by what the registry
+    records: a model that is registered at its new place is kept, any other is put
+    back where it was (a copy is removed). Put the settle call in a ``finally``,
+    so an interrupt or an error settles too."""
+
+    def __init__(self) -> None:
+        self._placed: list[_Placed] = []
+        self._moved: dict = {}
+        self._locks = ExitStack()
+        self._locked: set = set()
+        self._held: dict = {}
+
+    def lock(self, name: str) -> None:
+        """Lock the file name *name* in the models folder until this placement is
+        settled. Raises RuntimeError when another add or pull holds it."""
+        from .pull import PullInFlight, _holds_part_lock, _part_lock
+        _refuse_reserved(name)
+        if name.casefold() in self._locked or _holds_part_lock(name):
+            return
+        try:
+            self._locks.enter_context(_part_lock(name))
+        except PullInFlight as e:
+            raise RuntimeError(f"Cannot bring in {name}: another localm is downloading or "
+                               f"importing a file of that name. {e}") from e
+        self._locked.add(name.casefold())
+
+    def held(self, src: Path, dest: Path) -> Optional[str]:
+        """What is at *dest* for the file *src*: None (nothing), ``"here"`` (the same
+        name in the same folder), ``"link"`` (a second name of the same file),
+        ``"same"`` (a byte-identical file), else ``"other"``."""
+        key = (str(src), str(dest))
+        if not os.path.lexists(dest):
+            self._held.pop(key, None)
+            return None
+        if key not in self._held:
+            self._held[key] = _what_is_at(src, dest)
+        return self._held[key]
+
+    def place_file(self, src: Path, dest: Path, mode: str, unit: Path,
+                   follow: bool = False) -> None:
+        """Bring the file *src* to *dest* (*mode* ``"copy"`` or ``"move"``).
+        *follow* makes :meth:`repoint` follow a copy too; a move is always
+        followed. Raises RuntimeError, with nothing changed, when it cannot."""
+        self.lock(dest.name)
+        old = src.resolve()
+        state = self.held(src, dest)
+        if state in ("here", "other"):
+            raise RuntimeError(f"Cannot {mode}: {dest} already exists")
+        if state is not None:
+            how, removes = "present", mode == "move" and state == "link"
+        else:
+            how = self._transfer(src, dest, mode)
+            removes = mode == "move" and how != "rename"
+        if mode == "move" or follow:
+            self._moved[old] = str(dest.resolve())
+        self._placed.append(_Placed(src, dest, how, removes, unit, placing.stamp(dest)))
+
+    def _transfer(self, src: Path, dest: Path, mode: str) -> str:
+        if mode == "move":
+            if not src.is_symlink():
+                try:
+                    placing.second_name(src, dest)
+                    return "link"
+                except FileExistsError:
+                    raise RuntimeError(f"Cannot move: {dest} already exists") from None
+                except OSError as e:
+                    logger.debug("cannot link %s to %s (%s); renaming it", src, dest, e)
+            try:
+                placing.put_new(src, dest)
+                return "rename"
+            except FileExistsError:
+                raise RuntimeError(f"Cannot move: {dest} already exists") from None
+            except OSError as e:
+                logger.debug("cannot rename %s to %s (%s); copying it", src, dest, e)
+        _copy_verified(src, dest, mode)
+        return "copy"
+
+    def place_dir(self, src: Path, dest: Path, action: str, follow: bool = False) -> None:
+        """Bring the directory *src* to *dest*; see :func:`_transfer_model_dir`."""
+        _refuse_reserved(dest.name)
+        old = src.resolve()
+        renamed = _transfer_model_dir(src, dest, action)
+        if action == "move" or follow:
+            self._moved[old] = str(dest.resolve())
+        self._placed.append(_Placed(src, dest, "rename" if renamed else "copy",
+                                    action == "move" and not renamed, dest, placing.stamp(dest)))
+
+    def repoint(self) -> None:
+        """Point the registry entries that named a moved file or folder at its new
+        place. Raises when the registry cannot be updated."""
+        if self._moved:
+            _repoint_references(self._moved)
+
+    def _take(self, keep: "Callable[[_Placed], bool]") -> "tuple[list, list]":
+        kept = [p for p in self._placed if keep(p)]
+        dropped = [p for p in self._placed if not keep(p)]
+        self._placed = []
+        return kept, dropped
+
+    def _release(self) -> None:
+        self._locks.close()
+        self._locked.clear()
+        self._held.clear()
+
+    def commit(self) -> None:
+        """Finish every move: delete the source of each file that was linked or
+        copied. A source that cannot be deleted is reported and left."""
+        try:
+            self._finish(self._take(lambda p: True)[0])
+        finally:
+            self._release()
+
+    def rollback(self) -> None:
+        """Put everything back where it was; see :meth:`settle`."""
+        try:
+            self._undo(self._take(lambda p: False)[1])
+        finally:
+            self._release()
+
+    def settle(self) -> None:
+        """Finish the models the registry records at their new place and put the
+        others back. A projector that travelled with a model is kept with it, or
+        when an entry records it."""
+        try:
+            if self._placed:
+                self._settle()
+        finally:
+            self._release()
+
+    def _settle(self) -> None:
+        from .. import config
+        if config._read_json_state(config.REGISTRY_FILE, {})[1] == config.READ_UNREADABLE:
+            from rich.markup import escape
+            logger.warning("the model registry could not be read; %s stay where they are",
+                           ", ".join(str(p.dest) for p in self._placed))
+            console.print("[yellow]The model registry could not be read, so nothing was put "
+                          "back. In the models folder now: "
+                          f"{escape(', '.join(p.dest.name for p in self._placed))}[/yellow]")
+            self._placed = []
+            return
+        used: set = set()
+        for entry in _mm.load_registry().values():
+            for field in ("path", "mmproj"):
+                value = _entry_path(entry, field)
+                if value is None:
+                    continue
+                try:
+                    used.add(os.path.normcase(str(Path(value).resolve())))
+                except OSError:
+                    continue
+
+        def _used(p: Path) -> bool:
+            return os.path.normcase(str(p.resolve())) in used
+
+        kept, dropped = self._take(lambda p: _used(p.unit) or _used(p.dest))
+        self._finish(kept)
+        self._undo(dropped, some_kept=bool(kept))
+
+    def _finish(self, placed: "list[_Placed]") -> None:
+        from rich.markup import escape
+        for p in placed:
+            if not p.removes_source or not os.path.lexists(p.src):
+                continue
+            try:
+                _remove_moved_source(p)
+            except OSError as e:
+                logger.warning("could not remove %s after moving it to %s: %s",
+                               p.src, p.dest, e)
+                console.print(
+                    f"[yellow]{escape(str(p.src))} is now in the models folder as "
+                    f"{escape(str(p.dest))}, but the original could not be fully "
+                    f"removed: {escape(str(e))}[/yellow]")
+
+    def _undo(self, placed: "list[_Placed]", some_kept: bool = False) -> None:
+        from rich.markup import escape
+        moved_back = False
+        failed = some_kept
+        for p in reversed(placed):
+            if p.how == "present":
+                continue
+            try:
+                _take_back(p)
+            except OSError as e:
+                logger.warning("could not put %s back to %s: %s", p.dest, p.src, e)
+                if os.path.lexists(p.src):
+                    console.print(f"[yellow]{escape(str(p.src))} is where it was, but "
+                                  f"{escape(str(p.dest))} could not be removed: "
+                                  f"{escape(str(e))}[/yellow]")
+                else:
+                    console.print(f"[yellow]{escape(str(p.src))} could not be put back "
+                                  f"({escape(str(e))}); it is at {escape(str(p.dest))}."
+                                  "[/yellow]")
+                failed = True
+                continue
+            moved_back = moved_back or p.how == "rename" or p.removes_source
+        if moved_back and not failed:
+            console.print("[dim]Nothing was moved: every file is where it was.[/dim]")
+
+
+def _refuse_reserved(name: str) -> None:
+    if placing.reserved_in_models(name):
+        raise RuntimeError(f"Cannot bring in {name}: localm keeps its own data under such a "
+                           "name in the models folder. Rename it first.")
+
+
+def _what_is_at(src: Path, dest: Path) -> str:
+    """See :meth:`_Placement.held`, for a *dest* that exists."""
+    if placing.same_entry(src, dest):
+        return "here"
+    if not src.is_file() or not dest.is_file():
+        return "other"
+    if placing.same_file(src, dest):
+        return "link"
+    purpose = "to compare it with the file already in the models folder"
+    try:
+        if (src.stat().st_size == dest.stat().st_size
+                and _verify_digest(dest, purpose=purpose) == _verify_digest(src, purpose=purpose)):
+            return "same"
+    except OSError as e:
+        logger.debug("cannot compare %s with %s: %s", src, dest, e)
+    return "other"
+
+
+def _remove_moved_source(p: _Placed) -> None:
+    """Delete the source of the finished move *p*, once its destination is proven
+    to hold the file. Raises OSError, with the source left, when it does not."""
+    if p.src.is_dir() and not p.src.is_symlink():
+        if (not p.dest.is_dir() or placing.stamp(p.dest) != p.stamp
+                or placing.same_file(p.src, p.dest)):
+            raise OSError(f"{p.dest} does not hold the folder")
+        shutil.rmtree(p.src)
+    elif p.how == "copy":
+        if placing.stamp(p.dest) != p.stamp:
+            raise OSError(f"{p.dest} is not the file that was put there")
+        placing.drop_name(p.src, p.dest, copy=True)
+    else:
+        placing.drop_name(p.src, p.dest)
+
+
+def _take_back(p: _Placed) -> None:
+    """Undo what *p* put in the models folder. Raises OSError, with both places
+    left as they are, when the destination is not what was put there, or the
+    source would not hold the file afterwards."""
+    if not os.path.lexists(p.dest) and os.path.lexists(p.src):
+        return
+    if placing.stamp(p.dest) != p.stamp:
+        raise OSError(f"{p.dest} is not the file that was put there")
+    if p.how == "rename":
+        placing.put_new(p.dest, p.src)
+    elif p.dest.is_dir() and not p.dest.is_symlink():
+        if not p.src.is_dir() or placing.same_file(p.src, p.dest):
+            raise FileNotFoundError(f"{p.src} is gone")
+        shutil.rmtree(p.dest)
+    else:
+        placing.drop_name(p.dest, p.src, copy=p.how != "link")
+
+
+def _copy_verified(src: Path, dest: Path, mode: str) -> None:
+    """Copy the file *src* to *dest*, which must not exist, through a temporary
+    name beside it, and compare the two by SHA-256 before it gets its own name.
+    Raises RuntimeError, with nothing left behind and *src* untouched, when the
+    copy fails or differs. See
+    test_an_interrupted_copy_leaves_no_file_a_scan_would_register."""
+    _remove_stale_transfer_folders()
+    temp = dest.with_name(
+        f"{TRANSFER_TEMP_PREFIX}{dest.name}.{os.getpid()}.{secrets.token_hex(4)}")
+    failure: Optional[str] = None
+    try:
+        before = _verify_digest(src, purpose="to check the source before copying")
+        shutil.copy2(src, temp)
+        after = _verify_digest(temp, purpose="to confirm the copy")
+        if after != before:
+            failure = (f"Copy verification failed for {src.name}: sha256 mismatch "
+                       f"after copy to {dest} (source left untouched, bad copy removed)")
+        else:
+            failure = _rename_into_place(temp, dest, mode, src)
+    except OSError as e:
+        failure = f"Cannot {mode} {src} into {_mm.MODELS_DIR}: {e}."
+    except BaseException:
+        _remove_partial(temp)
+        raise
+    if failure is not None:
+        raise RuntimeError(failure + _remove_partial(temp))
+
+
+def _transfer_model_dir(path: Path, dest: Path, action: str) -> bool:
+    """Copy or move the directory *path* to *dest*, which must not exist. A copy leaves
+    out what has a :func:`placing.reserved` name; a move takes every file along.
 
     A move renames when it can. Otherwise the tree is copied into a temporary
     folder this call creates beside *dest* (``TRANSFER_TEMP_PREFIX`` name), checked
     against the source (:func:`_verify_dir_copy`), and only then renamed to *dest*,
     so *dest* never holds a partial model and a *dest* created by another import
-    meanwhile is never replaced or removed. A move then removes the source; one
-    that cannot be fully removed is reported while *dest* stays. Registry entries
-    that named a moved directory are pointed at *dest*. Temporary folders left by
-    an import whose process is gone are removed first.
+    meanwhile is never replaced or removed. Temporary folders left by an import
+    whose process is gone are removed first.
 
-    Raises RuntimeError, after removing the temporary folder it created, when the
-    transfer, its verification or the rename into place fails; the source is
-    untouched in that case. An interrupt (KeyboardInterrupt) removes the
+    Returns True when *path* was renamed, False when it was copied and is still
+    there. Raises RuntimeError, after removing the temporary folder it created,
+    when the transfer, its verification or the rename into place fails; the source
+    is untouched in that case. An interrupt (KeyboardInterrupt) removes the
     temporary folder too and propagates."""
-    from rich.markup import escape
-
-    old_resolved = path.resolve()
     _remove_stale_transfer_folders()
     if action == "move":
         try:
-            os.rename(path, dest)
+            placing.put_new(path, dest)
         except OSError:
             if dest.exists():
                 raise RuntimeError(f"Cannot {action}: {dest} already exists") from None
         else:
-            _repoint_directory_references(old_resolved, dest)
-            return
+            return True
     temp = dest.with_name(
         f"{TRANSFER_TEMP_PREFIX}{dest.name}.{os.getpid()}.{secrets.token_hex(4)}")
     try:
@@ -3709,8 +4142,10 @@ def _transfer_model_dir(path: Path, dest: Path, action: str) -> None:
     except OSError as e:
         raise RuntimeError(f"Cannot {action} {path} into {_mm.MODELS_DIR}: {e}.") from e
     try:
-        shutil.copytree(path, temp, dirs_exist_ok=True)
-        problem = _verify_dir_copy(path, temp)
+        left_out = placing.reserved if action == "copy" else (lambda rel: False)
+        shutil.copytree(path, temp, dirs_exist_ok=True, ignore=lambda folder, names: [
+            n for n in names if left_out((Path(folder).relative_to(path) / n).as_posix())])
+        problem = _verify_dir_copy(path, temp, left_out)
         if problem is not None:
             failure: Optional[str] = (
                 f"Copy verification failed for {path.name}: {problem} (source left "
@@ -3720,20 +4155,11 @@ def _transfer_model_dir(path: Path, dest: Path, action: str) -> None:
     except OSError as e:
         failure = f"Cannot {action} {path} into {_mm.MODELS_DIR}: {e}."
     except BaseException:
-        _remove_partial_dir(temp)
+        _remove_partial(temp)
         raise
     if failure is not None:
-        raise RuntimeError(failure + _remove_partial_dir(temp))
-    if action == "move":
-        _repoint_directory_references(old_resolved, dest)
-        try:
-            shutil.rmtree(path)
-        except OSError as e:
-            logger.warning("_transfer_model_dir: could not remove the source %s "
-                           "after moving it: %s", path, e)
-            console.print(
-                f"[yellow]{escape(str(path))} was copied to {escape(str(dest))} but "
-                f"could not be fully removed: {escape(str(e))}[/yellow]")
+        raise RuntimeError(failure + _remove_partial(temp))
+    return False
 
 
 def _store_into_models_dir(path: Path, action: str, *,
@@ -3744,7 +4170,28 @@ def _store_into_models_dir(path: Path, action: str, *,
 
 
 def _store_with_projector(path: Path, action: str, *,
-                          attached_projector_only: bool = False) -> StoredModel:
+                          attached_projector_only: bool = False,
+                          placement: Optional[_Placement] = None,
+                          follow: bool = False) -> StoredModel:
+    """:func:`_place_with_projector`, finished here unless the caller passes the
+    *placement* it settles itself: the registry entries that named a moved file
+    are pointed at its new place and the moves are completed. A failure of any
+    step puts every file back."""
+    if placement is not None:
+        return _place_with_projector(path, action, attached_projector_only, placement, follow)
+    own = _Placement()
+    try:
+        stored = _place_with_projector(path, action, attached_projector_only, own, follow)
+        own.repoint()
+    except BaseException:
+        own.rollback()
+        raise
+    own.commit()
+    return stored
+
+
+def _place_with_projector(path: Path, action: str, attached_projector_only: bool,
+                          placement: _Placement, follow: bool) -> StoredModel:
     """Copy or move an external model (file or directory) INTO ``MODELS_DIR``, so
     it can be registered from there and treated exactly like a pulled model
     afterward. ``action`` is ``"copy"`` or ``"move"``.
@@ -3761,6 +4208,10 @@ def _store_with_projector(path: Path, action: str, *,
         *attached_projector_only* only the attached one travels.
       - an HF-style model directory - the whole tree (:func:`_transfer_model_dir`)
 
+    Every file and folder goes through *placement*, which the caller commits or
+    rolls back; *follow* makes the registry follow a copy of the model as it
+    follows a move (see :class:`_Placement`).
+
     A directory transfer that fails raises RuntimeError after removing the
     temporary folder it copied into; the source is left as it was, and a
     destination another import created meanwhile is never replaced or removed.
@@ -3776,15 +4227,11 @@ def _store_with_projector(path: Path, action: str, *,
     WHICH projectors travel, never how a name collision for one is resolved.
     Preflights free disk space before copying (a copy needs room for both the
     original and the new copy at once); a same-name/no-op destination (already
-    in place) contributes nothing to that check. After each copy the
-    destination is re-hashed against a pre-copy digest of the source and the
-    whole operation fails loudly on any mismatch, so a copy that landed
-    corrupted is never registered as if it worked. A move is NOT re-verified: on
-    the same volume it is an atomic rename with no data written twice. Every
-    registry entry whose ``path`` or ``mmproj`` named an mmproj file that moved
-    (a travelling projector, or *path* itself when it is mmproj-named) is
-    pointed at its new location, including when a later transfer raises; a
-    failure to update the registry is printed and logged, never raised.
+    in place) contributes nothing to that check. After each copy, and each move
+    to another volume, the new file is hashed against a digest of the source and
+    the whole operation fails loudly on any mismatch, so a copy that landed
+    corrupted is never registered as if it worked. A move on the same volume is
+    not re-verified: no data is written twice.
 
     Returns a :class:`StoredModel`: the new path of the primary file/directory
     (the first part, for a split GGUF), which the caller registers instead of
@@ -3803,8 +4250,8 @@ def _store_with_projector(path: Path, action: str, *,
         if hub_repo and action == "move":
             raise RuntimeError(_HUB_MOVE_REFUSAL.format(path))
         dest = _mm.MODELS_DIR / (_sanitize_name(hub_repo) if hub_repo else path.name)
-        if dest.resolve() == path:
-            return StoredModel(path, None)                 # already in place
+        if _reaches(dest, path):
+            return StoredModel(dest, None)                 # already in place
         if dest.exists():
             raise RuntimeError(f"Cannot {action}: {dest} already exists")
         total = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
@@ -3815,7 +4262,7 @@ def _store_with_projector(path: Path, action: str, *,
         # path/dest: a caller-named filesystem path (add_local's path_str) -
         # not restricted to a safe charset.
         console.print(f"[dim]{verb} {escape(str(path))} to {escape(str(dest))}…[/dim]")
-        _transfer_model_dir(path, dest, action)
+        placement.place_dir(path, dest, action, follow)
         return StoredModel(dest, None)
 
     # Single GGUF: every split part, plus the projector files _plan_projectors
@@ -3831,7 +4278,8 @@ def _store_with_projector(path: Path, action: str, *,
     for part in parts:
         src = path.parent / part
         dest = _mm.MODELS_DIR / part
-        if dest.exists() and dest.resolve() != src.resolve():
+        placement.lock(part)
+        if placement.held(src, dest) == "other":
             raise RuntimeError(f"Cannot {action}: {dest} already exists")
         items.append((src, dest, action, None))
 
@@ -3841,6 +4289,7 @@ def _store_with_projector(path: Path, action: str, *,
     reused: list[Path] = []
     for t in transfers:
         dest, reuse = _projector_dest(t.src, taken)
+        placement.lock(dest.name)
         taken.add(dest.name.lower())
         placed[t.src] = dest
         if reuse:
@@ -3864,14 +4313,14 @@ def _store_with_projector(path: Path, action: str, *,
 
     to_transfer = []
     for item in items:
-        if item[0].resolve() != item[1].resolve():
+        if not _reaches(item[0], item[1].resolve()):
             to_transfer.append(item)
         elif item[0] in placed:
             arrived.add(item[0])
-    copy_bytes = sum(s.stat().st_size for s, _, mode, _ in to_transfer
-                     if mode == "copy" and s.exists())
-    move_bytes = sum(s.stat().st_size for s, _, mode, _ in to_transfer
-                     if mode == "move" and s.exists())
+    absent = [item for item in to_transfer
+              if item[0].exists() and placement.held(item[0], item[1]) is None]
+    copy_bytes = sum(s.stat().st_size for s, _, mode, _ in absent if mode == "copy")
+    move_bytes = sum(s.stat().st_size for s, _, mode, _ in absent if mode == "move")
     # Every source is a sibling of *path*, so one volume check covers them all.
     if not _mm._check_disk_space(
             _mm.MODELS_DIR, copy_bytes + _space_needed(path.parent, "move", move_bytes)):
@@ -3886,61 +4335,28 @@ def _store_with_projector(path: Path, action: str, *,
                       "with the same content; using that copy and leaving the "
                       "original where it is.[/dim]")
 
-    moved_projectors: dict = {}    # normcase(old resolved path) -> new resolved path
-    try:
-        for src, dest, mode, note in to_transfer:
-            if not src.exists():
-                # A split part or mmproj sibling that vanished between discovery and
-                # transfer (pre-existing incomplete/broken model on disk) - not this
-                # operation's problem to fix; note it and continue with the rest.
-                logger.debug("_store_into_models_dir: %s no longer exists, skipping", src)
-                continue
-            verb = "Copying" if mode == "copy" else "Moving"
-            # src.name/dest: a split-GGUF part or mmproj sibling filename, sourced
-            # from the caller's own filesystem - not restricted to a safe charset.
+    unit = _mm.MODELS_DIR / path.name
+    for src, dest, mode, note in to_transfer:
+        if not src.exists():
+            # A split part or mmproj sibling that vanished between discovery and
+            # transfer (pre-existing incomplete/broken model on disk) - not this
+            # operation's problem to fix; note it and continue with the rest.
+            logger.debug("_store_into_models_dir: %s no longer exists, skipping", src)
+            continue
+        verb = "Copying" if mode == "copy" else "Moving"
+        # src.name/dest: a split-GGUF part or mmproj sibling filename, sourced
+        # from the caller's own filesystem - not restricted to a safe charset.
+        if placement.held(src, dest) is None:
             console.print(f"[dim]{verb} {escape(src.name)} to {escape(str(dest))}…[/dim]")
-            if mode == "copy":
-                # Two full hashes of a multi-GB model, either side of the copy, so
-                # the "Copying ..." line above is followed by a long silence.
-                pre_digest = _verify_digest(src, purpose="to check the source before copying")
-                shutil.copy2(src, dest)
-                post_digest = _verify_digest(dest, purpose="to confirm the copy")
-                if post_digest != pre_digest:
-                    # Don't leave a known-bad copy sitting in MODELS_DIR - it would
-                    # otherwise be a ticking time bomb for a future sync_models_dir
-                    # to auto-register as its own (corrupt) model.
-                    try:
-                        dest.unlink()
-                    except OSError:
-                        pass  # best-effort cleanup; the mismatch itself still raises
-                    raise RuntimeError(
-                        f"Copy verification failed for {src.name}: sha256 mismatch "
-                        f"after copy to {dest} (source left untouched, bad copy removed)"
-                    )
-            else:
-                old_key = os.path.normcase(str(src.resolve()))
-                shutil.move(str(src), str(dest))
-                if src in placed or "mmproj" in src.name.lower():
-                    moved_projectors[old_key] = str(dest.resolve())
-            if src in placed:
-                arrived.add(src)
-            if note:
-                console.print(f"[yellow]{note}[/yellow]")
-    finally:
-        if moved_projectors:
-            try:
-                _repoint_projector_references(moved_projectors)
-            except Exception as e:
-                # Reports the failure instead of raising; an exception from the
-                # transfer loop keeps propagating unchanged. See
-                # test_repoint_failure_does_not_replace_the_transfer_error.
-                logger.warning("_store_into_models_dir: could not update the "
-                               "registry entries recording %s: %s",
-                               ", ".join(moved_projectors.values()), e)
-                console.print(
-                    "[yellow]Could not update the registry entries that record "
-                    f"{', '.join(escape(Path(p).name) for p in moved_projectors.values())}"
-                    f" (now in the models folder): {escape(str(e))}[/yellow]")
+        elif placement.held(src, dest) == "same":
+            console.print(f"[dim]{escape(dest.name)} is already in the models folder with "
+                          "the same content; using that copy and leaving the original "
+                          "where it is.[/dim]")
+        placement.place_file(src, dest, mode, unit, follow and src not in placed)
+        if src in placed:
+            arrived.add(src)
+        if note:
+            console.print(f"[yellow]{note}[/yellow]")
 
     mmproj: Optional[Path] = None
     attached_dest: Optional[Path] = None
@@ -3983,6 +4399,10 @@ def _name_collision(model_name: str, p: Path, reg: dict) -> Optional[str]:
     return _entry_path(reg[model_name]) or "?"
 
 
+class _TransferRefused(RuntimeError):
+    """A file could not be brought into the models folder; nothing was changed."""
+
+
 def _register_with_dedup(
     model_name: str,
     p: Path,
@@ -4000,6 +4420,8 @@ def _register_with_dedup(
     revision: Optional[str] = None,
     commit: Optional[str] = None,
     type_user_set: bool = False,
+    store: Optional[str] = None,
+    placement: Optional[_Placement] = None,
 ) -> bool:
     """
     Register a model, detecting duplicates first.
@@ -4022,6 +4444,15 @@ def _register_with_dedup(
     passing *attached_projector_only* through; the projector it attaches is
     recorded on the new entry when no *mmproj* was given, and on a move also on
     every other name that pointed at *p* and has none.
+
+    *store* (``"copy"`` / ``"move"``) asks for *p*, when it lies outside the
+    models folder, to be brought into it. Every question and refusal comes first:
+    the file is transferred only when it is then registered, so a duplicate that
+    is skipped or aliased, and a name that is taken, leave *p* untouched. A file
+    already registered where it is follows into the models folder under its
+    names, without a duplicate question. Whatever fails after the transfer, an
+    interrupt included, puts every file back (:class:`_Placement`). With
+    *placement* the caller settles it.
 
     *refresh* is for a caller that has just written *p*'s bytes (a pull): an
     entry of the same name already holding *p* then takes *source* and *digest*
@@ -4049,8 +4480,53 @@ def _register_with_dedup(
     # model_name: not guaranteed sanitized here - add_local passes _sanitize_name()'s
     # output when -n is given, but otherwise a filesystem stem (p.stem, an Ollama
     # manifest dir/tag name) that can itself carry brackets.
+    if placement is None:
+        own = _Placement()
+        try:
+            return _register_with_dedup(
+                model_name, p, source, on_duplicate=on_duplicate, digest=digest, size=size,
+                model_type=model_type, mmproj=mmproj, architecture=architecture,
+                expert_count=expert_count, attached_projector_only=attached_projector_only,
+                refresh=refresh, revision=revision, commit=commit,
+                type_user_set=type_user_set, store=store, placement=own)
+        except RuntimeError as e:
+            if not isinstance(e, _TransferRefused):
+                raise
+            # e: built from Path objects derived from the caller's own filesystem
+            # paths - not restricted to a safe charset.
+            console.print(f"[red]{escape(str(e))}[/red]")
+            return False
+        finally:
+            own.settle()
+
+    inside = library_path(p)
+    if inside is not None:
+        p, store = inside, None
     reg = _mm.load_registry()
     aliases = find_aliases_by_path(p, reg)
+    followed: list[str] = []
+
+    def _bring_in(action: str, follow: bool) -> StoredModel:
+        try:
+            stored = _mm._store_with_projector(
+                p, action, attached_projector_only=attached_projector_only,
+                placement=placement, follow=follow)
+            placement.repoint()
+        except (RuntimeError, OSError, TimeoutError) as e:
+            raise _TransferRefused(str(e)) from e
+        return stored
+
+    if store and (aliases or (store == "move" and p.is_file()
+                              and placing.same_file(p, _mm.MODELS_DIR / p.name))):
+        taken = _name_collision(model_name, p, reg)
+        if taken is None or placing.same_file(Path(taken), p):
+            stored = _bring_in(store, True)
+            followed = aliases
+            p, store = stored.path, None
+            if mmproj is None and model_type in _PROJECTOR_TYPES:
+                mmproj = stored.mmproj
+            reg = _mm.load_registry()
+            aliases = find_aliases_by_path(p, reg)
 
     # Same name, same file - true no-op (but backfill a fresh digest / mmproj /
     # architecture / expert_count)
@@ -4129,6 +4605,20 @@ def _register_with_dedup(
 
     # Same name, DIFFERENT file - real conflict, never overwrite silently
     old_path = _name_collision(model_name, p, reg)
+    if (old_path is not None and digest and Path(old_path).exists()
+            and on_duplicate in ("ask", "skip", "alias")
+            and model_name in _mm.find_by_sha256(digest, reg)):
+        if type_user_set:
+            def _type(r: dict) -> None:
+                if isinstance(r.get(model_name), dict):
+                    r[model_name]["model_type"] = model_type
+                    r[model_name]["type_user_set"] = True
+            _mm.update_registry(_type)
+        console.print(
+            f"[yellow]'{escape(model_name)}' is already registered with the same content"
+            f"[/yellow] [dim]({escape(str(old_path))})[/dim]\n"
+            f"[dim]{escape(str(p))} was left where it is.[/dim]")
+        return True
     if old_path is not None:
         console.print(
             f"[yellow]'{escape(model_name)}' already points to a different file:"
@@ -4159,69 +4649,53 @@ def _register_with_dedup(
             action = on_duplicate
         elif _must_alias_for_type(user_type):
             action = "alias"
+        elif followed and not can_prompt():
+            action = "skip"
         else:
             action = _prompt_duplicate_action(dup_names, reason)
+        if action == "skip" and followed:
+            console.print(f"[dim]Already registered as {escape(followed[0])}; it now "
+                          "points at the new location.[/dim]")
+            return True
         if action == "skip":
             console.print(f"[dim]Skipped {escape(model_name)}: {reason}, already "
                           f"registered as {escape(dup_names[0])}.[/dim]")
+            if store:
+                console.print(f"[dim]{escape(str(p))} was left where it is.[/dim]")
             return False
         if action == "alias":
+            if store:
+                console.print(f"[dim]{escape(str(p))} was left where it is: the models "
+                              "folder needs no second copy of it.[/dim]")
             return alias_model(dup_names[0], model_name, user_type=user_type)
+        if action == "register" and store:
+            action = store
         if action in ("copy", "move"):
-            # Capture the pre-move resolved path BEFORE _store_into_models_dir
-            # touches anything - it's the key the alias-relink below matches on.
-            moved_from = str(p.resolve())
-            try:
-                stored = _mm._store_with_projector(
-                    p, action, attached_projector_only=attached_projector_only)
-            except RuntimeError as e:
-                # e: built from Path objects derived from the caller's own
-                # filesystem paths - not restricted to a safe charset.
-                console.print(f"[red]{escape(str(e))}[/red]")
-                return False
+            stored = _bring_in(action, False)
+            store = None
             dest = stored.path
             if mmproj is None and model_type in _PROJECTOR_TYPES:
                 mmproj = stored.mmproj
-            if action == "move":
-                dest_str = str(dest.resolve())
-                entry: dict[str, Any] = {"path": dest_str, "source": source, "model_type": model_type}
-                if revision:
-                    entry["revision"] = revision
-                    if commit:
-                        entry["commit"] = commit
-                if type_user_set:
-                    entry["type_user_set"] = True
-                if digest:
-                    entry["sha256"] = digest.lower()
-                if mmproj:
-                    entry["mmproj"] = str(logical_model_path(Path(mmproj)))
-                if architecture is not None:
-                    entry["architecture"] = architecture
-                if expert_count is not None:
-                    entry["expert_count"] = expert_count
+            if action == "move" and mmproj is not None:
+                new_mmproj = str(logical_model_path(Path(mmproj)))
+                at_dest = set(find_aliases_by_path(dest, _mm.load_registry()))
 
-                # Move first so the file lands under MODELS_DIR (where a
-                # launch-time sync_models_dir can always recover it), THEN commit
-                # the registry in ONE atomic write: repoint the moved file's
-                # other aliases AND register the new name together, so the
-                # registry never persists a half-updated state. The move-then-
-                # write step is still not one transaction, but a crash between
-                # them leaves the file in MODELS_DIR and the registry fully
-                # pre-move, which sync reconciles on the next launch.
-                def _relink_and_register(r: dict) -> None:
-                    for alias_name in dup_names:
-                        if r.get(alias_name, {}).get("path") == moved_from:
-                            r[alias_name]["path"] = dest_str
-                            if (mmproj and r[alias_name].get("model_type") in _PROJECTOR_TYPES
-                                    and not r[alias_name].get("mmproj")):
-                                r[alias_name]["mmproj"] = entry["mmproj"]
-                    r[model_name] = entry
-
-                _mm.update_registry(_relink_and_register)
-                console.print(f"[green]✓[/green] Registered [bold]{escape(model_name)}[/bold]")
-                return True
+                def _attach(r: dict) -> None:
+                    for alias_name in at_dest:
+                        e = r.get(alias_name)
+                        if (isinstance(e, dict) and e.get("model_type") in _PROJECTOR_TYPES
+                                and not e.get("mmproj")):
+                            e["mmproj"] = new_mmproj
+                if at_dest:
+                    _mm.update_registry(_attach)
             p = dest
         # action == "register" falls through unchanged
+
+    if store:
+        stored = _bring_in(store, True)
+        p = stored.path
+        if mmproj is None and model_type in _PROJECTOR_TYPES:
+            mmproj = stored.mmproj
 
     _mm._register(model_name, p, source, sha256=digest, model_type=model_type,
                   mmproj=mmproj, architecture=architecture, expert_count=expert_count,
@@ -4512,6 +4986,10 @@ def remove_model(name: str) -> bool:
     # models folder that points INTO it resolves as owned, and the split-GGUF
     # branch then unlinks `path.parent / part` - siblings of the LINK, outside
     # the folder the gate just authorised.
+    refused = _removal_refused(path.resolve()) if is_owned_model_path(path) else None
+    if refused is not None:
+        console.print(f"[red]Cannot remove {escape(name)}:[/red] {escape(refused)}")
+        return False
     target = resolve_deletion_target(path)
     # is_owned_model_path is asked AGAIN here, even though a non-None target
     # already means it answered True inside the helper. A destructive sink keeps
@@ -4692,7 +5170,7 @@ def _is_hub_cache_link(path: Path) -> bool:
     return is_hub_blob_link(path)
 
 
-def _primary_name_collision(gguf: Path, claimed: dict) -> Optional[str]:
+def _primary_name_collision(gguf: Path, claimed: dict, placement: _Placement) -> Optional[str]:
     """The conflicting path in MODELS_DIR, if *gguf*'s own name (or any split
     part) is already occupied there by a genuinely different file, or by a
     different entry already checked earlier in this same *claimed* batch;
@@ -4710,7 +5188,7 @@ def _primary_name_collision(gguf: Path, claimed: dict) -> Optional[str]:
     for part in parts:
         src = gguf.parent / part
         dest = _mm.MODELS_DIR / part
-        if dest.exists() and dest.resolve() != src.resolve():
+        if placement.held(src, dest) == "other":
             return str(dest)
         prior = claimed.get(part.lower())
         if prior is not None and prior.resolve() != src.resolve():
@@ -4720,43 +5198,28 @@ def _primary_name_collision(gguf: Path, claimed: dict) -> Optional[str]:
     return None
 
 
-def _models_dir_twin(gguf: Path):
-    """What MODELS_DIR already holds under *gguf*'s name: None when nothing
-    (every part's name is free); the first part's path there when every part
-    is a byte-identical copy (equal size and sha256); False when any part's
-    name is held by a different file.
+def _models_dir_twin(gguf: Path, placement: _Placement):
+    """What MODELS_DIR already holds under *gguf*'s name: None when nothing, or only
+    some parts, or second names of the same files (an import that was stopped, which
+    placing them finishes); the first part's path there when every part is a
+    byte-identical copy; False when any part's name is held by a different file.
+    Locks the names.
     """
     parts = split_gguf_parts(gguf.name) or [gguf.name]
-    purpose = "to compare it with the file already in the models folder"
-    held = False
-    missing = False
-    first_dest = _mm.MODELS_DIR / parts[0]
+    states = []
     for part in parts:
-        src = gguf.parent / part
-        dest = _mm.MODELS_DIR / part
-        if not dest.exists():
-            missing = True
-            if held:
-                return False
-            continue
-        if missing:
-            return False
-        if dest.resolve() == src.resolve():
-            return None
-        held = True
-        try:
-            if dest.stat().st_size != src.stat().st_size:
-                return False
-        except OSError:
-            return False
-        if _verify_digest(dest, purpose=purpose) != _verify_digest(src, purpose=purpose):
-            return False
-    if not held:
+        placement.lock(part)
+        states.append(placement.held(gguf.parent / part, _mm.MODELS_DIR / part))
+    if "here" in states:
         return None
-    return first_dest
+    if "other" in states:
+        return False
+    if None in states or "link" in states:
+        return None
+    return _mm.MODELS_DIR / parts[0]
 
 
-def _store_standalone_projector(src: Path, action: str) -> Path:
+def _store_standalone_projector(src: Path, action: str, placement: _Placement) -> Path:
     """Bring a projector-shaped GGUF that is its own ``first_parts`` entry -
     nobody else in the folder claims it as their attached sibling - into
     MODELS_DIR, with the same collision leniency ``_projector_dest`` already
@@ -4783,36 +5246,74 @@ def _store_standalone_projector(src: Path, action: str) -> Path:
     # src.name/dest: a filename from the caller's own filesystem - not
     # restricted to a safe charset.
     console.print(f"[dim]{verb} {escape(src.name)} to {escape(str(dest))}…[/dim]")
-    if action == "copy":
-        pre_digest = _verify_digest(src, purpose="to check the source before copying")
-        shutil.copy2(src, dest)
-        post_digest = _verify_digest(dest, purpose="to confirm the copy")
-        if post_digest != pre_digest:
-            try:
-                dest.unlink()
-            except OSError:
-                pass  # best-effort cleanup; the mismatch itself still raises
-            raise RuntimeError(
-                f"Copy verification failed for {src.name}: sha256 mismatch "
-                f"after copy to {dest} (source left untouched, bad copy removed)"
-            )
-    else:
-        old_key = os.path.normcase(str(src))
-        shutil.move(str(src), str(dest))
-        try:
-            _repoint_projector_references({old_key: str(dest.resolve())})
-        except Exception as e:
-            logger.warning("_store_standalone_projector: could not update the "
-                           "registry entries recording %s: %s", dest, e)
-            console.print(
-                f"[yellow]Could not update the registry entries that record "
-                f"{escape(dest.name)} (now in the models folder): {escape(str(e))}[/yellow]")
+    placement.place_file(src, dest, action, dest)
     return dest
+
+
+def _registered_twins(first_parts: list[Path], on_duplicate: str, no_hash: bool,
+                      fast: bool) -> dict:
+    """The files of *first_parts* an import with ``--store`` leaves where they are,
+    because a byte-identical model is already registered and the answer to the
+    duplicate is not to copy, move or register it again: a resolved source path
+    maps to ``(registered name, its path, answer)``, the answer being ``"skip"``
+    or ``"alias"``. A file that is itself registered where it is has no twin."""
+    out: dict = {}
+    if on_duplicate in ("copy", "move", "register"):
+        return out
+    for k, gguf in enumerate(first_parts, 1):
+        if not _mm.is_external_path(gguf) or "mmproj" in gguf.name.lower():
+            continue
+        reg = _mm.load_registry()
+        if find_aliases_by_path(gguf, reg):
+            continue
+        label = f"{k} of {len(first_parts)}"
+        digest, size = _digest_for_add(gguf, reg, no_hash, fast, label=label)
+        if digest:
+            names, reason = _mm.find_by_sha256(digest, _mm.load_registry()), "byte-identical content"
+        elif size:
+            names, reason = find_by_size(size, reg), "same size (--fast: content not hashed)"
+        else:
+            continue
+        for name in names:
+            held = _entry_path(_mm.load_registry().get(name))
+            if held is None or not Path(held).exists() or placing.same_file(Path(held), gguf):
+                continue
+            action = (on_duplicate if on_duplicate != "ask"
+                      else _prompt_duplicate_action([name], f"{gguf.name}: {reason}"))
+            if action in ("skip", "alias"):
+                out[gguf.resolve()] = (name, Path(held), action)
+            break
+    return out
 
 
 def _store_loose_gguf_dir(first_parts: list[Path], store: str,
                           mmprojs: Optional[dict] = None,
-                          skipped: Optional[list] = None) -> Optional[list[Path]]:
+                          skipped: Optional[list] = None,
+                          placement: Optional[_Placement] = None,
+                          twins: Optional[dict] = None) -> Optional[list[Path]]:
+    """:func:`_place_loose_gguf_dir`, finished here unless the caller passes the
+    *placement* it settles itself. A refusal or an error puts every file back."""
+    if placement is not None:
+        return _place_loose_gguf_dir(first_parts, store, mmprojs, skipped, placement, twins or {})
+    own = _Placement()
+    stored: Optional[list[Path]] = None
+    try:
+        stored = _place_loose_gguf_dir(first_parts, store, mmprojs, skipped, own, twins or {})
+        if stored is not None:
+            own.repoint()
+    except BaseException:
+        own.rollback()
+        raise
+    if stored is None:
+        own.rollback()
+    else:
+        own.commit()
+    return stored
+
+
+def _place_loose_gguf_dir(first_parts: list[Path], store: str, mmprojs: Optional[dict],
+                          skipped: Optional[list], placement: _Placement,
+                          twins: dict) -> Optional[list[Path]]:
     """Bring every model in a directory-of-loose-ggufs import into MODELS_DIR
     before ``_add_local_gguf_dir`` registers them (mirrors its per-file loop).
 
@@ -4861,12 +5362,14 @@ def _store_loose_gguf_dir(first_parts: list[Path], store: str,
     where it is); when *skipped* is given, those entries of *first_parts* are
     appended to it, so the result pairs one-to-one with *first_parts* minus
     *skipped*, in order. A model whose identical copy is already in MODELS_DIR
-    is kept in the result, pointing at that copy.
+    is kept in the result, pointing at that copy; so is a model in *twins*
+    (:func:`_registered_twins`), pointing at its registered path. Both stay
+    where they are.
 
     Returns the new first_parts list (paths now under MODELS_DIR), or None if
     a genuine collision, a disk-space shortfall, or a copy that verified
-    corrupt means some transfer failed - the caller reports the printed error
-    and aborts the whole import.
+    corrupt means some transfer failed - the caller rolls *placement* back and
+    aborts the whole import.
     """
     from rich.markup import escape
 
@@ -4877,7 +5380,18 @@ def _store_loose_gguf_dir(first_parts: list[Path], store: str,
         if (not _mm.is_external_path(gguf) or gguf.resolve() in projectors
                 or "mmproj" in gguf.name.lower()):
             continue
-        state = _models_dir_twin(gguf)
+        twin = twins.get(gguf.resolve())
+        if twin is not None:
+            present[gguf.resolve()] = twin[1]
+            console.print(f"[dim]{escape(gguf.name)} is already registered as "
+                          f"{escape(twin[0])} with the same content; leaving the original "
+                          "where it is.[/dim]")
+            continue
+        try:
+            state = _models_dir_twin(gguf, placement)
+        except RuntimeError as e:
+            console.print(f"[red]{escape(str(e))}[/red]")
+            return None
         if state is None:
             continue
         if isinstance(state, Path):
@@ -4893,7 +5407,8 @@ def _store_loose_gguf_dir(first_parts: list[Path], store: str,
     if present or conflicting:
         rest = [g for g in first_parts
                 if g.resolve() not in present and g.resolve() not in conflicting]
-        moved = _store_loose_gguf_dir(rest, store, mmprojs=mmprojs) if rest else []
+        moved = (_place_loose_gguf_dir(rest, store, mmprojs, None, placement, {})
+                 if rest else [])
         if moved is None:
             return None
         landed_rest = iter(moved)
@@ -4928,7 +5443,7 @@ def _store_loose_gguf_dir(first_parts: list[Path], store: str,
             continue
         if is_unclaimed_projector(gguf):
             continue
-        conflict = _primary_name_collision(gguf, claimed_names)
+        conflict = _primary_name_collision(gguf, claimed_names, placement)
         if conflict is not None:
             console.print(f"[red]Cannot {store}: {escape(conflict)} already exists[/red]")
             return None
@@ -4948,10 +5463,11 @@ def _store_loose_gguf_dir(first_parts: list[Path], store: str,
             if is_unclaimed_projector(gguf):
                 landed = carried_to.get(gguf.resolve())
                 new_parts[i] = (landed if landed is not None
-                                else _store_standalone_projector(gguf, store))
+                                else _store_standalone_projector(gguf, store, placement))
             else:
                 sib = find_sibling_mmproj(gguf)
-                stored = _mm._store_with_projector(gguf, store, attached_projector_only=True)
+                stored = _mm._store_with_projector(gguf, store, attached_projector_only=True,
+                                                   placement=placement, follow=True)
                 new_parts[i] = stored.path
                 stored_of[gguf.resolve()] = stored
                 if sib is not None and stored.attached_dest is not None:
@@ -4975,7 +5491,7 @@ def _store_loose_gguf_dir(first_parts: list[Path], store: str,
             new_parts[i] = landed
         elif gguf.exists():
             try:
-                placed = _store_standalone_projector(gguf, store)
+                placed = _store_standalone_projector(gguf, store, placement)
             except RuntimeError as e:
                 console.print(f"[red]{escape(str(e))}[/red]")
                 return None
@@ -5146,6 +5662,7 @@ def _add_local_gguf_dir(
     total: Optional[int] = None,
     first_index: int = 1,
     recorded: Optional[RecordedDigests] = None,
+    decided: Optional[dict] = None,
 ) -> bool:
     """Register every loose .gguf model in a folder (the *first_parts* list).
 
@@ -5170,7 +5687,8 @@ def _add_local_gguf_dir(
     Each model is announced as ``k of total`` (*first_index* is the first k,
     *total* defaults to the list length). *stats*, when given, counts the
     models left unregistered under ``declined``. *recorded* is passed to
-    :func:`_digest_for_add`.
+    :func:`_digest_for_add`. *decided* maps a GGUF path to the answer already
+    given for it when it is a duplicate, used instead of *on_duplicate*.
     """
     from rich.markup import escape
 
@@ -5191,7 +5709,8 @@ def _add_local_gguf_dir(
         reg = _mm.load_registry()
         wanted = _sanitize_name(name) if use_given_name else (
             (names or {}).get(gguf) or base)
-        would_skip = on_duplicate == "skip" or (on_duplicate == "ask" and not can_prompt())
+        answer = (decided or {}).get(gguf, on_duplicate)
+        would_skip = answer == "skip" or (answer == "ask" and not can_prompt())
         model_name = ((_registered_name_for_file(reg, gguf, wanted) if would_skip else None)
                       or _unique_registry_name(reg, wanted))
 
@@ -5203,10 +5722,10 @@ def _add_local_gguf_dir(
         detected_type, gmeta = _detect_local_model_type(gguf, is_gguf=True, is_hf=False)
         final_type = model_type if model_type is not None else detected_type
         sib = (find_sibling_mmproj(gguf)
-               if on_duplicate in ("ask", "move") and _mm.is_external_path(gguf) else None)
+               if answer in ("ask", "move") and _mm.is_external_path(gguf) else None)
         before = _gguf_names_in(_mm.MODELS_DIR) if sib is not None else set()
         done = _mm._register_with_dedup(
-            model_name, gguf, "local", on_duplicate=on_duplicate,
+            model_name, gguf, "local", on_duplicate=answer,
             digest=digest, size=size,
             model_type=final_type,
             mmproj=((mmprojs or {}).get(gguf) if final_type in _PROJECTOR_TYPES else None),
@@ -5224,6 +5743,57 @@ def _add_local_gguf_dir(
             if len(landed) == 1:
                 carried_to[sib.resolve()] = _mm.MODELS_DIR / landed[0]
     return True
+
+
+def _store_and_add_gguf_dir(first_parts: list[Path], store: str, name: Optional[str],
+                            on_duplicate: str, no_hash: bool, fast: bool,
+                            model_type: Optional[str], *, names: Optional[dict] = None,
+                            stats: Optional[dict] = None,
+                            total: Optional[Callable[[int], int]] = None,
+                            conflicts: Optional[list] = None) -> Optional[int]:
+    """Bring the GGUF models *first_parts* into the models folder and register
+    them; a model that does not end up registered is put back where it was.
+
+    Returns how many of them there are to register (those left out because a
+    different file holds their name, appended to *conflicts*, do not count), or
+    None when a transfer failed and nothing was registered. *total* maps that
+    count to the batch total shown while registering."""
+    from rich.markup import escape
+
+    conflicts = conflicts if conflicts is not None else []
+    mmprojs: dict = {}
+    twins = _registered_twins(first_parts, on_duplicate, no_hash, fast)
+    placement = _Placement()
+    try:
+        stored = _mm._store_loose_gguf_dir(first_parts, store, mmprojs=mmprojs,
+                                           skipped=conflicts, placement=placement, twins=twins)
+        if stored is None:
+            placement.rollback()
+            return None
+        try:
+            placement.repoint()
+        except (OSError, RuntimeError) as e:
+            console.print(f"[red]The model registry could not be updated: {escape(str(e))}[/red]")
+            placement.rollback()
+            return None
+        kept = [g for g in first_parts if g not in conflicts]
+        landed = list(zip(kept, stored, strict=True))
+        new_names = {new: names[old] for old, new in landed if names and old in names}
+        decided: dict = {}
+        for old, new in landed:
+            twin = twins.get(old.resolve())
+            if twin is not None:
+                decided[new] = twin[2]
+                if twin[2] == "alias":
+                    new_names.setdefault(new, (names or {}).get(old) or _gguf_model_stem(old))
+        if stored:
+            _add_local_gguf_dir(
+                stored, name, on_duplicate, no_hash, fast, model_type=model_type,
+                names=new_names, mmprojs=mmprojs, stats=stats,
+                total=total(len(stored)) if total else None, decided=decided)
+        return len(stored)
+    finally:
+        placement.settle()
 
 
 def _registered_name_for_file(reg: dict, gguf: Path, wanted: str) -> Optional[str]:
@@ -5374,8 +5944,9 @@ def _extract_gguf_member(archive: zipfile.ZipFile, info: zipfile.ZipInfo,
     digest = hashlib.sha256()
     written = 0
     try:
+        part.unlink(missing_ok=True)
         with _ExtractProgress(filename, info.file_size) as progress, \
-                archive.open(info) as src, open(part, "wb") as out:
+                archive.open(info) as src, open(part, "xb") as out:
             while True:
                 chunk = src.read(_EXTRACT_CHUNK_BYTES)
                 if not chunk:
@@ -5394,13 +5965,17 @@ def _extract_gguf_member(archive: zipfile.ZipFile, info: zipfile.ZipInfo,
             raise RuntimeError(f"{filename} in {source_name} is not a GGUF file")
         sha = digest.hexdigest()
         dest = existing
-        if existing.exists():
-            if _mm._sha256_file(existing) == sha:
-                part.unlink()
-                return existing, sha
-            dest = _free_models_name(filename)
-        os.replace(part, dest)
-        return dest, sha
+        while True:
+            if dest.exists():
+                if _mm._sha256_file(dest) == sha:
+                    part.unlink()
+                    return dest, sha
+                dest = _free_models_name(filename)
+            try:
+                placing.put_new(part, dest)
+                return dest, sha
+            except FileExistsError:
+                continue
     except (zipfile.BadZipFile, zlib.error, EOFError, OSError, NotImplementedError) as e:
         raise RuntimeError(f"Could not extract {filename} from {source_name}: {e}") from e
     finally:
@@ -5486,60 +6061,40 @@ def _register_ollama_blob(
         console.print(f"[red]Not a usable model:[/red] {escape(str(blob_path))}\n"
                       f"{escape(blob_unusable)}")
         return False
-    if store and _mm.is_external_path(blob_path):
-        # Refuse before touching the filesystem when registration is already
-        # known to be refused (a name collision with no terminal to confirm an
-        # overwrite): moving first would displace the file while reporting success.
-        if not can_prompt():
-            reg = _mm.load_registry()
-            conflict = _name_collision(model_name, blob_path, reg)
-            if conflict is not None:
-                console.print(
-                    f"[red]'{escape(model_name)}' already points to a different "
-                    f"file:[/red] {escape(str(conflict))}\nRefusing to move "
-                    f"{escape(str(blob_path))} into place non-interactively - "
-                    "pick another name with -n."
-                )
-                return False
-        stored_blob = False
-        try:
-            blob_path = _mm._store_into_models_dir(blob_path, store)
-            stored_blob = True
-            if projector is not None and _mm.is_external_path(projector):
-                source = projector
-                if stored_projectors is not None and source in stored_projectors:
-                    projector = stored_projectors[source]
-                else:
-                    projector = _mm._store_into_models_dir(source, store)
-                    if stored_projectors is not None:
-                        stored_projectors[source] = projector
-        except RuntimeError as e:
-            console.print(f"[red]{escape(str(e))}[/red]")
-            if stored_blob:
-                verb = "moved" if store == "move" else "copied"
-                console.print(
-                    f"[yellow]{escape(str(blob_path))} was {verb} into the models "
-                    f"folder but not registered as '{escape(model_name)}'.[/yellow] "
-                    "It will be picked up under an automatic name the next time "
-                    "models are scanned (`localm list`, or the next server start)."
-                )
-            return False
     digest = blob_path.name.removeprefix("sha256-") \
         if blob_path.name.startswith("sha256-") else None
-    registered = _mm._register_with_dedup(
-        model_name, blob_path, "ollama",
-        on_duplicate=on_duplicate, digest=digest, model_type=model_type,
-        mmproj=projector, architecture=architecture, expert_count=expert_count,
-    )
-    if not registered and store:
-        verb = "moved" if store == "move" else "copied"
-        console.print(
-            f"[yellow]{escape(str(blob_path))} was {verb} into the models "
-            f"folder but not registered as '{escape(model_name)}'.[/yellow] "
-            "It will be picked up under an automatic name the next time "
-            "models are scanned (`localm list`, or the next server start)."
+    placement = _Placement()
+    source = projector
+    stored_here = False
+    try:
+        if store and projector is not None and _mm.is_external_path(projector):
+            known = (stored_projectors or {}).get(projector)
+            if known is not None:
+                projector = known
+            else:
+                projector = _mm._store_with_projector(
+                    projector, store, placement=placement, follow=True).path
+                placement.repoint()
+                stored_here = True
+        return _mm._register_with_dedup(
+            model_name, blob_path, "ollama",
+            on_duplicate=on_duplicate, digest=digest, model_type=model_type,
+            mmproj=projector, architecture=architecture, expert_count=expert_count,
+            store=store, placement=placement,
         )
-    return registered
+    except _TransferRefused as e:
+        console.print(f"[red]{escape(str(e))}[/red]")
+        return False
+    except (RuntimeError, OSError) as e:
+        if not store:
+            raise
+        console.print(f"[red]{escape(str(e))}[/red]")
+        return False
+    finally:
+        placement.settle()
+        if (stored_here and projector is not None and stored_projectors is not None
+                and projector.exists()):
+            stored_projectors[source] = projector
 
 
 _OLLAMA_MODEL_LAYER = "application/vnd.ollama.image.model"
@@ -5838,22 +6393,16 @@ def _add_local_hub_cache(
         found += 1
         models = [g for g in first_parts if "mmproj" not in g.name.lower()]
         names = {models[0]: repo_name} if len(models) == 1 else None
-        mmprojs: dict = {}
         if store:
-            conflicts: list = []
-            stored = _mm._store_loose_gguf_dir(
-                first_parts, store, mmprojs=mmprojs, skipped=conflicts)
-            if stored is None:
+            landed = _store_and_add_gguf_dir(
+                first_parts, store, None, on_duplicate, no_hash, fast, model_type, names=names)
+            if landed is None:
                 return False
-            kept = [g for g in first_parts if g not in conflicts]
-            names = {new: names[old] for old, new in zip(kept, stored, strict=True)
-                     if names and old in names}
-            first_parts = stored
-            if not first_parts:
-                continue
+            registered_any = landed > 0 or registered_any
+            continue
         registered_any = _add_local_gguf_dir(
             first_parts, None, on_duplicate, no_hash, fast,
-            model_type=model_type, names=names, mmprojs=mmprojs,
+            model_type=model_type, names=names,
         ) or registered_any
     if unusable:
         console.print(f"[dim]Skipped {unusable} Hugging Face cache repo(s) with no "
@@ -5890,17 +6439,13 @@ def add_local(
 
     *store* is ``"copy"``, ``"move"``, or ``None`` (default: register in place).
     When set and the path is OUTSIDE <data dir>/models, the file/dir is brought
-    into managed storage (via _store_into_models_dir) BEFORE registration, so the
-    model is treated exactly like a pulled model afterward. A failure here (name
-    collision, no disk space, copy corrupted) is a hard failure of the whole
-    call - unlike the softer dedup-prompt copy/move, where skipping just means
-    "keep the old registration", a requested --store must never fall back to
-    registering the ORIGINAL external path. A non-interactive name collision is
-    refused BEFORE the move/copy happens; an interactive decline, or the rarer
-    post-move content-dedup skip, can still leave the file sitting in MODELS_DIR
-    unregistered under any requested name - reported to the caller rather than
-    claimed as success, and recoverable via `localm list` / the next server
-    start (sync_models_dir), just under an automatic name.
+    into managed storage and registered there, so the model is treated exactly
+    like a pulled model afterward. A failure (name collision, no disk space,
+    copy corrupted, an interrupt) is a hard failure of the whole call: a
+    requested --store never falls back to registering the ORIGINAL external
+    path, and the file is left, or put back, where it was. The same holds for a
+    duplicate that is skipped or aliased: it is asked about before anything is
+    transferred (see ``_register_with_dedup``).
     """
     from rich.markup import escape
 
@@ -5990,7 +6535,7 @@ def add_local(
     # falls through to the dir-as-one-model path below; a folder holding no
     # model falls through to the "Not a model" message.
     if p.is_file() and (is_gguf or is_blob):
-        unusable = gguf_unusable_reason(p)
+        unusable = gguf_unusable_reason(p) or _unfinished_gguf_reason(p)
         if unusable is not None:
             console.print(f"[red]Not a usable model:[/red] {escape(str(p))}\n{escape(unusable)}")
             return False
@@ -6036,24 +6581,26 @@ def add_local(
             names_before = set(_mm.load_registry())
             stats: dict = {}
             conflicts: list = []
-            mmprojs: dict = {}
+            n_gguf = len(first_parts)
             if first_parts and store:
                 verb = "Moving" if store == "move" else "Copying"
                 _mm._import_status(
                     f"{verb} {len(first_parts)} GGUF file(s) into the models folder")
-                stored = _mm._store_loose_gguf_dir(
-                    first_parts, store, mmprojs=mmprojs, skipped=conflicts)
-                if stored is None:
+                landed = _store_and_add_gguf_dir(
+                    first_parts, store, name if only_one else None, on_duplicate, no_hash,
+                    fast, model_type, stats=stats, conflicts=conflicts,
+                    total=lambda n: n + len(hf_dirs) + len(media_files))
+                if landed is None:
                     return False
-                first_parts = stored
-            units = len(first_parts) + len(hf_dirs) + len(media_files)
-            if first_parts:
+                n_gguf, registered_any = landed, landed > 0
+            elif first_parts:
                 registered_any = _add_local_gguf_dir(
                     first_parts, name if only_one else None, on_duplicate, no_hash,
-                    fast, model_type=model_type, mmprojs=mmprojs,
-                    stats=stats, total=units, recorded=recorded,
+                    fast, model_type=model_type, stats=stats,
+                    total=n_gguf + len(hf_dirs) + len(media_files), recorded=recorded,
                 )
-            for k, unit in enumerate(hf_dirs + media_files, len(first_parts) + 1):
+            units = n_gguf + len(hf_dirs) + len(media_files)
+            for k, unit in enumerate(hf_dirs + media_files, n_gguf + 1):
                 _mm._import_status(f"Registering {unit.name} ({k} of {units})")
                 wanted = (_sanitize_name(name) if (name and only_one)
                           else unit.name if unit.is_dir() else unit.stem)
@@ -6122,39 +6669,6 @@ def add_local(
                        else p.name if p.is_dir() else p.stem))
     kind = "hf" if is_hf else "local"
 
-    # Bring an external file/dir into managed storage BEFORE registering, so the
-    # registry ends up pointing at the copy/move destination, not the original.
-    # Handles the split-GGUF parts and the mmproj siblings on its own
-    # (_store_with_projector); works for is_hf's whole directory too.
-    stored_mmproj: Optional[Path] = None
-    moved_aliases: list[str] = []
-    if store == "move" and p.is_dir() and _mm.is_external_path(p):
-        moved_aliases = find_aliases_by_path(p, _mm.load_registry())
-    if store and _mm.is_external_path(p):
-        # Refuse before touching the filesystem when registration is already
-        # known to be refused - a name collision with no terminal to confirm an
-        # overwrite. Moving first and discovering the refusal afterwards leaves
-        # the file moved and the registry untouched, so it is unregistered under
-        # ANY name until the next sync_models_dir scan picks it up under an
-        # auto-generated name - never the one requested.
-        if not can_prompt():
-            reg = _mm.load_registry()
-            conflict = _name_collision(model_name, p, reg)
-            if conflict is not None:
-                console.print(
-                    f"[red]'{escape(model_name)}' already points to a different "
-                    f"file:[/red] {escape(str(conflict))}\nRefusing to {store} "
-                    f"{escape(str(p))} into place non-interactively - pick "
-                    "another name with -n."
-                )
-                return False
-        try:
-            stored = _mm._store_with_projector(p, store)
-        except RuntimeError as e:
-            console.print(f"[red]{escape(str(e))}[/red]")
-            return False
-        p, stored_mmproj = stored.path, stored.mmproj
-
     size: Optional[int] = None
     if is_blob:
         digest = p.name.removeprefix("sha256-")
@@ -6182,31 +6696,14 @@ def add_local(
     if model_type is None:
         model_type = detected_type
 
-    # The interactive path can still decline (or a rarer post-move content
-    # dedup can) - report that honestly rather than claiming success for a
-    # file that is now sitting in MODELS_DIR unregistered under any name
-    # (sync_models_dir/`localm list` will pick it up under an auto name).
     registered = _mm._register_with_dedup(
         model_name, p, kind, on_duplicate=on_duplicate, digest=digest, size=size, model_type=model_type,
-        mmproj=stored_mmproj if model_type in _PROJECTOR_TYPES else None,
         architecture=gguf_metadata.get("architecture"), expert_count=gguf_metadata.get("expert_count"),
-        type_user_set=type_user_set,
+        type_user_set=type_user_set, store=store,
     )
-    if not registered and moved_aliases:
-        now_named = [n for n in find_aliases_by_path(p, _mm.load_registry())
-                     if n in moved_aliases]
-        if now_named:
-            console.print(f"[dim]Already registered as {escape(now_named[0])}; it now "
-                          "points at the new location.[/dim]")
-            registered = True
-    if not registered and store:
-        verb = "moved" if store == "move" else "copied"
-        console.print(
-            f"[yellow]{escape(str(p))} was {verb} into the models folder but not "
-            f"registered as '{escape(model_name)}'.[/yellow] It will be picked up "
-            "under an automatic name the next time models are scanned "
-            "(`localm list`, or the next server start)."
-        )
+    if registered and not p.exists():
+        entry_path = _entry_path(_mm.load_registry().get(model_name))
+        p = Path(entry_path) if entry_path is not None else p
     if registered and is_hf:
         cannot_load = hf_folder_refusal(p)
         if cannot_load is not None:

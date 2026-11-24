@@ -585,34 +585,22 @@ class TestAddLocalMarkupEscaping:
         assert f"old-{BRACKET_DROP}.gguf" in out, (
             f"the conflicting old path must survive verbatim: {out!r}")
 
-    def test_store_copy_registered_but_failed_message_verbatim(
+    def test_store_copy_of_a_duplicate_left_in_place_message_verbatim(
             self, fake_registry, tmp_path, monkeypatch, capsys):
-        # A --store copy that lands in MODELS_DIR under a fresh name, but
-        # whose CONTENT path-collides with an already-registered entry
-        # (pre-registered here pointing at the not-yet-existing destination),
-        # is declined by the (forced non-interactive) dedup prompt - the
-        # honest "moved/copied but not registered" outcome, not a claimed
-        # success.
         from tests.conftest import make_console_wide_and_plain
         make_console_wide_and_plain(monkeypatch, width="1000")
         store, models_dir = fake_registry
         external = tmp_path / "external" / f"new-{BRACKET_STYLE}.gguf"
         external.parent.mkdir()
         external.write_bytes(_GGUF_BYTES)
-        dest = models_dir / external.name
-        store[f"already-{BRACKET_DROP}"] = {"path": str(dest.resolve())}
+        have = models_dir / "have.gguf"
+        have.write_bytes(_GGUF_BYTES)
+        store["already"] = {"path": str(have.resolve())}
         monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
-        ok = mm.add_local(str(external), name="newname", store="copy", no_hash=True)
-        assert ok is False
+        assert mm.add_local(str(external), name="newname", store="copy") is False
         out = capsys.readouterr().out
-        # _store_into_models_dir's own (separately tested, in
-        # TestStoreIntoModelsDirMarkupEscaping) "Copying ..." progress print
-        # ALSO shows this bracketed filename, earlier in `out` - isolate the
-        # assertion to add_local's OWN final message (the distinct escape()
-        # call this test exists to cover), so this test cannot pass on the
-        # strength of a DIFFERENT function's escaping alone.
         final_line = next(
-            line for line in out.splitlines() if "not registered as" in line)
+            line for line in out.splitlines() if "was left where it is" in line)
         assert f"new-{BRACKET_STYLE}.gguf" in final_line, (
             f"the stored path must survive verbatim in add_local's own "
             f"message: {final_line!r}")

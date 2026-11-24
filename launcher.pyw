@@ -220,16 +220,26 @@ def _spawn_detached(cmd: list, *, cwd: str, env: dict | None = None,
     if sys.platform == "win32":
         cmd = _windows_command_line(cmd, env)
         kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+    elif terminal:
+        return _open_terminal(cmd, **kwargs)
     else:
-        if terminal:
-            wrapped = terminal_command(cmd, env)
-            if wrapped is None:
-                raise RuntimeError(
-                    "no terminal program was found to open it in; run "
-                    f"{shlex.join(cmd)} in a terminal, or set TERMINAL")
-            cmd = wrapped
         kwargs["start_new_session"] = True
-    return subprocess.Popen(cmd, **kwargs)
+    try:
+        from localm import procs
+    except ImportError:
+        return subprocess.Popen(cmd, **kwargs)
+    return procs.start(cmd, purpose="launcher window", **kwargs)
+
+
+def _open_terminal(cmd: list, *, env: dict | None = None, **kwargs):
+    """Start *cmd* in a terminal window. The terminal program is the user's and may hold
+    other windows, so it is not recorded; the localm in it records itself."""
+    wrapped = terminal_command(cmd, env)
+    if wrapped is None:
+        raise RuntimeError(
+            "no terminal program was found to open it in; run "
+            f"{shlex.join(cmd)} in a terminal, or set TERMINAL")
+    return subprocess.Popen(wrapped, env=env, start_new_session=True, **kwargs)
 
 
 def _invalid_numeric_fields(port: str, ctx: str, gpu: str):

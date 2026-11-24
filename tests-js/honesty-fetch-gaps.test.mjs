@@ -34,7 +34,7 @@ test("a failed server delete is surfaced, not silently swallowed", async () => {
     }
     return OK;
   } });
-  runScript(window, "chat.persist = true; deleteConversationRemote('c9');");
+  runScript(window, "chat.persist = true; deleteConversationRemote({ id: 'c9' });");
   await drain();
   const toastEl = window.document.getElementById("toast");
   assert.ok(/may reappear/.test(toastEl.textContent),
@@ -46,7 +46,7 @@ test("a failed server delete is surfaced, not silently swallowed", async () => {
 
 test("a successful server delete stays silent", async () => {
   const { window } = loadApp({ fetchImpl: async () => OK });
-  runScript(window, "chat.persist = true; deleteConversationRemote('c1');");
+  runScript(window, "chat.persist = true; deleteConversationRemote({ id: 'c1' });");
   await drain();
   assert.equal(window.document.getElementById("toast").textContent, "",
     "no toast on the happy path");

@@ -37,7 +37,7 @@ uninstall treats a journaled shortcut or command it never got to record as if it
 been recorded (through the same checks). A step that was begun but never finished
 while it could touch the user's profile is reported as a note.
 
-Stdlib only, plus ``localm._home_cfg`` (itself stdlib only).
+Stdlib only, plus ``localm._home_cfg`` and ``localm.procs`` (stdlib only themselves).
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ import time
 from pathlib import Path
 from typing import Iterable, Optional
 
-from localm import _home_cfg
+from localm import _home_cfg, procs
 
 MANIFEST_NAME = ".localm-install.json"
 PENDING_NAME = ".localm-uninstall-pending"
@@ -1711,10 +1711,11 @@ def _plan(root: Path, m: Optional[dict], *, purge_data: bool,
     if lib_ok and lock.is_dir():
         items.append(_Item(lock, "lib", "warn", "left by an interrupted runtime download"))
 
-    # Scratch files setup.bat keeps in the clone while it runs.
-    scratch = root / SETUP_TMP_NAME
-    if scratch.exists() or _is_link(scratch):
-        items.append(_Item(scratch, "data-entry", "remove"))
+    # Scratch files setup.bat keeps in the clone while it runs, and the files that
+    # name the running processes.
+    for scratch in (root / SETUP_TMP_NAME, root / procs.FOLDER):
+        if scratch.exists() or _is_link(scratch):
+            items.append(_Item(scratch, "data-entry", "remove"))
 
     # uv's own entries that point into this folder: PATH, shell files, receipt.
     uv_item = next((i for i in items if _same(i.path, root / ".uv")), None)
