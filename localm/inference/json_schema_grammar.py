@@ -17,7 +17,9 @@ objects, and local ``$ref`` (recursive schemas included). Annotations
 (``title``, ``description``, ``default``, ``examples``) and ``uniqueItems``
 are accepted and not enforced. Whitespace is allowed between tokens inside
 objects and arrays only: the root value is the whole reply, with nothing before
-or after it, so generation ends where the value ends. Any other keyword is
+or after it, so generation ends where the value ends. A number has at most 16
+digits before the point, 20 after it (enough for the shortest form of every
+double in plain notation) and 3 in the exponent. Any other keyword is
 refused with a ``SchemaGrammarError`` naming it, rather than dropped."""
 
 from __future__ import annotations
@@ -70,7 +72,7 @@ _PRIMITIVES: dict[str, str] = {
     "boolean": '"true" | "false"',
     "null": '"null"',
     "integer": '"-"? ([0-9] | [1-9] [0-9]{0,15})',
-    "number": ('"-"? ([0-9] | [1-9] [0-9]{0,15}) ("." [0-9]+)? '
+    "number": ('"-"? ([0-9] | [1-9] [0-9]{0,15}) ("." [0-9]{1,20})? '
                '([eE] [-+]? [0-9]{1,3})?'),
     "value": "object-any | array-any | string | number | boolean | null",
     "object-any": ('"{" ws (string ws ":" ws value ws '

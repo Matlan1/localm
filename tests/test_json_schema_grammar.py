@@ -530,3 +530,13 @@ def test_a_ready_made_json_grammar_ends_at_the_root_value(grammar, text):
     assert g.accepts(text)
     for tail in TAILS:
         assert not g.accepts(text + tail), repr(tail)
+
+
+def test_a_number_cannot_go_on_for_ever():
+    grammar = Grammar(schema_to_grammar({"type": "number"}))
+    for value in (0.00012345678901234567, 1.7976931348623157e308, 5e-324, 2.2250738585072014e-308,
+                  9007199254740993.0, 0.1 + 0.2, -3.14):
+        assert grammar.accepts(json.dumps(value)), value
+    assert grammar.accepts("0." + "1" * 20)
+    assert not grammar.accepts("0." + "1" * 21)
+    assert not grammar.accepts("3." + "1" * 300)
