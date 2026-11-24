@@ -139,7 +139,9 @@ progress when that happens is stopped at its next step (a coder tool call, a
 chat or memory model call, a knowledge file) and records an error: at once for
 a revoke in the running server, within about five seconds for a revoke from
 another process, an expiry or a narrowed scope. What the run wrote before it
-stopped (files a coder run edited, facts a memory run saved) stays. A stopped
+stopped (files a coder run edited, facts a memory run saved) stays. A coder
+run that did not finish its task, or had a tool call denied, records an error
+that carries its answer and names the denied calls. A stopped
 knowledge run keeps none of the documents it indexed in that run, unless it was
 already saving the collection's index: that save is finished first, so the
 collection is never left half written. Jobs created with the owner key, or in open mode,

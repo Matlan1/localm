@@ -21,7 +21,8 @@ from .chunk import chunk_text
 from .collection_lock import CollectionLockedError
 from .extract import (EXTRACTABLE_SUFFIXES, ExtractError, classify_format,
                       extract_bytes, extract_text, sniff_text_format)
-from .store import (Collection, check_collection_name, collection_names,
+from .store import (Collection, EmbeddingLossRefused, check_collection_name,
+                    collection_names,
                     collection_provenance_note, collection_provenance_report,
                     delete_collection, lexical_only_collection_names, rag_dir)
 
@@ -29,6 +30,7 @@ __all__ = [
     "BM25",
     "Collection",
     "CollectionLockedError",
+    "EmbeddingLossRefused",
     "check_collection_name",
     "ExtractError",
     "EXTRACTABLE_SUFFIXES",

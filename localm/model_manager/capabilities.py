@@ -21,9 +21,12 @@ vision           LIVE per call, delegated to registry.model_vision_capability.
 audio            LIVE per call, delegated to registry.model_audio_capability,
                  for the same reason as vision.
 tool_use         PERSISTED on the registry entry at registration, read from the
-                 model's own chat template.
+                 model's own chat template. model_capabilities reads it from the
+                 file when the entry has none.
 context_length   PERSISTED likewise, from the model's own header.
-reasoning        LIVE from the model NAME, the only signal that exists.
+reasoning        LIVE per call from the model's own chat template (a GGUF header
+                 or a HuggingFace directory's template files), kept per GGUF file
+                 in memory; never from the model's name.
 
 tool_use and context_length are cached precisely because they are baked into the
 model file's own immutable bytes: the same file at the same path answers the
@@ -42,9 +45,23 @@ from pathlib import Path
 from typing import Optional
 
 from . import registry as _registry
-from .gguf import chat_template_tool_signal
+from .gguf import (
+    _gguf_capability_probe, chat_template_tool_signal, gguf_tool_use_signal,
+)
 
 logger = logging.getLogger(__name__)
+
+# Substrings that mark a chat template as built for a model that reasons before
+# it answers: the thinking switch the template reads (``enable_thinking``,
+# ``reasoning_effort``, a ``thinking`` condition), the reasoning block it writes,
+# strips or asks for (``<think>``, ``<thought>``, Mistral's ``[THINK]``), the
+# reasoning field it renders (``reasoning_content``), and the harmony analysis
+# channel. Each is a template construct, never prose. Compared lower-case.
+_REASONING_TEMPLATE_MARKERS = (
+    "enable_thinking", "reasoning_effort", "if thinking %}", "if thinking is ",
+    "<think>", "</think>", "<thought>", "</thought>", "[think]",
+    "reasoning_content", "<|channel|>analysis",
+)
 
 VISION = "vision"
 AUDIO = "audio_input"
@@ -78,21 +95,37 @@ def _entry_for(name: str, reg: Optional[dict]) -> Optional[dict]:
 
 
 def _hf_dir_chat_template(model_dir: Path) -> Optional[str]:
-    """The chat template declared by a HuggingFace model directory, from
-    ``tokenizer_config.json``. None when the file is absent, unreadable, or
-    declares none.
+    """The chat template declared by a HuggingFace model directory: its
+    ``chat_template.jinja``, else ``chat_template`` in ``tokenizer_config.json``,
+    else in ``chat_template.json``. None when none of them is readable and
+    declares one.
 
-    Newer exports may state a LIST of named templates (``[{"name": ...,
+    A JSON file may state a LIST of named templates (``[{"name": ...,
     "template": ...}]``) instead of one string; the entry named "default" wins,
     else the first, matching how transformers itself picks one."""
     try:
-        cfg = model_dir / "tokenizer_config.json"
-        if not cfg.is_file():
-            return None
-        data = json.loads(cfg.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, ValueError, RecursionError) as e:
+        jinja = model_dir / "chat_template.jinja"
+        if jinja.is_file():
+            return jinja.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
         logger.debug("chat template read failed for %s (%s): %s",
                      model_dir, type(e).__name__, e)
+    for name in ("tokenizer_config.json", "chat_template.json"):
+        tmpl = _json_chat_template(model_dir / name)
+        if tmpl is not None:
+            return tmpl
+    return None
+
+
+def _json_chat_template(path: Path) -> Optional[str]:
+    """The ``chat_template`` a HuggingFace JSON file declares, or None."""
+    try:
+        if not path.is_file():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError, RecursionError) as e:
+        logger.debug("chat template read failed for %s (%s): %s",
+                     path, type(e).__name__, e)
         return None
     tmpl = data.get("chat_template") if isinstance(data, dict) else None
     if isinstance(tmpl, str):
@@ -203,26 +236,84 @@ def model_context_length(name: str, *,
     return None
 
 
+def chat_template_reasoning_signal(template: Optional[str]) -> Optional[bool]:
+    """Whether a chat template is built for a reasoning model - a TRI-STATE.
+
+    ``True``  the template carries a reasoning construct (see
+              ``_REASONING_TEMPLATE_MARKERS``).
+    ``False`` the template was read and carries none.
+    ``None``  no template was read, so there is nothing to judge."""
+    if template is None:
+        return None
+    low = template.lower()
+    return any(m in low for m in _REASONING_TEMPLATE_MARKERS)
+
+
+_gguf_signals: dict[tuple[str, int, int], tuple[Optional[bool], Optional[bool]]] = {}
+
+
+def _gguf_template_signals(path: Path) -> tuple[Optional[bool], Optional[bool]]:
+    """``(tool_use, reasoning)`` of the chat template inside a GGUF file. The
+    header read is bounded (``gguf._GGUF_CAPABILITY_PROBE_BYTES``) and the answer
+    is kept per file, size and modification time, so a model file is read once.
+    The answer of a header that could not be walked in full is not kept."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None, None
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    kept = _gguf_signals.get(key)
+    if kept is not None:
+        return kept
+    meta = _gguf_capability_probe(path)
+    signals = (gguf_tool_use_signal(path, meta=meta),
+               chat_template_reasoning_signal(meta.get("chat_template")))
+    if meta.get("complete"):
+        if len(_gguf_signals) > 512:
+            _gguf_signals.clear()
+        _gguf_signals[key] = signals
+    return signals
+
+
+def _template_signals(name: str, reg: Optional[dict],
+                      what: str) -> tuple[Optional[bool], Optional[bool]]:
+    """``(tool_use, reasoning)`` read from the chat template in the model's own
+    file or HuggingFace directory; ``(None, None)`` when there is none to read."""
+    entry = _entry_for(name, reg)
+    epath = None if entry is None else _registry._entry_path(entry)
+    if epath is None:
+        return None, None
+    try:
+        p = Path(epath)
+        if p.is_dir():
+            template = _hf_dir_chat_template(p)
+            return (chat_template_tool_signal(template),
+                    chat_template_reasoning_signal(template))
+        if p.suffix.lower() == ".gguf" and p.is_file():
+            return _gguf_template_signals(p)
+    except (OSError, ValueError) as e:
+        logger.debug("%s capability probe failed for %r (%s): %s",
+                     what, name, type(e).__name__, e)
+    return None, None
+
+
 def model_reasoning_capability(name: str, *,
                                reg: Optional[dict] = None) -> Optional[bool]:
-    """Whether ONE registered model is a reasoning/thinking family - ``True`` or
-    ``None``, NEVER ``False``.
+    """Whether ONE registered model reasons before it answers - a TRI-STATE.
 
-    The only available signal is the model NAME (see
-    ``inference.model_family.THINKING_MARKERS``). A name carrying a marker is
-    real evidence FOR; a name carrying none is not evidence AGAINST, because an
-    unmarked name is exactly what a reasoning model with a plain name, or an
-    opaque registry alias like "m8", looks like. Returning ``False`` there would
-    assert something no signal supports, so absence of a marker is reported as
-    the unknown it is.
+    ``True``  its chat template carries a reasoning construct (a thinking
+              switch, a ``<think>`` block, a reasoning field or the harmony
+              analysis channel).
+    ``False`` its template was read and carries none.
+    ``None``  nobody could read a template: the entry is missing or malformed,
+              the file is neither a GGUF nor a HuggingFace directory, or it
+              declares no template.
 
-    Wraps ``is_thinking_model`` rather than reimplementing it, so the coder's
-    per-family prompt tuning and chat's ``<think>`` inlet keep answering from the
-    same markers this does."""
-    from localm.inference.model_family import is_thinking_model
-    if _entry_for(name, reg) is None:
-        return None
-    return True if is_thinking_model(name) else None
+    The answer comes from the model's own template, the same source as
+    ``model_tool_use_capability``, never from the model's name. The name-marker
+    heuristic in ``inference.model_family`` stays what it is, a prompt-tuning
+    hint for the coder and the chat ``<think>`` nudge, and is not a capability."""
+    return _template_signals(name, reg, REASONING)[1]
 
 
 def model_capability(name: str, capability: str, *, reg: Optional[dict] = None,
@@ -256,10 +347,13 @@ def model_capabilities(name: str, *, reg: Optional[dict] = None,
     "context_length": ...}``.
 
     Each value keeps its own tri-state; a key is always present, so a caller
-    reads ``None`` explicitly rather than inferring it from a missing key."""
+    reads ``None`` explicitly rather than inferring it from a missing key.
+    A ``tool_use`` the entry does not carry is read from the model file."""
     reg = _registry._mm.load_registry() if reg is None else reg
     out = {c: model_capability(name, c, reg=reg, dir_cache=dir_cache)
            for c in BOOLEAN_CAPABILITIES}
+    if out[TOOL_USE] is None:
+        out[TOOL_USE] = _template_signals(name, reg, TOOL_USE)[0]
     out[CONTEXT_LENGTH] = model_context_length(name, reg=reg)
     return out
 

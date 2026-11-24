@@ -64,6 +64,9 @@ localm-home.cfg
 .localm-setup-tmp/
 .localm-setup-starting-*
 .localm-gui-bootstrap
+
+# Which processes of this clone are running
+.localm-run/
 .localm-setup-gui.log
 
 # Personal ComfyUI workflows (which models/encoders we use stays private -

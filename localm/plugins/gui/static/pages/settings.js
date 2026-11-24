@@ -9,7 +9,7 @@ import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDange
 import { chat, refreshCtxLimit } from "../app/chat.js";
 import { onLanguageReload, t, tn, tOr, tOrFirst } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
-import { loginWithKey, modelCache } from "../app/models-sidebar.js";
+import { keyGateErrorText, loginWithKeyResult, modelCache } from "../app/models-sidebar.js";
 import { showView } from "../app/tabs.js";
 import { nativeModelSelect } from "../app/native-models.js";
 import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrowserVoiceOverride, refreshBackendInfo, refreshPerfEstimate, reloadActiveModelAfterSave, syncIndexSpaceHint, syncPerfCtxHelp, ttsProvider } from "../app/settings-perf.js";
@@ -822,6 +822,28 @@ export async function refreshCompanion() {
   list.style.display = view.urls.length ? "block" : "none";
   hintEl.textContent = view.hint;
   hintEl.style.display = view.hint ? "block" : "none";
+  showBindFallbackNote(info.bind_fallback || "");
+}
+
+/** Show *text* in the note element *noteId* under the drawn field *fieldKey*
+ *  (created on first use); remove the note when *text* is empty or the field is
+ *  not drawn. */
+export function setFieldNote(fieldKey, noteId, text) {
+  const field = document.querySelector(`[data-field-key="${fieldKey}"]`);
+  const old = document.getElementById(noteId);
+  if (!text || !field) { if (old) old.remove(); return; }
+  const note = old || el("div", "sub key-warn field-override-note");
+  note.id = noteId;
+  note.textContent = text;
+  if (!old) field.appendChild(note);
+}
+
+/** Under the Bind address field: a note with *reason* (the server's
+ *  bind_fallback text) when a configured network bind was not applied at
+ *  startup; no note when *reason* is empty. */
+export function showBindFallbackNote(reason) {
+  setFieldNote("bind_host", "bind-fallback-note",
+    reason ? t("settings.field.bindHost.fallbackNote", { reason }) : "");
 }
 
 // Scopes offered in the GUI key minter (label per scope). Privileged scopes
@@ -846,8 +868,13 @@ export const KEY_SCOPES = [
   ["web", "settings.keyScopes.web"],
   ["browser", "settings.keyScopes.browser"],
   ["mcp", "settings.keyScopes.mcp"],
+  ["jobs", "settings.keyScopes.jobs"],
+  ["memory", "settings.keyScopes.memory"],
+  ["tts", "settings.keyScopes.tts"],
+  ["exllama", "settings.keyScopes.exllama"],
   ["config:read", "settings.keyScopes.configRead"],
   ["config:write", "settings.keyScopes.configWrite"],
+  ["plugins:read", "settings.keyScopes.pluginsRead"],
   ["plugins:admin", "settings.keyScopes.pluginsAdmin"],
   ["keys:admin", "settings.keyScopes.keysAdmin"],
   ["admin", "settings.keyScopes.admin"],
@@ -897,23 +924,55 @@ export function buildKeyPresets(presets, isOwner) {
 export function applyKeyPreset(want) {
   const set = new Set(want), box = $("key-scopes");
   if (!box) return;
+  const skipped = [];
   for (const cb of box.querySelectorAll(".key-scope-cb")) {
+    if (cb.disabled && set.has(cb.value)) skipped.push(cb.value);
     cb.checked = !cb.disabled && set.has(cb.value);   // never check a disabled (owner-only) scope
   }
+  showPresetSkipped(skipped);
+}
+
+/** Under the preset buttons: a line naming the owner-only scopes of the pressed
+ *  preset that were left unticked, or no line when *skipped* is empty. */
+export function showPresetSkipped(skipped) {
+  let note = $("key-preset-note");
+  if (!skipped.length) { if (note) note.remove(); return; }
+  if (!note) {
+    note = el("div", "sub key-warn");
+    note.id = "key-preset-note";
+    const presets = $("key-presets");
+    if (!presets) return;
+    presets.insertAdjacentElement("afterend", note);
+  }
+  note.textContent = t("settings.keys.presetSkippedNote", { scopes: skipped.join(", ") });
 }
 
 // Disable + dim the owner-only (privileged) scopes for a non-owner key minter, so a
 // keys:admin device cannot even try to mint a coder:full / admin / keys:admin /
 // plugins:admin / config:write key (the API would 403 anyway; this avoids the
 // confusing failed-submit round-trip).
-export function applyOwnerGate(isOwner) {
+export function applyOwnerGate(isOwner, openMode) {
   for (const cb of document.querySelectorAll("#key-scopes .key-scope-cb")) {
     const ownerOnly = PRIVILEGED_KEY_SCOPES.has(cb.value);
     cb.disabled = ownerOnly && !isOwner;
     if (cb.disabled) cb.checked = false;
     const lab = cb.closest(".key-scope");
-    if (lab) lab.classList.toggle("key-scope-disabled", cb.disabled);
+    if (lab) {
+      lab.classList.toggle("key-scope-disabled", cb.disabled);
+      if (cb.disabled) lab.title = t("settings.keys.ownerOnlyTitle");
+      else lab.removeAttribute("title");
+    }
   }
+  const box = $("key-scopes");
+  if (!box) return;
+  let note = $("key-owner-note");
+  if (isOwner) { if (note) note.remove(); return; }
+  if (!note) {
+    note = el("div", "sub key-owner-note");
+    note.id = "key-owner-note";
+    ($("key-scope-note") || box).insertAdjacentElement("afterend", note);
+  }
+  note.textContent = t(openMode ? "settings.keys.ownerOnlyOpenNote" : "settings.keys.ownerOnlyNote");
 }
 
 // Owner-only: persist an edited preset list (PATCH /v1/config needs config:write).
@@ -976,9 +1035,9 @@ export function keyExpiryLabel(expires) {
   if (!expires) return t("settings.keyExpiry.never");
   const ms = expires * 1000 - Date.now();
   if (ms <= 0) return t("settings.keyExpiry.expired");
-  const days = Math.floor(ms / 86400000);
-  if (days >= 1) return t("settings.keyExpiry.days", { days });
-  return t("settings.keyExpiry.hours", { hours: Math.max(1, Math.floor(ms / 3600000)) });
+  const hours = Math.round(ms / 3600000);
+  if (hours >= 24) return t("settings.keyExpiry.days", { days: Math.floor(hours / 24) });
+  return t("settings.keyExpiry.hours", { hours: Math.max(1, hours) });
 }
 
 export function keyLastUsedLabel(ts) {
@@ -1034,7 +1093,8 @@ export async function refreshKeysPanel() {
     isOwner = !!data.is_owner;
     presets = data.presets || [];
   } catch { setHidden(true); return; }
-  applyOwnerGate(isOwner);           // hide owner-only scopes from a keys:admin device
+  // Open mode as GET /api/session last reported it (refreshCsrf).
+  applyOwnerGate(isOwner, window.__LOCALM_AUTH_REQUIRED__ === false);
   buildKeyPresets(presets, isOwner);
 
   list.replaceChildren();
@@ -1052,10 +1112,20 @@ export async function refreshKeysPanel() {
     rm.onclick = () => {
       confirmDanger(t("settings.keys.revokeConfirmTitle", { name: k.name || k.id }),
         t("settings.keys.revokeConfirmBody"), t("settings.keys.revokeButton"), async () => {
-          const d = await fetch(`/v1/keys/${encodeURIComponent(k.id)}`,
-                                { method: "DELETE", headers: authHeaders() });
-          if (d.ok) { toast(t("settings.keys.revokedToast")); refreshKeysPanel(); }
-          else { toast(t("settings.keys.revokeFailedToast")); }
+          let d;
+          try {
+            d = await fetch(`/v1/keys/${encodeURIComponent(k.id)}`,
+                            { method: "DELETE", headers: authHeaders() });
+          } catch { toast(t("settings.keys.revokeFailedToast"), true); return; }
+          if (d.ok) {
+            toast(t("settings.keys.revokedToast"));
+            const shown = $("key-secret");
+            if (shown && shown.dataset.keyId === k.id) clearKeySecretBox(shown);
+            refreshKeysPanel();
+            return;
+          }
+          const e = await d.json().catch(() => ({}));
+          toast((typeof e.detail === "string" && e.detail) || t("settings.keys.revokeFailedToast"), true);
         });
     };
     row.appendChild(rm);
@@ -1064,7 +1134,7 @@ export async function refreshKeysPanel() {
 
   $("key-create").onclick = async () => {
     const name = ($("key-name").value || "").trim();
-    if (!name) { toast(t("settings.keys.enterNameToast")); return; }
+    if (!name) { toast(t("settings.keys.enterNameToast"), true); return; }
     const scopes = [...scopesBox.querySelectorAll(".key-scope-cb")]
       .filter((c) => c.checked).map((c) => c.value);
     // A zero-scope key is valid: it can still chat (chat is baseline). Confirm so
@@ -1085,10 +1155,11 @@ export async function refreshKeysPanel() {
         headers: { ...authHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-    } catch { toast(t("settings.keys.createFailedToast")); return; }
+    } catch { toast(t("settings.keys.createFailedToast"), true); return; }
     if (!r.ok) {
       const e = await r.json().catch(() => ({}));
-      toast(e.detail || t("settings.keys.createFailedToast")); return;
+      toast((typeof e.detail === "string" && e.detail) || t("settings.keys.createFailedToast"), true);
+      return;
     }
     const made = await r.json();
     // The first key on an open-mode server turns authentication on: the shell
@@ -1097,8 +1168,13 @@ export async function refreshKeysPanel() {
     if (!window.__LOCALM_CSRF__ && SHELL_TOKEN) await refreshCsrf();
     const box = $("key-secret");
     box.replaceChildren();
-    box.appendChild(el("div", "sub",
-      t("settings.keys.newKeyIntro", { name: made.name, scopes: (made.scopes || []).join(", ") })));
+    box.dataset.keyId = made.id || "";
+    const madeScopes = made.scopes || [];
+    box.appendChild(el("div", "sub", madeScopes.length
+      ? t("settings.keys.newKeyIntro", { name: made.name, scopes: madeScopes.join(", ") })
+      : t("settings.keys.newKeyIntroChatOnly", { name: made.name })));
+    for (const w of made.warnings || []) box.appendChild(el("div", "key-warn", w));
+    if (made.owner_key_created === true) box.appendChild(el("div", "sub", t("settings.keys.ownerKeySeeded")));
     const secret = document.createElement("input");
     secret.type = "text"; secret.readOnly = true; secret.value = made.key;
     secret.className = "key-secret-value";
@@ -1116,8 +1192,19 @@ export async function refreshKeysPanel() {
     box.style.display = "";
     $("key-name").value = "";
     scopesBox.querySelectorAll(".key-scope-cb").forEach((c) => { c.checked = false; });
+    showPresetSkipped([]);
     refreshKeysPanel();
+    // The reply carries owner_key_created when it also signed this browser in as owner.
+    if ("owner_key_created" in made) refreshOwnerKeyPanel();
   };
+}
+
+/** Empty the "copy it now" box *box* of a key that no longer exists (secret and
+ *  pairing QR included) and hide it. */
+export function clearKeySecretBox(box) {
+  box.replaceChildren();
+  delete box.dataset.keyId;
+  box.style.display = "none";
 }
 
 // Settings -> Owner key: roll or set the ONE key that grants full access. The GUI
@@ -1280,8 +1367,10 @@ const guiKeySave = $("gui-key-save");
 if (guiKeySave) guiKeySave.onclick = async () => {
   const key = $("gui-api-key").value.trim();
   if (key) {
-    const ok = await loginWithKey(key);   // POST /api/session -> server sets the HttpOnly cookie
-    if (!ok) { toast(t("settings.signIn.keyRejected"), true); return; }
+    await refreshCsrf();
+    if (window.__LOCALM_AUTH_REQUIRED__ === false) { toast(t("settings.signIn.noKeyOnServer"), true); return; }
+    const res = await loginWithKeyResult(key);   // POST /api/session -> server sets the HttpOnly cookie
+    if (!res.ok) { toast(keyGateErrorText(res), true); return; }
     try { sessionStorage.setItem("localm.loginOk", "1"); } catch { /* private mode */ }
     toast(t("settings.signIn.keySaved"));
     setTimeout(() => reloadApp(), 600);

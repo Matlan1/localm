@@ -2573,12 +2573,10 @@ class PluginManager:
                 out[name] = miss
         return out
 
-    def scope_deps_warnings(self, granted_scopes) -> list:
-        """Warnings for minting a key: a granted capability scope that maps to a
-        first-party plugin which is not installed, or is installed but missing a
-        declared pip extra. Empty when every granted plugin scope is ready. This
-        is the 'catch at grant' check - a key that unlocks a feature the host
-        cannot actually serve yet."""
+    def _unready_scopes(self, granted_scopes) -> list:
+        """``(scope, plugin, missing)`` for each granted scope that maps to a
+        first-party plugin which is not installed (*missing* None), or is
+        installed but missing declared pip extras (*missing* their names)."""
         from localm.plugins import catalog as _cat
         self.discover()
         installed = self._installed_set()
@@ -2589,20 +2587,41 @@ class PluginManager:
             by_scope[spec.scope or name] = name
         for e in _cat.CATALOG:                          # catalog scope == name
             by_scope.setdefault(e.name, e.name)
-        warnings = []
+        unready = []
         for sc in dict.fromkeys(granted_scopes or ()):  # de-dup, keep order
             pname = by_scope.get(sc)
             if not pname or self._is_protected(pname):   # not a plugin, or chat
                 continue
             if pname not in installed:
-                warnings.append(
-                    f"key grants '{sc}' but the {pname} plugin is not installed")
+                unready.append((sc, pname, None))
                 continue
             miss = self.plugin_missing_deps(pname)
             if miss:
-                warnings.append(
-                    f"key grants '{sc}' but {pname} is missing: {', '.join(miss)}")
-        return warnings
+                unready.append((sc, pname, miss))
+        return unready
+
+    def scope_deps_warnings(self, granted_scopes) -> list:
+        """Warnings for minting a key: a granted capability scope that maps to a
+        first-party plugin which is not installed, or is installed but missing a
+        declared pip extra. Empty when every granted plugin scope is ready. This
+        is the 'catch at grant' check - a key that unlocks a feature the host
+        cannot actually serve yet."""
+        return [f"key grants '{sc}' but the {pname} plugin is not installed"
+                if miss is None else
+                f"key grants '{sc}' but {pname} is missing: {', '.join(miss)}"
+                for sc, pname, miss in self._unready_scopes(granted_scopes)]
+
+    def scope_fix_commands(self, granted_scopes) -> list:
+        """The terminal commands that clear ``scope_deps_warnings``, one per
+        plugin: ``plugin install`` for one that is not installed,
+        ``plugin install-deps`` for one missing its pip extras."""
+        return list(dict.fromkeys(
+            f"localm plugin {'install' if miss is None else 'install-deps'} {pname}"
+            for _sc, pname, miss in self._unready_scopes(granted_scopes)))
+
+    def installed_scopes(self) -> set:
+        """The capability scopes of the installed plugins."""
+        return {spec.scope or name for name, spec in self.discover().items()}
 
     def install_plugin_deps(self, name: str, *, on_progress=None):
         """Install a plugin's declared pip extras on THIS host. HOST-ONLY: an

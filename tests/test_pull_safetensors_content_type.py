@@ -4,6 +4,7 @@ tensor layout, the same way ``localm add`` types it, not by the repository's
 tags. Only the network (the HF metadata query, the download and its HEAD) is
 faked; the typing runs for real."""
 
+import hashlib
 import json
 import struct
 from pathlib import Path
@@ -95,8 +96,10 @@ def test_a_pulled_lora_safetensors_registers_as_a_lora(hf_network):
     assert entry["model_type"] == "lora"
 
 
-def test_an_already_downloaded_lora_safetensors_registers_as_a_lora(hf_network):
+def test_an_already_downloaded_lora_safetensors_registers_as_a_lora(hf_network, monkeypatch):
     hf_network["body"] = _safetensors_bytes(SDXL_LORA)
+    digest = hashlib.sha256(hf_network["body"]).hexdigest()
+    monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo, fn: digest)
     (hf_network["models"] / "sdxl_lightning_4step_lora.safetensors").write_bytes(
         hf_network["body"])
     assert mm.pull_model(SPEC) is True

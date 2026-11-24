@@ -11,6 +11,8 @@ never keep another thread from running for long.
 
 from __future__ import annotations
 
+import contextlib
+import gc
 import json
 import math
 import random
@@ -225,6 +227,19 @@ class _RunnerStall:
         self.worst = float(out.strip() or 0.0)
 
 
+@contextlib.contextmanager
+def _earlier_objects_frozen():
+    """The objects alive now stay out of the block's garbage collections: a
+    full collection stops every thread for as long as it walks everything the
+    test process holds, and what earlier tests left is not the code's."""
+    gc.collect()
+    gc.freeze()
+    try:
+        yield
+    finally:
+        gc.unfreeze()
+
+
 _MAX_STARVED_S = 0.5
 
 
@@ -235,7 +250,7 @@ def test_indexing_into_a_large_collection_never_starves_another_thread(big_colle
     docs.mkdir()
     (docs / "new.txt").write_text("a new document about compressors", encoding="utf-8")
     vec = [0.5] * _DIM
-    with _RunnerStall() as runner, _Starvation() as s:
+    with _earlier_objects_frozen(), _RunnerStall() as runner, _Starvation() as s:
         result = Collection("big", base=big_collection, load=False, cache=False).add_paths(
             [docs], embed_fn=lambda texts: [vec for _ in texts])
     assert result["added"] == 1
@@ -270,14 +285,15 @@ def test_health_answers_while_a_large_collection_is_indexed(big_collection, tmp_
     answers = 0
     with _RunnerStall() as runner, TestClient(create_app(None)) as client:
         client.get("/health")
-        worker.start()
-        while worker.is_alive():
-            t0 = time.perf_counter()
-            assert client.get("/health").status_code in (200, 503)
-            worst = max(worst, time.perf_counter() - t0)
-            answers += 1
-            time.sleep(0.01)
-    worker.join()
+        with _earlier_objects_frozen():
+            worker.start()
+            while worker.is_alive():
+                t0 = time.perf_counter()
+                assert client.get("/health").status_code in (200, 503)
+                worst = max(worst, time.perf_counter() - t0)
+                answers += 1
+                time.sleep(0.01)
+            worker.join()
     assert result["added"] == 1
     assert answers > 10
     assert worst - runner.worst < _MAX_HEALTH_S, (

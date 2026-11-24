@@ -181,33 +181,6 @@ def options_to_fields(options: Optional[dict[str, Any]]
     return fields, stop, sorted(ignored)
 
 
-JSON_GRAMMAR = r'''root   ::= object
-value  ::= object | array | string | number | ("true" | "false" | "null") ws
-
-object ::=
-  "{" ws (
-            string ":" ws value
-    ("," ws string ":" ws value)*
-  )? "}" ws
-
-array  ::=
-  "[" ws (
-            value
-    ("," ws value)*
-  )? "]" ws
-
-string ::=
-  "\"" (
-    [^"\\\x7F\x00-\x1F] |
-    "\\" (["\\bfnrt] | "u" [0-9a-fA-F]{4})
-  )* "\"" ws
-
-number ::= ("-"? ([0-9] | [1-9] [0-9]{0,15})) ("." [0-9]+)? ([eE] [-+]? [0-9] [1-9]{0,15})? ws
-
-ws ::= | " " | "\n" [ \t]{0,20}
-'''
-
-
 def format_to_grammar(fmt: Any) -> Optional[str]:
     """The GBNF grammar a ``format`` value asks for, or ``None`` for no format.
 
@@ -217,7 +190,7 @@ def format_to_grammar(fmt: Any) -> Optional[str]:
     if fmt is None or fmt == "":
         return None
     if fmt == "json":
-        return JSON_GRAMMAR
+        return schema_to_grammar({"type": "object"})
     if isinstance(fmt, dict):
         try:
             return schema_to_grammar(fmt)

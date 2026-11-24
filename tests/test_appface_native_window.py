@@ -628,8 +628,10 @@ class _ShownWaitingWindow:
         self.events = MagicMock()
         self.events.shown = threading.Event()
         self.events.loaded.wait.return_value = False
+        self.destroy_calls = 0
 
     def destroy(self):
+        self.destroy_calls += 1
         if not self.events.shown.wait(2.0):
             raise RuntimeError("Main window failed to start")
 
@@ -641,16 +643,15 @@ class _StopOnSecondCheck(threading.Event):
     def __init__(self):
         super().__init__()
         self.checks = 0
-        self.close_took = None
+        self.closed = False
         self._stop_signalled = threading.Event()
         self._racer = None
 
     def _race(self):
         self.set()
         self._stop_signalled.set()
-        started = time.monotonic()
         appface.close_native_window()
-        self.close_took = time.monotonic() - started
+        self.closed = True
 
     def is_set(self):
         self.checks += 1
@@ -675,9 +676,9 @@ def test_a_stop_racing_the_window_publish_neither_hangs_nor_stalls(monkeypatch):
                                        server_stopped=stopped)
     stopped._racer.join(10)
 
-    assert stopped.close_took is not None and stopped.close_took < 1.0, (
-        f"close_native_window() blocked {stopped.close_took}s on a window whose "
-        "loop never started")
+    assert stopped.closed
+    assert window.destroy_calls == 0, (
+        "close_native_window() called destroy() on a window whose loop never started")
     assert result is True
     fake.start.assert_not_called()
     assert appface._native_window is None

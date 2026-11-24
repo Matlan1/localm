@@ -14,7 +14,7 @@
 # models, settings, API keys and TLS certificates live in /data, which is meant to
 # be a volume.
 
-ARG UBUNTU_IMAGE=ubuntu:24.04@sha256:2198e4c65076e9cb0b3d695219df667c0e3b0072da64ca3c2648aca17dcecaf5
+ARG UBUNTU_IMAGE=ubuntu:24.04@sha256:9c7f200c07e3d4a03e7249d2c16bf66a51120fb876aa2242cf31451412543289
 FROM ${UBUNTU_IMAGE}
 
 ARG BACKEND=cpu

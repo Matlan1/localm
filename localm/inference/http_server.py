@@ -22,6 +22,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sys
 import threading
@@ -4596,22 +4597,153 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 SESSION_COOKIE = "localm_session"
 
 
+# An unqualified or port-named session cookie, as older builds set them.
+_OLDER_SESSION_COOKIE = re.compile(rf"{SESSION_COOKIE}(_[0-9]{{1,5}})?")
+
+
+def _session_cookie_names(request) -> tuple[str, str]:
+    """This install's session cookie name for *request*'s scheme, and the one for
+    the other scheme (http, https)."""
+    from localm import sessions
+    from localm.config import instance_id
+    tag = hashlib.sha256(
+        f"localm-session-cookie:{instance_id()}:{sessions.data_folder_id()}".encode(
+            "utf-8", "surrogatepass")).hexdigest()[:12]
+    plain = f"{SESSION_COOKIE}_{tag}"
+    tls = f"{plain}_tls"
+    return (tls, plain) if request.url.scheme == "https" else (plain, tls)
+
+
 def session_cookie_name(request) -> str:
-    """Per-instance session cookie name. Browsers share cookies across ports of
-    one host, so the name carries the port the request arrived on; a request
-    with no explicit port uses the legacy ``SESSION_COOKIE``."""
-    try:
-        port = request.url.port
-    except ValueError:
-        port = None
-    return f"{SESSION_COOKIE}_{port}" if port else SESSION_COOKIE
+    """This install's session cookie name: ``SESSION_COOKIE`` plus a short hash
+    of ``config.instance_id()`` and the data folder (``sessions.data_folder_id``), with
+    ``_tls`` appended over https. Browsers share cookies across the ports of one
+    host, so the name is the install's and not the port's; http and https use two
+    names because a browser does not let an http response replace a Secure cookie
+    of the same name."""
+    return _session_cookie_names(request)[0]
+
+
+def _presented_session_cookies(request) -> dict[str, str]:
+    """The non-empty cookies in *request* under a session cookie name of this
+    install (either scheme) or of an older build. A cookie of another install with
+    its own name is never among them."""
+    names = set(_session_cookie_names(request))
+    return {n: v.strip() for n, v in request.cookies.items()
+            if (n in names or _OLDER_SESSION_COOKIE.fullmatch(n)) and v.strip()}
+
+
+def _older_build_choice(values) -> str:
+    """The session id that counts of *values*, the ones older builds' cookies carry:
+    the newest when every one is a live session, otherwise one that is not live."""
+    newest, issued = "", -1.0
+    for value in dict.fromkeys(values):
+        rec = _valid_session(value)
+        if rec is None:
+            return value
+        if rec["issued"] > issued:
+            newest, issued = value, rec["issued"]
+    return newest
 
 
 def session_cookie_value(request) -> str:
-    """The session id presented by *request*: the instance-specific cookie, else
-    the legacy unsuffixed one left by an older build."""
-    jar = request.cookies
-    return (jar.get(session_cookie_name(request)) or jar.get(SESSION_COOKIE) or "").strip()
+    """The session id presented by *request*. Under this install's own cookie name
+    only that one counts, live or not; without it the one under the other scheme's
+    name; without both: ``_older_build_choice``. "" when none is presented. Decided
+    once per request."""
+    chosen = getattr(request.state, "localm_session_id", None)
+    if isinstance(chosen, str):
+        return chosen
+    presented = _presented_session_cookies(request)
+    own, other = _session_cookie_names(request)
+    chosen = (presented.get(own) or presented.get(other)
+              or _older_build_choice(presented.values()))
+    request.state.localm_session_id = chosen
+    return chosen
+
+
+def _set_session_cookie(request, response, sid: str, others) -> None:
+    """Set this install's session cookie to *sid* on *response* (HttpOnly,
+    SameSite=Strict, Secure over https, kept for ``SESSION_MAX_AGE``) and delete
+    the cookies named in *others*."""
+    secure = request.url.scheme == "https"
+    own = session_cookie_name(request)
+    response.set_cookie(own, sid, httponly=True, secure=secure, samesite="strict",
+                        path="/", max_age=SESSION_MAX_AGE)
+    for name in others:
+        if name != own:
+            response.delete_cookie(name, path="/", httponly=True, secure=secure,
+                                   samesite="strict")
+
+
+def start_session(request, response, *, key_hash: Optional[str], **snapshot) -> str:
+    """Log this browser in: end every other session of this install the request
+    presents, except one under the other scheme's name that the same key minted,
+    mint a session (``sessions.create`` with *key_hash* and *snapshot*), set its
+    cookie on *response* and delete the cookies of the ended ones. Returns the
+    session id. Raises a 503 ``HTTPException``, with no session made, when the
+    presented sessions could not be ended or the new one not stored. Blocking."""
+    from localm import sessions
+    presented = _presented_session_cookies(request)
+    _own, other = _session_cookie_names(request)
+    ending = set(presented.values())
+    rec = sessions.lookup(presented.get(other))
+    if rec is not None and key_hash and rec["key_hash"] == key_hash:
+        ending.discard(presented[other])
+    ended = sessions.revoke_many(ending)
+    if ended is None:
+        raise HTTPException(503, "The earlier login of this browser could not be "
+                                 "ended, so it was not signed in. Try again.")
+    try:
+        sid = sessions.create(key_hash=key_hash, **snapshot)
+    except (OSError, ValueError) as e:
+        from localm.debuglog import logger as _dbg
+        _dbg.warning("could not store a browser login (%s)", e)
+        raise HTTPException(503, "The login could not be stored, so this browser was "
+                                 "not signed in. Try again.") from e
+    _set_session_cookie(request, response, sid,
+                        [n for n, v in presented.items() if v in ended])
+    return sid
+
+
+def move_session_to_own_name(request, response) -> bool:
+    """When the live session *request* is signed in with came under another name (an
+    older build's, or the other scheme's), set it under this install's own name on
+    *response*, end the other sessions older builds' cookies present and delete the
+    cookies of both. The other scheme's cookie is kept. False, with nothing changed,
+    when those sessions could not be ended. Blocking."""
+    from localm import sessions
+    presented = _presented_session_cookies(request)
+    own, other = _session_cookie_names(request)
+    if not presented or own in presented:
+        return True
+    sid = session_cookie_value(request)
+    presented.pop(other, None)
+    ended = sessions.revoke_many(set(presented.values()) - {sid})
+    if ended is None:
+        return False
+    _set_session_cookie(request, response, sid,
+                        [n for n, v in presented.items() if v == sid or v in ended])
+    return True
+
+
+def end_sessions(request, response) -> bool:
+    """Sign this browser out: end every session of this install *request* presents
+    and delete this install's cookies and theirs on *response*. False when the
+    store could not be read or written; the cookie the request is signed in with is
+    deleted then too. Blocking."""
+    from localm import sessions
+    presented = _presented_session_cookies(request)
+    own, other = _session_cookie_names(request)
+    ended = sessions.revoke_many(presented.values())
+    gone = {session_cookie_value(request)} if ended is None else ended
+    secure = request.url.scheme == "https"
+    for name in {own, *(n for n, v in presented.items() if n == other or v in gone)}:
+        response.delete_cookie(name, path="/", httponly=True, secure=secure,
+                               samesite="strict")
+    return ended is not None
+
+
 CSRF_HEADER = "X-CSRF-Token"
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 
@@ -6446,7 +6578,7 @@ def _make_lifespan():
             _sessions.sweep()
         except Exception:
             from localm.debuglog import logger as _dbg
-            _dbg.debug("session sweep at startup failed (non-fatal)", exc_info=True)
+            _dbg.warning("session sweep at startup failed", exc_info=True)
         await asyncio.get_running_loop().run_in_executor(None, _remove_leftovers, app)
         # Route an uncaught asyncio task exception through the bug reporter
         # instead of a silent "Task exception was never retrieved". Skipped under

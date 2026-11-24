@@ -34,6 +34,8 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+from localm import procs
+
 MODULE = "localm/_finish_update.py"
 RESULT_FILE = "finish-result.json"
 STEPS = frozenset({"dependencies", "runtime", "components"})
@@ -142,7 +144,8 @@ def run(root, *, old: str, new: str, klass: str, result_file, env: dict,
     flags: dict = ({"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32"
                    else {"start_new_session": True})
     try:
-        proc = subprocess.Popen(cmd, cwd=str(root), env=env, stdin=subprocess.DEVNULL,
+        proc = procs.start(cmd, purpose="update step",
+                                cwd=str(root), env=env, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                 encoding="utf-8", errors="replace", **flags)
     except OSError as e:

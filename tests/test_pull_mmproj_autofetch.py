@@ -125,6 +125,8 @@ class TestAutoDetectSingleCandidate:
         never picks up its projector."""
         store, models_dir = fake_registry
         (models_dir / "main.gguf").write_bytes(_LLM_BYTES)
+        store["main"] = {"path": str((models_dir / "main.gguf").resolve()),
+                         "source": "hf:o/r", "model_type": "llm"}
         _wire_repo_listing(monkeypatch, ["main.gguf", "mmproj-main-f16.gguf"])
         _wire_download(monkeypatch, {"mmproj-main-f16.gguf": _CLIP_BYTES})
 

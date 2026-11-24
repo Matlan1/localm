@@ -21,7 +21,7 @@ class _CollectionResync:
 
     def _resync_locked(self, *, embed_fn, classify_fn, describe_image_fn,
                        on_progress, policy, force, prune_missing,
-                       model_name=None) -> dict:
+                       allow_vector_loss=False, model_name=None) -> dict:
         """The resync body. MUST run under _collection_lock after _load()."""
         say = on_progress or (lambda _t: None)
         available, unavailable, blocked = self._partition_roots(policy, say)
@@ -43,7 +43,8 @@ class _CollectionResync:
             result = self._add_paths_locked(
                 targets, embed_fn=embed_fn, classify_fn=classify_fn,
                 describe_image_fn=describe_image_fn, on_progress=on_progress,
-                policy=policy, force=force, model_name=model_name)
+                policy=policy, force=force, allow_vector_loss=allow_vector_loss,
+                model_name=model_name)
         else:
             result = {"added": 0, "updated": 0, "skipped": 0, "failed": [],
                       "not_found": [], "chunks": len(self._chunks)}

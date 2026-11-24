@@ -18,14 +18,17 @@ from ..display import (
     print_success, print_task_footer, print_tool_call, print_tool_error,
     print_tool_result, print_turn_divider, safe_markup,
 )
-from ..parser import looks_like_tool_attempt, split_response, strip_orphan_closers
+from ..parser import (
+    invented_result_at, invented_result_without_call, looks_like_tool_attempt,
+    names_a_tool_as_command, split_response, strip_orphan_closers, strip_tool_calls, unfinished_call,
+)
 from ..tools import ToolResult
 from ..audit import SessionMode
 from .constants import (
     _ACTION_VERBS, _IMPERATIVE_LEADS, _IMPERATIVE_ONLY_VERBS, _MAX_NOCALL_ESCALATIONS, _MAX_TOOL_REPAIRS,
     _NON_FILE_SUFFIXES, _STATEMENT_LINKS, _STATEMENT_PARTICIPLES, _STATEMENT_PREDICATES,
     _REPEAT_HISTORY_MAX, _REPEAT_RESPONSE_ABORT, _REPEAT_SIMILARITY,
-    _BROWSER_TOOLS, _SKILL_STATE_TOOLS,
+    _BROWSER_TOOLS, _SKILL_STATE_TOOLS, confirm_forced,
 )
 from .planmode import INTERACTION_TOOLS
 from localm.textguard import compose, compose_join
@@ -507,6 +510,10 @@ _PROSE_TARGET_NOUNS = frozenset({
     "changelog", "notes", "wiki", "doc", "document"})
 
 
+# Folders a test run or this tool leaves behind, not a change a command made.
+_CACHE_DIRS = frozenset({"__pycache__", ".pytest_cache", ".localcoder",
+                         ".mypy_cache", ".ruff_cache", "node_modules"})
+_MAX_RECORD_PATHS = 10
 # A shell command that runs a project's tests.
 _RE_TEST_COMMAND = re.compile(
     r"^\s*(?:(?:python[\d.]*|py)\s+-m\s+)?(?:pytest|unittest|tox|nox|jest|vitest|mocha)\b"
@@ -582,22 +589,36 @@ def _announced_step(text: str) -> str:
 
 
 def _dedupe_calls(calls: list) -> tuple[list, int]:
-    """``(calls, dropped)``: *calls* with every call whose name and arguments
-    equal an earlier call's removed, in order, and how many were removed."""
+    """``(calls, dropped)``: *calls* with one of every set of calls that have the
+    same name and arguments, in order, and how many were removed. Kept is the one
+    written in the call format, else one that stands outside the reply's
+    reasoning, else the first."""
     import json
-    seen: set = set()
-    kept = []
-    for call in calls:
+
+    def rank(call) -> tuple:
+        return (getattr(call, "lenient", False) is True,
+                getattr(call, "in_reasoning", False) is True)
+
+    best: dict = {}
+    keys: list = []
+    for i, call in enumerate(calls):
         try:
             key = (call.name, json.dumps(call.args, sort_keys=True, default=str))
         except (TypeError, ValueError):
-            kept.append(call)
-            continue
-        if key in seen:
-            continue
-        seen.add(key)
-        kept.append(call)
+            key = i
+        keys.append(key)
+        if key not in best or rank(call) < rank(calls[best[key]]):
+            best[key] = i
+    kept = [call for i, call in enumerate(calls) if best[keys[i]] == i]
     return kept, len(calls) - len(kept)
+
+
+def _with_notices(response: str, *notices: str) -> str:
+    """*response* as it is kept in the conversation, with the harness's own
+    notices about how the run ended in front of it: the saved transcript cuts a
+    long message at its end."""
+    said = [n.strip() for n in notices if n.strip()]
+    return "\n\n".join([*said, response]) if said else response
 
 
 def response_similarity(a: str, b: str) -> float:
@@ -618,6 +639,46 @@ class _LoopMixin:
 
         # Set by Agent (core.py).
         parent: Any
+        gen_kwargs: dict
+        on_event: Any
+        name: str
+        turn_budget: int
+        _messages: list
+
+        def _call_llm(self, messages: list[dict], interactive: bool) -> str: ...
+
+        _loose_answers: dict
+        _loose_unasked: dict
+        _loose_refused: set
+        _refused_quotations: list
+        _answered_with_example: set
+        _typed_now: str
+        _force_not: frozenset
+
+        def _ask_if_request_open(self, refused: str = "") -> bool | None: ...
+
+        def _note_foreign_text(self, text) -> None: ...
+        _consecutive_errors: dict[str, int]
+
+        def _loose_calls_to_check(self, calls: list) -> list: ...
+
+        def _ask_if_calls_meant(self, calls: list, response: str = "",
+                                parsed=()) -> dict: ...
+
+        def _build_messages(self) -> list[dict]: ...
+
+        _max_tokens_explicit: bool | None
+        _reply_limit: int | None
+        _writing_commands: int
+        _files_read: set
+        _shell_baseline_captured: bool
+        confirm_handler: Any
+        always_confirm: Any
+
+        _git_baseline: frozenset | None
+
+        def _git_status_map(self) -> dict[str, str] | None: ...
+
         @property
         def stop_pending(self) -> bool: ...
 
@@ -688,8 +749,34 @@ class _LoopMixin:
             self._note_typed_request(task)
             self._record_typed_request(task)
         message = self._with_episodes(task)
-        self._add_user_with_plan_note(compose(message, attachments) if attachments else message)
+        if attachments:
+            message = compose(message, attachments)
+        if getattr(self, "parent", None) is None:
+            self._typed_now = task
+        note = "" if interactive else self._unconfirmable_note()
+        self._add_user_with_plan_note(compose(message, note) if note else message)
         return self._loop(interactive=interactive)
+
+    def _always_denied(self) -> list[str]:
+        """The tools this run can only deny: they need a confirmation even under
+        auto_approve and nobody can give one."""
+        if (self.confirm_handler is not None or getattr(self, "_interactive", False)
+                or not self.always_confirm):
+            return []
+        disabled = self.disabled_tools
+        return sorted(
+            name for name, td in _agent.TOOL_REGISTRY.items()
+            if name not in disabled and confirm_forced(self.always_confirm, name, td))
+
+    def _unconfirmable_note(self) -> str:
+        """Tells the model which tools this run can only deny, or ""."""
+        names = self._always_denied()
+        if not names:
+            return ""
+        return ("\n\n[this run] Nobody can confirm a call in this run, so these "
+                f"tools are always denied: {', '.join(names)}. Do not call them. Do "
+                "the rest of the task, and say in your final answer what is missing "
+                "because of it.")
 
     def continue_task(self, message: str, *, interactive: bool = False) -> str:
         """
@@ -724,6 +811,7 @@ class _LoopMixin:
         # Recall relevant past lessons on the first turn of a session (the turn
         # that sets the session's task); later turns keep the same context.
         self._last_user_request = user_input   # raw, see run_task
+        typed = user_input
         self._untrusted_in_context = False
         if record_request:
             self._note_typed_request(user_input)
@@ -733,6 +821,7 @@ class _LoopMixin:
             user_input = self._with_episodes(user_input)
         if not self._review_task:
             self._review_task = user_input
+        self._typed_now = typed
         self._add_user_with_plan_note(compose(user_input, attachments) if attachments else user_input)
         return self._loop(interactive=True)
 
@@ -814,7 +903,11 @@ class _LoopMixin:
                                            # the session-wide flag, set in the finally.
         self._last_verify_state = None     # per-run: this run is unverified until
                                            # its own gate says otherwise
+        self._refused_quotations = []
         self._denied_unconfirmed = []      # per-run: see Agent.denied_unconfirmed
+        self._reply_limit = None           # per-run: see _raise_reply_limit
+        self._disarm_forced_call()
+        self._files_read = set()           # per-run
         start_turns = self._turns          # turns used by *this* task only
         self._task_start_turns = start_turns
         budget_escalated = False           # uncertainty escalation fires at most once per task
@@ -829,12 +922,18 @@ class _LoopMixin:
                              verify_checked_at=self._write_total(),
                              partial_notice_count=0, partial_notice_cap_announced=False,
                              nocall_escalation=0, nocall_declined=False, tool_calls_made=0,
-                             nocall_response="", code_nudged=False, announce_nudged=False,
+                             nocall_response="", code_nudged=False, code_forced=False, code_reminded=0,
+                             announce_nudged=False,
                              possible_write=False, announced_step="",
                              writes_at_start=self._write_total(),
                              files_at_start={f["path"]: f["writes"]
                                              for f in self.changed_files()},
                              start_turns=start_turns,
+                             budget_reminded=0, invented_count=0,
+                             question_answered=False, example_replies=0,
+                             example_open=None, quoted_replies=0,
+                             quotations_in_a_row=0, refused_calls="",
+                             cut_off_count=0,
                              unfounded_checked=False,
                              plan_submitted=False, plan_nudges=0,
                              declines_at_start=self._user_declines)
@@ -853,6 +952,7 @@ class _LoopMixin:
                 for queued in self._drain_queued():
                     self._note_typed_request(queued)
                     self._record_typed_request(queued)
+                    self._typed_now = queued
                     self._add_user(
                         "[user steering note - read this before continuing, it "
                         f"overrides earlier instructions where they conflict]\n{queued}"
@@ -917,6 +1017,8 @@ class _LoopMixin:
                             "of continuing to experiment. If you are genuinely close to "
                             "done, finish with the minimal remaining steps."
                         )
+                elif budget_escalated and not interactive:
+                    self._remind_of_budget(task_turns, st)
 
                 # ---- context-budget check --------------------------------
                 self._maybe_compact(interactive=interactive)
@@ -927,7 +1029,7 @@ class _LoopMixin:
                 # One-shot: the forcing grammar applies only to the turn the
                 # ladder armed it for. Cleared here, next to the single call that
                 # consumes it, so no later path inherits a constrained sampler.
-                self._force_tool_grammar = False
+                self._disarm_forced_call()
 
                 if self.stop_pending:
                     # Stopped mid-generation: keep the partial text, run nothing
@@ -943,6 +1045,17 @@ class _LoopMixin:
                 # and json / bare fences) are recognised.
                 tool_names = set(TOOL_REGISTRY) - self.disabled_tools
                 parsed_calls = parse_tool_calls(response, tool_names=tool_names)
+                # What follows a result the model invented is dropped, calls
+                # included. Judged on the whole reply, so a call in it is as
+                # trusted or as lenient as it was written.
+                cut_at = invented_result_at(response, tool_names) if isinstance(
+                    response, str) else -1
+                invented = cut_at >= 0
+                if invented:
+                    response = response[:cut_at]
+                    parsed_calls = [c for c in parsed_calls if c.end <= cut_at]
+                    self._audit.notice("invented_result", "the reply went on with a "
+                                       "tool result it wrote itself; cut off there")
                 calls, duplicate_calls = _dedupe_calls(parsed_calls)
 
                 # ---- repeated-scaffold breaker ---------------------------
@@ -977,7 +1090,7 @@ class _LoopMixin:
                         "conversation is intact.]")
                     print_warning(final_response)
                     self._emit("info", text=final_response)
-                    self._add_assistant(response)
+                    self._add_assistant(_with_notices(response, final_response))
                     self._last_run_ok = False
                     break
 
@@ -990,11 +1103,42 @@ class _LoopMixin:
                     continue
 
                 # ---- there are tool calls --------------------------------
-                # Recorded before execution: the escalation ladder asks whether
-                # the model can produce a CALL at all, not whether it succeeded.
-                st.tool_calls_made += len(calls)
-                st.possible_write = st.possible_write or any(
-                    _may_write_files(c, self.cwd) for c in calls)
+                # A loosely written call is run, or offered for approval, only
+                # once the model was asked whether it meant this call.
+                self._add_assistant(response)
+                self._loose_unasked.clear()
+                self._loose_refused.clear()
+                self._answered_with_example.clear()
+                loose = self._loose_calls_to_check(calls)
+                self._loose_answers = self._ask_if_calls_meant(
+                    loose, response, parsed_calls) if loose else {}
+                shown = (bool(loose) and all(
+                    self._loose_answers.get(id(c)) is False for c in loose)
+                    and all(c.lenient for c in calls))
+                if shown:
+                    st.example_replies += 1
+                turns_left = self._task_turns_left()
+                if (shown and st.example_replies == 1 and turns_left
+                        and len(loose) == len(calls)):
+                    self._loose_answers = {}
+                    self._show_examples(response, parsed_calls, interactive)
+                    self._send_example_back(interactive)
+                    continue
+                if shown and (st.example_replies > 1 or not turns_left):
+                    # Shown again after the model was told that nothing ran, or
+                    # on the last turn: the reply is the answer, judged and
+                    # recorded like any other final reply.
+                    self._loose_answers = {}
+                    self._show_examples(response, parsed_calls, interactive)
+                    st.refused_calls = ""
+                    st.example_open = self._ask_if_request_open()
+                    self._messages.pop()
+                    should_break, fr = self._handle_no_tool_calls(
+                        response, interactive, st, examples=True)
+                    if should_break:
+                        final_response = fr
+                        break
+                    continue
 
                 # Show the non-tool-call text parts when not already streamed
                 segments = split_response(response, parsed_calls)
@@ -1013,17 +1157,50 @@ class _LoopMixin:
                 self._emit("assistant_text",
                           text="".join(seg for seg in segments if isinstance(seg, str)))
 
-                self._add_assistant(response)
-
                 # Execute tools - run non-destructive batches in parallel
-                lenient_before = self._lenient_denials
-                result_blocks = self._execute_tools(calls, interactive=interactive)
+                writes_before = self._write_total()
+                try:
+                    result_blocks = self._execute_tools(calls, interactive=interactive)
+                finally:
+                    self._loose_answers = {}
+                # A call refused for its format or as an example is no evidence
+                # that the model used a tool, and changed nothing.
+                used = [c for c in calls if id(c) not in self._loose_refused]
+                st.tool_calls_made += len(used)
+                st.possible_write = st.possible_write or any(
+                    _may_write_files(c, self.cwd) for c in used)
                 st.plan_submitted = st.plan_submitted or any(
                     c.name == "exit_plan_mode" for c in calls)
-                if self._lenient_denials > lenient_before:
-                    owed_note = self._force_after_lenient_denial()
-                    if owed_note:
-                        result_blocks.append(owed_note)
+                request = getattr(self, "_last_user_request", "") or ""
+                from .execution import _FOREIGN, _call_key
+                quoted = all(id(c) in self._loose_refused
+                             and self._loose_unasked.get(id(c)) in _FOREIGN for c in calls)
+                st.quotations_in_a_row = st.quotations_in_a_row + 1 if quoted else 0
+                if (st.quotations_in_a_row > 1 and self._used_tools_this_task(st)
+                        and not self._change_still_owed(request, st)
+                        and self._messages[-1].get("role") == "assistant"):
+                    # A reply that goes on quoting, refused calls and nothing
+                    # else, is the answer and is judged like any final reply.
+                    st.refused_calls = "; ".join(
+                        f"{c.name} {_call_key(c)[:200]}" for c in calls)
+                    st.example_open = self._ask_if_request_open(st.refused_calls)
+                    self._audit.notice("quoting_answer", "the reply again only quotes "
+                                       "calls that were refused; it is taken as the answer")
+                    self._show_examples(response, parsed_calls, interactive,
+                                        "a quotation: nothing was run")
+                    self._messages.pop()
+                    should_break, fr = self._handle_no_tool_calls(
+                        response, interactive, st, examples=True)
+                    if should_break:
+                        final_response = fr
+                        break
+                    continue
+                if invented:
+                    result_blocks.append(
+                        "[invented result] Your reply went on with a <tool_result> "
+                        "you wrote yourself. It was cut off there and dropped: only "
+                        "the results above are real. Make a call, stop, and read its "
+                        "real result before the next step.")
 
                 # parse_tool_calls silently drops a tool-call-shaped block whose
                 # body could not be recovered, and the only downstream check
@@ -1035,9 +1212,16 @@ class _LoopMixin:
                 # Capped at _MAX_TOOL_REPAIRS: the notice's own example text is
                 # itself tool-call-shaped, so a model echoing it back would
                 # re-trigger the notice every turn.
-                leftover = strip_orphan_closers(
-                    "".join(seg for seg in segments if isinstance(seg, str)))
-                if looks_like_tool_attempt(leftover, tool_names):
+                prose = "".join(seg for seg in segments if isinstance(seg, str))
+                leftover = strip_orphan_closers(prose)
+                cut_off = unfinished_call(prose, tool_names)
+                request = getattr(self, "_last_user_request", "") or ""
+                as_command = (demands_action(request)
+                              and names_a_tool_as_command(leftover, tool_names))
+                if cut_off and st.partial_notice_count < _MAX_TOOL_REPAIRS:
+                    st.partial_notice_count += 1
+                    result_blocks.append(self._cut_off_note(cut_off, interactive))
+                elif as_command or looks_like_tool_attempt(leftover, tool_names):
                     if st.partial_notice_count < _MAX_TOOL_REPAIRS:
                         st.partial_notice_count += 1
                         if interactive:
@@ -1080,6 +1264,38 @@ class _LoopMixin:
                             "already reached, not reported to the model "
                             "this turn")
 
+                tests_fail = (self._consecutive_errors.get("run_tests", 0) > 0
+                              and self._write_total() == writes_before
+                              and demands_action(request) and asks_for_change(request))
+                if (st.code_reminded < 3 and _has_file_code_block(leftover)
+                        and (tests_fail or self._change_still_owed(request, st))):
+                    st.code_reminded += 1
+                    note = (
+                        "[nothing written] The code block in your reply changed no "
+                        "file: only a tool call does. If it belongs in the project, "
+                        "write it now with write_file or edit_file.")
+                    if st.code_reminded > 1 and self._arm_forced_call(
+                            c.name for c in calls):
+                        note += (
+                            " Your next reply is constrained: it must be a tool call, "
+                            "and not " + ", ".join(sorted(self._force_not)) + " again.")
+                    result_blocks.append(note)
+
+                if (any(id(c) in self._loose_refused and self._loose_unasked.get(id(c))
+                        for c in calls) and self._change_still_owed(request, st)):
+                    # A quotation that was refused is not the change.
+                    st.quoted_replies += 1
+                    note = (
+                        "[nothing written] The user's request asks for a change, and "
+                        "nothing has been written yet. Do not show that call again: "
+                        "make the change with write_file or edit_file now.")
+                    if st.quoted_replies > 1 and self._arm_forced_call(
+                            c.name for c in calls):
+                        note += (
+                            " Your next reply is constrained: it must be a tool call, "
+                            "and not " + ", ".join(sorted(self._force_not)) + " again.")
+                    result_blocks.append(note)
+
                 if duplicate_calls:
                     result_blocks.append(
                         f"[duplicate calls] {duplicate_calls} call(s) in this "
@@ -1100,8 +1316,12 @@ class _LoopMixin:
             else:
                 msg = f"[max_turns={self.max_turns} reached]"
                 print_warning(msg)
-                final_response = msg
                 self._last_run_ok = False
+                summary = self._closing_summary(interactive, st)
+                final_response = (f"{summary}\n\n{msg}{self._grounding_footer()}"
+                                  if summary else msg)
+                if summary and not interactive and self.on_event is None:
+                    print_assistant_response(final_response, name=self.name)
 
         except KeyboardInterrupt:
             if interactive and self._messages:
@@ -1129,12 +1349,15 @@ class _LoopMixin:
             raise
 
         else:
+            if not self._last_run_ok and not self._user_stopped:
+                self._record_unanswered_end(final_response)
             # Clean finish - discard any stale checkpoint
             self.clear_checkpoint()
 
         finally:
             # Auto-run from an approved plan lasts for this run only.
             self._end_plan_autorun()
+            self._disarm_forced_call()
             # Fold this run's outcome into the session-level flag before the next
             # run re-arms the per-run one, so every failure path (max_turns,
             # either circuit breaker) is captured in one place. A user stop is
@@ -1146,6 +1369,142 @@ class _LoopMixin:
 
         return final_response
 
+    def _arm_forced_call(self, but_not=()) -> bool:
+        """Hold the next turn of this task to a tool call, to none of *but_not*.
+        Returns False, and changes nothing, when no turn is left or the backend
+        cannot enforce it."""
+        if not self._task_turns_left() or not self.can_force_tool_calls():
+            return False
+        self._force_tool_grammar = True
+        self._force_not = frozenset(but_not)
+        return True
+
+    def _disarm_forced_call(self) -> None:
+        self._force_tool_grammar = False
+        self._force_not = frozenset()
+
+    def _show_examples(self, response: str, calls: list, interactive: bool,
+                       note: str = "an example, as the model said: nothing was run",
+                       ) -> None:
+        """Show a reply whose calls are all examples whole: the live display
+        hides a call."""
+        if self.on_event is not None:
+            self._emit("assistant_text", text=response)
+        elif interactive:
+            if getattr(self, "_streamed_to_terminal", False):
+                parts = [response[c.start:c.end].strip() for c in calls]
+            else:
+                parts = [response.strip()]
+            for part in parts:
+                console.print(safe_markup(part))
+            print_info(f"({note})")
+
+    def _send_example_back(self, interactive: bool) -> None:
+        """Tell the model, once per task, that the calls it called examples did
+        not run, and leave it to make them or to answer."""
+        self._add_user(
+            "[nothing ran] You said the tool call in your reply was an example, so "
+            "nothing ran and nothing changed. If any part of the user's request "
+            "asks for something to be done, do it now with a call, exactly as\n"
+            '<tool_call>\n{"name": "TOOL_NAME", "args": {"PARAM": "VALUE"}}\n'
+            "</tool_call>\nIf the request only asks to be shown or told something, "
+            "give your answer again.")
+        note = "the model called its tool call an example, so nothing ran - asking once more"
+        if interactive:
+            print_info(f"({note})")
+        self._emit("info", text=note)
+
+    def _remind_of_budget(self, task_turns: int, st) -> None:
+        """Past the turn budget, tell the model how many turns are left: once
+        when half of the turns after the budget are used, and once when three
+        are left."""
+        left = self.max_turns - task_turns
+        over = max(1, (self.max_turns - self.turn_budget) // 2)
+        due = (2 if left <= 3 else 1 if left <= over else 0)
+        if due <= st.budget_reminded or left < 0:
+            return
+        st.budget_reminded = due
+        self._emit("info", text=f"{left} turn(s) left of {self.max_turns}")
+        self._add_user(
+            f"[turn budget] {left} more turn(s) after this one, then this run "
+            "ends. Stop collecting. Write what you have so far with your tools "
+            "now, then give your final answer: what is done, what is not done, "
+            "and what you did not check.")
+
+    def _closing_summary(self, interactive: bool, st) -> str:
+        """The model's own account of a run that used up its turns, or "".
+
+        One more reply after the last turn, asked for in plain text; any tool
+        call in it is dropped and nothing in it runs. Not asked for when the
+        run made no tool call or was stopped."""
+        if not st.tool_calls_made or self.stop_pending:
+            return ""
+        self._disarm_forced_call()
+        self._add_user(
+            f"[run ending] All {self.max_turns} turns of this run are used. No "
+            "tool call will run any more. In plain text and in a few sentences: "
+            "what you did, what is not done, and what you did not check.")
+        try:
+            reply = self._call_llm(self._build_messages(), interactive=interactive)
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.warning("closing summary of a run that used its turns failed: %r", e)
+            reply = ""
+        if not isinstance(reply, str):
+            reply = ""
+        tool_names = set(_agent.TOOL_REGISTRY) - self.disabled_tools
+        _calls, text, _malformed = strip_tool_calls(reply, tool_names=tool_names)
+        text = text.strip()
+        if not text or looks_like_tool_attempt(text, tool_names):
+            if str(self._messages[-1].get("content", "")).startswith("[run ending]"):
+                self._messages.pop()
+            return ""
+        return text
+
+    def _record_unanswered_end(self, final_response: str) -> None:
+        """Put the end of a failed run into the conversation when the model's
+        last reply is not there as its end: a circuit breaker or the turn limit
+        after tool results, or a closing summary. The saved transcript and a
+        resumed session then end with how the run ended."""
+        if self._messages and self._messages[-1].get("role") == "user":
+            self._add_assistant(final_response)
+
+    def _raise_reply_limit(self) -> int:
+        """Double this run's reply limit, once, when the limit in force was
+        filled in by default. Returns the limit in force now, 0 when the run
+        has none of its own."""
+        current = self.gen_kwargs.get("max_tokens")
+        if not isinstance(current, int) or isinstance(current, bool):
+            return 0
+        if self._reply_limit is None and self._max_tokens_explicit is False:
+            self._reply_limit = current * 2
+        return max(current, self._reply_limit or 0)
+
+    def _cut_off_note(self, name: str, interactive: bool) -> str:
+        """Tell the model, and the person, that the reply ended in the middle of
+        a call to *name*."""
+        before = self._reply_limit or self.gen_kwargs.get("max_tokens")
+        now = self._raise_reply_limit()
+        limit = (f" One reply can be at most {before} tokens long."
+                 if isinstance(before, int) else "")
+        raised = ""
+        if now and isinstance(before, int) and now > before:
+            raised = f" The limit is {now} tokens from here on."
+        self._audit.notice("call_cut_off",
+                           f"the reply ended in the middle of a {name} call")
+        self._emit("info", text=(
+            f"the reply ended in the middle of a {name} call, so it was not run"))
+        if interactive:
+            _agent.print_warning(
+                f"  The reply ended in the middle of a {name} call, so it was "
+                "not run. The model was told.")
+        return ("[tool-call format] Your reply ended in the middle of the "
+                f"{name} call, before it was complete, so that call was NOT run."
+                f"{limit}{raised} Do not send the same long call again: do it in "
+                "smaller steps, each one a complete call. For a long file, write "
+                "the first part with write_file, then add each next part with "
+                "edit_file.")
+
     def _task_turns_left(self) -> bool:
         """True while the running task has used fewer than ``max_turns`` turns.
 
@@ -1153,7 +1512,8 @@ class _LoopMixin:
         started, so turns earlier tasks in the session used do not count."""
         return self._turns - self._task_start_turns < self.max_turns
 
-    def _handle_no_tool_calls(self, response, interactive, st) -> tuple[bool, str]:
+    def _handle_no_tool_calls(self, response, interactive, st,
+                              examples: bool = False) -> tuple[bool, str]:
         """Handle a turn that produced no tool calls (split out of _loop).
 
         Runs, in order: the harness-run exit-code oracle (when a verify command is
@@ -1162,7 +1522,8 @@ class _LoopMixin:
         one-shot pre-done reviewer pass, and finally accepting the response as the
         final answer. ``st`` carries the per-task one-shot flags (verify_nudged,
         repair_count, review_done, verify_retries/verify_settled) so they persist
-        across turns.
+        across turns. With *examples* every call in the response is an example, so
+        none of it is read as a broken attempt at a call.
 
         Returns ``(should_break, final_response)``: ``(False, "")`` to continue the
         loop, ``(True, text)`` to end it with that final response."""
@@ -1174,10 +1535,17 @@ class _LoopMixin:
         # self-graded nudge and the reviewer, so a failing check goes straight
         # back as a fix request. Skipped for a response that only looks like a
         # broken tool call - the repair turn below handles that.
-        if not looks_like_tool_attempt(response, tool_names):
+        attempt = not examples and looks_like_tool_attempt(response, tool_names)
+        if not attempt:
             gated = self._run_verify_gate(response, interactive, st)
             if gated is not None:
                 return gated
+
+        request = getattr(self, "_last_user_request", "") or ""
+        invented = (-1 if examples or not demands_action(request)
+                    else invented_result_without_call(response))
+        if invented >= 0 and st.invented_count < 2 and self._task_turns_left():
+            return self._invented_result_nudge(response[:invented], interactive, st)
 
         # Self-verification: nudge the agent to check its work while code changes
         # sit unverified. Fires at most once per task.
@@ -1197,6 +1565,8 @@ class _LoopMixin:
                 from ..verify import command_text
                 how = (f"run `{command_text(self.verify_cmd)}` (via run_shell, "
                        "or run_tests if it is the project's test command)")
+            elif "run_tests" in self._always_denied():
+                how = "re-read the changed files to check for mistakes"
             else:
                 how = ("run run_tests if this project has a test suite, "
                        "otherwise re-read the changed files to check for mistakes")
@@ -1215,13 +1585,29 @@ class _LoopMixin:
         # Repair turn: the response looks like a tool call that failed to parse
         # (a marker/fence, or a name+args object the lenient parser could not
         # recover). Re-prompt once with the exact format.
+        # A call the reply ends in the middle of has its own count: it needs
+        # smaller steps, not another format.
+        cut_off = unfinished_call(response, tool_names) if attempt else ""
+        if cut_off and st.cut_off_count < _MAX_TOOL_REPAIRS and self._task_turns_left():
+            st.cut_off_count += 1
+            self._add_assistant(response)
+            self._add_user(self._cut_off_note(cut_off, interactive))
+            return (False, "")
         if (
-            st.repair_count < _MAX_TOOL_REPAIRS
+            not cut_off
+            and st.repair_count < _MAX_TOOL_REPAIRS
             and self._task_turns_left()
-            and looks_like_tool_attempt(response, tool_names)
+            and (attempt
+                 or (not examples and invented < 0
+                     and demands_action(request)
+                     and names_a_tool_as_command(response, tool_names)))
         ):
             st.repair_count += 1
             self._add_assistant(response)
+            if st.repair_count > 1 and (
+                    self._change_still_owed(request, st)
+                    or self._tool_demanded(request, st)):
+                self._arm_forced_call()
             self._add_user(
                 "[tool-call format] That looked like a tool call, "
                 "but I could not parse it. Re-emit it in EXACTLY "
@@ -1244,16 +1630,19 @@ class _LoopMixin:
         # Still looks like an unparseable tool call after the repair attempts:
         # surface the raw attempt instead of finalising a hidden <tool_call>
         # block, which the streaming display hides.
-        if looks_like_tool_attempt(response, tool_names):
+        if attempt:
             self._emit("info", text=(
                 "the model tried to call a tool but emitted invalid output "
-                f"{st.repair_count + 1} times - surfacing its raw attempt "
-                "(nothing was run or written)"))
+                f"{st.repair_count + st.cut_off_count + 1} times - surfacing its "
+                "raw attempt (nothing was run or written)"))
             notice = (
+                f"[I tried to call {cut_off}, but each attempt ended before the "
+                "call was complete, so it was not run. My last attempt was:]"
+                if cut_off else
                 "[I tried to call a tool but could not produce valid "
                 "tool-call JSON after several attempts, so nothing was run "
-                "or written. My raw attempt was:]\n\n" + response
-            )
+                "or written. My raw attempt was:]"
+            ) + "\n\n" + response
             if not interactive and self.on_event is None:
                 print_assistant_response(notice, name=self.name)
             self._add_assistant(response)
@@ -1261,9 +1650,7 @@ class _LoopMixin:
             return (True, notice)
 
         # Zero-attempt escalation: the model produced nothing tool-shaped on a
-        # request that needs a tool. Every branch above is reached only via
-        # looks_like_tool_attempt().
-        request = getattr(self, "_last_user_request", "") or ""
+        # request that needs a tool.
         if self._plan_owed(request, response, st):
             return self._plan_not_submitted(response, interactive, st)
         offered = st.nocall_escalation >= 1 or st.code_nudged
@@ -1291,17 +1678,27 @@ class _LoopMixin:
         elif declined is not None:
             st.nocall_declined = True
             response = response[declined.end():]
-        if declined is None:
+        if declined is None and invented < 0 and not examples:
             escalated = self._escalate_no_tool_attempt(response, interactive, st)
             if escalated is not None:
                 return escalated
 
         unfinished = ""
-        if not st.nocall_declined:
+        if invented >= 0:
+            unfinished = ("\n\n[not finished: this reply shows a tool result the "
+                          "model wrote itself. No tool produced it, so do not rely "
+                          "on it.]")
+        elif not st.nocall_declined:
             gated = self._unfinished_work_gate(response, request, interactive, st)
             if isinstance(gated, tuple):
                 return gated
             unfinished = gated or ""
+            if examples and not unfinished and st.example_open is not False:
+                what = ("were refused" if st.refused_calls else
+                        "were called examples by the model")
+                unfinished = (f"\n\n[not finished: the tool calls in this answer {what}, "
+                              "so they were not run, and the model did not say that "
+                              "the request needs nothing done]")
 
         # Code shown for a workspace file that defines names the file does not
         # contain is invented file content, whatever the reply says it read.
@@ -1387,11 +1784,13 @@ class _LoopMixin:
             self._emit("info", text=(
                 f"unverified code: {where} - the code in this answer is not "
                 "the content of the file it names"))
+        not_run = (f"\n\n[refused, not run: {st.refused_calls}]"
+                   if examples and st.refused_calls else "")
         footer = self._grounding_footer()
         sensitive = self._sensitive_changes_notice()
         if unfinished:
             self._last_run_ok = False
-        final_text = (response + enforcement + unfinished + unverified
+        final_text = (response + enforcement + unfinished + not_run + unverified
                       + (footer or "") + sensitive)
         if interactive and self.on_event is None:
             print_warning = _agent.print_warning
@@ -1399,6 +1798,8 @@ class _LoopMixin:
                 print_warning(enforcement.strip())
             if unfinished.strip():
                 print_warning(unfinished.strip())
+            if not_run:
+                print_warning(not_run.strip())
             if unverified.strip():
                 print_warning(unverified.strip())
             task_files = self._files_changed_this_task(st)
@@ -1414,14 +1815,39 @@ class _LoopMixin:
                 )
         elif not interactive and self.on_event is None:
             print_assistant_response(final_text, name=self.name)
-        self._add_assistant(response)
+        self._add_assistant(_with_notices(response, enforcement, unfinished, unverified))
         return (True, final_text)
+
+    def _invented_result_nudge(self, kept, interactive, st) -> tuple[bool, str]:
+        """Answer a reply that shows the result of a command nothing ran. Only
+        *kept*, the part before that result, stays in the conversation. The
+        second time the next turn is held to a tool call where the backend can."""
+        st.invented_count += 1
+        forced = st.invented_count > 1 and self._arm_forced_call()
+        self._audit.notice("invented_result", "the reply showed a result of a "
+                           "command that no tool ran; cut off there")
+        self._add_assistant(kept.strip() or "(a made-up tool result, dropped)")
+        self._add_user(
+            "[invented result] Nothing ran: the <tool_result> in your reply was "
+            "written by you, so it is not real and was dropped. A code block runs "
+            "nothing. Run what you showed with a tool call now, stop, and read its "
+            "real result."
+            + (" This turn is constrained: the only output accepted is a tool call."
+               if forced else ""))
+        note = "the reply showed a tool result nothing produced - asking for a real call"
+        if interactive:
+            print_info(f"({note})")
+        self._emit("info", text=note)
+        return (False, "")
 
     def _unfinished_work_gate(self, response, request, interactive, st):
         """Hold back a final answer that leaves the requested work undone.
 
-        Three cases:
+        Four cases:
 
+        * in a run nobody answers, a short question while a change is still owed:
+          the agent is told once to find out for itself, and a second question
+          stands as the answer;
         * the reply to the self-verification request is empty (or only the
           ``[no tool needed]`` marker) while changed code files are still
           unverified: the run ends as not finished, naming those files;
@@ -1439,8 +1865,44 @@ class _LoopMixin:
         the final answer when the run ends with the case still open (it is then
         reported as not finished), or ``""``."""
         turns_left = self._task_turns_left() and not self.plan_mode
+        if (self._change_still_owed(request, st) and _asks_a_question(response)
+                and turns_left and not interactive and self.confirm_handler is None
+                and not st.question_answered):
+            st.question_answered = True
+            self._audit.notice("question_unattended",
+                               "the reply asked the user something in a run "
+                               "nobody answers")
+            self._add_assistant(response)
+            self._add_user(
+                "[unattended run] Nobody can answer in this run. Find out what you "
+                "can with your tools (list_dir, grep, read_file, run_tests), decide "
+                "the rest yourself, and do the task. If it cannot be done without an "
+                "answer, say in your final answer exactly what is missing.")
+            self._emit("info", text=(
+                "the model asked a question in a run nobody answers - asking it to "
+                "find out for itself"))
+            return (False, "")
         if self._change_still_owed(request, st) and not _asks_a_question(response):
-            if st.code_nudged or st.nocall_escalation or not turns_left:
+            escalated = st.nocall_escalation and not self._used_tools_this_task(st)
+            if (st.code_nudged and not st.code_forced and turns_left
+                    and "```" in response and self._arm_forced_call()):
+                # It shows the change again instead of making it.
+                st.code_forced = True
+                self._audit.notice("change_forced",
+                                   "the change was shown again instead of made - "
+                                   "the next turn is constrained to a tool call")
+                self._add_assistant(response)
+                self._add_user(
+                    "[nothing written] Still nothing on disk changed. This turn is "
+                    "constrained: the only output accepted is a tool call. Make the "
+                    "change you showed.")
+                if interactive:
+                    print_info("(nothing written: forcing a tool call via constrained sampling)")
+                self._emit("info", text=(
+                    "the change was shown again instead of made - forcing a tool "
+                    "call via constrained sampling"))
+                return (False, "")
+            if st.code_nudged or escalated or not turns_left:
                 return ("\n\n[not finished: nothing was written to any file in this "
                         "task, so the change the request asked for was not made]")
             st.code_nudged = True
@@ -1559,8 +2021,8 @@ class _LoopMixin:
                 "now with the whole plan as markdown in its plan argument "
                 "(read-only tools first if you still need to look). If you need "
                 "an answer from the user first, ask one short question instead.")
-            if st.plan_nudges == 2 and self.can_force_tool_calls():
-                self._force_tool_grammar = True
+            if st.plan_nudges == 2:
+                self._arm_forced_call()
             if interactive:
                 print_info("(plan mode: asking the agent to submit the plan)")
             self._emit("info", text=(
@@ -1569,34 +2031,11 @@ class _LoopMixin:
             return (False, "")
         self._last_run_ok = False
         self._emit("info", text="plan mode: the plan was never submitted")
-        self._add_assistant(response)
-        return (True, response + (
-            "\n\n[not finished: plan mode needs the plan submitted with "
-            "exit_plan_mode, and it never was, so you were not asked to approve "
-            "it]") + self._grounding_footer())
-
-    def _force_after_lenient_denial(self) -> str:
-        """A call denied only for its loose format is re-emitted next turn with
-        the tool-call grammar bound from the first token, so the retry arrives
-        in the <tool_call> format the unattended run accepts. Returns the note
-        that names the denied calls for the model, "" when forcing is not
-        available."""
-        if not self.can_force_tool_calls():
-            return ""
-        self._force_tool_grammar = True
-        with self._denied_lock:
-            owed = [f"- {name} {key[:300]}" for name, key, reason
-                    in self._denied_unconfirmed if reason == "lenient"]
-        self._audit.notice(
-            "lenient_call_forced",
-            "a call was denied for its loose format - the next turn is "
-            "constrained to the tool-call format")
-        self._emit("info", text=(
-            "a tool call was denied for its loose format - asking again with "
-            "the tool-call format enforced"))
-        return ("[tool-call format] These calls did NOT run because of their "
-                "format. Emit exactly these calls again now, nothing else:\n"
-                + "\n".join(owed))
+        notice = ("\n\n[not finished: plan mode needs the plan submitted with "
+                  "exit_plan_mode, and it never was, so you were not asked to approve "
+                  "it]")
+        self._add_assistant(_with_notices(response, notice))
+        return (True, response + notice + self._grounding_footer())
 
     def _used_tools_this_task(self, st) -> bool:
         """Has the model demonstrated, THIS TASK, that it can drive a tool?
@@ -1713,7 +2152,7 @@ class _LoopMixin:
                 "re-prompt did not produce a tool call and grammar forcing is "
                 "unavailable on this backend/config")
             return None                      # caller's own branch reports it
-        self._force_tool_grammar = True
+        self._arm_forced_call()
         self._audit.notice(
             "no_tool_call",
             "re-prompt did not produce a tool call - re-running the turn with "
@@ -1746,10 +2185,41 @@ class _LoopMixin:
             names = ", ".join(sorted(f["path"] for f in changed))
             parts = [f"{len(changed)} file(s) changed: {names}"]
         else:
+            parts = []
+        by_commands = self._changed_by_commands({f["path"] for f in changed})
+        if by_commands:
+            shown = ", ".join(by_commands[:_MAX_RECORD_PATHS])
+            more = len(by_commands) - _MAX_RECORD_PATHS
+            parts.append(f"{len(by_commands)} file(s) changed by commands: {shown}"
+                         + (f" and {more} more" if more > 0 else ""))
+        elif self._shell_baseline_captured and self._writing_commands:
+            parts.append(f"{self._writing_commands} command(s) ran whose file "
+                         "changes are not recorded")
+        if not parts:
             parts = ["no files changed"]
+        if self._files_read:
+            parts.append(f"{len(self._files_read)} file(s) read")
         if self.verify_cmd is not None and self._last_verify_state:
             parts.append(f"verify: {self._last_verify_state}")
         return "\n\n[session record: " + "; ".join(parts) + "]"
+
+    def _changed_by_commands(self, known: set) -> list[str]:
+        """Paths a shell command of this session changed, from the git work
+        tree before its first command and now: without the *known* paths the
+        write tools recorded and without caches a test run leaves. Empty when no
+        command ran or the folder is no git work tree."""
+        if not self._shell_baseline_captured or self._git_baseline is None:
+            return []
+        current = self._git_status_map()
+        found = []
+        for path in sorted(set(current or ()) - self._git_baseline):
+            if any(part in _CACHE_DIRS for part in path.split("/")):
+                continue
+            if path in known or (path.endswith("/")
+                                 and any(k.startswith(path) for k in known)):
+                continue
+            found.append(path)
+        return found
 
     def _files_changed_this_task(self, st) -> list[dict]:
         """changed_files() entries written since this task started."""
@@ -1932,7 +2402,7 @@ class _LoopMixin:
             f"{self.verify_max_retries} fix attempt(s) - reporting failure, "
             "not a false success"))
         _agent.print_warning(notice.strip())
-        self._add_assistant(response)
+        self._add_assistant(_with_notices(response, notice))
         # The grounding footer is unconditional. _last_verify_state is already
         # "failed" here, so the same call includes it.
         return (True, response + notice + self._grounding_footer()
@@ -1990,6 +2460,8 @@ class _LoopMixin:
         """
         TOOL_REGISTRY = _agent.TOOL_REGISTRY  # live: honour a patched agent.TOOL_REGISTRY
         from ..provenance import build_result_block, is_untrusted_tool, taints_session
+        if id(call) not in self._answered_with_example:
+            self._note_foreign_text(result.output)
         if taints_session(call.name, TOOL_REGISTRY.get(call.name), result):
             agent = self
             while agent is not None:

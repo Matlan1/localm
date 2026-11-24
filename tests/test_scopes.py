@@ -89,31 +89,26 @@ def test_coder_full_implies_only_the_base_coder_scope():
     assert not scopes.grants(set(), scopes.CODER)
 
 
-_UNKNOWN_SCOPE_TEXT = ("scope '{sc}' is not a localm scope or an installed plugin's scope"
-                       "{hint}. It grants nothing now, and a plugin installed later "
-                       "under that name would inherit it.")
+_TAIL = " A key can hold localm's own scopes and those of installed plugins."
 
 
-def test_unknown_scope_warnings_names_only_the_unknown_identifier_scopes():
-    assert scopes.unknown_scope_warnings(["chat", "chatt", "not a scope!"]) == [
-        _UNKNOWN_SCOPE_TEXT.format(sc="chatt", hint="; closest known scope: 'chat'")]
+def test_unknown_scope_refusal_names_every_unknown_scope_and_the_closest_one():
+    assert scopes.unknown_scope_refusal(["chat", "chatt", "not a scope!"]) == (
+        "Unknown scope(s): chatt (did you mean 'chat'?), not a scope!." + _TAIL)
 
 
-def test_unknown_scope_warnings_has_no_hint_without_a_close_known_scope():
-    assert scopes.unknown_scope_warnings(["zqxwvy"]) == [
-        _UNKNOWN_SCOPE_TEXT.format(sc="zqxwvy", hint="")]
+def test_unknown_scope_refusal_has_no_hint_without_a_close_known_scope():
+    assert scopes.unknown_scope_refusal(["zqxwvy"]) == (
+        "Unknown scope(s): zqxwvy." + _TAIL)
 
 
-def test_unknown_scope_warnings_accepts_installed_plugin_scopes():
-    assert scopes.unknown_scope_warnings(["qzxjvk"], installed=["qzxjvk"]) == []
-    assert scopes.unknown_scope_warnings(["qzxjvk"], installed=None) == [
-        _UNKNOWN_SCOPE_TEXT.format(sc="qzxjvk", hint="")]
-
-
-def test_unknown_scope_warnings_of_known_or_empty_scopes_is_an_empty_list():
-    assert scopes.unknown_scope_warnings(sorted(scopes.all_known_scopes())) == []
-    assert scopes.unknown_scope_warnings([]) == []
-    assert scopes.unknown_scope_warnings(None) == []
+def test_unknown_scope_refusal_passes_localm_and_installed_plugin_scopes():
+    assert scopes.unknown_scope_refusal(sorted(scopes.all_known_scopes())) is None
+    assert scopes.unknown_scope_refusal([]) is None
+    assert scopes.unknown_scope_refusal(None) is None
+    assert scopes.unknown_scope_refusal(["qzxjvk"], installed=["qzxjvk"]) is None
+    assert scopes.unknown_scope_refusal(["qzxjvk"], installed=None) == (
+        "Unknown scope(s): qzxjvk." + _TAIL)
 
 
 def test_normalize():

@@ -129,10 +129,11 @@ class TestPatchModeIntercept:
         agent = _make_agent(tmp_path)
         agent.patch_mode = True
 
+        (tmp_path / "x.py").write_text("old\n", encoding="utf-8")
         raw_diff = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+new\n"
         call = _make_call("patch_file", path="x.py", diff=raw_diff)
         result = agent._patch_mode_intercept(call)
-        assert result == raw_diff
+        assert result is not None and "-old\n+new\n" in result
 
     def test_patch_file_old_key_patch_returns_none(self, tmp_path):
         """A 'patch' key is not read: with no 'diff' key the intercept returns

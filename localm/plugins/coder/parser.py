@@ -69,6 +69,8 @@ class ToolCall:
     # Keys the call object carried beside its args instead of inside them.
     # argnorm.normalize_args uses the ones the tool declares.
     beside: dict = field(default_factory=dict)
+    # True when the call stands inside the reply's reasoning text.
+    in_reasoning: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +156,35 @@ def looks_like_tool_attempt(text: str, tool_names: Optional[set] = None) -> bool
             return True
         if re.search(r"\b(?:" + names + r")\s*\(\s*[{\[]", text):
             return True
+    return False
+
+
+# A reply that ends right after the line that opens a JSON or tool-call block.
+_RE_DANGLING_FENCE = re.compile(r"```[ \t]*(?:json|tool_call|tool_code)[ \t]*\s*\Z")
+
+
+def names_a_tool_as_command(text: str, tool_names: set) -> bool:
+    """True when *text* holds a fenced block that starts with one of *tool_names*
+    as a command or a function call (``run_tests`` alone, ``edit_file(path=...)``,
+    ``write_file -args ...``), or ends where a JSON or tool-call block opens.
+
+    Comment lines at the start of a block are skipped. Only names with an
+    underscore count: ``grep`` and ``tree`` are commands of their own. Weaker
+    than :func:`looks_like_tool_attempt`: such a block can be part of an answer."""
+    if _RE_DANGLING_FENCE.search(text):
+        return True
+    names = "|".join(re.escape(n) for n in sorted(tool_names) if "_" in n)
+    if not names:
+        return False
+    head = re.compile(r"(?:" + names + r")[ \t]*(?:\(|\{|-|\w+=|$)")
+    for _start, _end, _lang, body in _iter_fenced_blocks(text):
+        for line in body.splitlines():
+            line = line.strip()
+            if not line or line.startswith(("#", "//")):
+                continue
+            if head.match(line):
+                return True
+            break
     return False
 
 
@@ -718,9 +749,152 @@ def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCa
             for call, _exact in gated:
                 call.lenient = False
 
+    for start, end in reasoning_spans(text, seen_spans):
+        for call in calls:
+            if start <= call.start < end:
+                call.in_reasoning = True
+
     # Sort by position in the response
     calls.sort(key=lambda c: c.start)
     return calls
+
+
+_REASONING_WORDS = r"(?:think|thinking|reasoning|thought|reflection)"
+_RE_REASONING_TAG = re.compile(
+    r"(?P<open><[ \t]{0,4}" + _REASONING_WORDS + r"[ \t]{0,4}>|\[THINK\]"
+    r"|<\|?[ \t]{0,4}channel[ \t]{0,4}\|?>"
+    r"(?:thought|thinking|analysis|reasoning|commentary|reflection))"
+    r"|(?P<close><[ \t]{0,4}/[ \t]{0,4}" + _REASONING_WORDS + r"[ \t]{0,4}>|\[/THINK\]"
+    r"|<[ \t]{0,4}channel[ \t]{0,4}\|>|<\|?[ \t]{0,4}channel[ \t]{0,4}\|?>final)",
+    re.IGNORECASE)
+
+
+def reasoning_spans(text: str, inside=()) -> list[tuple[int, int]]:
+    """The ``(start, end)`` ranges of *text*, a model's reply, that are
+    reasoning: between an opening and a closing tag, from an opening tag that is
+    never closed to the end, and before a closing tag that was never opened. A
+    tag inside one of the *inside* ranges (a call) is content, not a tag."""
+    spans = []
+    opened = None
+    last = 0
+    for m in _RE_REASONING_TAG.finditer(text):
+        if any(s <= m.start() < e for s, e in inside):
+            continue
+        if m.group("open"):
+            if opened is None:
+                opened = m.start()
+        else:
+            spans.append((last if opened is None else opened, m.end()))
+            opened = None
+            last = m.end()
+    if opened is not None:
+        spans.append((opened, len(text)))
+    return spans
+
+
+# A "name" key and its value, either also spelled with JSON string escapes.
+_RE_NAME_VALUE = re.compile(
+    r"""(?:["'](?:n|\\u006[eE])(?:a|\\u0061)(?:m|\\u006[dD])(?:e|\\u0065)["']|\bname)"""
+    r"""\s*:\s*["']{1,3}((?:[\w.-]|\\u[0-9a-fA-F]{4}){1,128})["']""")
+_RE_JSON_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
+_RE_BARE_KEY = re.compile(r"([{,]\s{0,200})([A-Za-z_]\w{0,64})(?=\s{0,40}:)")
+# What a tool or a viewer puts in front of each line of a text it shows: a line
+# number, a path and line number, a diff or quote sign, a comment sign.
+_RE_LINE_PREFIX = re.compile(
+    r"^[ \t]*(?:(?:[^\s{}\"']{1,200}[:-])?\d{1,7}[ \t]*[:|\t-]?[ \t]?|[+\-][ \t]?"
+    r"|[>#|*]{1,6}[ \t]?|//+[ \t]?)", re.MULTILINE)
+_MAX_STANDING_CALLS = 200
+# Characters looked at to find the objects around the names in one text.
+_MAX_STANDING_SCAN = 1_000_000
+
+
+def _readings_of(text: str) -> list[str]:
+    """*text* as it is and as it reads without line prefixes, string escapes and
+    HTML escapes."""
+    readings = [text]
+    plain = _RE_LINE_PREFIX.sub("", text)
+    if plain != text:
+        readings.append(plain)
+    if "&quot;" in text or "&#" in text:
+        import html
+        readings += [html.unescape(r) for r in list(readings)]
+    if '\\"' in text:
+        readings += [r.replace('\\"', '"').replace("\\n", "\n").replace("\\\\", "\\")
+                     for r in list(readings)]
+    return readings
+
+
+def _standing_call(body: str) -> Optional[tuple[str, dict]]:
+    """``(name, args)`` of the call object *body*, also when it is a Python
+    literal, has unquoted keys or carries its arguments as a JSON string."""
+    obj = _lenient_json(body)
+    if not isinstance(obj, dict):
+        import ast
+        for spelled in (body, _RE_BARE_KEY.sub(r'\1"\2"', body)):
+            try:
+                obj = ast.literal_eval(spelled)
+                break
+            except (ValueError, SyntaxError, MemoryError, RecursionError, TypeError):
+                continue
+    if not isinstance(obj, dict) or not isinstance(obj.get("name"), str):
+        return None
+    args = next((obj[k] for k in ("args", "arguments", "parameters")
+                 if obj.get(k) is not None), {})
+    if isinstance(args, str):
+        args = _lenient_json(args)
+    if not isinstance(args, dict):
+        return None
+    beside = {k: v for k, v in obj.items() if k not in _CALL_ENVELOPE_KEYS}
+    return obj["name"], {**beside, **args}
+
+
+def calls_standing_in(text: str, tool_names: set) -> tuple[list[ToolCall], set]:
+    """``(calls, unread)``: every call of one of *tool_names* that stands in
+    *text*, however it is written there: in every notation
+    :func:`parse_tool_calls` reads, and nested in other JSON, numbered line by
+    line or escaped. *unread* holds the tools named in a part of *text* that was
+    not read to its end: more calls, markers or braces than are looked at."""
+    found: list[ToolCall] = []
+    unread: set = set()
+    if not isinstance(text, str) or not text or not tool_names:
+        return found, unread
+    left = _MAX_STANDING_SCAN
+    for reading in _readings_of(text):
+        names = [(m, _unescaped(m.group(1))) for m in _RE_NAME_VALUE.finditer(reading)]
+        names = [(m, name) for m, name in names if name in tool_names]
+        if (len(names) > _MAX_STANDING_CALLS
+                or sum(1 for _ in _RE_TOOL_MARKER.finditer(reading))
+                > _MAX_EXPENSIVE_MARKER_RESCANS
+                or reading.count("[TOOL_CALLS]") > _MAX_MISTRAL_SCANS):
+            plain = _unescaped(reading)
+            unread |= {name for name in tool_names if name in plain}
+            continue
+        found += [c for c in parse_tool_calls(reading, tool_names=tool_names)
+                  if c.name in tool_names]
+        last_close = reading.rfind("}")
+        for m, name in names:
+            at = m.start()
+            while left > 0:
+                at = reading.rfind("{", 0, at)
+                if at < 0:
+                    break
+                end = _object_end_from(reading, at, last_close)
+                left -= max(1, (end if end >= 0 else last_close) - at)
+                if end <= m.start():
+                    continue
+                parsed = _standing_call(reading[at:end])
+                left -= end - at
+                if parsed is not None and parsed[0] == name:
+                    found.append(ToolCall(name=name, args=parsed[1], raw=reading[at:end],
+                                          start=at, end=end, lenient=True))
+                    break
+            else:
+                unread.add(name)
+    return found, unread
+
+
+def _unescaped(text: str) -> str:
+    return _RE_JSON_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), text)
 
 
 def split_response(text: str, calls: list[ToolCall]) -> list[str | ToolCall]:
@@ -740,6 +914,109 @@ def split_response(text: str, calls: list[ToolCall]) -> list[str | ToolCall]:
     if pos < len(text):
         parts.append(text[pos:])
     return parts
+
+
+_RE_INVENTED_RESULT = re.compile(r"^[ \t]*<tool_result\b", re.MULTILINE)
+
+
+def invented_result_at(text: str, tool_names: Optional[set] = None) -> int:
+    """Where *text*, a model's reply, starts to invent the result of a call it
+    makes: the first ``<tool_result`` at the start of a line after at least one
+    recognised call and outside every call; -1 when there is none. Only the
+    harness writes results, so nothing after that point rests on one."""
+    first = _RE_INVENTED_RESULT.search(text)
+    if first is None:
+        return -1
+    calls = parse_tool_calls(text, tool_names=tool_names)
+    for m in _RE_INVENTED_RESULT.finditer(text):
+        at = m.start()
+        if any(c.start <= at < c.end for c in calls):
+            continue
+        before = [c for c in calls if c.end <= at]
+        if before and not unfinished_call(text[:at], tool_names):
+            return at
+        if not before:
+            continue
+        return -1
+    return -1
+
+
+_RE_RESULT_NEXT = re.compile(r"\s*<tool_result\b")
+
+
+def invented_result_without_call(text: str) -> int:
+    """Where a reply that makes no call starts to invent a result: a
+    ``<tool_result`` it opens with, or the first one that directly follows a code
+    block, as if the block had been run; -1 when there is none."""
+    if _RE_RESULT_NEXT.match(text or ""):
+        return 0
+    for _start, end, _lang, _body in _iter_fenced_blocks(text or ""):
+        m = _RE_RESULT_NEXT.match(text, end)
+        if m:
+            return text.index("<tool_result", end)
+    return -1
+
+
+_RE_ANY_OPENER = re.compile(
+    r"<\|?tool_call(?:\s+name=['\"][^'\"]+['\"])?\|?>|\[tool_call\]"
+    r"|```[ \t]*(?:[\w+.-]+)?[ \t]*\r?\n",
+    re.IGNORECASE)
+_RE_CALL_NAME_HEAD = re.compile(r"""(?:(?:#|//)[^\n]*\n\s*)*\{\s*["']name["']\s*:\s*["'](\w+)["']""")
+# Openers unfinished_call scans the body of; bounds a text that is all openers.
+_MAX_UNFINISHED_SCANS = 32
+
+
+def unfinished_call(text: str, tool_names: Optional[set] = None) -> str:
+    """The name of the tool whose call *text* ends in the middle of, or "".
+
+    That is a call opener (a ``<tool_call>`` tag or a code fence) followed by the start of one JSON object that names a tool
+    (one of *tool_names* when given) and whose braces or last string are still
+    open at the end of the text. A complete object is not unfinished, whatever
+    follows it, and neither is a body that some closing tag follows."""
+    scans = 0
+    text = text or ""
+    for m in _RE_ANY_OPENER.finditer(text):
+        start = m.end()
+        while start < len(text) and text[start].isspace():
+            start += 1
+        head = _RE_CALL_NAME_HEAD.match(text, start)
+        if head is None or (tool_names is not None and head.group(1) not in tool_names):
+            continue
+        if scans >= _MAX_UNFINISHED_SCANS:
+            return ""
+        scans += 1
+        if not text.startswith("`", m.start()) and _RE_CLOSER.search(text, start):
+            continue
+        if _open_at_end(text, text.index("{", start)):
+            return head.group(1)
+    return ""
+
+
+def _open_at_end(text: str, start: int) -> bool:
+    """True when the JSON object at *start* is still open at the end of *text*.
+    A raw newline does not end a string: a multi-line value is the usual
+    content of a call that was cut off."""
+    depth = 0
+    in_str = False
+    esc = False
+    for j in range(start, len(text)):
+        c = text[j]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return False
+    return True
 
 
 def strip_tool_calls(text: str, tool_names: Optional[set] = None) -> tuple[list[ToolCall], str, int]:
