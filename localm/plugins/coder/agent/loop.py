@@ -930,6 +930,7 @@ class _LoopMixin:
                              budget_reminded=0, invented_count=0,
                              question_answered=False, example_replies=0,
                              example_open=None, quoted_replies=0,
+                             quotations_in_a_row=0,
                              cut_off_count=0,
                              unfounded_checked=False,
                              plan_submitted=False, plan_nudges=0,
@@ -1167,6 +1168,28 @@ class _LoopMixin:
                     _may_write_files(c, self.cwd) for c in used)
                 st.plan_submitted = st.plan_submitted or any(
                     c.name == "exit_plan_mode" for c in calls)
+                request = getattr(self, "_last_user_request", "") or ""
+                from .execution import _QUOTED
+                quoted = all(id(c) in self._loose_refused
+                             and self._loose_unasked.get(id(c)) == _QUOTED for c in calls)
+                st.quotations_in_a_row = st.quotations_in_a_row + 1 if quoted else 0
+                if (st.quotations_in_a_row > 1 and self._used_tools_this_task(st)
+                        and not self._change_still_owed(request, st)
+                        and self._messages[-1].get("role") == "assistant"):
+                    # A reply that goes on quoting, refused calls and nothing
+                    # else, is the answer and is judged like any final reply.
+                    st.example_open = False
+                    self._audit.notice("quoting_answer", "the reply again only quotes "
+                                       "calls that were refused; it is taken as the answer")
+                    self._show_examples(response, parsed_calls, interactive,
+                                        "a quotation: nothing was run")
+                    self._messages.pop()
+                    should_break, fr = self._handle_no_tool_calls(
+                        response, interactive, st, examples=True)
+                    if should_break:
+                        final_response = fr
+                        break
+                    continue
                 if invented:
                     result_blocks.append(
                         "[invented result] Your reply went on with a <tool_result> "
@@ -1355,7 +1378,9 @@ class _LoopMixin:
         self._force_tool_grammar = False
         self._force_not = frozenset()
 
-    def _show_examples(self, response: str, calls: list, interactive: bool) -> None:
+    def _show_examples(self, response: str, calls: list, interactive: bool,
+                       note: str = "an example, as the model said: nothing was run",
+                       ) -> None:
         """Show a reply whose calls are all examples whole: the live display
         hides a call."""
         if self.on_event is not None:
@@ -1367,7 +1392,7 @@ class _LoopMixin:
                 parts = [response.strip()]
             for part in parts:
                 console.print(safe_markup(part))
-            print_info("(an example, as the model said: nothing was run)")
+            print_info(f"({note})")
 
     def _send_example_back(self, interactive: bool) -> None:
         """Tell the model, once per task, that the calls it called examples did

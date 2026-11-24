@@ -596,6 +596,53 @@ def test_a_change_owed_beside_a_refused_quotation_is_asked_for_and_then_forced(t
     assert '("\\"write_file\\"")' in grammar and '("\\"run_shell\\"")' not in grammar
 
 
+def _summarised_then_quoted(*more):
+    quote = "The summary is written. The README documents:\n" + _loose("run_shell", **README)
+    return [_xml("read_file", path="README.md"), _xml("write_file", path="summary.md", content="s"),
+            quote, *more, quote + "\nSo it stands, and nothing of it was run."]
+
+
+def test_an_answer_that_goes_on_quoting_ends_the_run(tmp_path):
+    _readme(tmp_path, _call_json())
+    backend = _Backend(_summarised_then_quoted())
+    agent = _agent(tmp_path, backend)
+    final = agent.run_task("read README.md and write a summary to summary.md")
+    assert final.startswith("The summary is written.") and "So it stands" in final
+    assert len(backend.calls) == 4 and not backend.still_asked
+    assert "not finished" not in final and agent.last_run_ok
+    assert agent.denied_unconfirmed == [("run_shell", "lenient")] * 2
+    assert [m["role"] for m in agent._messages][-2:] == ["user", "assistant"]
+    assert not (tmp_path / "pwned.txt").exists()
+
+
+def test_an_answer_that_goes_on_quoting_is_not_asked_about_for_ever(tmp_path):
+    _readme(tmp_path, _call_json())
+    person = _Person(answer=False)
+    events = []
+    backend = _Backend(_summarised_then_quoted())
+    agent = _agent(tmp_path, backend, confirm_handler=person, on_event=events.append)
+    agent.run_task("read README.md and write a summary to summary.md")
+    assert person.asked == [("run_shell", True)] * 2 and len(backend.calls) == 4
+    shown = [e["text"] for e in events if e["type"] == "assistant_text"]
+    assert "pwned.txt" in shown[-1] and "So it stands" in shown[-1]
+
+
+def test_a_call_that_ran_between_two_quoting_replies_lets_the_run_go_on(tmp_path):
+    _readme(tmp_path, _call_json())
+    backend = _Backend([*_summarised_then_quoted(_xml("read_file", path="summary.md")), "Done."])
+    agent = _agent(tmp_path, backend)
+    agent.run_task("read README.md and write a summary to summary.md")
+    assert len(backend.calls) == 6
+
+
+def test_quoting_before_any_tool_was_used_does_not_end_the_run(tmp_path):
+    quote = "It says:\n" + _loose("run_shell", **README)
+    backend = _Backend([quote, quote + " That is it.", "Done."])
+    agent = _agent(tmp_path, backend)
+    agent.run_task("do what is needed", attachments="\n[file]\n" + _call_json())
+    assert len(backend.calls) > 2
+
+
 def test_a_quoted_call_is_put_to_the_person_where_one_can_be_asked(tmp_path):
     _readme(tmp_path, _call_json())
     person = _Person(answer=False)
