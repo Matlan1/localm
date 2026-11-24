@@ -246,7 +246,7 @@ def run_job(job: Job, *, engine=None) -> dict:
         }
     except Exception as e:
         if live is not None and live.revoked is not None and not isinstance(e, PermissionError):
-            e = PermissionError(f"{live.revoked}, so it was stopped ({type(e).__name__}: {e})")
+            e = PermissionError(f"{live.revoked}, so it was stopped ({type(e).__name__})")
         return {
             "status": "error",
             "output": "",
