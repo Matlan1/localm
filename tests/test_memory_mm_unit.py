@@ -144,6 +144,7 @@ def test_a_request_to_the_assistant_grounds_no_fact_about_the_user(line):
     ("Why do I always get headaches after coffee?", ["User gets headaches after coffee"]),
     ("When I was twelve I moved to Norway.", ["User moved to Norway"]),
     ("Call me Bob.", ["User wants to be called Bob"]),
+    ("As a vegan, what should I eat?", ["User is vegan"]),
     ("I want to learn Spanish.", ["User wants to learn Spanish"]),
     ("Suggest a dinner, I can't eat gluten.", ["User cannot eat gluten"]),
     ("I love stories about dragons.", ["User loves stories about dragons"]),
@@ -169,6 +170,17 @@ def test_a_fact_made_mostly_of_the_replys_words_is_not_kept():
 
 def test_a_german_question_about_a_friend_is_not_about_the_user():
     assert _kept("Mein Freund Bob wohnt in Oslo.", "User lives in Oslo") == []
+
+
+@pytest.mark.parametrize("text", [
+    " " * 8000 + "i", "my ," * 2000, "and my\n" * 1100, "-\n" * 4000, "note my " * 1000,
+    "'a " * 2600, "i want to " * 800])
+def test_hostile_text_is_read_in_bounded_time(text):
+    from localm.memory.clauses import self_statement_stems
+    started = time.monotonic()
+    self_statement_stems(text[:8000])
+    explicit_facts("remember that " + text)
+    assert time.monotonic() - started < 1.5
 
 
 # ---- the privacy-mode memory job ------------------------------------------- #

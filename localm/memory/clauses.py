@@ -87,7 +87,7 @@ _ASKS = re.compile(
     + _ASKED_FOR + r"\b)"
     r"|wonder(?:ing)?\b|asking\b|curious\s+(?:what|how|which|whether|if|why|about)\b)"
     r"|ich\s+(?:(?:möchte|will|wollte|würde|hätte|brauche|suche|habe)\s+)(?:\w+\s+){0,4}?"
-    r"(?:wissen|hören|erfahren|fragen|fakt|fakten|tatsache|information\w*|antwort|erklärung|"
+    r"(?:wissen|hören|erfahren|fragen|fakt|fakten|tatsache|information\w*|infos?|antwort|erklärung|"
     r"rezepte?|geschichte|witz|gedicht|beispiele?|rat|hilfe|tipps?|vorschl\w+|empfehlung\w*|"
     r"ideen?|frage|überblick|zusammenfassung)\b"
     r"|ich\s+frage?\s+mich\b|ich\s+will\s+dass\s+du\b|ich\s+möchte\s*$|ich\s+will\s*$")
@@ -226,6 +226,8 @@ def _read_clause(text: str, dependent: bool, asked: bool, last_question: bool) -
     has_me = any(w in _ME for w in words)
     mine = [i for i, w in enumerate(words) if w in _MY]
     if not (has_i or has_me or mine):
+        if words[0] == "als" or words[0] == "as" and words[1:2] in (["a"], ["an"]):
+            return stems(body), True, False
         return None, False, False
     if has_i:
         at = next(i for i, w in enumerate(words) if w in _I)
@@ -251,6 +253,7 @@ def self_statement_stems(user_text: str) -> set:
     with the one after it when it opens the sentence."""
     out: set = set()
     for sentence in _SENTENCE_SPLIT.split(user_text):
+        sentence = " ".join(sentence.split())
         clauses = _clauses(sentence)
         question = sentence.rstrip().endswith("?")
         opened_with: set = set()

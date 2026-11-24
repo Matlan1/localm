@@ -117,7 +117,7 @@ def _runs_on(line: str, following: str) -> bool:
         return False
     if line.endswith((".", "!", "?", ":", ";")) or _opens_request(following):
         return False
-    return bool(_OPEN_END_RE.search(line) or _JOINING_START_RE.match(following))
+    return bool(_OPEN_END_RE.search(line[-40:]) or _JOINING_START_RE.match(following))
 
 
 def _logical_lines(para: str) -> list[str]:
