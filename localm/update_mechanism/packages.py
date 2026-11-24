@@ -10,7 +10,6 @@ the whole venv taken before: a change nobody planned is a failure.
 
 from __future__ import annotations
 
-import contextlib
 import os
 import posixpath
 import re
@@ -18,7 +17,7 @@ import stat
 import subprocess
 import time
 from pathlib import Path
-from typing import Callable, Iterable, Iterator, Mapping, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 
 from . import disk, mover, shared
 from .disk import Held, Unsafe, Wait
@@ -26,20 +25,23 @@ from .mover import PACKAGES, REMOVE, Area, Op, Plan, Refused, StepFailed
 
 #: Seconds the way back waits for a uv that is still working in the venv.
 UV_WAIT_S = 120.0
+# The input file of uv: as long as a process has it open, uv is running.
+_INPUT = "uv-input"
 _OWN = "localm"
 _LINE = re.compile(r" ([-+~]) ([A-Za-z0-9][A-Za-z0-9._-]*)(?:==(\S+)(?: \(.*\))?| @ .+)")
 _COUNT = re.compile(r"Would (uninstall|install) (\d+) packages?")
 _OTHER_VENV = re.compile(r"Would (?:replace|create|remove)\b.*\benvironment\b")
 
-#: Runs a command: ``(argv, cwd, env) -> (exit status, output)``.
-Runner = Callable[[list, str, dict], tuple]
+#: Runs a command: ``(argv, cwd, env, stdin) -> (exit status, output)``. The command
+#: gets *stdin* (a file or ``subprocess.DEVNULL``) as its standard input.
+Runner = Callable[[list, str, dict, Any], tuple]
 
 
-def run_hidden(argv: list, cwd: str, env: dict) -> tuple:
+def run_hidden(argv: list, cwd: str, env: dict, stdin: Any) -> tuple:
     """The default :data:`Runner`: runs *argv* without a window, output and errors
     together."""
     flags: dict = ({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {})
-    done = subprocess.run(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+    done = subprocess.run(argv, cwd=cwd, env=env, stdin=stdin,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                           encoding="utf-8", errors="replace", check=False, **flags)
     return done.returncode, done.stdout
@@ -134,7 +136,7 @@ def plan_packages(root, update_id: str, argv: Iterable, *, env: Mapping, project
     also when uv cannot make its plan. Raises OSError."""
     venv = mover.venv_of(root)
     code, output = run([*command(argv, project=project), "--dry-run"], str(root),
-                       _environment(env))
+                       _environment(env), subprocess.DEVNULL)
     if code != 0:
         raise Refused(f"uv cannot prepare the packages: {_last(output)}")
     removed, installed = changes(output)
@@ -185,8 +187,11 @@ def forward(root, update_id: str, plan: Plan, argv: Iterable, *, env: Mapping,
         for parent in sorted({a.base.joinpath(*op.path.split("/")).parent for op in plan.ops},
                              key=lambda p: len(p.parts), reverse=True):
             disk.prune(parent, site if site in parent.parents else parent)
-        code, output = run(_relocated(a, plan, command(argv, project=project)), str(root),
-                           _environment(env))
+        with open(_input(root, update_id), "a+b") as busy:
+            if os.name != "nt":
+                disk.lock_file(busy.fileno())
+            code, output = run(_relocated(a, plan, command(argv, project=project)), str(root),
+                               _environment(env), busy)
         if code != 0:
             raise Refused(f"uv could not install the packages: {_last(output)}")
         added = _verify(a, site, plan)
@@ -234,16 +239,17 @@ def _verify(a: Area, site: Path, plan: Plan) -> list:
 
 def back(root, update_id: str, plan: Plan, *, wait_s: Optional[float] = None,
          uv_wait_s: float = UV_WAIT_S) -> list:
-    """:func:`mover.back` for a package step, once no uv works in the venv any
-    more. Returns one line per file that is not as it was before the step, or the
-    reason when a uv was still working after *uv_wait_s* seconds."""
+    """:func:`mover.back` for a package step, once the uv of the step has ended, also
+    one that outlived the process that started it. Returns one line per file that is
+    not as it was before the step, or the reason when uv was still running after
+    *uv_wait_s* seconds."""
     try:
-        venv = mover.venv_of(root)
-        with _uv_lock(venv, uv_wait_s):
-            a = mover.area(root, update_id, PACKAGES)
-            errors = _take_out_extra(a, plan, Wait(wait_s))
-            errors += mover.back(root, update_id, plan, wait_s=wait_s)
-            return errors or _differences(a, plan)
+        mover.venv_of(root)
+        _wait_for_uv(root, update_id, uv_wait_s)
+        a = mover.area(root, update_id, PACKAGES)
+        errors = _take_out_extra(a, plan, Wait(wait_s))
+        errors += mover.back(root, update_id, plan, wait_s=wait_s)
+        return errors or _differences(a, plan)
     except (OSError, Unsafe, Refused) as e:
         return [str(e)]
 
@@ -322,21 +328,36 @@ def listing(base: Path) -> dict:
     return {"files": files, "folders": sorted(folders)}
 
 
-@contextlib.contextmanager
-def _uv_lock(venv: Path, wait_s: float) -> Iterator[None]:
-    """Hold the lock uv takes on *venv* while it changes it. Raises
-    :class:`Refused` when uv still has it after *wait_s* seconds."""
-    fd = disk.open_lock(venv / ".lock")
+def _input(root, update_id: str) -> Path:
+    return mover.work_folder(root, update_id) / _INPUT
+
+
+def _wait_for_uv(root, update_id: str, wait_s: float) -> None:
+    """Return once no process has the input file of uv open. Raises
+    :class:`Refused` when one still has after *wait_s* seconds."""
+    path = _input(root, update_id)
+    deadline = time.monotonic() + wait_s
+    while not _unused(path):
+        if time.monotonic() >= deadline:
+            raise Refused(f"a package installation is still running in {Path(root) / '.venv'}")
+        time.sleep(0.1)
+
+
+def _unused(path: Path) -> bool:
+    """Whether no process has the file *path* open: Windows does not delete an open
+    file, elsewhere the lock goes with the last open descriptor. Removes the file on
+    Windows."""
+    if disk.lstat(path) is None:
+        return True
     try:
-        deadline = time.monotonic() + wait_s
-        while True:
-            try:
-                disk.lock_file(fd)
-                break
-            except (PermissionError, BlockingIOError):
-                if time.monotonic() >= deadline:
-                    raise Refused(f"a package installation is still running in {venv}") from None
-                time.sleep(0.1)
-        yield
-    finally:
-        os.close(fd)
+        if os.name == "nt":
+            os.unlink(path)
+            return True
+        fd = disk.open_lock(path)
+        try:
+            disk.lock_file(fd)
+        finally:
+            os.close(fd)
+        return True
+    except (PermissionError, BlockingIOError):
+        return False

@@ -46,7 +46,20 @@ def _arm(kill_at):
     json.dump = wrap(json.dump)
 
 
+def _kill_after_uv_starts(um):
+    real = um.packages.subprocess.Popen
+
+    class Popen(real):
+        def __init__(self, args, **kwargs):
+            super().__init__(args, **kwargs)
+            if "--dry-run" not in args:
+                os.kill(os.getpid(), signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
+    um.packages.subprocess.Popen = Popen
+
+
 def _update(um, spec):
+    if spec.get("kill_after_uv_starts"):
+        _kill_after_uv_starts(um)
     root, update_id = spec["root"], spec["id"]
     with um.job.Lock(root) as lock:
         um.job.start(lock, update_id, old="1", new="2")

@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from localm.update_mechanism import disk, job, mover, packages
+from localm.update_mechanism import job, mover, packages
 from tests import _update_mechanism as um
 from tests._held_file import held
 
@@ -498,8 +498,8 @@ def test_the_lines_of_a_dry_run_are_read():
 
 def tampering(world, change):
     """Run uv for real, then *change* the venv as if uv had done it."""
-    def run(command, cwd, env):
-        done = packages.run_hidden(command, cwd, env)
+    def run(command, cwd, env, stdin):
+        done = packages.run_hidden(command, cwd, env, stdin)
         change()
         return done
     return run
@@ -572,8 +572,8 @@ def test_a_uv_killed_half_way_takes_everything_back(template, world, tmp_path):
     made = plan(root, world)
     killed = []
 
-    def run(command, cwd, env):
-        p = subprocess.Popen([*command, "--link-mode", "copy"], cwd=cwd, env=env,
+    def run(command, cwd, env, stdin):
+        p = subprocess.Popen([*command, "--link-mode", "copy"], cwd=cwd, env=env, stdin=stdin,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **um.NO_WINDOW)
         while p.poll() is None and not (site(root) / "big" / "d1").exists():
             time.sleep(0.002)
@@ -657,8 +657,9 @@ def test_a_kill_at_every_operation_of_the_way_back_of_packages_leads_back(templa
     um.each(points, one)
 
 
-def test_the_way_back_waits_for_a_uv_that_outlived_the_update(world, tmp_path):
-    """The applier is killed while uv still installs; uv goes on."""
+@pytest.mark.parametrize("moment", ["just-started", "installing"])
+def test_the_way_back_waits_for_a_uv_that_outlived_the_update(world, tmp_path, moment):
+    """The applier is killed while uv still runs; uv goes on."""
     run_dir = um.applier(tmp_path / "applier")
     root = world.install(tmp_path / "x" / "root", ["big==1.0"])
     world.lock(root, ["big==2.0"])
@@ -666,16 +667,18 @@ def test_the_way_back_waits_for_a_uv_that_outlived_the_update(world, tmp_path):
     (root / ".localm-update" / ID / "new").mkdir(parents=True)
     spec = tmp_path / "spec.json"
     spec.write_text(json.dumps({"do": "update", "root": str(root), "id": ID,
+                                "kill_after_uv_starts": moment == "just-started",
                                 "uv": [*argv(world), "--link-mode", "copy"], "env": world.env}),
                     encoding="utf-8")
     p = subprocess.Popen([um.PYTHON, "-I", "-S", str(um.DRIVER), str(run_dir), str(spec), "-1"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **um.NO_WINDOW)
     deadline = time.monotonic() + 60
-    while not (site(root) / "big" / "d1").exists():
+    while moment == "installing" and not (site(root) / "big" / "d1").exists():
         assert p.poll() is None and time.monotonic() < deadline
         time.sleep(0.002)
-    p.kill()
-    p.wait(timeout=30)
+    if moment == "installing":
+        p.kill()
+    assert p.wait(timeout=60) != 0
     again = um.restore(run_dir, root)
     assert again.returncode == 0, again.stderr
     time.sleep(1)
@@ -683,35 +686,25 @@ def test_the_way_back_waits_for_a_uv_that_outlived_the_update(world, tmp_path):
     assert um.phase(root) is None
 
 
-def test_the_way_back_gives_up_while_uv_still_works_in_the_venv(root, world):
+def test_the_way_back_gives_up_while_uv_is_still_running(root, world):
     made = plan(root, world)
-    forward(root, world, made)
+    children = []
+
+    def run(command, cwd, env, stdin):
+        children.append(subprocess.Popen(
+            [um.PYTHON, "-I", "-S", "-c", "import time; time.sleep(60)"], stdin=stdin,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **um.NO_WINDOW))
+        return packages.run_hidden(command, cwd, env, subprocess.DEVNULL)
+    forward(root, world, made, run=run)
     now = tree(root)
-    fd = disk.open_lock(root / ".venv" / ".lock")
-    disk.lock_file(fd)
     try:
         errors = packages.back(root, ID, made, uv_wait_s=0.3)
     finally:
-        os.close(fd)
+        children[0].kill()
+        children[0].wait(timeout=30)
     assert len(errors) == 1 and "still running" in errors[0]
     assert tree(root) == now
     assert packages.back(root, ID, made) == []
-
-
-def test_uv_really_takes_the_lock_the_way_back_waits_for(root, world):
-    """A uv that finds the lock taken waits and changes nothing until it is free."""
-    fd = disk.open_lock(root / ".venv" / ".lock")
-    disk.lock_file(fd)
-    before = tree(root)
-    p = subprocess.Popen(packages.command(argv(world)), cwd=root, env=world.env,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **um.NO_WINDOW)
-    try:
-        time.sleep(2)
-        assert p.poll() is None and tree(root) == before
-    finally:
-        os.close(fd)
-        assert p.wait(timeout=60) == 0
-    assert versions(root)["alpha"] == "2.0"
 
 
 def test_packages_are_put_back_before_the_files_of_the_release(template, world, tmp_path):
