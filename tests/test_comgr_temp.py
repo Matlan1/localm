@@ -154,11 +154,71 @@ def test_a_record_of_another_machine_is_left_alone(temp, process):
     assert d.is_dir() and path.is_file()
 
 
-@pytest.mark.parametrize("text", ["", "[]", '{"pid": "1", "temp": "/x"}', '{"pid": 5, "temp": "rel"}'])
-def test_an_unusable_record_is_ignored(temp, text):
+def test_no_records_folder_is_nothing_to_do(temp):
+    assert comgr_temp.sweep() == 0 and not comgr_temp.records_dir().exists()
+
+
+_OK = {"pid": 2 ** 31 - 1, "start": None, "space": "x", "created": 1.0, "temp": "PLACE"}
+
+
+@pytest.mark.parametrize("change", [
+    {"pid": "1"}, {"pid": 0}, {"pid": -5}, {"pid": True}, {"pid": 2 ** 70}, {"pid": 1.5},
+    {"pid": None}, {"temp": "rel"}, {"temp": 5}, {"temp": None}, {"temp": ""},
+    {"temp": "\\\\192.0.2.1\\share"}, {"temp": "//192.0.2.1/share"},
+    {"temp": "\\\\?\\C:\\x"}, {"temp": "/tmp/\u0000x"}, {"temp": "/" + "a" * 5000}])
+def test_a_record_with_a_wrong_field_is_never_acted_on(temp, monkeypatch, change):
+    monkeypatch.setattr(comgr_temp, "_remove_folders",
+                        lambda *a: pytest.fail("acted on a bad record"))
+    rec = {**_OK, "temp": str(temp), "space": comgr_temp.procid.pid_space_id(), **change}
     comgr_temp.records_dir().mkdir(parents=True)
-    (comgr_temp.records_dir() / "5-a.json").write_text(text)
+    (comgr_temp.records_dir() / "5-a.json").write_text(json.dumps(rec), encoding="utf-8")
     assert comgr_temp.sweep() == 0
+
+
+@pytest.mark.parametrize("raw", [
+    b"", b"[]", b"null", b"\xff\xfe", b"[" * 4000, b'{"pid": ' + b"9" * 4000 + b"}",
+    b" " * 100_000])
+def test_a_file_that_is_no_record_is_ignored(temp, raw):
+    comgr_temp.records_dir().mkdir(parents=True)
+    (comgr_temp.records_dir() / "5-a.json").write_bytes(raw)
+    (comgr_temp.records_dir() / "6-folder.json").mkdir()
+    assert comgr_temp.sweep() == 0
+
+
+@pytest.mark.parametrize("field,value", [
+    ("created", float("nan")), ("created", "x"), ("created", [1]), ("start", "x"),
+    ("start", {"created": float("inf")}), ("start", {"boot": 1, "ticks": "a"}), ("space", 7)])
+def test_a_wrong_optional_field_never_raises(temp, process, field, value):
+    pid, end = process()
+    path = _records()[0]
+    path.write_text(json.dumps({**json.loads(path.read_text()), field: value}))
+    end()
+    comgr_temp.sweep()
+
+
+def test_one_bad_record_does_not_stop_the_others(temp, process, monkeypatch):
+    pid, end = process()
+    d = _folder(temp, pid)
+    real = comgr_temp._is_gone
+
+    def odd(rec):
+        if rec["pid"] == 1:
+            raise RuntimeError("odd record")
+        return real(rec)
+    monkeypatch.setattr(comgr_temp, "_is_gone", odd)
+    rec = {**json.loads(_records()[0].read_text()), "pid": 1}
+    (comgr_temp.records_dir() / "0-bad.json").write_text(json.dumps(rec))
+    end()
+    comgr_temp.sweep()
+    assert not d.exists()
+
+
+def test_a_flood_of_records_is_cut_off(temp, monkeypatch):
+    monkeypatch.setattr(comgr_temp, "_MAX_RECORDS", 5)
+    comgr_temp.records_dir().mkdir(parents=True)
+    for i in range(20):
+        (comgr_temp.records_dir() / f"{i}-a.json").write_text("{}")
+    assert len(comgr_temp._record_paths()) == 5
 
 
 def test_the_watcher_removes_them_without_being_asked(temp, process, monkeypatch):

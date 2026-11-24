@@ -22,6 +22,7 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -42,6 +43,14 @@ _IDLE_POLLS = 150
 _FINISH_WAIT_SECONDS = 3.0
 _FINISH_LIMIT_SECONDS = 8.0
 _SEEN_MARGIN_SECONDS = 30.0
+
+# A record is data from a folder anything may write to: what is larger, or not of
+# this shape, is ignored.
+_MAX_RECORD_BYTES = 4096
+_MAX_RECORDS = 1000
+_MAX_PID = 2 ** 31 - 1
+_MAX_TEMP_CHARS = 1024
+_WINDOWS_LOCAL = re.compile(r"[A-Za-z]:[\\/]")
 
 _lock = threading.Lock()
 _watcher: Optional[threading.Thread] = None
@@ -138,14 +147,36 @@ def adopt_tree(pid: int) -> None:
 
 
 def _read(path: Path) -> Optional[dict]:
+    """The record in *path*, or None for anything that is not one: not a plain
+    file, too large, not JSON, or a field of the wrong type or range."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        st = os.lstat(path)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > _MAX_RECORD_BYTES:
+            return None
+        with open(path, "rb") as f:
+            data = json.loads(f.read(_MAX_RECORD_BYTES + 1).decode("utf-8"))
+    except (OSError, ValueError, RecursionError):
         return None
-    if (isinstance(data, dict) and type(data.get("pid")) is int and data["pid"] > 0
-            and isinstance(data.get("temp"), str) and os.path.isabs(data["temp"])):
-        return data
-    return None
+    if not isinstance(data, dict):
+        return None
+    pid, temp, created = data.get("pid"), data.get("temp"), data.get("created")
+    if type(pid) is not int or not 0 < pid <= _MAX_PID:
+        return None
+    if not isinstance(temp, str) or not _is_local_folder(temp):
+        return None
+    if type(created) not in (int, float) or not math.isfinite(created):
+        data["created"] = None
+    return data
+
+
+def _is_local_folder(path: str) -> bool:
+    """Whether *path* is spelled as an absolute folder on a local drive. Asks the
+    system nothing."""
+    if len(path) > _MAX_TEMP_CHARS or any(ord(c) < 32 for c in path):
+        return False
+    if sys.platform == "win32":
+        return _WINDOWS_LOCAL.match(path) is not None
+    return path.startswith("/") and not path.startswith("//")
 
 
 def _is_gone(rec: dict) -> Optional[bool]:
@@ -190,7 +221,7 @@ def _remove_folders(rec: dict, last_seen: float) -> int:
     """Remove the empty comgr folders the recorded process, last seen running at
     *last_seen*, made. Returns how many."""
     name = re.compile(rf"comgr-{rec['pid']}-[^/\\]*")
-    created = rec.get("created")
+    created = rec["created"]
     until = last_seen + _SEEN_MARGIN_SECONDS
     holder = _started_at(rec["pid"]) if procid.pid_liveness(rec["pid"]) else None
     if holder is not None:
@@ -209,8 +240,7 @@ def _remove_folders(rec: dict, last_seen: float) -> int:
             continue
         if not _is_plain_dir(st):
             continue
-        if st.st_mtime > until or (isinstance(created, (int, float))
-                                   and st.st_mtime < created - 2):
+        if st.st_mtime > until or (created is not None and st.st_mtime < created - 2):
             continue
         if hasattr(os, "getuid") and st.st_uid != os.getuid():
             continue
@@ -218,29 +248,38 @@ def _remove_folders(rec: dict, last_seen: float) -> int:
     return removed
 
 
+def _record_paths() -> list[Path]:
+    """The record files, at most ``_MAX_RECORDS``; empty when there are none."""
+    found: list[Path] = []
+    try:
+        with os.scandir(records_dir()) as it:
+            for e in it:
+                if e.name.endswith(".json"):
+                    found.append(Path(e.path))
+                    if len(found) >= _MAX_RECORDS:
+                        break
+    except OSError:
+        return found   # See test_no_records_folder_is_nothing_to_do.
+    return found
+
+
 def sweep() -> int:
     """Remove the folders of every recorded process that is gone, and its record.
     Returns how many records of running processes are left. Never raises."""
     running = 0
-    try:
-        paths = list(records_dir().glob("*.json"))
-    except OSError:
-        return 0
     removed = 0
-    for path in paths:
-        rec = _read(path)
-        if rec is None:
-            continue
-        gone = _is_gone(rec)
+    for path in _record_paths():
         try:
+            rec = _read(path)
+            gone = None if rec is None else _is_gone(rec)
             if gone is False:
                 running += 1
                 os.utime(path)
-            if gone is not True:
+            if rec is None or gone is not True:
                 continue
             removed += _remove_folders(rec, path.stat().st_mtime)
             path.unlink()
-        except OSError as e:
+        except Exception as e:   # noqa: BLE001 - one record never stops the others
             logger.debug("comgr temp: record %s stays (%s)", path, e)
     if removed:
         logger.debug("comgr temp: removed %d empty folder(s) of ended GPU processes", removed)
@@ -318,7 +357,7 @@ def _descendants() -> set:
 
 
 def _recorded_running(pids: set) -> bool:
-    for path in records_dir().glob("*.json"):
+    for path in _record_paths():
         rec = _read(path)
         if rec is not None and rec["pid"] in pids and _is_gone(rec) is False:
             return True
