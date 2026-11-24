@@ -530,7 +530,7 @@ class TestPullCivitaiFileResume:
         refused = []
 
         def _open_refusing_truncate(path, mode="r", *a, **kw):
-            if Path(path) == part and "w" in mode:
+            if Path(path) == part and "x" in mode:
                 refused.append(mode)
                 raise PermissionError(13, "file is in use", str(path))
             return open(path, mode, *a, **kw)
@@ -539,7 +539,7 @@ class TestPullCivitaiFileResume:
         ok = _civitai_pull(monkeypatch, self._resolved(), dest_dir, _RangeServer(_V2),
                            version_id="222")
         monkeypatch.delattr(pull, "open")
-        assert refused == ["wb"], "the truncate was never refused"
+        assert refused == ["xb"], "the new file was never refused"
         assert ok is False
         server = _RangeServer(_V2)
 

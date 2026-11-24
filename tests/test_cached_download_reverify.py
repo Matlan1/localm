@@ -7,6 +7,7 @@ model.bin and a pinned embedding GGUF. Each damaged file is replaced, not kept."
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -63,6 +64,17 @@ DAMAGED_WEIGHTS = b"w" * 499 + b"X" + b"w" * 500
 CONFIG = b"{}"
 
 
+def _corrupt(path: Path) -> bytes:
+    """Change bytes of *path* as a failing disk does: size and time stay."""
+    st = path.stat()
+    data = path.read_bytes()
+    data = data[:-7] + b"DAMAGED"
+    with open(path, "r+b") as fh:
+        fh.write(data)
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+    return data
+
+
 def _snapshot_hub(monkeypatch, downloaded: list):
     siblings = [
         SimpleNamespace(rfilename="config.json", size=len(CONFIG), lfs=None),
@@ -77,11 +89,12 @@ def _snapshot_hub(monkeypatch, downloaded: list):
         def model_info(self, repo_id, files_metadata=True):
             return SimpleNamespace(siblings=siblings, sha="a" * 40)
 
-    def _snapshot_download(repo_id, local_dir, **kw):
+    def _snapshot_download(repo_id, local_dir, allow_patterns=None, **kw):
         d = Path(local_dir)
         d.mkdir(parents=True, exist_ok=True)
-        (d / "config.json").write_bytes(CONFIG)
-        (d / "model.safetensors").write_bytes(GOOD_WEIGHTS)
+        for name, body in (("config.json", CONFIG), ("model.safetensors", GOOD_WEIGHTS)):
+            if allow_patterns is None or name in allow_patterns:
+                (d / name).write_bytes(body)
         downloaded.append(repo_id)
         return str(d)
 
@@ -140,28 +153,30 @@ class TestSnapshotRepull:
         assert ok is True
         assert "skipping" not in capsys.readouterr().out.lower()
 
-    def test_a_damaged_file_that_is_in_use_is_reported_and_nothing_is_fetched(
+    def test_a_damaged_file_that_is_in_use_is_reported_and_the_download_is_kept(
             self, fake_registry, monkeypatch, capsys):
         store, models_dir = fake_registry
         dest = self._lay(models_dir, DAMAGED_WEIGHTS)
         store["snap"] = {"path": str(dest), "source": "hf:o/r", "model_type": "llm"}
         downloaded: list = []
         _snapshot_hub(monkeypatch, downloaded)
-        real_unlink = Path.unlink
+        real_replace = os.replace
 
-        def _locked(self, missing_ok=False):
-            if self.name == "model.safetensors":
+        def _locked(src, dst):
+            if Path(dst) == dest / "model.safetensors":
                 raise PermissionError(32, "in use")
-            return real_unlink(self, missing_ok=missing_ok)
+            return real_replace(src, dst)
 
-        monkeypatch.setattr(Path, "unlink", _locked)
+        monkeypatch.setattr(mm.pull.os, "replace", _locked)
 
         ok = mm._pull_hf_snapshot("o/r", "snap")
 
         assert ok is False
-        assert downloaded == []
         assert (dest / "model.safetensors").read_bytes() == DAMAGED_WEIGHTS
-        assert "could not delete" in " ".join(capsys.readouterr().out.lower().split())
+        staged = dest / mm.pull._SNAPSHOT_STAGING / "model.safetensors"
+        assert staged.read_bytes() == GOOD_WEIGHTS
+        assert "unload the model and pull again" in " ".join(
+            capsys.readouterr().out.lower().split())
 
     def test_nothing_is_deleted_when_the_folder_belongs_to_another_model(
             self, fake_registry, monkeypatch):
@@ -176,7 +191,7 @@ class TestSnapshotRepull:
         assert (dest / "model.safetensors").read_bytes() == DAMAGED_WEIGHTS
         assert downloaded == []
 
-    def test_a_failed_refetch_says_the_damaged_files_are_gone(
+    def test_a_failed_refetch_says_the_files_are_unchanged(
             self, fake_registry, monkeypatch, capsys):
         store, models_dir = fake_registry
         dest = self._lay(models_dir, DAMAGED_WEIGHTS)
@@ -191,8 +206,8 @@ class TestSnapshotRepull:
         assert mm._pull_hf_snapshot("o/r", "snap") is False
 
         out = " ".join(capsys.readouterr().out.lower().split())
-        assert "damaged files were deleted" in out
-        assert not (dest / "model.safetensors").exists()
+        assert "files that were there are unchanged" in out
+        assert (dest / "model.safetensors").read_bytes() == DAMAGED_WEIGHTS
 
     def test_a_listing_without_digests_keeps_the_size_only_check(
             self, fake_registry, monkeypatch):
@@ -263,7 +278,7 @@ class TestProjectorRepull:
             ("o/r", "main.gguf"): model, ("o/r", "mmproj-main-f16.gguf"): right})
         assert mm._pull_gguf_file("o/r:main.gguf", None) is True
         projector = models_dir / "mmproj-main-f16.gguf"
-        projector.write_bytes(right + b"damaged")
+        _corrupt(projector)
         downloaded.clear()
 
         assert mm._pull_gguf_file("o/r:main.gguf", None) is True
@@ -366,19 +381,19 @@ class TestProjectorRepull:
             ("o/r", "main.gguf"): model, ("o/r", "mmproj-main-f16.gguf"): right})
         assert mm._pull_gguf_file("o/r:main.gguf", None) is True
         projector = models_dir / "mmproj-main-f16.gguf"
-        projector.write_bytes(right + b"damaged")
-        real_unlink = Path.unlink
+        damaged = _corrupt(projector)
+        real_replace = os.replace
 
-        def _locked(self, missing_ok=False):
-            if self.name == "mmproj-main-f16.gguf":
+        def _locked(src, dst):
+            if Path(dst) == projector:
                 raise PermissionError(32, "in use")
-            return real_unlink(self, missing_ok=missing_ok)
+            return real_replace(src, dst)
 
-        monkeypatch.setattr(Path, "unlink", _locked)
+        monkeypatch.setattr(mm.pull.os, "replace", _locked)
 
         assert mm._pull_gguf_file("o/r:main.gguf", None) is True
 
-        assert projector.read_bytes() == right + b"damaged"
+        assert projector.read_bytes() == damaged
         assert (models_dir / "mmproj-main-f16-2.gguf").read_bytes() == right
 
 

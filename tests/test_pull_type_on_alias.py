@@ -243,7 +243,7 @@ class TestPullAlreadyOnDisk:
         other = tmp_path / "other.safetensors"
         other.write_bytes(b"other bytes")
         mm._register("new", other, "local", model_type="lora")
-        monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo, filename: None)
+        monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo, filename: DIGEST)
         monkeypatch.setattr(pull_mod, "_refuse_name_held_by_external_file",
                             lambda name, dest: False)
         _no_terminal(monkeypatch)
@@ -258,7 +258,7 @@ class TestPullAlreadyOnDisk:
         other = tmp_path / "other.safetensors"
         other.write_bytes(b"other bytes")
         mm._register("new", other, "local", model_type="lora")
-        monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo, filename: None)
+        monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo, filename: DIGEST)
         monkeypatch.setattr(pull_mod, "_refuse_name_held_by_external_file",
                             lambda name, dest: False)
         _terminal(monkeypatch, "s")
