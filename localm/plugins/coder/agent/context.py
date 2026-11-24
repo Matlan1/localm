@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -16,7 +17,7 @@ from ..display import (
     print_reasoning_token, print_status, print_streaming_done,
     print_streaming_token, print_thinking, spinner_available,
 )
-from ..parser import _EXPLICIT_FENCE_LANGS, _try_parse_body
+from ..parser import _EXPLICIT_FENCE_LANGS, _try_parse_body, invented_result_at
 from .constants import (
     _COMPACT_AUTO_RATIO, _COMPACT_KEEP_OUTPUT_RATIO, _COMPACT_TARGET_RATIO,
     _DEFAULT_CTX_TOKENS,
@@ -209,6 +210,42 @@ class _TerminalReply:
 
     def finish(self) -> None:
         self._spinner.stop()
+
+
+# The answer to "did you mean these calls to run?", after an optional reasoning
+# block bounded as in gbnf.TOOL_CALLS_AFTER_THINK.
+_CALL_CHECK_GRAMMAR = r"""
+root        ::= opt-think opt-ws ("[run]" | "[example]") opt-ws
+opt-think   ::= ("<think>" think-body "</think>")?
+think-body  ::= think-char{0,1900}
+think-char  ::= [^<] | "<" [^/] | "</" [^t]
+opt-ws      ::= [ \t\n\r]? [ \t\n\r]?
+""".strip()
+
+# Seconds between two reports of a call that is still being written.
+_CALL_PROGRESS_INTERVAL_S = 10.0
+
+
+class _CallProgress:
+    """Reports a tool call that is still being generated through *say*, at most
+    once per ``_CALL_PROGRESS_INTERVAL_S``."""
+
+    def __init__(self, say) -> None:
+        self._say = say
+        self._started = None
+        self._next = 0.0
+
+    def __call__(self, label: str, detail: str = "") -> None:
+        now = time.monotonic()
+        if self._started is None:
+            self._started = now
+            self._next = now + _CALL_PROGRESS_INTERVAL_S
+            return
+        if now < self._next:
+            return
+        self._next = now + _CALL_PROGRESS_INTERVAL_S
+        parts = [label] + ([detail] if detail else [])
+        self._say(f"{' - '.join(parts)} ({now - self._started:.0f}s)")
 
 
 class _ProgressLines:
@@ -1621,6 +1658,40 @@ ws     ::= [ \t\n\r]*
         except Exception:
             return None
 
+    def _ask_if_calls_meant(self, calls: list) -> Optional[bool]:
+        """Ask the model whether the calls it wrote as plain JSON were meant to
+        run: True for ``[run]``, False for ``[example]``, None when it could not
+        be asked (no grammar on this backend or config, an error, a stop, or an
+        answer that is neither). The reply is held to those two answers by the
+        grammar, and the exchange is not kept in the conversation."""
+        if not self.can_force_tool_calls():
+            return None
+        from ..backends.http import CoderServerError
+        from .execution import _call_key
+        listed = "\n".join(f"- {c.name} {_call_key(c)[:600]}" for c in calls)
+        messages = self._build_messages() + [{"role": "user", "content": (
+            "[tool-call check] Your reply contains JSON text that names a tool:\n"
+            + listed + "\nNothing of it has run. Answer [run] if you wrote it as a "
+            "call for me to execute now. Answer [example] if it was an example, a "
+            "quotation, or an illustration for the user.")}]
+        kw = {k: v for k, v in self.gen_kwargs.items() if k != "max_tokens"}
+        kw["grammar"] = _CALL_CHECK_GRAMMAR
+        try:
+            reply = self.backend.chat(messages, **kw)
+        except CoderServerError as e:
+            if not self._disable_grammar_on_unsupported(e):
+                raise
+            return None
+        self._accumulate_usage()
+        self._audit.notice("loose_call_check",
+                           f"asked whether {', '.join(c.name for c in calls)} was "
+                           f"meant to run; the model answered {str(reply)[-40:]!r}")
+        if self.stop_pending or not isinstance(reply, str):
+            return None
+        if reply.rstrip().endswith("[run]"):
+            return True
+        return False if reply.rstrip().endswith("[example]") else None
+
     def can_force_tool_calls(self) -> bool:
         """True when this backend + config can bind the tool-call grammar from
         the first token (the escalation ladder's forcing rung). Pure query: it
@@ -1699,6 +1770,9 @@ ws     ::= [ \t\n\r]*
             if triggers:
                 kw["grammar_triggers"] = triggers
                 kw["grammar_lazy"] = True
+        limit = getattr(self, "_reply_limit", None)
+        if isinstance(limit, int) and isinstance(kw.get("max_tokens"), int):
+            kw["max_tokens"] = max(kw["max_tokens"], limit)
         native = getattr(getattr(self, "backend", None), "native_tools", False) is True
         defs = getattr(self, "_native_tool_defs", None)
         if native and defs is not None and "tool_defs" not in kw:
@@ -1745,6 +1819,10 @@ ws     ::= [ \t\n\r]*
             for chunk in raw_stream:
                 raw_seen += chunk
                 yield chunk
+                if self.stop_pending or (
+                        "<tool_result" in chunk or "<tool_result" in raw_seen[-60:]
+                        ) and invented_result_at(raw_seen, tool_names) >= 0:
+                    return
                 if on_tool_progress is not None and len(raw_seen) - len(full) >= 12:
                     pending = raw_seen[len(full):]
                     tagged = "<tool_call" in pending or "<|tool_call" in pending
@@ -1782,6 +1860,9 @@ ws     ::= [ \t\n\r]*
                 raise
             on_interrupt()
         finally:
+            close = getattr(raw_stream, "close", None)
+            if callable(close):
+                close()
             # Whatever the text streamed so far (on_token/on_reasoning are
             # caller-supplied and can raise), the turn is recorded before any
             # exception continues past this point - see
@@ -1812,6 +1893,8 @@ ws     ::= [ \t\n\r]*
                         on_status=lambda text, code: self._emit(
                             "status", text=str(text), code=code,
                             args=getattr(text, "args", None)),
+                        on_tool_progress=_CallProgress(
+                            lambda text: self._emit("status", text=text, code=None)),
                     )
                     self._record_prompt_usage(messages)
                     return reply
@@ -1859,6 +1942,7 @@ ws     ::= [ \t\n\r]*
                         on_token=lambda piece: None,
                         on_reasoning=lambda piece: None,
                         on_status=progress.status,
+                        on_tool_progress=_CallProgress(self._say_progress),
                     )
                     self._record_prompt_usage(messages)
                     return reply

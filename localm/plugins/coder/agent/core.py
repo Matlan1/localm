@@ -460,6 +460,18 @@ class Agent(
         # work tree.
         self._shell_baseline_captured: bool = False
         self._git_baseline: Optional[frozenset] = None
+        # Shell commands run this session that may have written files, and the
+        # paths read_file read, for the session record.
+        self._writing_commands: int = 0
+        self._files_read: set[str] = set()
+        # The loosely written calls of the reply being executed and whether the
+        # model meant them to run; None outside a reply (see
+        # execution._loose_call_meant).
+        self._loose_check: Optional[dict] = None
+        self._loose_check_lock = threading.Lock()
+        # The reply limit of the rest of this run when a call was cut off at
+        # the default one (see loop._raise_reply_limit); None leaves it alone.
+        self._reply_limit: Optional[int] = None
         # Mid-task steering: messages queued (possibly from another thread)
         # while the loop runs, delivered at the next turn boundary.
         self._queued_messages: list[str] = []

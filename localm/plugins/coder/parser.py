@@ -66,6 +66,10 @@ class ToolCall:
     # dialects like <|tool_call>. execution.py's confirmation gate keys on
     # this flag.
     lenient: bool = False
+    # True when the call was written in a name-gated form, trusted or not.
+    gated: bool = False
+    # Set by the executor when the call was denied only for its format.
+    format_denied: bool = False
     # Keys the call object carried beside its args instead of inside them.
     # argnorm.normalize_args uses the ones the tool declares.
     beside: dict = field(default_factory=dict)
@@ -636,7 +640,7 @@ def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCa
     def _accept(name: str, args: dict, raw: str, start: int, end: int,
                 lenient: bool = False, body: str = "") -> None:
         calls.append(ToolCall(name=name, args=args, raw=raw, start=start,
-                               end=end, lenient=lenient,
+                               end=end, lenient=lenient, gated=lenient,
                                beside=_beside_args(body) if body else {}))
         seen_spans.append((start, end))
 
@@ -740,6 +744,113 @@ def split_response(text: str, calls: list[ToolCall]) -> list[str | ToolCall]:
     if pos < len(text):
         parts.append(text[pos:])
     return parts
+
+
+_RE_INVENTED_RESULT = re.compile(r"^[ \t]*<tool_result\b", re.MULTILINE)
+
+
+def invented_result_at(text: str, tool_names: Optional[set] = None) -> int:
+    """Where *text*, a model's reply, starts to invent the result of a call it
+    makes: the first ``<tool_result`` at the start of a line after at least one
+    recognised call and outside every call; -1 when there is none. Only the
+    harness writes results, so nothing after that point rests on one."""
+    first = _RE_INVENTED_RESULT.search(text)
+    if first is None:
+        return -1
+    calls = parse_tool_calls(text, tool_names=tool_names)
+    for m in _RE_INVENTED_RESULT.finditer(text):
+        at = m.start()
+        if any(c.start <= at < c.end for c in calls):
+            continue
+        before = [c for c in calls if c.end <= at]
+        if before and not unfinished_call(text[:at], tool_names):
+            return at
+        if not before:
+            continue
+        return -1
+    return -1
+
+
+def in_tool_call_format(text: str, calls: list[ToolCall]) -> str:
+    """*text* with the span of every name-gated call in *calls* rewritten as
+    ``<tool_call>{"name": ..., "args": ...}</tool_call>``. Nothing else in
+    *text* changes. *calls* are calls :func:`parse_tool_calls` found in *text*."""
+    out: list[str] = []
+    pos = 0
+    for call in sorted(calls, key=lambda c: c.start):
+        if not call.gated or call.start < pos:
+            continue
+        out.append(text[pos:call.start])
+        out.append("<tool_call>\n"
+                   + json.dumps({"name": call.name, "args": call.args},
+                                ensure_ascii=False, default=str)
+                   + "\n</tool_call>")
+        pos = call.end
+    out.append(text[pos:])
+    return "".join(out)
+
+
+_RE_ANY_OPENER = re.compile(
+    r"<\|?tool_call(?:\s+name=['\"][^'\"]+['\"])?\|?>|\[tool_call\]"
+    r"|```[ \t]*(?:tool_call|tool_code|tool|json)?[ \t]*\r?\n",
+    re.IGNORECASE)
+_RE_CALL_NAME_HEAD = re.compile(r"""\{\s*["']name["']\s*:\s*["'](\w+)["']""")
+# Openers unfinished_call scans the body of; bounds a text that is all openers.
+_MAX_UNFINISHED_SCANS = 32
+
+
+def unfinished_call(text: str, tool_names: Optional[set] = None) -> str:
+    """The name of the tool whose call *text* ends in the middle of, or "".
+
+    That is a call opener (a ``<tool_call>`` tag, or a ``json``, ``tool_call``
+    or bare fence) followed by the start of one JSON object that names a tool
+    (one of *tool_names* when given) and whose braces or last string are still
+    open at the end of the text. A complete object is not unfinished, whatever
+    follows it, and neither is a body that some closing tag follows."""
+    scans = 0
+    text = text or ""
+    for m in _RE_ANY_OPENER.finditer(text):
+        start = m.end()
+        while start < len(text) and text[start].isspace():
+            start += 1
+        head = _RE_CALL_NAME_HEAD.match(text, start)
+        if head is None or (tool_names is not None and head.group(1) not in tool_names):
+            continue
+        if scans >= _MAX_UNFINISHED_SCANS:
+            return ""
+        scans += 1
+        if not text.startswith("`", m.start()) and _RE_CLOSER.search(text, start):
+            continue
+        if _open_at_end(text, start):
+            return head.group(1)
+    return ""
+
+
+def _open_at_end(text: str, start: int) -> bool:
+    """True when the JSON object at *start* is still open at the end of *text*.
+    A raw newline does not end a string: a multi-line value is the usual
+    content of a call that was cut off."""
+    depth = 0
+    in_str = False
+    esc = False
+    for j in range(start, len(text)):
+        c = text[j]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return False
+    return True
 
 
 def strip_tool_calls(text: str, tool_names: Optional[set] = None) -> tuple[list[ToolCall], str, int]:
