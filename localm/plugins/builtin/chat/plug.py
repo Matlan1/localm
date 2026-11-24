@@ -248,8 +248,9 @@ _DISPLAY_ONLY = {"refusedBy", "notSent", "name", "seconds"}
 def _media_of(m: dict) -> str:
     """A fingerprint of everything in message *m* beside its text: pictures,
     audio and video; empty when it has none."""
+    content = m.get("content")
     parts = [{k: v for k, v in p.items() if k not in _DISPLAY_ONLY}
-             for p in (m.get("content") if isinstance(m.get("content"), list) else ())
+             for p in (content if isinstance(content, list) else ())
              if isinstance(p, dict) and p.get("type") != "text"]
     parts += [m[k] for k in ("audio", "video") if m.get(k)]
     if not parts:
@@ -282,7 +283,8 @@ def _all_turn_keys(messages, branches) -> Counter:
     for rec in branches if isinstance(branches, list) else ():
         if not isinstance(rec, dict):
             continue
-        for i, tail in enumerate(rec.get("tails") or ()):
+        tails = rec.get("tails")
+        for i, tail in enumerate(tails if isinstance(tails, list) else ()):
             if i != rec.get("current"):
                 _turn_keys(tail, out)
     return out

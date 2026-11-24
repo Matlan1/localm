@@ -204,6 +204,14 @@ def test_a_client_without_a_revision_may_not_drop_a_picture_or_a_repetition(stor
     assert _put(client, "r", "ok", "x").status_code == 409
 
 
+@pytest.mark.parametrize("branches", [[{"tails": 5}], ["x"], [{"tails": [None, 3]}], [{}]])
+def test_branches_of_another_shape_are_counted_as_holding_nothing(store, branches):
+    client, _, _ = store
+    assert _put(client, "c1", "a", branches=branches).status_code == 200
+    assert _put(client, "c1", "a", "b", branches=branches).status_code == 200
+    assert _put(client, "c1", "b", branches=branches).status_code == 409
+
+
 def test_the_live_timeline_s_own_slot_of_a_fork_is_not_counted_twice(store):
     client, _, _ = store
     live = _msgs("a", "b")
