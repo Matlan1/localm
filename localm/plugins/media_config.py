@@ -412,7 +412,7 @@ def media_keep_check(request):
     starts, for use in the route and again in the job. A request from the
     owner's chat page (``X-Client-Id: chat``) follows the chat mode instead of
     the server's, so a chat that is saved keeps the media made in it."""
-    from localm.audit import SessionMode, caller_cap, privacy_keeps
+    from localm.audit import caller_is_recorded, privacy_keeps
     from localm.inference.http_server import _owner_caller_headers
     client, asserted = _owner_caller_headers(request)
 
@@ -421,10 +421,7 @@ def media_keep_check(request):
             return True
         if (client or "").strip().lower() != "chat":
             return media_is_kept()
-        try:
-            return caller_cap(client, asserted) != SessionMode.PRIVACY
-        except Exception:   # noqa: BLE001 - an unresolvable mode must fail closed
-            return False
+        return caller_is_recorded(client, asserted)
     return keeps
 
 

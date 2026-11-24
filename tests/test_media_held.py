@@ -7,11 +7,13 @@ command line, the chat REPL and the MCP tool."""
 
 from __future__ import annotations
 
+import contextlib
 import io
+import os
+import signal
 import subprocess
 import sys
 import time
-from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -108,42 +110,48 @@ def test_a_held_folder_is_removed_with_everything_in_it():
 
 
 _HOLDER = """
-import sys
+import os, sys
 from localm.media import held
 d = held.folder("image")
 (d / "left.png").write_bytes(b"x")
-print(d.parent, flush=True)
+print(os.getpid(), d.parent, flush=True)
 sys.stdin.readline()
 """
 
 
-@contextmanager
+@contextlib.contextmanager
 def _other_process():
-    import os
     env = dict(os.environ, LOCALM_HOME=str(_home()), PYTHONPATH=str(_REPO))
     proc = subprocess.Popen([sys.executable, "-c", _HOLDER], env=env, text=True,
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    try:
-        yield proc, Path(proc.stdout.readline().strip())
-    finally:
-        proc.kill()
+    pid, folder = proc.stdout.readline().strip().split(" ", 1)
+
+    def kill():
+        """Kill the process that holds the folder, which on Windows is the child
+        of the venv launcher ``proc`` stands for."""
+        with contextlib.suppress(OSError):
+            os.kill(int(pid), signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
         proc.wait(30)
+
+    try:
+        yield kill, Path(folder)
+    finally:
+        kill()
 
 
 def test_a_killed_process_leaves_its_media_until_the_next_start_removes_it():
-    with _other_process() as (proc, folder):
+    with _other_process() as (kill, folder):
         assert held.sweep_leftovers() == 0
         assert (folder / "image" / "left.png").is_file()
-        proc.kill()
-        proc.wait(30)
+        kill()
         assert (folder / "image" / "left.png").is_file()
         assert held.sweep_leftovers() == 1
         assert not folder.exists() and not folder.with_name(folder.name + ".lock").exists()
 
 
 def test_the_root_stays_while_another_process_holds_media():
-    with _other_process() as (_proc, folder):
+    with _other_process() as (_kill, folder):
         held.folder("music")
         assert held.discard_all() is True
         assert (folder / "image" / "left.png").is_file()

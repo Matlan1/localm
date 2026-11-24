@@ -782,6 +782,18 @@ def caller_cap(client_id: Optional[str] = None,
     return most_private(*caps) if caps else None
 
 
+def caller_is_recorded(client_id: Optional[str] = None,
+                       caller_mode: Optional[str] = None) -> bool:
+    """True when the caller's own limit (:func:`caller_cap`) is a mode that writes
+    to disk. False when it is privacy, when the caller has none, and when it
+    cannot be resolved. Never raises."""
+    try:
+        cap = caller_cap(client_id, caller_mode)
+    except Exception:   # noqa: BLE001 - an unresolvable mode must fail closed
+        return False
+    return cap is not None and cap != SessionMode.PRIVACY
+
+
 class CallerRecorder:
     """A :class:`SessionRecorder` capped for one caller's traffic.
 
