@@ -1306,6 +1306,7 @@ pre:hover .canvas-btn { opacity: 1; }
   border-radius: 9px;
   padding: 10px 18px;
   font-size: 13.5px;
+  white-space: pre-line;
   display: none;
   z-index: 50;
   box-shadow: 0 6px 24px rgba(0,0,0,0.4);

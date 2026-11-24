@@ -138,7 +138,7 @@ def test_backfill_sweep_bg_bypasses_the_embedder_semaphore(monkeypatch, semclean
     monkeypatch.setattr(plug, "_persist_enabled", lambda: True)
     monkeypatch.setattr(
         "localm.memory.backfill.backfill_all",
-        lambda root, embed_fn: {"embedded": 0, "namespaces": 0,
+        lambda root, embed_fn, **kw: {"embedded": 0, "namespaces": 0,
                                 "remaining": 0, "unreadable": 0})
 
     def spawn():

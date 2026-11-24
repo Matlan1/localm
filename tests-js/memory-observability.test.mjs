@@ -108,3 +108,40 @@ test("a remember request's outcome is parsed and shown under the reply", () => {
   }
   assert.equal(window.parseMemoryHeader(headerResp({ n: 0, items: [] })).saved, undefined);
 });
+
+test("several remember requests name every fact with its own outcome", () => {
+  const { window } = loadApp({});
+  const text = (facts) => {
+    const b = window.document.createElement("div");
+    window.addMessageRow(b, "assistant", "ok", { memory: { n: 0, items: [],
+      saved: { text: facts[0].text, status: facts[0].status, facts } } });
+    return b.querySelector(".mem-saved").textContent;
+  };
+  assert.equal(text([{ text: "a", status: "saved" }, { text: "b", status: "full" }]),
+    "Saved to memory: a\nNot stored, memory is full: b");
+  assert.equal(text([{ text: "a", status: "exists" }, { text: "b", status: "full" }]),
+    "Already in memory: a\nNot stored, memory is full: b");
+  assert.equal(text([{ text: "a", status: "saved" }, { text: "b", status: "failed" },
+                     { text: "c", status: "saved" }]),
+    "Saved to memory: a; c\nNot stored, saving failed: b");
+});
+
+test("the chip says a configured embedding model could not be loaded", () => {
+  const { window } = loadApp({});
+  const chip = window.buildMemoryChip({ n: 1, degrade: "embedder_failed", items: [] });
+  assert.match(chip.title, /embedding model could not be loaded/);
+  assert.doesNotMatch(chip.title, /no embedding model installed/);
+});
+
+test("/remember confirms before the memory list is read again", async () => {
+  const { window } = loadApp({ fetchImpl: (url) => {
+    if (String(url).includes("/api/memory/append")) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ status: "appended" }) });
+    }
+    if (String(url).endsWith("/api/memory")) return new Promise(() => {});
+    return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
+  } });
+  await Promise.race([window.rememberFact("I like tea"),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("waited for the list")), 2000))]);
+  assert.match(window.document.getElementById("toast").textContent, /Remembered/);
+});

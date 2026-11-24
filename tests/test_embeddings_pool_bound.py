@@ -124,7 +124,8 @@ def test_memory_off_loop_holds_one_embedder_slot_at_a_time(app_client, monkeypat
     from localm.plugins.builtin.memory import plug
     app_client.app.include_router(plug._router)
     monkeypatch.setattr(plug, "_persist_enabled", lambda: True)
-    monkeypatch.setattr(plug, "_migrate_legacy", lambda store: None)
+    monkeypatch.setattr(plug, "_migrate_legacy", lambda store, **kw: False)
+    monkeypatch.setattr(plug, "_fill_stores", {})
     monkeypatch.setattr(plug, "_stop", threading.Event())
     monkeypatch.setattr(plug, "_fill_pending", False)
     # Open-mode management routes (POST /api/memory/*) require the per-process
