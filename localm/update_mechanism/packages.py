@@ -265,15 +265,11 @@ def _take_out_extra(a: Area, plan: Plan, wait: Wait) -> list:
 
 
 def _differences(a: Area, plan: Plan) -> list:
-    """What still differs from the listing *plan* has, once its files are back:
-    folders are made and removed, and each file of an installed package that is not
-    the listed one is named. A file no package lists is the user's or a program's own
-    and is not."""
+    """What still differs from the listing *plan* has, once its files are back: an
+    added folder that cannot be removed, and each file of an installed package that
+    is not the listed one. A file no package lists is the user's or a program's own
+    and is not named."""
     before = plan.before or {}
-    for rel in before["folders"]:
-        path, st = a.find(rel)
-        if st is None:
-            path.mkdir(parents=True, exist_ok=True)
     now = listing(a.base)
     errors = []
     extra = set(now["folders"]) - set(before["folders"])
