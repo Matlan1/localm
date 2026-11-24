@@ -47,9 +47,10 @@ def test_a_revoke_in_this_process_discards_the_running_jobs_output(revocable, mo
     assert runner._LIVE_RUNS == {}
 
 
-def test_a_revoked_run_that_ends_in_an_error_keeps_none_of_its_output(revocable, monkeypatch):
+def test_a_revoked_run_that_ends_in_an_error_keeps_none_of_its_output(
+        revocable, monkeypatch, tmp_path):
     job = Job(name="j", task_kind="coder", prompt="p", schedule_kind="interval",
-              schedule=60, owner="k" * 64)
+              schedule=60, owner="k" * 64, cwd=str(tmp_path))
 
     def coder(j, engine=None):
         auth._credentials_changed(j.owner)
