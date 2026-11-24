@@ -77,6 +77,7 @@ def _make_agent(tmp_path: Path, responses=("done",), **kwargs):
 def _fresh_state(agent, verify_checked_at=0):
     """The per-task state namespace _loop builds, for direct gate tests."""
     return SimpleNamespace(verify_nudged=False, review_done=False, repair_count=0,
+                           cut_off_count=0, invented_count=0,
                            verify_retries=0, verify_settled=False,
                            verify_checked_at=verify_checked_at)
 

@@ -719,6 +719,8 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   margin: 4px 0;
 }
 .msg-row.tool-event .msg-meta { margin-top: 4px; }
+/* A conversation held in this tab only */
+.conv-item.conv-tab-only .title { font-style: italic; opacity: 0.8; }
 /* NEW-1: inline marker where the active model changed between turns */
 .model-switch {
   text-align: center;

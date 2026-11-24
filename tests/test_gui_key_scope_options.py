@@ -61,10 +61,28 @@ def test_privileged_key_scopes_constant_matches_the_python_source_of_truth():
 
 
 def test_every_offered_scope_is_a_real_known_scope():
-    for scope in _key_scope_values():
-        assert S.is_valid_scope(scope), f"{scope!r} is not a scope localm.scopes knows"
+    """is_valid_scope accepts any bare identifier, so a misspelling such as
+    'chatt' would pass it: the offered values must be members of the known set."""
+    unknown = set(_key_scope_values()) - S.all_known_scopes()
+    assert not unknown, f"not scopes localm.scopes ships: {sorted(unknown)}"
 
 
 def test_no_duplicate_checkboxes():
     values = _key_scope_values()
     assert len(values) == len(set(values)), values
+
+
+def test_every_scope_localm_ships_has_a_checkbox():
+    """A scope with no box can be minted only by the CLI or the API."""
+    missing = S.all_known_scopes() - set(_key_scope_values())
+    assert not missing, (
+        f"these scopes have no checkbox in the GUI key minter: {sorted(missing)}")
+
+
+def test_every_offered_scope_has_an_english_label():
+    catalog = (STATIC_DIR / "app" / "i18n-en.js").read_text(encoding="utf-8")
+    m = re.search(r"export const KEY_SCOPES = \[(.*?)\n\];", _js_text(), re.S)
+    labels = re.findall(r'\["[^"]+", "([^"]+)"\]', m.group(1))
+    assert len(labels) == len(_key_scope_values())
+    missing = [k for k in labels if f'"{k}":' not in catalog]
+    assert not missing, f"scope labels with no English text: {missing}"

@@ -37,6 +37,11 @@ def _model(tmp_path: Path, modeling: str, auto_map: bool = True) -> Path:
     return folder
 
 
+@pytest.fixture(autouse=True)
+def hf_stack(monkeypatch):
+    monkeypatch.setattr(mp, "hf_stack_installed", lambda: True)
+
+
 @pytest.fixture
 def trusted(monkeypatch):
     monkeypatch.setattr(hf_backend, "_trust_remote_code_enabled", lambda: True)
@@ -105,6 +110,32 @@ def test_a_package_localm_ships_but_this_install_lacks_says_to_update(tmp_path, 
     monkeypatch.setattr(mp, "SHIPPED_MODULES", frozenset({ABSENT}))
     reason = mp.folder_refusal(_model(tmp_path, f"import {ABSENT}\n"))
     assert "normally includes" in reason and "pip" not in reason.lower()
+
+
+@pytest.mark.parametrize("absent", ["torch", "transformers"])
+def test_the_hf_stack_counts_as_absent_without_either_of_its_two_packages(monkeypatch, absent):
+    monkeypatch.undo()
+    monkeypatch.setattr(mp, "is_importable", lambda module: module != absent)
+    assert mp.hf_stack_installed() is False
+    monkeypatch.setattr(mp, "is_importable", lambda module: True)
+    assert mp.hf_stack_installed() is True
+
+
+def test_without_pytorch_a_shipped_package_says_to_add_pytorch_not_to_run_setup(monkeypatch):
+    monkeypatch.setattr(mp, "hf_stack_installed", lambda: False)
+    reason = mp.refusal_for("m", ["einops", "torch"])
+    assert "needs the Python packages einops, torch" in reason
+    assert "set up without PyTorch" in reason and "docs/gpu-setup.md" in reason
+    assert "run its setup again" not in reason and "pip" not in reason.lower()
+
+
+def test_the_pytorch_section_the_refusal_names_is_in_the_docs():
+    text = (Path(__file__).resolve().parents[1] / "docs" / "gpu-setup.md").read_text(encoding="utf-8")
+    heading = re.search(r'under "([^"]+)"', mp._ADD_HF_STACK)
+    assert heading is not None
+    assert f"## {heading.group(1)}\n" in text
+    section = text.split(f"## {heading.group(1)}\n", 1)[1].split("\n## ", 1)[0]
+    assert "--torch-backend=cpu" in section and '".[hf]"' in section
 
 
 def _on(monkeypatch, plat: str, machine: str) -> None:
@@ -414,7 +445,12 @@ CENSUS_PACKAGES = {"tiktoken": "tiktoken", "sentencepiece": "sentencepiece",
                    "protobuf": "google", "einops": "einops", "peft": "peft",
                    "librosa": "librosa", "scipy": "scipy",
                    "scikit-learn": "sklearn", "opencv-python-headless": "cv2",
-                   "datasets": "datasets", "matplotlib": "matplotlib"}
+                   "datasets": "datasets", "matplotlib": "matplotlib",
+                   "addict": "addict", "easydict": "easydict", "decord": "decord",
+                   "backoff": "backoff", "lmdb": "lmdb", "pretty-midi": "pretty_midi",
+                   "mir-eval": "mir_eval", "monai": "monai", "onnxruntime": "onnxruntime",
+                   "x-transformers": "x_transformers", "nltk": "nltk", "g2p-en": "g2p_en",
+                   "lightning": "lightning", "ftfy": "ftfy", "icecream": "icecream", "av": "av"}
 
 
 def _census_module():

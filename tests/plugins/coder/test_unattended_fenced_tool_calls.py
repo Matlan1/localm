@@ -43,7 +43,8 @@ def _xml_call(tool: str, **args) -> str:
 
 class _ScriptedBackend:
     """Answers one canned reply per call, repeating the last, and keeps every
-    message list it was handed."""
+    message list it was handed. Asked whether a loosely written call was meant
+    to run, it does not answer."""
     model_id = "stub-model"
     native_tools = False
     supports_grammar = False
@@ -56,6 +57,8 @@ class _ScriptedBackend:
         pass
 
     def chat(self, messages, **kw) -> str:
+        if messages[-1]["content"].startswith("[tool-call check]"):
+            return ""
         reply = self._replies[min(len(self.seen), len(self._replies) - 1)]
         self.seen.append([dict(m) for m in messages])
         return reply
@@ -232,7 +235,8 @@ def test_a_timed_out_run_still_carries_its_denials(tmp_path, monkeypatch):
 
     class _Gated(_ScriptedBackend):
         def chat(self, messages, **kw):
-            if len(self.seen) == 1:
+            if len(self.seen) == 1 and not messages[-1]["content"].startswith(
+                    "[tool-call check]"):
                 gate.wait()
             return super().chat(messages, **kw)
 

@@ -140,6 +140,12 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
     "tests/test_streaming_response_closes_body.py": (_LOCALM_PY, "reads every localm/*.py for StreamingResponse uses"),
     "tests/test_update_steps_run_in_the_new_version.py": (
         _LOCALM_PY, "scans every localm module for updater.apply calls"),
+    "tests/test_process_start_sites.py": (
+        ("localm/*.py", "installer/*.py", "runtime/*.py", "launcher.pyw", "hatch_build.py",
+         "localm.py", "scripts/crash_recovery_watchdog.py", "scripts/report_issue.py",
+         "scripts/rollback_update.py", "scripts/update_watchdog.py",
+         "scripts/verify_release.py"),
+        "walks the AST of every shipped Python file for process starts"),
     "tests/test_process_tree_guard.py": (
         _LOCALM_PY, "scans every localm module that lists processes for a parent pid read"),
     "tests/test_amd_windows_torch_pin_one_source.py": (
@@ -201,6 +207,8 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
                                                 "walks the AST of every localm .py for store writes in async functions"),
     "tests/test_mtp_arch_allowlist.py": (_LOCALM_PY, "runs the MTP architecture gate over localm/"),
     "tests/test_config_write.py": (("localm/plugins/*.py",), "scans every plugin module for direct config writes"),
+    "tests/test_rag_save_is_one_change.py": (
+        ("localm/rag/store.py", "localm/rag/_store/*.py"), "reads every module of the RAG store for file writes"),
     "tests/test_rag_store_live_lookups.py": (("localm/rag/_store/*.py",), "reads every module of the RAG store"),
     "tests/test_setup_llama_live_lookups.py": (("localm/setup_llama/*.py",), "reads every module of setup_llama"),
     "tests/test_vc_runtime.py": (("localm/setup_llama/*.py", "localm/media/sdcpp/*.py",

@@ -109,7 +109,8 @@ def test_session_store_is_written_while_a_reader_holds_it():
     holder = _held_for(path, 0.15)
     sessions._save([{"id": "two"}])
     holder.join(5)
-    assert json.loads(path.read_text(encoding="utf-8")) == [{"id": "two"}]
+    assert json.loads(path.read_text(encoding="utf-8")) == [
+        {"id": "two", "folder": sessions.data_folder_id()}]
 
 
 @windows_only

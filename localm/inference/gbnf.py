@@ -22,9 +22,9 @@ from typing import Optional
 
 #  JSON grammars
 
-# Any valid JSON value at the root
+# Any valid JSON value at the root. Nothing follows the root value in these three.
 JSON_VALUE = r"""
-root   ::= ws value ws
+root   ::= ws value
 value  ::= object | array | string | number | "true" | "false" | "null"
 object ::= "{" ws (string ws ":" ws value ws ("," ws string ws ":" ws value ws)*)? "}"
 array  ::= "[" ws (value ws ("," ws value ws)*)? "]"
@@ -35,7 +35,7 @@ ws     ::= ([ \t\n\r])*
 
 # Root must be a JSON object (dict)
 JSON_OBJECT = r"""
-root   ::= ws object ws
+root   ::= ws object
 object ::= "{" ws (member ws ("," ws member ws)*)? "}"
 member ::= string ws ":" ws value
 value  ::= object | array | string | number | "true" | "false" | "null"
@@ -47,7 +47,7 @@ ws     ::= ([ \t\n\r])*
 
 # Root must be a JSON array
 JSON_ARRAY = r"""
-root   ::= ws array ws
+root   ::= ws array
 array  ::= "[" ws (value ws ("," ws value ws)*)? "]"
 value  ::= object | array | string | number | "true" | "false" | "null"
 object ::= "{" ws (member ws ("," ws member ws)*)? "}"

@@ -9,6 +9,7 @@ import webbrowser
 from pathlib import Path
 from typing import Optional
 
+from localm import procs
 from localm.bugreport._common import console, MAINTAINER_EMAIL
 from localm.console import markup_safe
 from localm.bugreport.errors import LocalmError, RateLimitedError
@@ -177,7 +178,7 @@ def offer_to_send(summary: str, path: Optional[Path], text: str, *,
             report = _read_report(summary, path, text, where)
             if report is None:
                 return
-            open_browser(mailto_url(*report, kind=kind))
+            procs.open_for_user(open_browser, mailto_url(*report, kind=kind))
             console.print(f"[green]Opened your mail app to {MAINTAINER_EMAIL}.[/green]")
         elif action == "self":
             console.print(f"[dim]Thanks. Send {markup_safe(where)} to {MAINTAINER_EMAIL} or on "

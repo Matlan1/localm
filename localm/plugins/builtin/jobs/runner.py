@@ -246,7 +246,7 @@ def run_job(job: Job, *, engine=None) -> dict:
         }
     except Exception as e:
         if live is not None and live.revoked is not None and not isinstance(e, PermissionError):
-            e = PermissionError(f"{live.revoked}, so it was stopped ({type(e).__name__}: {e})")
+            e = PermissionError(f"{live.revoked}, so it was stopped ({type(e).__name__})")
         return {
             "status": "error",
             "output": "",
@@ -782,15 +782,25 @@ def _format_rag_result(name: str, result: dict, lines: list, *,
     and new documents indexed WITHOUT embeddings into a collection that had
     semantic search, which pushes vector coverage down and can drop the whole
     collection to BM25."""
+    from localm.rag._store.types import count_noun
     out = [f"re-synced '{name}': {result['added']} added, "
            f"{result['updated']} updated, {result['skipped']} unchanged - "
-           f"{result['chunks']} chunks over {len(result['roots'])} folder(s)"]
-    if result["missing"]:
-        out.append(f"{len(result['missing'])} document(s) are no longer on disk. "
-                   f"They are FLAGGED, not removed, so nothing is lost if this "
-                   f"was temporary; remove them from the collection yourself when "
-                   f"you are sure:")
-        out.extend(f"  missing: {p}" for p in result["missing"][:10])
+           f"{count_noun(result['chunks'], 'chunk')} over "
+           f"{len(result['roots'])} folder(s)"]
+    still_gone = sorted(set(result["missing"])
+                        | set(result.get("still_missing") or ()))
+    if still_gone:
+        newly = len(result["missing"])
+        out.append(f"{len(still_gone)} document(s) are no longer on disk"
+                   + (f" ({newly} flagged by this run)" if newly else "")
+                   + f". They are FLAGGED, not removed, so nothing is lost if "
+                     f"this was temporary; remove them from the collection "
+                     f"yourself when you are sure ('localm rag resync {name} "
+                     f"--prune-missing'):")
+        out.extend(f"  missing: {p}" for p in still_gone[:10])
+        if len(still_gone) > 10:
+            out.append(f"  ... and {len(still_gone) - 10} more "
+                       f"('localm rag docs {name}' lists them)")
     if result["restored"]:
         out.append(f"{len(result['restored'])} previously missing document(s) "
                    f"are back.")
@@ -1119,6 +1129,11 @@ def _run_coder(job: Job, *, engine=None) -> str:
         if notes:
             joined = "\n\n".join(notes)
             out = f"{joined}\n\n{out}" if out else joined
+        denied = tuple(getattr(agent, "denied_unconfirmed", ()))
+        if denied or getattr(agent, "last_run_ok", True) is False:
+            from localm.plugins.coder.runner import describe_denied
+            raise RuntimeError("The coder run did not finish its task.\n\n" + "\n\n".join(
+                part for part in (out, describe_denied(denied)) if part))
         return out
     finally:
         close = getattr(agent, "close", None)

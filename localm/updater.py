@@ -2043,7 +2043,7 @@ def spawn_health_watchdog(*, host: str, port, scheme: str, expect_version: str,
         import sys
         from localm.config import home_dir
         script = _watchdog_script()
-        from localm import _apply_update as au
+        from localm import _apply_update as au, procs
         code_root = au.running_code_dir().parent
         if code_root.resolve() == repo_root().resolve() or script.parent.parent != code_root:
             code_root = None
@@ -2082,7 +2082,10 @@ def spawn_health_watchdog(*, host: str, port, scheme: str, expect_version: str,
             # setsid: detaches from the parent's session/process group, so the
             # watchdog also survives a SIGHUP if the controlling terminal closes.
             kwargs["start_new_session"] = True
-        (popen or subprocess.Popen)(argv, **kwargs)
+        if popen is None:
+            procs.start(argv, purpose="update watchdog", **kwargs)
+        else:
+            popen(argv, **kwargs)
         return True
     except Exception as e:
         _watchdog_warn("could not spawn the update health watchdog: %s", e)

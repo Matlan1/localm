@@ -7,6 +7,8 @@ their own metadata keys: ``pplx_decider.*`` or ``<architecture>.decision.*``.
 The key names below are the ones read from the published GGUF headers.
 """
 
+import hashlib
+
 import pytest
 
 from localm import model_manager as mm
@@ -155,9 +157,12 @@ class TestPullRegistersADecisionModelAsDecision:
 
     def test_an_already_downloaded_file_is_typed_decision(self, pull_registry, monkeypatch):
         store, models_dir = pull_registry
-        (models_dir / "dec.gguf").write_bytes(build_gguf("qwen35", NIMBLE_KEYS))
+        body = build_gguf("qwen35", NIMBLE_KEYS)
+        (models_dir / "dec.gguf").write_bytes(body)
         _wire_repo_listing(monkeypatch, ["dec.gguf"])
         _wire_download(monkeypatch, {})
+        monkeypatch.setattr(mm, "_hf_file_sha256",
+                            lambda *a, **k: hashlib.sha256(body).hexdigest())
         assert mm._pull_gguf_file("o/r:dec.gguf", None, type_is_auto=True) is True
         assert store["dec"]["model_type"] == "decision"
 

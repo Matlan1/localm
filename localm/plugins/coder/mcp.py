@@ -41,7 +41,7 @@ import threading
 from pathlib import Path
 from typing import Optional
 
-from localm import __version__ as _LOCALM_VERSION
+from localm import __version__ as _LOCALM_VERSION, procs
 
 from .proc_tail import StderrTail
 from .provenance import neutralise
@@ -93,8 +93,9 @@ class MCPServer:
         from localm.config import user_command_env
         full_env = user_command_env({**os.environ, **self.env} if self.env else None)
         try:
-            self._proc = subprocess.Popen(
+            self._proc = procs.start(
                 [self.command, *self.args],
+                purpose="mcp server",
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,   # drained by StderrTail, never DEVNULL

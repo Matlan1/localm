@@ -20,6 +20,7 @@ from localm import model_manager as mm
 from localm.model_manager.pull import (
     _ensure_hf_resumable_download,
     _partial_owner_path,
+    _REPO_FOLDER_STAGING,
     _resumable_download_to_tmp_and_move,
 )
 from tests._process_identity import (
@@ -833,7 +834,7 @@ class TestOwnerlessPartialResume:
     @staticmethod
     def _preflight(hf_env, monkeypatch, partial_bytes: bytes):
         models, _ = hf_env
-        inc = _hf_incomplete(models, "test.gguf", "newetag")
+        inc = _hf_incomplete(models / _REPO_FOLDER_STAGING, "test.gguf", "newetag")
         inc.write_bytes(partial_bytes)
         checked = []
         monkeypatch.setattr(mm, "_check_disk_space",
@@ -856,7 +857,8 @@ class TestOwnerlessPartialResume:
         from filelock import FileLock
         from huggingface_hub._local_folder import get_local_download_paths
         models, checked = self._preflight(hf_env, monkeypatch, b"123456")
-        holder = FileLock(str(get_local_download_paths(models, "test.gguf").lock_path))
+        holder = FileLock(str(get_local_download_paths(
+            models / _REPO_FOLDER_STAGING, "test.gguf").lock_path))
         holder.acquire()
         try:
             assert mm._pull_gguf_file("owner/repo:test.gguf", name="test") is False

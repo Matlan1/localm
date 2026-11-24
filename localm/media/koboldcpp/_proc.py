@@ -17,6 +17,8 @@ import subprocess
 import sys
 from typing import Any, Optional
 
+from localm import procs
+
 # Runs in its own session with SIGINT, SIGHUP and SIGTERM ignored, so a Ctrl-C or
 # a closed terminal that ends localm does not end the watcher first. It kills the
 # process group (whose id is the child's PID) once localm is gone, and exits when
@@ -123,7 +125,7 @@ def start(argv: list, *, cwd: str, env: dict) -> ManagedProcess:
         stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1)
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-        proc = subprocess.Popen(argv, **kwargs)
+        proc = procs.start(argv, purpose="koboldcpp", **kwargs)
         job = None
         try:
             job = _win_job_for(proc)
@@ -135,11 +137,12 @@ def start(argv: list, *, cwd: str, env: dict) -> ManagedProcess:
                            "stopped with localm's normal shutdown only", proc.pid)
         return ManagedProcess(proc, job=job)
     kwargs["start_new_session"] = True
-    proc = subprocess.Popen(argv, **kwargs)
+    proc = procs.start(argv, purpose="koboldcpp", **kwargs)
     watcher = None
     try:
-        watcher = subprocess.Popen(
+        watcher = procs.start(
             [sys.executable, "-I", "-c", _WATCHER, str(os.getpid()), str(proc.pid)],
+            purpose="koboldcpp watcher",
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             close_fds=True, start_new_session=True)
     except OSError as e:

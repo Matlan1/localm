@@ -294,3 +294,11 @@ class TestUnfinishedCopyIsNotRegistered:
         assert add_local(str(folder)) is True
         assert set(load_registry()) == {"Whole.Q4_0"}
         assert "not finished copying" in " ".join(capsys.readouterr().out.split())
+
+    @pytest.mark.parametrize("store", [None, "move", "copy"])
+    def test_one_added_by_its_own_path_is_refused_and_left_where_it_is(
+            self, tmp_path, isolated_home, capsys, store):
+        half = self._truncated(tmp_path / "models-in")
+        assert add_local(str(half), store=store) is False
+        assert half.is_file() and load_registry() == {}
+        assert "not finished copying" in " ".join(capsys.readouterr().out.split())

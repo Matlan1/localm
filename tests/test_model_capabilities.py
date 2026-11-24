@@ -314,24 +314,129 @@ class TestRegistryContextLength:
         assert caps.model_context_length("m", reg=reg) == 4096
 
 
-class TestReasoning:
-    def test_marker_in_the_name_is_true(self, tmp_path):
-        reg = _reg(**{"DeepSeek-R1-Distill": {"path": str(tmp_path / "m.gguf")}})
-        assert caps.model_reasoning_capability("DeepSeek-R1-Distill",
-                                               reg=reg) is True
+# Excerpts of the chat templates of real models, each the construct that makes the
+# template a reasoning one.
+QWEN3_THINKING_SWITCH = (
+    "{%- if add_generation_prompt %}\n    {{- '<|im_start|>assistant\\n' }}\n"
+    "    {%- if enable_thinking is defined and enable_thinking is false %}\n"
+    "        {{- '<think>\\n\\n</think>\\n\\n' }}\n    {%- endif %}\n{%- endif %}")
+GPT_OSS_EFFORT = (
+    '{%- if reasoning_effort is not defined %}\n    {%- set reasoning_effort = "medium" %}\n'
+    '{%- endif %}\n{{- "Reasoning: " + reasoning_effort + "\\n\\n" }}')
+GEMMA4_THINKING_SWITCH = (
+    "{%- if (enable_thinking is defined and enable_thinking) or tools or "
+    "messages[0]['role'] in ['system', 'developer'] -%}")
+MAGISTRAL_SYSTEM = (
+    "{%- set default_system_message = 'Your thinking process must follow the template "
+    "below:[THINK]Your thoughts.[/THINK]Here, provide a self-contained response.' %}")
+EXAONE_DEEP_ENDING = "{{ '\n[|assistant|]<thought>\n' }}"
+GRANITE_CONDITION = "{%- if tools %}{%- elif thinking %}{{ ' Respond in two parts.' }}{%- endif %}"
+R1_DISTILL_ENDING = "{% if add_generation_prompt %}{{'<｜Assistant｜><think>\\n'}}{% endif %}"
 
-    def test_no_marker_is_unknown_NEVER_false(self, tmp_path):
-        """A name heuristic can evidence a reasoning model; it can never
-        evidence the absence of one. An opaque alias is exactly what a reasoning
-        model with a plain name looks like, so False would assert what no signal
-        supports."""
-        reg = _reg(m8={"path": str(tmp_path / "m.gguf")})
-        got = caps.model_reasoning_capability("m8", reg=reg)
-        assert got is None
-        assert got is not False
+
+class TestChatTemplateReasoningSignal:
+    @pytest.mark.parametrize("template", [QWEN3_THINKING_SWITCH, GPT_OSS_EFFORT,
+                                          GEMMA4_THINKING_SWITCH, R1_DISTILL_ENDING,
+                                          MAGISTRAL_SYSTEM, EXAONE_DEEP_ENDING,
+                                          GRANITE_CONDITION])
+    def test_a_reasoning_template_is_true(self, template):
+        assert caps.chat_template_reasoning_signal(template) is True
+
+    @pytest.mark.parametrize("template", [REAL_PLAIN_TEMPLATE, REAL_TOOL_TEMPLATE])
+    def test_a_chat_or_tool_template_without_reasoning_is_false(self, template):
+        assert caps.chat_template_reasoning_signal(template) is False
+
+    def test_absent_template_is_unknown_not_false(self):
+        assert caps.chat_template_reasoning_signal(None) is None
+
+    def test_prose_about_thinking_does_not_match(self):
+        prose = "You think carefully and show your reasoning to the user."
+        assert caps.chat_template_reasoning_signal(prose) is False
+
+
+class TestReasoning:
+    def test_a_reasoning_template_is_true_whatever_the_name(self, tmp_path):
+        f = _model_gguf(tmp_path / "m.gguf", template=QWEN3_THINKING_SWITCH)
+        reg = _reg(m8={"path": str(f)})
+        assert caps.model_reasoning_capability("m8", reg=reg) is True
+
+    def test_a_plain_template_is_false_even_under_a_reasoning_name(self, tmp_path):
+        f = _model_gguf(tmp_path / "m.gguf", template=REAL_TOOL_TEMPLATE)
+        reg = _reg(**{"Qwen3-Instruct-Thinking-R1": {"path": str(f)}})
+        got = caps.model_reasoning_capability("Qwen3-Instruct-Thinking-R1", reg=reg)
+        assert got is False
+
+    def test_a_file_without_a_template_is_unknown(self, tmp_path):
+        f = _model_gguf(tmp_path / "m.gguf")
+        reg = _reg(**{"DeepSeek-R1-Distill": {"path": str(f)}})
+        assert caps.model_reasoning_capability("DeepSeek-R1-Distill", reg=reg) is None
+
+    def test_a_missing_file_is_unknown(self, tmp_path):
+        reg = _reg(m8={"path": str(tmp_path / "gone.gguf")})
+        assert caps.model_reasoning_capability("m8", reg=reg) is None
+
+    def test_hf_directory_template_is_read(self, tmp_path):
+        import json as _json
+        d = tmp_path / "hf"
+        d.mkdir()
+        (d / "tokenizer_config.json").write_text(
+            _json.dumps({"chat_template": QWEN3_THINKING_SWITCH}), encoding="utf-8")
+        reg = _reg(m={"path": str(d)})
+        assert caps.model_reasoning_capability("m", reg=reg) is True
+
+    def test_a_replaced_file_is_read_again(self, tmp_path):
+        f = _model_gguf(tmp_path / "m.gguf", template=REAL_PLAIN_TEMPLATE)
+        reg = _reg(m={"path": str(f)})
+        assert caps.model_reasoning_capability("m", reg=reg) is False
+        _model_gguf(f, template=QWEN3_THINKING_SWITCH + " " * 7)
+        assert caps.model_reasoning_capability("m", reg=reg) is True
 
     def test_unknown_model_is_unknown(self):
         assert caps.model_reasoning_capability("qwq-nonexistent", reg={}) is None
+
+    def test_a_truncated_header_is_unknown_and_is_not_kept(self, tmp_path, monkeypatch):
+        import localm.model_manager.gguf as g
+        f = _model_gguf(tmp_path / "m.gguf", template=QWEN3_THINKING_SWITCH, ctx=4096, vocab=400)
+        reg = _reg(m={"path": str(f)})
+        with monkeypatch.context() as m:
+            m.setattr(g, "_GGUF_CAPABILITY_PROBE_BYTES", 512)
+            assert caps.model_reasoning_capability("m", reg=reg) is None
+        assert caps.model_reasoning_capability("m", reg=reg) is True
+
+    def test_a_file_is_read_once(self, tmp_path, monkeypatch):
+        f = _model_gguf(tmp_path / "m.gguf", template=QWEN3_THINKING_SWITCH)
+        reads = []
+        real = caps._gguf_capability_probe
+        monkeypatch.setattr(caps, "_gguf_capability_probe",
+                            lambda p: (reads.append(p), real(p))[1])
+        reg = _reg(m={"path": str(f)})
+        for _ in range(3):
+            assert caps.model_reasoning_capability("m", reg=reg) is True
+        assert len(reads) == 1
+
+
+class TestHfDirChatTemplate:
+    def _dir(self, tmp_path, **files):
+        d = tmp_path / "hf"
+        d.mkdir()
+        for name, text in files.items():
+            (d / name.replace("__", ".")).write_text(text, encoding="utf-8")
+        return d
+
+    def test_the_jinja_file_wins_over_the_tokenizer_config(self, tmp_path):
+        d = self._dir(tmp_path, chat_template__jinja="jinja",
+                      tokenizer_config__json='{"chat_template": "config"}')
+        assert caps._hf_dir_chat_template(d) == "jinja"
+
+    def test_the_tokenizer_config_wins_over_the_template_json(self, tmp_path):
+        d = self._dir(tmp_path, tokenizer_config__json='{"chat_template": "config"}',
+                      chat_template__json='{"chat_template": "json"}')
+        assert caps._hf_dir_chat_template(d) == "config"
+
+    def test_the_template_json_is_read_when_the_config_declares_none(self, tmp_path):
+        d = self._dir(tmp_path, tokenizer_config__json="{}",
+                      chat_template__json='{"chat_template": "json"}')
+        assert caps._hf_dir_chat_template(d) == "json"
 
     def test_is_thinking_model_contract_is_unchanged(self):
         """The two existing call sites (the coder's per-family prompt tuning and
@@ -355,6 +460,13 @@ class TestCapabilityDispatch:
         for cap in caps.BOOLEAN_CAPABILITIES:
             caps.model_capability("m", cap, reg=reg)
 
+    def test_the_report_reads_a_tool_use_the_entry_does_not_carry(self, tmp_path):
+        f = _model_gguf(tmp_path / "m.gguf", template=REAL_TOOL_TEMPLATE)
+        reg = _reg(m={"path": str(f)}, stored={"path": str(f), "tool_use": False})
+        assert caps.model_capabilities("m", reg=reg)["tool_use"] is True
+        assert caps.model_capabilities("stored", reg=reg)["tool_use"] is False
+        assert caps.model_tool_use_capability("m", reg=reg) is None
+
     def test_capabilities_report_always_carries_every_key(self, tmp_path):
         reg = _reg(m={"path": str(tmp_path / "m.gguf")})
         got = caps.model_capabilities("m", reg=reg)
@@ -369,6 +481,16 @@ class TestPositiveMembership:
             unknown={"path": str(tmp_path / "c.gguf")},
         )
         assert caps.models_with_capability(caps.TOOL_USE, reg=reg) == ["yes"]
+
+    def test_routing_for_reasoning_follows_the_template_not_the_name(self, tmp_path):
+        from localm.inference.capability_routing import CapabilityNeeds, capable_models
+        thinks = _model_gguf(tmp_path / "a.gguf", template=GPT_OSS_EFFORT)
+        plain = _model_gguf(tmp_path / "b.gguf", template=REAL_TOOL_TEMPLATE)
+        reg = _reg(**{"plain-name": {"path": str(thinks), "model_type": "llm"},
+                      "Qwen3-Thinking-R1": {"path": str(plain), "model_type": "llm"}})
+        assert caps.models_with_capability(caps.REASONING, reg=reg) == ["plain-name"]
+        assert capable_models(CapabilityNeeds(capabilities=(caps.REASONING,)),
+                              reg=reg) == ["plain-name"]
 
     def test_context_listing_is_roomiest_first(self, tmp_path):
         reg = _reg(
