@@ -17,6 +17,7 @@ from localm.plugins.coder.tools.files import (
     edit_call_refusal, tool_edit_file, tool_edit_files, tool_grep,
     tool_search_files, tool_tree,
 )
+from localm.plugins.coder.tools import git as git_tools
 from localm.plugins.coder.tools.git import (
     tool_git_create_branch, tool_git_diff, tool_git_log, tool_git_push,
 )
@@ -260,8 +261,107 @@ def test_a_rejected_push_says_why_and_that_the_remote_is_unchanged(repo, tmp_pat
     _git(*_IDENT, "commit", "-q", "-m", "diverged", cwd=work)
     res = tool_git_push(work)
     assert not res.ok
-    assert "was rejected" in res.output
+    assert "git push was rejected: the remote has commits" in res.output
     assert "Nothing was changed on the remote" in res.output
+
+
+def test_a_push_that_changed_one_branch_does_not_say_nothing_changed(repo, tmp_path):
+    work, bare = repo
+    branch = _git("symbolic-ref", "--short", "HEAD", cwd=work).strip()
+    _git("branch", "side", cwd=work)
+    _git("push", "-q", "-u", "origin", branch, "side", cwd=work)
+    other = tmp_path / "other"
+    _git("clone", "-q", "-b", branch, str(bare), str(other), cwd=tmp_path)
+    (other / "b.txt").write_text("x", encoding="utf-8")
+    _git("add", "b.txt", cwd=other)
+    _git(*_IDENT, "commit", "-q", "-m", "ahead", cwd=other)
+    _git("push", "-q", "origin", branch, cwd=other)
+    (work / "c.txt").write_text("y", encoding="utf-8")
+    _git("add", "c.txt", cwd=work)
+    _git(*_IDENT, "commit", "-q", "-m", "diverged", cwd=work)
+    _git("branch", "-f", "side", "HEAD", cwd=work)
+    _git("config", "push.default", "matching", cwd=work)
+    before = _git("rev-parse", "side", cwd=bare)
+    res = tool_git_push(work)
+    assert not res.ok
+    assert _git("rev-parse", "side", cwd=bare) != before
+    assert "git push was rejected: the remote has commits" in res.output
+    assert "Nothing was changed" not in res.output
+
+
+def test_pushing_an_existing_tag_is_not_called_behind(repo):
+    work, bare = repo
+    _git("tag", "v1", cwd=work)
+    assert tool_git_push(work, branch="v1").ok
+    (work / "a.txt").write_text("two\n", encoding="utf-8")
+    _git("add", "a.txt", cwd=work)
+    _git(*_IDENT, "commit", "-q", "-m", "second", cwd=work)
+    _git("tag", "-f", "v1", cwd=work)
+    before = _git("rev-parse", "v1", cwd=bare)
+    res = tool_git_push(work, branch="v1")
+    assert not res.ok
+    assert "already exists" in res.output
+    assert res.output.startswith("git push failed. Nothing was changed on the remote.")
+    assert "the remote has commits" not in res.output
+    assert _git("rev-parse", "v1", cwd=bare) == before
+
+
+def test_a_declined_branch_named_after_a_git_reason_is_not_called_behind(repo):
+    work, bare = repo
+    hook = bare / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\necho 'fetch first' >&2\nexit 1\n", encoding="utf-8",
+                    newline="\n")
+    hook.chmod(0o755)
+    assert tool_git_create_branch(work, "non-fast-forward").ok
+    res = tool_git_push(work)
+    assert not res.ok
+    assert "pre-receive hook declined" in res.output
+    assert "the remote has commits" not in res.output
+
+
+def test_a_push_declined_by_a_remote_hook_is_not_called_behind(repo):
+    work, bare = repo
+    hook = bare / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\necho 'closed for pushes' >&2\nexit 1\n", encoding="utf-8",
+                    newline="\n")
+    hook.chmod(0o755)
+    res = tool_git_push(work)
+    assert not res.ok
+    assert "pre-receive hook declined" in res.output
+    assert "closed for pushes" in res.output
+    assert res.output.startswith("git push failed. Nothing was changed on the remote.")
+    assert "was rejected" not in res.output
+    assert "the remote has commits" not in res.output
+
+
+def test_a_failing_pre_push_hook_is_reported_as_git_says_it(repo, monkeypatch):
+    work, bare = repo
+    monkeypatch.setattr(git_tools, "_HARDENING_CONFIG", tuple(
+        item for item in git_tools._HARDENING_CONFIG
+        if not item.startswith("core.hooksPath=")))
+    hook = work / ".git" / "hooks" / "pre-push"
+    hook.write_text("#!/bin/sh\necho 'lint says no' >&2\nexit 1\n", encoding="utf-8",
+                    newline="\n")
+    hook.chmod(0o755)
+    res = tool_git_push(work)
+    assert not res.ok
+    assert "lint says no" in res.output
+    assert "failed to push some refs" in res.output
+    assert res.output.startswith("git push failed.\n")
+    assert "the remote has commits" not in res.output
+    assert _git("branch", "-a", cwd=bare).strip() == ""
+
+
+def test_a_push_never_runs_the_projects_own_pre_push_hook(repo):
+    work, bare = repo
+    marker = work.parent / "PRE_PUSH_RAN"
+    hook = work / ".git" / "hooks" / "pre-push"
+    hook.write_text(f"#!/bin/sh\ntouch '{marker.as_posix()}'\nexit 1\n", encoding="utf-8",
+                    newline="\n")
+    hook.chmod(0o755)
+    res = tool_git_push(work)
+    assert res.ok, res.output
+    assert not marker.exists()
 
 
 def test_a_url_remote_is_not_mistaken_for_a_missing_name(repo, tmp_path):

@@ -258,8 +258,27 @@ def tool_git_commit(
 
 _REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
-_PUSH_REJECTED_MARKERS = ("[rejected]", "non-fast-forward", "fetch first",
-                          "failed to push some refs")
+_PUSH_REFUSED_REF_RE = re.compile(r"^ ! \[", re.MULTILINE)
+_PUSH_ACCEPTED_REF_RE = re.compile(r"^ [ +*-] \S", re.MULTILINE)
+_PUSH_BEHIND_RE = re.compile(
+    r"^ ! \[(?:remote )?rejected\] .*\((?:non-fast-forward|fetch first)\)\s*$",
+    re.MULTILINE)
+
+
+def _push_failure(out: str) -> str:
+    """The answer to a failed push whose git output is *out*.
+
+    The remote is called ahead only where git refused a ref as
+    ``(non-fast-forward)`` or ``(fetch first)``, and unchanged only where git
+    refused a ref and accepted none. Every other failure is git's own text."""
+    unchanged = (" Nothing was changed on the remote."
+                 if _PUSH_REFUSED_REF_RE.search(out)
+                 and not _PUSH_ACCEPTED_REF_RE.search(out) else "")
+    if _PUSH_BEHIND_RE.search(out):
+        return ("git push was rejected: the remote has commits the rejected branch "
+                f"does not have, or that branch moved there.{unchanged} Fetch and "
+                f"merge or rebase, then push again.\n{out}")
+    return f"git push failed.{unchanged}\n{out}"
 
 
 def _current_branch_name(cwd: Path) -> str:
@@ -341,13 +360,7 @@ def tool_git_push(
         args.append(branch)
     out, ok = _git(cwd, *args, timeout=60)
     if not ok:
-        low = out.lower()
-        if any(marker in low for marker in _PUSH_REJECTED_MARKERS):
-            return ToolResult.error(
-                f"git push was rejected: the remote has commits this branch does "
-                f"not have, or the branch moved there. Nothing was changed on the "
-                f"remote. Fetch and merge or rebase, then push again.\n{out}")
-        return ToolResult.error(f"git push failed: {out}")
+        return ToolResult.error(_push_failure(out))
     if sets_upstream:
         out += (f"\nUpstream set: '{branch}' had none, so it now tracks "
                 f"{remote}/{branch}.")

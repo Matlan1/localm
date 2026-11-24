@@ -611,7 +611,7 @@ def edit_call_refusal(cwd: Path, tool_name: str, args: dict) -> Optional[str]:
     """Why an ``edit_file`` or ``edit_files`` call is certain to be refused, in the
     words the tool itself would answer with, or None when the call can run.
 
-    Reads and writes nothing. It is the check a caller makes BEFORE asking anyone
+    Writes nothing. It is the check a caller makes BEFORE asking anyone
     to approve the call, so a call that cannot succeed is answered rather than put
     to a person as a decision."""
     if tool_name == "edit_files":
