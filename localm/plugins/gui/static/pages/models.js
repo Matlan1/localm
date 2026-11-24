@@ -3141,7 +3141,9 @@ function initFeedbackCard(kind) {
   let reviewed = null;
   let canUpload = false;
   const buttons = ["save", "upload", "confirm", "cancel", "send-anyway"].map(at);
+  let working = false;
   const busy = (on) => {
+    working = on;
     for (const b of buttons) b.disabled = on;
     text.readOnly = on || !!reviewed;
   };
@@ -3150,7 +3152,7 @@ function initFeedbackCard(kind) {
     at("review").hidden = !reviewed;
     save.hidden = canUpload || !!reviewed;
     upload.hidden = !canUpload || !!reviewed;
-    text.readOnly = !!reviewed;
+    text.readOnly = working || !!reviewed;
   };
   const close = () => {
     reviewed = null;
