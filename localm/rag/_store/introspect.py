@@ -26,6 +26,11 @@ class _CollectionIntrospection:
     """Mixin of ``Collection``: stats, documents, roots, the meta.json-only path and
     confinement checks."""
 
+    if TYPE_CHECKING:
+        def exists(self) -> bool:
+            """Provided by ``Collection`` (store.py)."""
+            ...
+
     def roots(self) -> list:
         """The folders indexed into this collection, resolved and sorted.
 

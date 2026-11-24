@@ -9,7 +9,7 @@ import os
 import stat as _stat
 import time
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from localm.debuglog import logger as _log
 from localm.pathsafe import resolve_keeping_mapped_drive
@@ -105,6 +105,9 @@ def _walk_files(root: Path, *, max_depth: int = _MAX_WALK_DEPTH):
 class _CollectionIndexing:
     """Mixin of ``Collection``: indexing files, folders and uploads, chunking and
     embedding each document."""
+
+    if TYPE_CHECKING:
+        name: str
 
     @staticmethod
     def _expand(paths: list,

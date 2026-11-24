@@ -7,7 +7,8 @@ from __future__ import annotations
 import json
 import time
 import weakref
-from typing import Iterable, Optional
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Iterable, Optional
 
 from localm.debuglog import logger as _log
 from localm.jsonl import dumps_lines
@@ -60,6 +61,14 @@ def _plain_rows(vectors: list) -> list:
 class _CollectionFiles:
     """Mixin of ``Collection``: loading a collection from disk or the snapshot
     cache, and writing it back."""
+
+    if TYPE_CHECKING:
+        dir: Path
+        _meta: dict
+
+        def _discard_rejected_vectors(self, why: str) -> None:
+            """Provided by ``_CollectionSidecar`` (sidecar.py)."""
+            ...
 
     def _serve_snapshot(self, snap: _Snapshot) -> None:
         """Adopt *snap*'s state: fresh containers over its read-only chunks and
@@ -204,7 +213,8 @@ class _CollectionFiles:
         # vectors.json PRESENT but unusable is handled on its own path, never
         # collapsed into "simply absent".
         present = True
-        data, vectors = None, None
+        data: Any = None
+        vectors: Any = None
         try:
             data = read_current(self.dir, "vectors.json", load_vectors_json)
             if not isinstance(data, dict):
