@@ -1673,8 +1673,8 @@ ws     ::= [ \t\n\r]*
 
     def _forced_call_grammar(self) -> str:
         """The grammar of a turn that must be a tool call: an optional reasoning
-        block, then calls that name one of this session's tools and carry its
-        arguments. ``gbnf.TOOL_CALLS_AFTER_THINK``, which takes any name and any
+        block, then calls that name one of this session's tools, without those in
+        ``_force_not``, and carry its arguments. ``gbnf.TOOL_CALLS_AFTER_THINK``, which takes any name and any
         arguments, when the tools' own schemas give no usable grammar."""
         from localm.inference.backends.base import InvalidGrammarError
         from localm.inference.gbnf import (
@@ -1682,7 +1682,8 @@ ws     ::= [ \t\n\r]*
         from localm.inference.tool_calling import (
             Tool, ToolChoice, ToolsError, tool_grammar)
         from .tooldefs import _build_openai_tool_defs
-        skip = self.disabled_tools | frozenset(self._always_denied())
+        skip = (self.disabled_tools | frozenset(self._always_denied())
+                | getattr(self, "_force_not", frozenset()))
         tools = [Tool(name=f["name"], description="", parameters=f["parameters"])
                  for f in (d["function"] for d in _build_openai_tool_defs())
                  if f["name"] not in skip]

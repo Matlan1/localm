@@ -1063,6 +1063,24 @@ def test_a_call_shown_as_code_beside_a_real_one_is_named_and_then_forced(tmp_pat
     told = [t for t in _texts(agent, "user") if "looked like another tool call" in t]
     assert len(told) == 2
     assert ["grammar_lazy" not in kw for _m, kw in backend.calls] == [False, False, False, True, False]
+    forced = backend.calls[3][1]["grammar"]
+    assert '("\\"edit_file\\"")' in forced and '("\\"run_tests\\"")' not in forced
+    assert "not run_tests again" in _texts(agent, "user")[3]
+    assert agent._force_not == frozenset()
+    assert (tmp_path / "a.py").read_text() == "x = 2\n"
+
+
+def test_code_beside_a_call_is_forced_without_that_tool(tmp_path):
+    block = FENCE + "python\nx = 2\ny = 3\nz = 4\nw = 5\n" + FENCE + "\n"
+    (tmp_path / "a.py").write_text("x = 1\n")
+    backend = _Backend(["One.\n" + block + _xml("read_file", path="a.py"),
+                        "And again, differently.\n" + block + _xml("read_file", path="./a.py"),
+                        _xml("write_file", path="a.py", content="x = 2\n"), "Done."])
+    agent = _agent(tmp_path, backend)
+    agent.run_task("change a.py so x is 2")
+    assert "grammar_lazy" not in backend.calls[2][1]
+    grammar = backend.calls[2][1]["grammar"]
+    assert '("\\"write_file\\"")' in grammar and '("\\"read_file\\"")' not in grammar
     assert (tmp_path / "a.py").read_text() == "x = 2\n"
 
 

@@ -642,6 +642,7 @@ class _LoopMixin:
         def _call_llm(self, messages: list[dict], interactive: bool) -> str: ...
 
         _loose_check: tuple | None
+        _force_not: frozenset
         _consecutive_errors: dict[str, int]
 
         def _loose_calls_to_check(self, calls: list) -> list: ...
@@ -1004,6 +1005,7 @@ class _LoopMixin:
                 # ladder armed it for. Cleared here, next to the single call that
                 # consumes it, so no later path inherits a constrained sampler.
                 self._force_tool_grammar = False
+                self._force_not = frozenset()
 
                 if self.stop_pending:
                     # Stopped mid-generation: keep the partial text, run nothing
@@ -1208,15 +1210,20 @@ class _LoopMixin:
                 tests_fail = (self._consecutive_errors.get("run_tests", 0) > 0
                               and self._write_total() == writes_before
                               and demands_action(request) and asks_for_change(request))
-                if (st.code_reminded < 2 and _has_file_code_block(leftover)
+                if (st.code_reminded < 3 and _has_file_code_block(leftover)
                         and (tests_fail or self._change_still_owed(request, st))):
                     st.code_reminded += 1
-                    if st.code_reminded > 1 and as_command and self.can_force_tool_calls():
-                        self._force_tool_grammar = True
-                    result_blocks.append(
+                    note = (
                         "[nothing written] The code block in your reply changed no "
                         "file: only a tool call does. If it belongs in the project, "
                         "write it now with write_file or edit_file.")
+                    if st.code_reminded > 1 and self.can_force_tool_calls():
+                        self._force_tool_grammar = True
+                        self._force_not = frozenset(c.name for c in calls)
+                        note += (
+                            " Your next reply is constrained: it must be a tool call, "
+                            "and not " + ", ".join(sorted(self._force_not)) + " again.")
+                    result_blocks.append(note)
 
                 if duplicate_calls:
                     result_blocks.append(

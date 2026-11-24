@@ -468,6 +468,9 @@ class Agent(
         # model meant them to run; None outside a reply (see
         # execution._loose_call_meant).
         self._loose_check: Optional[tuple] = None
+        # Tools a forced turn may not name (see context._forced_call_grammar);
+        # set and cleared with _force_tool_grammar.
+        self._force_not: frozenset = frozenset()
         # The reply limit of the rest of this run when a call was cut off at
         # the default one (see loop._raise_reply_limit); None leaves it alone.
         self._reply_limit: Optional[int] = None
