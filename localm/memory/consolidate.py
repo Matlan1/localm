@@ -19,8 +19,10 @@ message can try to launder an instruction into memory):
   - near-duplicates short-circuit to NO_OP deterministically (no LLM call).
   - idempotent: same input + deterministic ``complete`` (temperature 0) -> same
     ChangeSet; all changes applied in ONE atomic batch (crash-safe).
-  - the whole loop is gated at ENTRY on ``writes_allowed(surface)``: in privacy
-    mode ``complete`` is NEVER called and nothing is written (it returns skipped).
+  - the whole loop is gated on ``writes_allowed(surface)`` at entry, before each
+    model call and right before it writes: in privacy mode ``complete`` is NEVER
+    called and nothing is written (it returns skipped), and a switch to privacy mode
+    during the run ends it the same way.
 """
 
 from __future__ import annotations
@@ -183,6 +185,11 @@ class ConsolidationReplyError(ConsolidationModelError):
     so an unreadable reply is never reported as an empty result."""
 
 
+class _WritesForbidden(Exception):
+    """The session mode forbids memory writes (privacy mode): the run ends with
+    nothing written."""
+
+
 def _unreadable_reason(raw: str) -> str:
     """Why *raw*, a model reply, holds no fact list, for the message the user
     sees."""
@@ -196,6 +203,8 @@ def _call_model(complete: Complete, prompt: str) -> str:
     the original exception, when the call raises."""
     try:
         return complete(prompt) or ""
+    except _WritesForbidden:
+        raise
     except Exception as e:
         raise ConsolidationModelError(f"{type(e).__name__}: {e}") from e
 
@@ -491,8 +500,10 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
                       now: Optional[float] = None) -> dict:
     """Extract facts from *session_text* and fold them into *store*.
 
-    Gated at entry on ``writes_allowed(surface)``; in privacy mode ``complete`` is
-    never called and nothing is written. Applies all decisions in ONE atomic batch.
+    Gated on ``writes_allowed(surface)`` at entry, before each model call and right
+    before the write; in privacy mode ``complete`` is never called and nothing is
+    written (``status: "skipped"``, ``reason: "privacy"``). Applies all decisions in
+    ONE atomic batch.
     Returns ``{status, added, updated, deleted, noop, [reason], [error]}``. When a
     model call raises, nothing is written and the result is ``status: "error"``,
     ``reason: "model_failed"`` with the failure in ``error``; ``reason:
@@ -508,13 +519,32 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
     stale-snapshot whole-namespace replace."""
     counts = {"status": "ok", "added": 0, "updated": 0, "deleted": 0, "noop": 0,
               "proposed": 0}
-    if not writes_allowed(surface):
-        return {**counts, "status": "skipped", "reason": "privacy"}
+    try:
+        return _consolidate(store, session_text, complete, embed_fn, surface,
+                            max_candidates, now, counts)
+    except _WritesForbidden:
+        return {**dict.fromkeys(counts, 0), "status": "skipped", "reason": "privacy"}
+
+
+def _consolidate(store: MemoryStore, session_text: str, complete: Complete,
+                 embed_fn: Optional[EmbedFn], surface: str, max_candidates: int,
+                 now: Optional[float], counts: dict) -> dict:
+    """run_consolidation once its result shape *counts* is made. Raises
+    _WritesForbidden, with nothing written, when the mode forbids writes."""
+    def require_writes() -> None:
+        if not writes_allowed(surface):
+            raise _WritesForbidden
+
+    def gated(prompt: str) -> str:
+        require_writes()
+        return complete(prompt)
+
+    require_writes()
     from localm.debuglog import logger
     now = time.time() if now is None else now
     logger.info("memory consolidation: extracting candidate facts from session history (%d chars)...", len(session_text))
     try:
-        candidates = extract(complete, session_text, max_candidates=max_candidates)
+        candidates = extract(gated, session_text, max_candidates=max_candidates)
     except ConsolidationModelError as e:
         return _model_failed(counts, e)
     logger.info("memory consolidation: extracted %d candidate fact(s)", len(candidates))
@@ -524,6 +554,7 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
         # must not depend on a fact-producing run, or a store that keeps extracting
         # nothing never forgets anything. Prune is a no-op when nothing is decayed,
         # and prune() locks itself atomically.
+        require_writes()
         store.prune(now=now)
         return _with_eviction_note(counts, store)
 
@@ -541,11 +572,12 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
     snapshot_ids = {r.id for r in snapshot}
     try:
         working, updated_ids, proposals = _decide_changeset(
-            store, snapshot, candidates, complete, embed_fn=embed_fn, now=now,
-            counts=counts)
+            store, snapshot, candidates, gated, embed_fn=embed_fn, now=now,
+            counts=counts, require_writes=require_writes)
     except ConsolidationModelError as e:
         return _model_failed({**counts, "added": 0, "updated": 0, "deleted": 0,
                               "noop": 0}, e)
+    require_writes()
     if updated_ids or store.lacks_vector(working):
         if isinstance(embed_fn, DeferredEmbed):
             embed_fn.ensure()
@@ -558,6 +590,7 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
     # stale-snapshot whole-namespace replace(). The lock is held only for the fast
     # reload + merge + save, never across an LLM call.
     with store.lock():
+        require_writes()
         store._load()
         merged, invalidate = _merge_changeset(
             store.all(), working, snapshot_ids, updated_ids, now)
@@ -598,11 +631,11 @@ def _model_failed(counts: dict, err: ConsolidationModelError) -> dict:
 
 def _decide_changeset(store: MemoryStore, snapshot: list, candidates: list,
                       complete: Complete, *, embed_fn: Optional[EmbedFn], now: float,
-                      counts: dict) -> tuple:
+                      counts: dict, require_writes: Callable[[], None]) -> tuple:
     """The DECIDE half of run_consolidation, run OFF the namespace lock against
     *snapshot* (= a lock-snapshot of store.all()). Holds NO lock and makes NO store
     write; only reads store._vectors (via semantic_nearest) and mutates its OWN
-    snapshot copies.
+    snapshot copies. *require_writes* is called before each candidate.
 
     Returns ``(working, updated_ids, proposals)``: *working* is the intended
     post-consolidation record set derived from the snapshot (kept/NO_OP snapshot
@@ -626,6 +659,7 @@ def _decide_changeset(store: MemoryStore, snapshot: list, candidates: list,
         if key in processed:
             continue                              # idempotency within a run
         processed.add(key)
+        require_writes()
 
         idx, ratio = _nearest(text, working)
         matched = working[idx] if idx >= 0 else None

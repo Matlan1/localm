@@ -18,7 +18,7 @@ Provisioning (``resolve_embedding_model_path``): the ``embedding_model`` config 
 is either a filesystem path, a registered model name, or a known key (default
 ``bge-small-en-v1.5``). A known model missing from ``<home>/models/embeddings/`` is
 downloaded on demand, gated by the network policy: automatically only under
-``net_mode=allow``, and the default one, when ``embedding_model`` was never set, only
+``net_mode=allow``, and the default one, when ``embedding_model`` is not set, only
 while no usable embedding model is registered; otherwise the user runs
 ``localm setup-embeddings`` or the GUI's download action, which ``off`` allows only with
 ``net_allow_model_downloads``.
@@ -469,7 +469,7 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None,
     (downloaded into <home>/models/embeddings if missing and the net policy allows).
     ``allow_download`` overrides the policy (used by ``localm setup-embeddings`` to
     force the fetch); the default downloads only under net_mode 'allow'
-    (``netpolicy.automatic_download_allowed``), and a never-set ``embedding_model``
+    (``netpolicy.automatic_download_allowed``), and an unset ``embedding_model``
     not while a usable embedding model is registered.
     ``allow_download=True`` also re-hashes an already-present known model file
     against its pin and fetches it again when it differs; every other call

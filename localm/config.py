@@ -2181,8 +2181,23 @@ def _user_delta(cfg: dict) -> dict:
 
 
 # Kept in config.json even at their default value once somebody set them, so the
-# file tells a choice from the default (see config_key_stored).
+# file tells a choice from the default (see config_key_stored). A blank value is no
+# choice and is not stored.
 _KEPT_WHEN_SET = frozenset({"embedding_model"})
+
+
+def keys_kept_when_set() -> frozenset:
+    """The config keys whose setting counts as a choice even at the default value;
+    a blank one is unset."""
+    return _KEPT_WHEN_SET
+
+
+def _unset_blank_choices(cfg: dict) -> set:
+    """Put each blank _KEPT_WHEN_SET key of *cfg* back to its default and return
+    those keys."""
+    blank = {k for k in _KEPT_WHEN_SET if k in cfg and not str(cfg[k] or "").strip()}
+    cfg.update({k: DEFAULT_CONFIG[k] for k in blank})
+    return blank
 
 
 class _NotedWrites(dict):
@@ -2221,6 +2236,8 @@ def _set_keys(stored) -> set:
     at its default says nothing and is left out."""
     if not isinstance(stored, dict):
         return set()
+    stored = {k: v for k, v in stored.items()
+              if k not in _KEPT_WHEN_SET or str(v or "").strip()}
     at_default = {k for k, v in stored.items()
                   if k in DEFAULT_CONFIG and v == DEFAULT_CONFIG[k]}
     if CONFIG_VERSION_KEY not in stored and at_default - _KEPT_WHEN_SET:
@@ -2233,6 +2250,8 @@ def _config_for_disk(cfg: dict, written=()) -> dict:
     ``_KEPT_WHEN_SET`` keys in *written*, and the ``model_refs`` of the model names
     in both."""
     from localm import model_ids
+    cfg = dict(cfg)
+    written = set(written) - _unset_blank_choices(cfg)
     delta = _user_delta(cfg)
     delta.update({k: cfg[k] for k in _KEPT_WHEN_SET.intersection(written) if k in cfg})
     model_ids.attach_refs(delta, model_ids.config_names(delta), model_index())
@@ -2334,6 +2353,7 @@ def update_config(mutator: Callable[[dict], None]) -> dict:
         # user-set delta hits the disk (see _user_delta / save_config).
         lock.assert_held()
         _atomic_write_json(CONFIG_FILE, _config_for_disk(cfg, written))
+        _unset_blank_choices(cfg)
     _refill_after_write()
     _record_config_saved(before, cfg)
     return cfg

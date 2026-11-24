@@ -50,7 +50,7 @@ missing depends on `net_mode` (see [network.md](network.md)):
 
 | `net_mode` | a missing embedding model |
 |---|---|
-| `allow` | downloaded the first time memory needs it. The default model (when you never chose an embedding model) is not downloaded while another embedding model localm could use is registered: memory stays lexical-only until you pick that model as the embedding model or press Download |
+| `allow` | downloaded the first time memory needs it. The default model (when you have not chosen an embedding model, or cleared the Embedding model box in Settings) is not downloaded while another embedding model localm could use is registered: memory stays lexical-only until you pick that model as the embedding model or press Download |
 | `ask` (default) | not downloaded; memory stays lexical-only, the debug log says once which model is missing and how to get it, and the memory dialog names it with a Download button (when the Knowledge plugin is installed and the network policy would accept the download) or the `localm setup-embeddings` command |
 | `off` | not downloaded; the Download button and `localm setup-embeddings` work only when `net_allow_model_downloads` is on |
 
@@ -136,8 +136,11 @@ In the GUI:
   requests in a row ("Remember that X. Remember that Y.") store one fact each, at
   most 8 per message, from the paragraph the message opens with. Text after a
   paragraph break, a quotation, or words you introduce as somebody else's ("Bob
-  wrote me this:") adds no further fact. The reply says for each fact whether it
-  was saved, was already there, or was not stored.
+  wrote me this:") adds no further fact. A fact runs to the end of its sentence; a
+  line break inside it is a space, unless the next line starts a quotation, a code
+  fence, a list item, a "Name:" line or another request. The reply says for each
+  fact whether it was saved, was already there, or was not stored; a long fact is
+  shown cut there.
 - `/memory` opens the memory manager: view and edit your facts (one per line;
   Save replaces the list), click **Synthesize now** to distil facts from your
   recent chats immediately, and review any **suggested corrections** (see
@@ -222,7 +225,8 @@ and accepting one archives the old value to the recoverable forgotten sidecar
 before applying the change. A rejected suggestion is remembered so the same
 contradiction is not re-proposed on the next pass.
 
-In privacy mode, consolidation returns "skipped" and never calls the model.
+In privacy mode, consolidation returns "skipped" and never calls the model. A switch
+to privacy mode during a pass ends it before its next model call and its next write.
 
 ## How recall ranks facts
 
@@ -264,7 +268,8 @@ When memory injects facts, the server reports it so you are never guessing:
 - The GUI shows a memory chip with the number of facts used on the reply (hover
   it for the facts); click it to open the memory manager.
 - `POST /v1/chat/completions` carries an `X-Localm-Memory` response header with
-  the count, the injected items, and a **degrade reason** when the semantic
+  the count, the injected items (long texts cut, so the header stays under 4 KB),
+  and a **degrade reason** when the semantic
   signal could not be used: `no_embedder` (no embedding model resolved -
   you have not run `localm setup-embeddings` yet), `embedder_failed` (the
   embedding model is installed but could not be loaded), `no_vectors` (records not

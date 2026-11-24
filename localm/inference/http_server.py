@@ -8843,6 +8843,36 @@ def _capability_route_header(route, placement=None) -> dict:
     return {"X-Localm-Model-Routing": blob}
 
 
+# The X-Localm-Memory value stays below this many bytes.
+MEMORY_HEADER_BYTES = 4096
+# The encoded bytes each text of that header may take, the first that fits.
+_MEMORY_HEADER_TEXT_BYTES = (200, 100, 40)
+
+
+def _cut_for_header(text: str, room: int) -> str:
+    """*text* cut so that its JSON form takes at most *room* bytes, a cut marked with
+    "..." at the end."""
+    if len(text) <= room and len(json.dumps(text)) - 2 <= room:
+        return text
+    out, size = [], 3
+    for ch in text[:room]:
+        size += len(json.dumps(ch)) - 2
+        if size > room:
+            break
+        out.append(ch)
+    return "".join(out).rstrip() + "..." if room >= 3 else ""
+
+
+def _cut_texts(value, room: int):
+    """*value* (JSON data) with every ``text`` string in it cut to *room* bytes."""
+    if isinstance(value, list):
+        return [_cut_texts(v, room) for v in value]
+    if isinstance(value, dict):
+        return {k: _cut_for_header(v, room) if k == "text" and isinstance(v, str)
+                else _cut_texts(v, room) for k, v in value.items()}
+    return value
+
+
 def _memory_used_header(ctx) -> dict:
     """Observability: render the memory plugin's per-turn recall (stashed in
     ``ctx.state`` by its inlet) into a response-header dict so a client can show a
@@ -8851,9 +8881,11 @@ def _memory_used_header(ctx) -> dict:
     for this turn (plugin disabled, privacy mode, recall off). The value is
     compact ASCII JSON, header-safe: ``{"n":<int>,"degrade":<reason|null>,"items":
     [{"id","text","source","kind"}...],"saved":{"text","status"}}`` (``saved`` only
-    when the message asked to remember something; with several facts it also holds
-    ``"facts":[{"text","status"}...]``) - json.dumps(ensure_ascii=True)
-    escapes newlines and non-ASCII, so the blob is a single header-legal line."""
+    when the message asked to remember something; with several facts it holds
+    ``"facts":[{"text","status"}...]`` in place of ``text``) -
+    json.dumps(ensure_ascii=True) escapes newlines and non-ASCII, so the blob is a
+    single header-legal line. Each text is cut (``_cut_for_header``) so that the
+    whole value stays under MEMORY_HEADER_BYTES."""
     if ctx is None:
         return {}
     state = getattr(ctx, "state", {})
@@ -8868,7 +8900,13 @@ def _memory_used_header(ctx) -> dict:
     if saved is not None:
         payload["saved"] = saved
     try:
-        blob = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+        for room in _MEMORY_HEADER_TEXT_BYTES:
+            blob = json.dumps(_cut_texts(payload, room), ensure_ascii=True,
+                              separators=(",", ":"))
+            if len(blob) < MEMORY_HEADER_BYTES:
+                return {"X-Localm-Memory": blob}
+        blob = json.dumps({**_cut_texts(payload, 0), "items": []}, ensure_ascii=True,
+                          separators=(",", ":"))
     except (TypeError, ValueError):
         return {}
     return {"X-Localm-Memory": blob}

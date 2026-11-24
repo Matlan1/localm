@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 
-from .store import _OTHER_PERSON, _content_tokens
+from .store import _content_tokens, _names_another_person
 
 STEM_CHARS = 4
 
@@ -91,6 +91,8 @@ _ASKS = re.compile(
     r"rezepte?|geschichte|witz|gedicht|beispiele?|rat|hilfe|tipps?|vorschl\w+|empfehlung\w*|"
     r"ideen?|frage|überblick|zusammenfassung)\b"
     r"|ich\s+frage?\s+mich\b|ich\s+will\s+dass\s+du\b|ich\s+möchte\s*$|ich\s+will\s*$")
+# More words than _ASKS can match.
+_ASKS_WORDS = 16
 # "I like good jokes", "I have a song on the radio": a like or a possession, not a request.
 _STATES_LIKING = re.compile(
     r"(?:i|ich)\s+(?:(?:really|also|always|do)\s+)?(?:like|love|have)\s+(?!to\s+(?:know|hear|ask)\b)"
@@ -168,19 +170,21 @@ def _named_things(text: str, words: list) -> set:
     """The stems of what a request calls the user's own ("my cat Tom": cat, Tom).
     "What is my name" names nothing: it asks for the value."""
     spelled = [m.group() for m in _WORD.finditer(text.replace("\u2019", "'"))]
-    out: set = set()
+    named: list = []
+    done = 0
     for i, word in enumerate(words):
-        if word not in _MY or i + 1 >= len(words) or words[i + 1] in _OTHER_PERSON:
+        if (word not in _MY or i + 1 >= len(words) or i + 2 <= done
+                or _names_another_person(word, words[i + 1])):
             continue
         before = words[i - 1] if i else ""
         if before in ("is", "are", "was", "were", "ist", "sind", "war", "lautet", "heißt",
                       "what's", "who's", "where's", "how's"):
             continue
-        end = i + 2
-        while end < len(spelled) and spelled[end][:1].isupper():
-            end += 1
-        out |= stems(" ".join(spelled[i + 1:end]))
-    return out
+        done = i + 2
+        while done < len(spelled) and spelled[done][:1].isupper():
+            done += 1
+        named += spelled[i + 1:done]
+    return stems(" ".join(named))
 
 
 def _request_stems(text: str, words: list) -> set:
@@ -192,10 +196,10 @@ def _request_stems(text: str, words: list) -> set:
             continue
         if (words[i - 1] in _INDIRECT or words[i - 1] in _AUX
                 or words[i + 1] in _MODALS or word in ("i'd", "i'll")
-                or _ASKS.match(" ".join(words[i:]))):
+                or _ASKS.match(" ".join(words[i:i + _ASKS_WORDS]))):
             continue
-        spelled = [m for m in _WORD.finditer(text.replace("\u2019", "'"))]
-        out |= stems(text[spelled[i].start():])
+        spelled = list(_WORD.finditer(text.replace("\u2019", "'")))
+        return out | stems(text[spelled[i].start():])
     return out
 
 
@@ -235,7 +239,8 @@ def _read_clause(text: str, dependent: bool, asked: bool, last_question: bool) -
         if modal and ((dependent and asked) or last_question or words[0] in _WH):
             return _named_things(body, words), False, True
         return stems(body), True, False
-    if any(i + 1 >= len(words) or words[i + 1] not in _OTHER_PERSON for i in mine):
+    if any(i + 1 >= len(words) or not _names_another_person(words[i], words[i + 1])
+           for i in mine):
         return stems(body), True, False
     if has_me and not last_question and not (
             {"please", "bitte", "you", "du"} & set(_tokens(text))):

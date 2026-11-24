@@ -2126,7 +2126,7 @@ export const I18N_EN = {
 
   // Settings > schema fields: Embeddings
   "settings.field.embeddingModel.label": "Embedding model",
-  "settings.field.embeddingModel.help": "A known key, registered name or GGUF path. A missing key is fetched on first use under network allow (never set: only if no embedding model is registered), else with Download on Knowledge or memory.",
+  "settings.field.embeddingModel.help": "A known key, registered name or GGUF path. A missing key is fetched on first use under network allow (not set: only if no embedding model is registered), else with Download on Knowledge or memory.",
   "settings.field.embeddingPooling.label": "Embedding pooling",
   "settings.field.embeddingPooling.help": "Changing this invalidates document collections and memory vectors: re-index after. A loaded embedder keeps the old value until unloaded. mean suits bge/nomic; a decoder-based one needs last or auto.",
   "settings.field.embeddingGpuLayers.label": "Embedder GPU layers",

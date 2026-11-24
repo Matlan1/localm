@@ -65,7 +65,8 @@ _BACK_REFERENCE_RE = re.compile(
 _IMPERATIVE_NEXT_RE = re.compile(
     r"^\s*(?:(?:and|then|now|please|pls|ok|okay)[,!]?\s+)*" + _TASK_ON_IT,
     re.IGNORECASE)
-_PARAGRAPH_RE = re.compile(r"\n\s*\n")
+_LINE_BREAKS_RE = re.compile("\r\n|[\r\x0b\x0c\x1c\x1d\x1e\x85\u2028]")
+_PARAGRAPH_RE = re.compile("\\n[\\s\u200b-\u200d\u2060\ufeff]*\\n")
 _TERMINATOR_RE = re.compile(r"[.!?]+(?=\s|$)")
 _ABBREVIATIONS = frozenset((
     "e.g i.e z.b d.h u.a z.t v.a u.s.w etc vs bzw usw ca inc ltd co corp dr mr mrs ms "
@@ -74,17 +75,13 @@ _MIN_FACT_CHARS = 6
 _MAX_SCAN_CHARS = 4000
 _MAX_FACTS = 8
 
-# A fact runs on into the next line only when its own line is visibly unfinished.
-_OPEN_END_RE = re.compile(
-    r"(?:[,-]|\b(?:a|an|the|my|your|our|his|her|their|is|are|am|was|were|and|or|but|"
-    r"of|in|on|at|to|for|from|with|by|as|than|that|because|"
-    r"der|die|das|den|dem|des|ein|eine|einen|einem|einer|mein|meine|meinen|meinem|"
-    r"meiner|ist|sind|bin|war|und|oder|aber|von|vom|im|am|an|auf|zu|zum|zur|"
-    r"für|mit|bei|als|dass|weil))\s*$", re.IGNORECASE)
-_JOINING_START_RE = re.compile(
-    r"(?:and|or|but|because|which|with|is|are|was|of|in|on|at|for|to|from|"
-    r"und|oder|aber|weil|mit|ist|sind|war|von|im|am|auf|für|zu)\b")
-_FOREIGN_LINE_RE = re.compile(r"\s*(?:[>|\"'`~#\u201c\u201e\u00ab]|\*{2,}|-{2,})")
+# What ends a fact at a line break: a line that starts a quotation, a fence or
+# separator, a list item, or a "Name:" line, each read at the start of the line.
+_QUOTED_LINE_RE = re.compile(
+    "(?:[>\"\u201c\u201e\u00ab]|['\u2018](?!\\d)|`{3,}|~{3,}|-{3,}|={3,})")
+_LIST_ITEM_RE = re.compile("[-*+\u2022]\\s")
+_NUMBERED_LINE_RE = re.compile(r"\d{1,3}[.)]\s")
+_NAME_LINE_RE = re.compile(r"[^\W\d_][^\s:]*(?: [^\s:]+){0,3}:(?:\s|$)")
 # Words that announce somebody else's text after them.
 _SOURCE = (
     r"(?:wrote|writes|written|says|said|saying|texted|texts|mailed|emailed|e-mailed|"
@@ -107,40 +104,48 @@ _LETTER_OPENING_RE = re.compile(r"^\s*(?:hey|hi|hello|hallo)\b", re.IGNORECASE)
 _QUOTE_PAIRS = (("\u201c", "\u201d"), ("\u201e", "\u201c"), ("\u00ab", "\u00bb"))
 
 
-def _opens_request(text: str) -> bool:
-    return bool(_EN_RE.match(text) or _DE_RE.match(text))
+def _plain_breaks(text: str) -> str:
+    """*text* with every Unicode line break as a newline and every paragraph
+    separator as an empty line."""
+    return _LINE_BREAKS_RE.sub("\n", text.replace("\u2029", "\n\n"))
 
 
-def _runs_on(line: str, following: str) -> bool:
-    """True when *following* continues the unfinished text line *line*."""
-    if _FOREIGN_LINE_RE.match(following) or following.endswith(":"):
+def _opens_request(line: str, before: str) -> bool:
+    """True when *line*, after the line *before*, starts a request of its own. In
+    lower case, and with no "that", "dass" or ":" after the verb, it is one only when
+    *before* ended a sentence: "I never" / "remember my dreams" is one sentence."""
+    m = _EN_RE.match(line) or _DE_RE.match(line)
+    if m is None:
         return False
-    if line.endswith((".", "!", "?", ":", ";")) or _opens_request(following):
-        return False
-    return bool(_OPEN_END_RE.search(line[-40:]) or _JOINING_START_RE.match(following))
+    if line[:1].isupper() or before.endswith((".", "!", "?")):
+        return True
+    connect = _CONNECT_RE.match(m.group("rest"))
+    return bool(connect and (connect.group("kw") or connect.group("punct")))
 
 
 def _logical_lines(para: str) -> list[str]:
-    """The lines of the paragraph *para*, whitespace collapsed, with a line joined
-    to the one before it when that one is visibly unfinished. A first line that
-    announces a list of its own ("my hobbies are:") takes the lines after it, unless
-    it announces somebody else's words or the next line is itself a request."""
-    out: list[str] = []
-    for raw in para.split("\n"):
-        line = " ".join(raw.split())
-        if not line:
-            continue
-        if out and _runs_on(out[-1], line):
-            out[-1] = out[-1] + " " + line
+    """The paragraph *para* with its line breaks read as spaces, cut only before a
+    line that starts a quotation, a fence, a list item, a "Name:" line or a new
+    request. After a first line that announces a list of the user's own ("my
+    hobbies are:"), list items and "Name:" lines continue it."""
+    lines = [line for line in (" ".join(raw.split()) for raw in para.split("\n")) if line]
+    numbered = sum(1 for line in lines if _NUMBERED_LINE_RE.match(line)) > 1
+    out: list[list[str]] = []
+    own_list = False
+    for n, line in enumerate(lines):
+        if not n or _QUOTED_LINE_RE.match(line) or _opens_request(line, lines[n - 1]):
+            starts = True
+        elif own_list:
+            starts = False
         else:
-            out.append(line)
-    if len(out) > 1 and out[0].endswith(":") and not _INTRODUCES_RE.search(out[0]):
-        own = 1
-        while own < len(out) and not (_FOREIGN_LINE_RE.match(out[own])
-                                      or _opens_request(out[own])):
-            own += 1
-        out[:own] = [" ".join(out[:own])]
-    return out
+            starts = bool(_LIST_ITEM_RE.match(line)
+                          or (numbered and _NUMBERED_LINE_RE.match(line))
+                          or (line[0].isupper() and _NAME_LINE_RE.match(line)))
+        if starts:
+            out.append([])
+            own_list = not n and line.endswith(":") and not _INTRODUCES_RE.search(line)
+        out[-1].append(line)
+    return [" ".join(parts) for parts in out]
 
 
 def _quotes_open(text: str) -> bool:
@@ -211,9 +216,9 @@ def explicit_facts(message: str) -> list[str]:
     explain it"), refers back to earlier chat ("from earlier", "you wrote"), or is
     followed by a task on it ("... . Fix it."). Only the first _MAX_SCAN_CHARS
     characters of *message* are read. The fact is the first sentence after the
-    request, trailing punctuation removed, cut to MAX_TEXT_LEN; a line break ends it
-    unless the line is visibly unfinished."""
-    text = message[:_MAX_SCAN_CHARS].strip() if isinstance(message, str) else ""
+    request, trailing punctuation removed, cut to MAX_TEXT_LEN. A line break in it is
+    a space unless the next line starts something of its own (see _logical_lines)."""
+    text = _plain_breaks(message[:_MAX_SCAN_CHARS]).strip() if isinstance(message, str) else ""
     facts: list[str] = []
     while text and len(facts) < _MAX_FACTS:
         got = _one_request(text)

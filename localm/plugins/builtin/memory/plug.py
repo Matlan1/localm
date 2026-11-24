@@ -654,6 +654,7 @@ def _fill_vectors_later(store) -> None:
 def _fill_run() -> None:
     global _fill_pending
     from localm.debuglog import logger
+    failed: dict = {}
     while True:
         try:
             allowed = _fill_allowed()
@@ -668,7 +669,7 @@ def _fill_run() -> None:
             key, path = next(iter(_fill_stores.items()))
             del _fill_stores[key]
         try:
-            if _fill_one(path):
+            if _fill_one(path, failed.setdefault(key, set())):
                 with _fill_lock:
                     _fill_stores.setdefault(key, path)
         except Exception as e:
@@ -676,9 +677,10 @@ def _fill_run() -> None:
                            path.name, e)
 
 
-def _fill_one(path) -> bool:
-    """Give up to _FILL_STEP records of the store at *path* their vector. True when
-    it went well and records without one are left."""
+def _fill_one(path, failed: set) -> bool:
+    """Give up to _FILL_STEP records of the store at *path* their vector, leaving out
+    the ones in *failed*, whose embedding failed earlier in this run. True when it
+    went well and records without one are left."""
     from localm.memory import MemoryStore
     embed_fn = _embed_fn()
     if embed_fn is None:
@@ -687,7 +689,8 @@ def _fill_one(path) -> bool:
                      "vector for now")
         return False
     store = MemoryStore.open_file(path)
-    filled = store.backfill_vectors(embed_fn, limit=_FILL_STEP, allowed=_fill_allowed)
+    filled = store.backfill_vectors(embed_fn, limit=_FILL_STEP, allowed=_fill_allowed,
+                                    failed=failed)
     return bool(filled) and store.lacks_vector()
 
 
@@ -1053,10 +1056,12 @@ def synthesize_memory(complete, *, principal: str | None = None, max_facts: int 
 
     Privacy: gated on _persist_enabled(); in privacy mode returns
     ``{"status": "skipped", "reason": "privacy", "added": 0}`` and NEVER calls the
-    model. Returns ``{status, added, updated, deleted, facts}``, the shape the jobs
-    "memory" runner consumes. When a model call raised in the fact pass or the
-    episodic pass, ``status`` is ``"error"`` with ``reason: "model_failed"`` and the
-    failure in ``error``; the counts then describe only what was written before it."""
+    model. A switch to privacy mode during the pass ends it before the next model
+    call and the next write. Returns ``{status, added, updated, deleted, facts}``, the
+    shape the jobs "memory" runner consumes. When a model call raised in the fact pass
+    or the episodic pass, ``status`` is ``"error"`` with ``reason: "model_failed"`` and
+    the failure in ``error``; the counts then describe only what was written before
+    it."""
     from localm.debuglog import logger
     if not _persist_enabled():
         logger.debug("memory synthesis skipped: privacy mode active")
@@ -1080,12 +1085,16 @@ def synthesize_memory(complete, *, principal: str | None = None, max_facts: int 
     # Episodic capture is per-session and watermarked: one episode per NEW session,
     # not one blob summary over all of them.
     model_errors: list[str] = []
+    if res.get("status") == "skipped":
+        logger.debug("memory synthesis stopped: privacy mode active")
+        return {"status": "skipped", "reason": "privacy", "added": 0}
     if res.get("status") == "error":
         model_errors.append(res.get("error") or "the model call failed")
     episodic = _store_episodes(store, complete, embed_fn=embed_fn, errors=model_errors,
                                model_answered=(res.get("status") != "error"
-                                               or res.get("reason") == "unreadable_reply"))
-    pruned = _prune_trivial_episodes(store, complete)
+                                               or res.get("reason") == "unreadable_reply"),
+                               allowed=_persist_enabled)
+    pruned = _prune_trivial_episodes(store, complete, allowed=_persist_enabled)
     # Backfill vectors for records stored before an embedder was available, so
     # semantic recall turns on retroactively. Bounded per pass; a large store fills
     # over several passes. No-op when no embedder.
@@ -1255,12 +1264,12 @@ EPISODIC_MAX_ATTEMPTS = 3
 EPISODIC_JUDGE_MAX_PER_RUN = 5
 
 
-def _prune_trivial_episodes(store, complete) -> int:
+def _prune_trivial_episodes(store, complete, allowed=lambda: True) -> int:
     """Ask the model once about each stored synth episode that was never judged,
     at most EPISODIC_JUDGE_MAX_PER_RUN per call. An episode judged DROP is archived
     to the recoverable sidecar and removed; every other one is stamped judged.
-    Returns the number removed. Best-effort; the caller confirmed writes are
-    allowed."""
+    Returns the number removed. Best-effort. *allowed* is asked before each model
+    call and each write; a False answer ends the run with nothing more written."""
     from localm.debuglog import logger
     from localm.memory.consolidate import judge_episode
     try:
@@ -1269,7 +1278,12 @@ def _prune_trivial_episodes(store, complete) -> int:
                    and not (r.meta or {}).get("judged")][:EPISODIC_JUDGE_MAX_PER_RUN]
         removed = 0
         for r in pending:
-            if not judge_episode(complete, r.text):
+            if not allowed():
+                break
+            keep = judge_episode(complete, r.text)
+            if not allowed():
+                break
+            if not keep:
                 if store.forget(r.id):
                     removed += 1
                     continue
@@ -1284,7 +1298,7 @@ def _prune_trivial_episodes(store, complete) -> int:
 
 
 def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
-                    model_answered=False) -> int:
+                    model_answered=False, allowed=lambda: True) -> int:
     """Store one EPISODIC summary PER NEW session file (past the watermark), so N
     sessions become N episodes instead of collapsing into <=1 blob summary. Each
     episode is tagged with its source session id + mtime. Deduped against existing
@@ -1316,7 +1330,9 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
     another call in the same run (*model_answered*, or an earlier summary in this
     pass), the failure is counted against the session in the watermark sidecar,
     and after EPISODIC_MAX_ATTEMPTS counted failures the session is skipped with
-    a warning and the pass continues."""
+    a warning and the pass continues. *allowed* is asked before each model call and
+    each write; a False answer ends the run with nothing more written, the watermark
+    included."""
     ef = _deferred_embed() if embed_fn is _UNSET else embed_fn
     try:
         import time as _time
@@ -1387,11 +1403,14 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
             # and the cursor for the next run.
             if gens >= EPISODIC_MAX_PER_RUN:
                 break
+            if not allowed():
+                return stored
             logger.info("memory consolidation: summarizing session %s (%d chars)...", f.stem, len(text))
             try:
                 summ = summarize_session(complete, text)
             except BackgroundYield:
-                _write_episodic_watermark(store, newest, newest_stems, failures)
+                if allowed():
+                    _write_episodic_watermark(store, newest, newest_stems, failures)
                 raise
             except ConsolidationModelError as e:
                 if errors is not None:
@@ -1410,6 +1429,8 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
                                "summarizing session %s (%s); it is retried next run",
                                f.stem, e)
                 break
+            if not allowed():
+                return stored
             answered = True
             failures.pop(f.stem, None)
             gens += 1
@@ -1440,6 +1461,8 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
                 # update() re-embeds on a text change, so the vector cannot go stale
                 # against the superseded text.
                 _ensure_embedder(ef)
+                if not allowed():
+                    return stored
                 store.update(keep.id, text=summ, embed_fn=ef,
                              meta={"session": f.stem, "session_mtime": mt,
                                    "judged": True})
@@ -1451,12 +1474,16 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
                    for r in store.all()):
                 continue                           # already have this episode
             _ensure_embedder(ef)
+            if not allowed():
+                return stored
             store.add(MemoryRecord(text=summ, kind="episodic", source="synth",
                                    importance=0.4,
                                    meta={"session": f.stem, "session_mtime": mt,
                                          "judged": True}),
                       embed_fn=ef)
             stored += 1
+        if not allowed():
+            return stored
         _write_episodic_watermark(store, newest, newest_stems, failures)
         if stored > 0:
             logger.info("memory consolidation: stored %d episodic summary record(s)", stored)
@@ -1876,7 +1903,7 @@ def _note_unsaved_request(messages, ctx) -> None:
         if last is not None and is_user_written(last):
             facts = explicit_facts(user_written_text(last))
             if facts:
-                ctx.state["memory_saved"] = {"text": "; ".join(facts), "status": "off"}
+                ctx.state["memory_saved"] = _saved_header(facts, ["off"] * len(facts))
     except Exception as e:
         from localm.debuglog import logger
         logger.debug("memory: could not check for a remember request: %s", e)
@@ -1950,17 +1977,14 @@ def add_user_fact(store, fact: str, embed_fn, *, kind: str = "semantic",
 
 def _saved_header(facts: list, statuses: list) -> dict:
     """The ``memory_saved`` outcome of the remember requests *facts* with their
-    *statuses*. ``{"text", "status"}`` describes the facts that were saved, or, when
-    none was, the first one's status and the facts that share it. With more than one
-    fact, ``facts`` holds every fact with its own status, in order."""
-    lead = "saved" if "saved" in statuses else statuses[0]
-    header: dict = {"text": "; ".join(f for f, s in zip(facts, statuses, strict=True)
-                                      if s == lead),
-                    "status": lead}
-    if len(facts) > 1:
-        header["facts"] = [{"text": f, "status": s}
-                           for f, s in zip(facts, statuses, strict=True)]
-    return header
+    *statuses*: ``{"text", "status"}`` for one fact, and for several
+    ``{"status", "facts": [{"text", "status"}...]}`` with every fact in order, where
+    "status" is "saved" when any of them was saved, else the first one's."""
+    if len(facts) == 1:
+        return {"text": facts[0], "status": statuses[0]}
+    return {"status": "saved" if "saved" in statuses else statuses[0],
+            "facts": [{"text": f, "status": s}
+                      for f, s in zip(facts, statuses, strict=True)]}
 
 
 def _remember_explicit(messages, ctx, before_embed=None) -> None:
@@ -1968,8 +1992,8 @@ def _remember_explicit(messages, ctx, before_embed=None) -> None:
     ...", "merk dir ..."), without the model. The outcome goes to
     ``ctx.state["memory_saved"]`` for the response header: ``{"text", "status"}``
     with status "saved", "exists" (the same fact is already stored), "full" (the
-    store is at its cap) or "failed"; with several facts, "facts" gives each one its
-    own status (see _saved_header); "off" is set by the caller. Only the user's
+    store is at its cap) or "failed", or, with several facts, each one's own status
+    (see _saved_header); "off" is set by the caller. Only the user's
     own words count; a user row the client marked with an ``origin`` is not
     examined. Blocking (embedder); the caller runs it off the loop. Nothing is
     stored in privacy mode. *before_embed*, when given, is called before the

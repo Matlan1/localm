@@ -114,7 +114,7 @@ test("several remember requests name every fact with its own outcome", () => {
   const text = (facts) => {
     const b = window.document.createElement("div");
     window.addMessageRow(b, "assistant", "ok", { memory: window.parseMemoryHeader(headerResp({
-      n: 0, items: [], saved: { text: facts[0].text, status: facts[0].status, facts } })) });
+      n: 0, items: [], saved: { status: facts[0].status, facts } })) });
     return b.querySelector(".mem-saved").textContent;
   };
   assert.equal(text([{ text: "a", status: "saved" }, { text: "b", status: "full" }]),
@@ -124,6 +124,10 @@ test("several remember requests name every fact with its own outcome", () => {
   assert.equal(text([{ text: "a", status: "saved" }, { text: "b", status: "failed" },
                      { text: "c", status: "saved" }]),
     "Saved to memory: a; c\nNot stored, saving failed: b");
+  assert.equal(text([{ text: "a...", status: "saved" }, { text: "b", status: "exists" }]),
+    "Saved to memory: a...\nAlready in memory: b");
+  assert.match(text([{ text: "a", status: "off" }, { text: "b", status: "off" }]),
+    /^Not saved: memory is off/);
 });
 
 test("the chip says a configured embedding model could not be loaded", () => {

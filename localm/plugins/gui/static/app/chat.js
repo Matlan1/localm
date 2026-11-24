@@ -2085,14 +2085,16 @@ export function buildMemoryChip(mem) {
 }
 
 /** The sentence for the outcome of a "remember ..." request the server handled
- *  for a message: `saved` is `{ text, status, facts? }`, status "saved" | "exists" |
- *  "full" | "failed". `facts` ([{ text, status }]), sent for a message with several
- *  requests, gives one line per outcome, naming the facts it applies to. */
+ *  for a message: `saved` is `{ text, status }`, status "saved" | "exists" | "full" |
+ *  "failed" | "off". For a message with several requests it is `{ status, facts }`:
+ *  `facts` ([{ text, status }]) gives one line per outcome, naming the facts it
+ *  applies to. */
 export function memorySavedText(saved) {
   const facts = saved && Array.isArray(saved.facts) ? saved.facts : [];
   if (facts.length > 1) {
     const lines = { saved: "chat.memory.saved", exists: "chat.memory.exists",
-                    full: "chat.memory.fullFact", failed: "chat.memory.failedFact" };
+                    full: "chat.memory.fullFact", failed: "chat.memory.failedFact",
+                    off: "chat.memory.off" };
     return Object.entries(lines).flatMap(([status, line]) => {
       const named = facts.filter((f) => f && f.status === status).map((f) => f.text);
       return named.length ? [t(line, { text: named.join("; ") })] : [];

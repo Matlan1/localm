@@ -1030,7 +1030,8 @@ unchanged. A new `embedding_model` that names a registered model of another type
 (a chat model, for example), a GGUF file whose header marks it as another type,
 or a reranker is refused with a 400; one that names no
 known key, registered model or file yet is saved, and the answer carries
-`warnings`, a list of sentences saying so. A change to `embedding_model` that would leave an existing
+`warnings`, a list of sentences saying so. Sending an `embedding_model`, the default's name
+included, chooses that model; `null` or `""` unsets the choice. A change to `embedding_model` that would leave an existing
 collection's vectors unusable is not applied by the first request: it answers 200
 `{"needs_confirm": true, "model", "collections", "note"}`, and the same body with
 `"confirm": true` applies it. PATCH errors: 400 for an unknown key, an invalid
@@ -1450,7 +1451,9 @@ be used (for example `no_embedder` before `localm setup-embeddings`, or
 `embedder_failed` when the installed embedding model could not be loaded). When the
 message asked to remember something, `saved` holds its outcome, `{"text", "status"}`
 with status `saved`, `exists`, `full`, `failed` or `off` (memory is off); with several
-requests in one message `saved.facts` lists every fact as `{"text", "status"}`.
+requests in one message it is `{"status", "facts"}`, where `facts` lists every fact as
+`{"text", "status"}` and `status` is `saved` when any was saved. Each text in the header is
+cut to a short length (a cut ends in `...`), and the whole value stays under 4 KB.
 
 ## Other routes the GUI and plugins serve
 

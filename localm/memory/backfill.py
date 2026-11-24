@@ -65,9 +65,10 @@ def backfill_all(root: Path, embed_fn: Optional[Callable], *,
                          path, e)
             continue
         seen += 1
+        failed: set = set()
         for _ in range(_MAX_PASSES_PER_NS):
             try:
-                filled = store.backfill_vectors(embed_fn, allowed=allowed)
+                filled = store.backfill_vectors(embed_fn, allowed=allowed, failed=failed)
             except Exception:
                 # One namespace failing must not abandon the rest; the shortfall
                 # shows up in "remaining" rather than as a silent success.

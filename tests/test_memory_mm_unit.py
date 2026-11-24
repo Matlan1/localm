@@ -56,6 +56,56 @@ def test_consecutive_remember_requests_store_one_fact_each(message, facts):
     assert explicit_fact(message) == facts[0]
 
 
+@pytest.mark.parametrize("message, fact", [
+    ("Remember that I am allergic to everything except\npeanuts",
+     "I am allergic to everything except peanuts"),
+    ("Remember that I am not\nallergic to nuts", "I am not allergic to nuts"),
+    ("Remember that I never\neat meat", "I never eat meat"),
+    ("Remember that I hate\nonions", "I hate onions"),
+    ("Remember that I don't drink coffee after\n3 pm", "I don't drink coffee after 3 pm"),
+    ("Remember that I moved here from New\nYork last year",
+     "I moved here from New York last year"),
+    ("Remember that I am not\r\nallergic to nuts", "I am not allergic to nuts"),
+    ("Remember that I never\u2028eat meat", "I never eat meat"),
+    ("Remember that I am **not**\n**allergic** to nuts", "I am **not** **allergic** to nuts"),
+    ("Remember that I never\nremember my dreams", "I never remember my dreams"),
+    ("Remember that I like the music of the\n'90s", "I like the music of the '90s"),
+    ("Remember that I always get up at\n6:30 on weekdays",
+     "I always get up at 6:30 on weekdays"),
+    ("Remember that my appointment is on the\n3. of May", "my appointment is on the 3. of May"),
+    ("Remember that I am allergic\nto nuts. They make me ill.", "I am allergic to nuts"),
+    ("Remember that I work at Acme Inc.\nin Oslo", "I work at Acme Inc. in Oslo"),
+    ("Merk dir, dass ich gegen alles allergisch bin, außer\nErdnüsse",
+     "ich gegen alles allergisch bin, außer Erdnüsse"),
+    ("Merk dir, dass ich nie\nFleisch esse", "ich nie Fleisch esse"),
+])
+def test_a_line_break_inside_a_fact_is_a_space(message, fact):
+    assert explicit_facts(message) == [fact]
+
+
+@pytest.mark.parametrize("line, more", [
+    ("> I have cancer", []), ("\"I have cancer\"", []), ("\u201cI have cancer\u201d", []),
+    ("\u201eIch habe Krebs\u201c", []), ("\u00abI have cancer\u00bb", []),
+    ("'I have cancer'", []), ("```\nI have cancer\n```", []), ("~~~\nI have cancer", []),
+    ("--- forwarded ---\nI have cancer", []), ("- I have cancer", []),
+    ("* I have cancer", []), ("\u2022 I have cancer", []),
+    ("1. I have cancer\n2. I am ill", []), ("1) I have cancer\n2) I am ill", []),
+    ("Bob: I have cancer", []), ("Bob's mail: I have cancer", []),
+    ("Remember that I paint", ["I paint"]), ("remember that I paint", ["I paint"]),
+    ("Remember to buy milk", []), ("Merk dir, dass ich male", ["ich male"]),
+])
+def test_a_line_that_starts_something_of_its_own_ends_the_fact(line, more):
+    assert explicit_facts(f"Remember that I live in Oslo\n{line}") == ["I live in Oslo", *more]
+
+
+@pytest.mark.parametrize("gap", [
+    "\r\r", "\r\n\r\n", "\u2029", "\u2028\u2028", "\x0c\x0c", "\x0b\x0b", "\x85\x85",
+    "\x1c\x1c", "\x1d\x1d", "\x1e\x1e", "\n\u2028", "\n\u200b\n", "\n\ufeff\n", "\n\u00a0\n"])
+def test_every_unicode_paragraph_break_ends_the_chain(gap):
+    assert explicit_facts(f"Remember that I like tea.{gap}Remember that my PIN is 1234.") == [
+        "I like tea"]
+
+
 @pytest.mark.parametrize("message, facts", [
     ("Remember that I like tea. Remember that I live in Oslo\n\n"
      "Bob's mail: hi there, our client Anna has cancer", ["I like tea", "I live in Oslo"]),
@@ -170,6 +220,60 @@ def test_a_fact_made_mostly_of_the_replys_words_is_not_kept():
 
 def test_a_german_question_about_a_friend_is_not_about_the_user():
     assert _kept("Mein Freund Bob wohnt in Oslo.", "User lives in Oslo") == []
+
+
+@pytest.mark.parametrize("line, fact", [
+    ("My kind of music is jazz.", "User's kind of music is jazz"),
+    ("My kind of food is Thai.", "User likes Thai food"),
+    ("My chef knife is from Japan.", "User has a chef knife from Japan"),
+    ("My kinder side loves puppies.", "User loves puppies"),
+    ("My mutter annoys colleagues.", "User's mutter annoys colleagues"),
+    ("My mama bear mug is blue.", "User has a blue mama bear mug"),
+    ("My papa smurf mug is blue.", "User has a blue papa smurf mug"),
+    ("My opa cookbook is vegan.", "User has a vegan cookbook"),
+    ("My oma cookbook is vegan.", "User has a vegan cookbook"),
+    ("My Mann novels are rare.", "User owns rare Mann novels"),
+])
+def test_a_german_word_for_a_person_counts_after_a_german_possessive_only(line, fact):
+    from localm.memory.store import _is_self_referential
+    assert _kept(line, fact) == [fact]
+    assert _is_self_referential(line.lower()) is True
+
+
+@pytest.mark.parametrize("person", sorted(
+    __import__("localm.memory.store", fromlist=["_"])._OTHER_PERSON_DE))
+def test_a_german_possessive_before_another_person_is_not_about_the_user(person):
+    from localm.memory.store import _is_self_referential
+    assert _kept(f"Mein {person} wohnt in Oslo.", "User lives in Oslo") == []
+    assert _is_self_referential(f"wo wohnt meine {person}") is False
+    assert _is_self_referential(f"where is my {person} from") is True
+
+
+@pytest.mark.parametrize("text", [
+    "tell " + "i like " * 1150, "tell " + "ich mag " * 1000, "what is " + "My " * 2600,
+    "tell me of " + "my Cat " * 1100, "tell you where i want to " * 320])
+def test_a_request_is_read_a_bounded_number_of_times(monkeypatch, text):
+    from localm.memory import clauses
+    read = []
+
+    class Counted:
+        def __init__(self, rx):
+            self.rx = rx
+
+        def __getattr__(self, name):
+            def call(s, *a):
+                read.append(len(s))
+                return getattr(self.rx, name)(s, *a)
+            return call
+
+    for name in ("_WORD", "_ASKS", "_STATES_LIKING", "_CONJUNCTION", "_REPORTED",
+                 "_PUNCTUATION", "_SENTENCE_SPLIT"):
+        monkeypatch.setattr(clauses, name, Counted(getattr(clauses, name)))
+    tokens = clauses._content_tokens
+    monkeypatch.setattr(clauses, "_content_tokens",
+                        lambda t: read.append(len(t)) or tokens(t))
+    clauses.self_statement_stems(text)
+    assert read and sum(read) < 60 * len(text)
 
 
 @pytest.mark.parametrize("text", [
@@ -490,6 +594,30 @@ def test_the_newest_fact_gets_its_vector_first_and_every_fact_gets_one(
     assert MemoryStore.open_file(store.path).vectorless_count() == 0
 
 
+def test_a_record_whose_embedding_failed_is_tried_once_per_run(
+        plug_home, tmp_path, monkeypatch):
+    plug = plug_home
+    tried = []
+
+    def embed(texts):
+        tried.extend(texts)
+        if int(texts[0].split()[-1]) >= 20:
+            raise RuntimeError("no vector")
+        return _unit(texts)
+
+    monkeypatch.setattr(plug, "_embed_fn", lambda: embed)
+    store = _store_with(tmp_path / "memory" / "chat" / "ns.jsonl", 40)
+    plug._fill_vectors_later(store)
+    _join_fill()
+    assert len(tried) == len(set(tried)) == 40
+    assert MemoryStore.open_file(store.path).vectorless_count() == 20
+    tried.clear()
+    from localm.memory.backfill import backfill_all
+    _store_with(tmp_path / "memory" / "chat" / "ns2.jsonl", 100, start=-80)
+    backfill_all(tmp_path / "memory", embed)
+    assert len(tried) == 20 + 100
+
+
 def test_one_stores_failure_does_not_end_the_fill_of_the_others(
         plug_home, tmp_path, monkeypatch):
     plug = plug_home
@@ -551,6 +679,91 @@ def test_the_sweep_writes_nothing_after_a_switch_to_privacy_mode(
     monkeypatch.setattr(plug, "_embed_fn", lambda: embed)
     plug._backfill_sweep_bg()
     assert not store._vec_file().exists()
+
+
+# ---- the distillation stops at a switch to privacy mode -------------------- #
+
+def _consolidating_store(tmp_path, monkeypatch):
+    allowed = [True]
+    monkeypatch.setattr("localm.memory.consolidate.writes_allowed",
+                        lambda surface: allowed[0])
+    store = _store_with(tmp_path / "ns.jsonl", 3)
+    return store, allowed, store.path.read_bytes()
+
+
+@pytest.mark.parametrize("facts", [["User sails on weekends"], []])
+def test_a_switch_to_privacy_mode_during_the_model_call_writes_nothing(
+        tmp_path, monkeypatch, facts):
+    from localm.memory import run_consolidation
+    store, allowed, before = _consolidating_store(tmp_path, monkeypatch)
+
+    def complete(prompt):
+        allowed[0] = False
+        return _model(*facts)(prompt)
+
+    pruned = []
+    monkeypatch.setattr(MemoryStore, "prune", lambda self, **k: pruned.append(1) or 0)
+    res = run_consolidation(store, "User: I sail on weekends.\nAssistant: Nice.", complete)
+    assert res["status"] == "skipped" and res["reason"] == "privacy" and res["added"] == 0
+    assert store.path.read_bytes() == before and pruned == []
+
+
+def test_a_switch_to_privacy_mode_ends_the_run_before_the_next_model_call(
+        tmp_path, monkeypatch):
+    from localm.memory import run_consolidation
+    store, allowed, before = _consolidating_store(tmp_path, monkeypatch)
+    calls = []
+
+    def complete(prompt):
+        calls.append(prompt)
+        allowed[0] = False
+        return "not a fact list"
+
+    res = run_consolidation(store, "User: I sail on weekends.\nAssistant: Nice.", complete)
+    assert res["status"] == "skipped" and len(calls) == 1
+    assert store.path.read_bytes() == before
+
+
+def test_a_switch_to_privacy_mode_while_embedding_writes_nothing(tmp_path, monkeypatch):
+    from localm.memory import run_consolidation
+    store, allowed, before = _consolidating_store(tmp_path, monkeypatch)
+
+    def embed(texts):
+        if "User sails on weekends" in texts and store_embeds:
+            allowed[0] = False
+        store_embeds.append(texts)
+        return _unit(texts)
+
+    store_embeds: list = []
+    res = run_consolidation(store, "User: I sail on weekends.\nAssistant: Nice.",
+                            _model("User sails on weekends"), embed_fn=embed)
+    assert store_embeds and res["status"] == "skipped"
+    assert store.path.read_bytes() == before
+
+
+@pytest.mark.parametrize("ends_at", [1, 2])
+def test_episodes_end_at_a_switch_to_privacy_mode(plug_home, tmp_path, monkeypatch, ends_at):
+    plug = plug_home
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    for n in range(3):
+        (sessions / f"s{n}.jsonl").write_text("\n".join(json.dumps(e) for e in (
+            {"role": "user", "content": "Debugging the websocket reconnect backoff timer"},
+            {"role": "assistant", "content": "Check the exponential jitter."})) + "\n",
+            encoding="utf-8")
+    monkeypatch.setattr(plug, "_session_text",
+                        lambda f, **k: "User: debugging the websocket reconnect timer")
+    calls, store = [], plug._chat_store(None)
+
+    def complete(prompt):
+        calls.append(prompt)
+        return f"Debugged {'abcdefgh'[len(calls)] * 30} number {len(calls)}"
+
+    stored = plug._store_episodes(store, complete, embed_fn=None, now=time.time() + 1e6,
+                                  allowed=lambda: len(calls) < ends_at)
+    assert len(calls) == ends_at
+    assert stored == len(plug._chat_store(None)) == ends_at - 1
+    assert not plug._episodic_watermark_path(store).exists()
 
 
 def test_a_fill_that_cannot_start_does_not_fail_the_save(plug_home, monkeypatch):
@@ -631,11 +844,44 @@ def test_the_header_says_per_fact_what_happened():
     import localm.plugins.builtin.memory.plug as plug
     assert plug._saved_header(["a"], ["exists"]) == {"text": "a", "status": "exists"}
     assert plug._saved_header(["a", "b"], ["saved", "full"]) == {
-        "text": "a", "status": "saved",
+        "status": "saved",
         "facts": [{"text": "a", "status": "saved"}, {"text": "b", "status": "full"}]}
     assert plug._saved_header(["a", "b"], ["exists", "full"]) == {
-        "text": "a", "status": "exists",
+        "status": "exists",
         "facts": [{"text": "a", "status": "exists"}, {"text": "b", "status": "full"}]}
+
+
+def _header_for(saved, used=None):
+    from localm.inference.http_server import _memory_used_header
+    ctx = types.SimpleNamespace(state={"memory_saved": saved, "memory_used": used})
+    return _memory_used_header(ctx)["X-Localm-Memory"]
+
+
+@pytest.mark.parametrize("ch", ["a", "\u00fc", "\u6f22", "\U0001f600", "\\", "\x01"])
+def test_the_header_stays_under_four_kilobytes_and_carries_each_text_once(ch):
+    import localm.plugins.builtin.memory.plug as plug
+    facts = [f"{n}{ch * 499}" for n in range(8)]
+    used = [{"text": f"{n}{ch * 499}", "id": "f" * 32, "source": "import", "kind": "semantic"}
+            for n in range(6)]
+    raw = _header_for(plug._saved_header(facts, ["exists"] * 8), used)
+    assert raw.isascii() and len(raw.encode()) < 4096
+    got = json.loads(raw)
+    assert "text" not in got["saved"] and got["n"] == 6
+    assert [f["text"][0] for f in got["saved"]["facts"]] == list("01234567")
+    for item, full in zip(got["saved"]["facts"] + got["items"], facts + [u["text"] for u in used],
+                          strict=True):
+        assert item["text"].endswith("...") and full.startswith(item["text"][:-3])
+        assert len(item["text"]) > 8
+    [one] = [_header_for(plug._saved_header([facts[0]], ["saved"]))]
+    assert len(one) < 400
+
+
+def test_a_short_text_is_not_cut_and_an_oversized_id_cannot_break_the_header():
+    import localm.plugins.builtin.memory.plug as plug
+    got = json.loads(_header_for(plug._saved_header(["I like tea", "I paint"], ["saved", "off"])))
+    assert got["saved"] == {"status": "saved", "facts": [
+        {"text": "I like tea", "status": "saved"}, {"text": "I paint", "status": "off"}]}
+    assert len(_header_for(None, [{"text": "x", "id": "y" * 9000}])) < 4096
 
 
 def test_an_exception_on_one_fact_hides_no_other(plug_home, monkeypatch):
@@ -654,8 +900,9 @@ def test_an_exception_on_one_fact_hides_no_other(plug_home, monkeypatch):
                               "Remember that I like tea. Remember that I live in Oslo. "
                               "Remember that I paint."}], ctx)
     saved = ctx.state["memory_saved"]
-    assert saved["status"] == "saved" and saved["text"] == "I like tea; I paint"
-    assert [f["status"] for f in saved["facts"]] == ["saved", "failed", "saved"]
+    assert saved["status"] == "saved" and "text" not in saved
+    assert [(f["text"], f["status"]) for f in saved["facts"]] == [
+        ("I like tea", "saved"), ("I live in Oslo", "failed"), ("I paint", "saved")]
     assert {r.text for r in plug._chat_store(None).all()} == {"I like tea", "I paint"}
 
 
@@ -779,6 +1026,86 @@ def test_a_chosen_default_stays_chosen_and_an_unrelated_save_chooses_nothing(emb
     config.save_config(config.load_config())
     assert config.config_key_stored("embedding_model") is True
     assert "n_ctx" not in json.loads(config.CONFIG_FILE.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("blank", ["", "  ", None])
+@pytest.mark.parametrize("chosen", ["nomic-embed-text-v1.5", "bge-small-en-v1.5"])
+@pytest.mark.parametrize("way", ["update", "save"])
+def test_a_cleared_embedding_model_is_not_chosen(emb_env, chosen, blank, way):
+    _register(emb_env, "embeddinggemma")
+    config.update_config(lambda c: c.__setitem__("embedding_model", chosen))
+    assert config.config_key_stored("embedding_model") is True
+    if way == "update":
+        got = config.update_config(lambda c: c.update({"embedding_model": blank}))
+        assert got["embedding_model"] == "bge-small-en-v1.5"
+    else:
+        config.save_config({**config.load_config(), "embedding_model": blank})
+    assert "embedding_model" not in json.loads(config.CONFIG_FILE.read_text(encoding="utf-8"))
+    assert config.config_key_stored("embedding_model") is False
+    _resolve_says(emb_env, downloads=False)
+
+
+def test_a_blank_embedding_model_already_in_config_json_is_no_choice(emb_env):
+    config.CONFIG_FILE.write_text(json.dumps({"embedding_model": "", "config_version": 1}),
+                                  encoding="utf-8")
+    assert config.config_key_stored("embedding_model") is False
+
+
+@pytest.fixture
+def patch_config(emb_env, monkeypatch):
+    from fastapi.testclient import TestClient
+    from localm.inference.http_server import create_app
+    monkeypatch.setenv("LOCALM_HOME", str(emb_env.root))
+    monkeypatch.setenv("LOCALM_API_KEY", "mm-unit-test-key")
+    with TestClient(create_app(None)) as client:
+        yield lambda body: client.patch("/v1/config", json=body, headers={
+            "Authorization": "Bearer mm-unit-test-key"})
+
+
+@pytest.mark.parametrize("blank", ["", None])
+def test_the_config_route_sets_and_unsets_the_choice(patch_config, monkeypatch, blank):
+    import localm.rag as rag
+    asked = []
+    monkeypatch.setattr(rag, "collection_provenance_report",
+                        lambda candidate_model=None: asked.append(candidate_model) or [])
+    assert patch_config({"embedding_model": "bge-small-en-v1.5"}).status_code == 200
+    assert config.config_key_stored("embedding_model") is True and asked == []
+    assert patch_config({"embedding_model": blank}).status_code == 200
+    assert config.config_key_stored("embedding_model") is False and asked == []
+    config.update_config(lambda c: c.__setitem__("embedding_model", "nomic-embed-text-v1.5"))
+    monkeypatch.setattr(rag, "collection_provenance_report",
+                        lambda candidate_model=None: asked.append(candidate_model)
+                        or [{"name": "notes"}])
+    r = patch_config({"embedding_model": blank})
+    assert r.json().get("needs_confirm") is True and asked == ["bge-small-en-v1.5"]
+    assert config.config_key_stored("embedding_model") is True
+    assert patch_config({"embedding_model": blank, "confirm": True}).status_code == 200
+    assert config.config_key_stored("embedding_model") is False
+
+
+def test_localm_config_sets_and_unsets_the_choice(emb_env):
+    from click.testing import CliRunner
+    from localm.cli.models import config_cmd
+    for value, stored in (("bge-small-en-v1.5", True), ("", False),
+                          ("nomic-embed-text-v1.5", True), (" ", False)):
+        out = CliRunner().invoke(config_cmd, ["embedding_model", value])
+        assert out.exit_code == 0, out.output
+        assert config.config_key_stored("embedding_model") is stored
+
+
+def test_the_settings_schema_says_whether_the_embedding_model_was_chosen(emb_env):
+    from localm.settings_schema import schema_json
+
+    def chosen():
+        [f] = [f for f in schema_json(values=config.load_config())
+               if f["key"] == "embedding_model"]
+        return f["chosen"]
+
+    assert chosen() is False
+    config.update_config(lambda c: c.__setitem__("embedding_model", "bge-small-en-v1.5"))
+    assert chosen() is True
+    config.update_config(lambda c: c.__setitem__("embedding_model", ""))
+    assert chosen() is False
 
 
 def test_the_default_frozen_in_an_old_full_dump_is_no_choice(emb_env):

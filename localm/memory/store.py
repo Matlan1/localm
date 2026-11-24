@@ -200,14 +200,24 @@ _OTHER_PERSON = frozenset({
     "cousin", "uncle", "aunt", "nephew", "niece", "grandma", "grandmother",
     "grandpa", "grandfather", "family", "mate", "buddy", "pal", "team",
     "guest", "visitor", "client", "customer", "student", "teacher", "doctor",
+})
+# Counted after a German possessive only (see _names_another_person).
+_OTHER_PERSON_DE = frozenset({
     "freund", "freundin", "freunde", "kollege", "kollegin", "kollegen", "chef", "chefin",
     "nachbar", "nachbarin", "nachbarn", "frau", "mann", "partnerin", "mutter", "mama",
     "vater", "papa", "eltern", "bruder", "schwester", "geschwister", "sohn", "tochter",
     "kind", "kinder", "cousine", "onkel", "tante", "neffe", "nichte", "oma", "opa",
     "familie", "kunde", "kundin", "lehrer", "lehrerin", "arzt", "ärztin",
 })
-_POSSESSIVE = frozenset({"my", "mine", "mein", "meine", "meinen", "meinem", "meiner",
-                         "meines"})
+_POSSESSIVE_DE = frozenset({"mein", "meine", "meinen", "meinem", "meiner", "meines"})
+_POSSESSIVE = frozenset({"my", "mine"}) | _POSSESSIVE_DE
+
+
+def _names_another_person(possessive: str, word: str) -> bool:
+    """True when *word* after *possessive* ("my friend", "mein Chef") names another
+    person, so the pair says nothing about the user."""
+    return word in _OTHER_PERSON or (word in _OTHER_PERSON_DE
+                                     and possessive in _POSSESSIVE_DE)
 
 
 def _is_self_referential(text: str) -> bool:
@@ -226,7 +236,8 @@ def _is_self_referential(text: str) -> bool:
     for i, t in enumerate(toks):
         if t not in _SELF_REF:
             continue
-        if t in _POSSESSIVE and i + 1 < len(toks) and toks[i + 1] in _OTHER_PERSON:
+        if (t in _POSSESSIVE and i + 1 < len(toks)
+                and _names_another_person(t, toks[i + 1])):
             continue                      # "my friend ..." - about them
         return True
     return False
@@ -914,7 +925,8 @@ class MemoryStore:
                    for r in (self._records if records is None else records))
 
     def backfill_vectors(self, embed_fn: EmbedFn, *, limit: int = 64,
-                         allowed: Optional[Callable[[], bool]] = None) -> int:
+                         allowed: Optional[Callable[[], bool]] = None,
+                         failed: Optional[set] = None) -> int:
         """Embed records that have no vector yet, newest first, up to *limit* per
         call, and save. Returns the number that got a vector.
 
@@ -932,7 +944,9 @@ class MemoryStore:
         text and still has no vector, so a concurrent add/update/delete is neither
         blocked nor clobbered. *allowed*, when given, is asked before each embedding
         and again before the write; a False answer ends the pass with nothing more
-        written."""
+        written. *failed*, when given, holds the records (id and text) whose embedding
+        failed: they are left out, and those that fail now are added, so a caller that
+        drives several passes tries each text once."""
         if embed_fn is None:
             return 0
         with _namespace_lock(self._ns_hash):
@@ -944,12 +958,16 @@ class MemoryStore:
         for r in pending:
             if len(ready) >= limit:
                 break
+            if failed is not None and (r.id, r.text) in failed:
+                continue
             if allowed is not None and not allowed():
                 return 0
             vec = self._embed_one(r.text, embed_fn)
             if vec is not None:
                 vectors[r.text] = vec
                 ready.append((r.id, r.text))
+            elif failed is not None:
+                failed.add((r.id, r.text))
         if not ready:
             return 0
         with self._wlock('a vector backfill'):
