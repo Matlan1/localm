@@ -143,6 +143,8 @@ def _win_row(handle):
 
 def _win_open(pid: int, access: int):
     import ctypes
+    if sys.platform != "win32":
+        return None
     k32 = _win_dll("kernel32")
     k32.OpenProcess.restype = ctypes.c_void_p
     k32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
@@ -167,6 +169,8 @@ def _win_exited(handle) -> bool:
 
 def _win_process(pid: int, table=None):
     import ctypes
+    if sys.platform != "win32":
+        return None
     handle = _win_open(pid, 0x101000)       # SYNCHRONIZE | QUERY_LIMITED_INFORMATION
     if handle:
         try:
