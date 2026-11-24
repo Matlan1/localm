@@ -5687,6 +5687,12 @@ def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
     except Exception:
         _dbg_swallow("speech worker release during shutdown failed (non-fatal)")
     try:
+        from localm.media import held as _held
+        _held.discard_all()
+    except Exception:
+        _dbg_swallow("removing generated media held for this run failed during shutdown; "
+                     "the next start removes it", level="warning")
+    try:
         from localm import bugreport
         bugreport.disarm_crash_guard(instance_id=instance_id)
     except Exception:
@@ -6025,6 +6031,12 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         released_embedder = _speech_mod.release_for_exit() or released_embedder
     except Exception:
         _dbg_swallow("speech worker release during restart failed (non-fatal)")
+    try:
+        from localm.media import held as _held
+        _held.discard_all()
+    except Exception:
+        _dbg_swallow("removing generated media held for this run failed during restart; "
+                     "the next start removes it", level="warning")
 
     # Wait for the frees above to actually land before re-exec. The re-exec'd
     # process spawns a brand-new GGUF worker that constructs a fresh
@@ -6391,6 +6403,13 @@ def _make_lifespan():
         except Exception:
             from localm.debuglog import logger as _dbg
             _dbg.debug("session sweep at startup failed (non-fatal)", exc_info=True)
+        try:
+            from localm.media import held as _held
+            _held.sweep_leftovers()
+        except Exception:
+            from localm.debuglog import logger as _dbg
+            _dbg.warning("removing generated media left by an earlier run failed",
+                         exc_info=True)
         # Route an uncaught asyncio task exception through the bug reporter
         # instead of a silent "Task exception was never retrieved". Skipped under
         # pytest so the test runner keeps its own loop handling.

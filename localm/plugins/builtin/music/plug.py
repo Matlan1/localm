@@ -35,8 +35,9 @@ from localm.audit import carry_request_privacy
 from localm.media import gallery
 from localm.media import paths as media_paths
 from localm.media.native_models import check_request
-from localm.plugins.media_config import media_session_is_private, range_refusal
-from localm.pathsafe import confined_file, confined_name
+from localm.plugins.media_config import (
+    media_keep_check, media_session_is_private, range_refusal,
+)
 from localm.pathscrub import map_strings
 from localm.selfclient import resolve_self_url
 from localm.settings_schema import NATIVE_STEPS_MAX
@@ -81,7 +82,7 @@ def _music_dir() -> Path:
 
 
 def _music_path(name: str) -> Path:
-    return confined_file(_music_dir(), name, "track")
+    return media_paths.media_file("music", name, "track")
 
 
 async def _require_native_acceptance(req: MusicRequest) -> None:
@@ -142,21 +143,25 @@ async def music(req: MusicRequest, request: Request):
     instance_token = getattr(request.app.state, "instance_token", None)
 
     native_choice, _ = check_request(req.native_models, None, "music")
-    music_dir = _music_dir()
-    music_dir.mkdir(parents=True, exist_ok=True)
-    out_path = music_dir / f"{time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.flac"
+    out_name = f"{time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.flac"
     owner = principal_id(request)
+    keeps = media_keep_check(request)
+    kept_at_start = keeps()
 
     @media_handover_job
     def _generate(job):
         from localm.config import load_config
+        kept = kept_at_start and keeps()
+        out_path = gallery.job_output_path(job, "music", out_name, kept)
+        if out_path is None:
+            return False
         # Resolved here, in the job's own worker thread, not the route above.
         # See test_comfy_media_routes_offloaded.
         _cfg = load_config()
         s = _backend.prepare_for_job(_backend.settings(_cfg), _cfg)
         # Privacy mode suppresses the sidecar; the backend facade also forces
         # ComfyUI's own output copy to be deleted.
-        is_privacy = media_session_is_private()
+        is_privacy = not kept or media_session_is_private()
         if s.get("warning"):
             job.push({"type": "line", "text": s["warning"]})
         if s.get("backend_note"):
@@ -261,19 +266,22 @@ async def music(req: MusicRequest, request: Request):
                 cancel_check=lambda: job.cancel_requested,
                 placement=placement,
                 privacy=is_privacy,
+                leave_nothing=not kept,
                 **kwargs,
             )
             job.push({"type": "line", "text": message})
             if ok:
                 job.result = track_path.name
                 gallery.push_stamp_warning(
-                    job, gallery.stamp_owner("music", track_path.name, owner))
+                    job, gallery.record_owner("music", track_path, owner))
+                if not kept:
+                    gallery.push_held(job)
             # Recorded before the chat model reload that runs on leaving the block.
             job.mark_outcome("done" if ok else "failed")
         return ok
 
     job = jobs.start_fn("music", carry_request_privacy(_generate),
-                        result_path=out_path.name,
+                        result_path=out_name,
                         owner=owner)
     return {"job_id": job.id}
 
@@ -356,7 +364,7 @@ async def music_move(name: str, req: MoveFileRequest, request: Request):
 async def music_rename(name: str, req: RenameFileRequest):
     """Rename a generated track (and its metadata sidecar) in place.
 
-    Mirrors the image plugin's rename: confined_name re-confines the CALLER's
+    Mirrors the image plugin's rename: rename_target re-confines the CALLER's
     string to the gallery dir, so a traversal or absolute path is rejected
     rather than escaping it - require_owner proves ownership of the source
     artifact, never authority over the destination path."""
@@ -366,9 +374,7 @@ async def music_rename(name: str, req: RenameFileRequest):
         raise HTTPException(400, "Empty name")
     if not new_name.lower().endswith(path.suffix.lower()):
         new_name += path.suffix          # keep the extension
-    target = confined_name(_music_dir(), new_name)
-    if target.exists():
-        raise HTTPException(409, f"Already exists: {new_name}")
+    target = media_paths.rename_target("music", path, new_name)
     path.rename(target)
     sidecar = path.with_suffix(path.suffix + ".json")
     if sidecar.is_file():
@@ -397,7 +403,8 @@ async def music_history(request: Request):
                           "size_bytes": p.stat().st_size,
                           "mtime": p.stat().st_mtime})
     allowed = set(gallery.owned_names(request, "music", [it["name"] for it in items]))
-    return {"tracks": [it for it in items if it["name"] in allowed]}
+    return {"tracks": [it for it in items if it["name"] in allowed],
+            "held": gallery.held_items(request, "music", show_path)}
 
 
 @_router.get("/api/music/comfy-models")

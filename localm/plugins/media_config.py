@@ -268,8 +268,14 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
     declares *capability* (one of ``CAPABILITIES``; any other name raises
     KeyError).
 
-    ``generate`` takes the extra keywords ``privacy`` and ``withhold_on_trace``
-    (both default False), which are not passed to the backend. It passes the
+    ``generate`` takes the extra keywords ``privacy``, ``withhold_on_trace``
+    (both default False) and ``leave_nothing``, which are not passed to the
+    backend. ``leave_nothing`` (default: ``privacy`` is set and the
+    ``privacy_keep`` setting does not list media) makes a backend that declares
+    ``NEEDS_COMFY_SERVER`` also remove every other file the job left in ComfyUI's
+    output and temp folders, however the job ended
+    (``comfy_client.private_comfy_jobs``): an output file that stays counts like
+    the job's own copy, a temp file that stays is named in the message. It passes the
     backend ``delete_outputs`` as True when ``privacy`` is set and as the
     settings' ``delete_outputs`` otherwise; a caller that passes
     ``delete_outputs`` itself gets a TypeError. The generation is STRICT when
@@ -311,7 +317,8 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
         return resolve(s).free_vram(s, *args, **kwargs)
 
     def generate(s: dict, prompt: str, out_path, *args, privacy: bool = False,
-                 withhold_on_trace: bool = False, **kwargs) -> tuple[bool, str]:
+                 withhold_on_trace: bool = False, leave_nothing: Optional[bool] = None,
+                 **kwargs) -> tuple[bool, str]:
         if "delete_outputs" in kwargs or "containment_required" in kwargs:
             raise TypeError("generate() sets delete_outputs and containment_required "
                             "from the settings, privacy and withhold_on_trace; do not "
@@ -321,10 +328,23 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
         embeds = bool(getattr(impl, "EMBEDS_OUTPUT_METADATA", False))
         if strict and getattr(impl, "NEEDS_COMFY_SERVER", False):
             kwargs["containment_required"] = True
+        if leave_nothing is None:
+            from localm.audit import privacy_keeps
+            leave_nothing = bool(privacy) and not privacy_keeps("media")
         before = _file_state(out_path) if strict and embeds else None
-        ok, message = impl.generate(
-            s, prompt, out_path, *args,
-            delete_outputs=bool(privacy or s.get("delete_outputs")), **kwargs)
+
+        def run() -> tuple[bool, str]:
+            return impl.generate(
+                s, prompt, out_path, *args,
+                delete_outputs=bool(privacy or s.get("delete_outputs")), **kwargs)
+
+        if leave_nothing and getattr(impl, "NEEDS_COMFY_SERVER", False):
+            from localm.media.comfy_client import run_leaving_nothing
+            ok, message = run_leaving_nothing(
+                run, comfy_output_dir=s.get("output_dir") or None,
+                comfy_workdir=s.get("workdir") or None)
+        else:
+            ok, message = run()
         if not ok:
             if strict and embeds and _file_state(out_path) not in (None, before):
                 message += _remove_withheld(out_path)
@@ -376,6 +396,36 @@ def media_session_is_private() -> bool:
     Never raises."""
     from localm.audit import automatic_write_allowed, request_is_privacy
     return request_is_privacy() or not automatic_write_allowed("server")
+
+
+def media_is_kept() -> bool:
+    """True when media generated now is kept in its gallery: the work is not
+    private (:func:`media_session_is_private`), or the ``privacy_keep`` setting
+    lists media. Otherwise the result is held only while localm runs
+    (``localm.media.held``). Never raises."""
+    from localm.audit import privacy_keeps
+    return privacy_keeps("media") or not media_session_is_private()
+
+
+def media_keep_check(request):
+    """A callable answering :func:`media_is_kept` for the media job *request*
+    starts, for use in the route and again in the job. A request from the
+    owner's chat page (``X-Client-Id: chat``) follows the chat mode instead of
+    the server's, so a chat that is saved keeps the media made in it."""
+    from localm.audit import SessionMode, caller_cap, privacy_keeps
+    from localm.inference.http_server import _owner_caller_headers
+    client, asserted = _owner_caller_headers(request)
+
+    def keeps() -> bool:
+        if privacy_keeps("media"):
+            return True
+        if (client or "").strip().lower() != "chat":
+            return media_is_kept()
+        try:
+            return caller_cap(client, asserted) != SessionMode.PRIVACY
+        except Exception:   # noqa: BLE001 - an unresolvable mode must fail closed
+            return False
+    return keeps
 
 
 #: The generation arguments with a fixed range, by argument name:

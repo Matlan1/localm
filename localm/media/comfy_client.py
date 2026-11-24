@@ -13,6 +13,7 @@ workflow shaping (which nodes to inject, which output keys to read).
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import os
@@ -2910,6 +2911,9 @@ def contain_comfy_artifacts(
     # Delete ComfyUI's on-disk copy of the output. type "temp" is auto-purged
     # by ComfyUI, so only a real "output" artifact needs removing.
     if (info.get("type") or "output") == "output":
+        private = _PRIVATE_JOBS.get()
+        if private is not None:
+            private.handle(prompt_id, info)
         if root is None:
             warnings.append(
                 "a copy of this file remains in ComfyUI's output folder; localm "
@@ -2937,6 +2941,175 @@ def contain_comfy_artifacts(
                     warnings.append(refusal)
 
     return ("WARNING: " + "; ".join(warnings) + ".") if warnings else ""
+
+
+class _PrivateJobs:
+    """The ComfyUI jobs one :func:`run_leaving_nothing` call submitted, and what
+    is known about the files each of them left."""
+
+    def __init__(self) -> None:
+        self.api_urls: dict[str, str] = {}
+        self.outputs: dict[str, dict] = {}
+        self.handled: set[tuple] = set()
+
+    @staticmethod
+    def _key(prompt_id: str, info: dict) -> tuple:
+        return (prompt_id, info.get("type") or "output", str(info.get("subfolder") or ""),
+                str(info.get("filename") or ""))
+
+    def submitted(self, api_url: str, prompt_id: str) -> None:
+        self.api_urls[prompt_id] = api_url
+
+    def finished(self, prompt_id: str, entry: dict) -> None:
+        self.outputs[prompt_id] = entry.get("outputs") or {}
+
+    def handle(self, prompt_id: str, info: dict) -> None:
+        self.handled.add(self._key(prompt_id, info))
+
+    def is_handled(self, prompt_id: str, info: dict) -> bool:
+        return self._key(prompt_id, info) in self.handled
+
+
+_PRIVATE_JOBS: contextvars.ContextVar[Optional[_PrivateJobs]] = contextvars.ContextVar(
+    "localm_private_comfy_jobs", default=None)
+
+_PRIVATE_STOP_WAIT_S = 10.0
+
+
+def run_leaving_nothing(job, *, comfy_output_dir: Optional[str] = None,
+                        comfy_workdir: Optional[str] = None) -> tuple[bool, str]:
+    """Run *job* (a generation returning ``(ok, message)``) and remove every file
+    its ComfyUI jobs left in ComfyUI's output and temp folders, plus their
+    history entries, however it ended.
+
+    The files are the ones ComfyUI lists for the job; each is deleted only when
+    it is byte for byte what ComfyUI serves under that name. A finished
+    generation whose output file stays becomes ``(False, "Output withheld:
+    ...")``; any other file that stays is named in a WARNING line. An exception
+    from *job* propagates after the removal."""
+    jobs = _PrivateJobs()
+    token = _PRIVATE_JOBS.set(jobs)
+    try:
+        ok, message = job()
+    except BaseException:
+        stay, temp = _remove_private_jobs(jobs, comfy_output_dir, comfy_workdir)
+        if stay or temp:
+            from localm.debuglog import logger
+            logger.warning("%s", "; ".join(stay + temp))
+        raise
+    finally:
+        _PRIVATE_JOBS.reset(token)
+    stay, temp = _remove_private_jobs(jobs, comfy_output_dir, comfy_workdir)
+    if stay and ok:
+        return False, f"Output withheld: WARNING: {'; '.join(stay + temp)}."
+    if stay or temp:
+        message = _with_warning(message, f"WARNING: {'; '.join(stay + temp)}.")
+    return ok, message
+
+
+def _remove_private_jobs(jobs: _PrivateJobs, comfy_output_dir: Optional[str],
+                         comfy_workdir: Optional[str]) -> tuple[list, list]:
+    """Remove what *jobs* left. Returns ``(reasons, temp_reasons)`` for the output
+    and the temp files that stay. Never raises an ``Exception``."""
+    stay: list = []
+    temp: list = []
+    for prompt_id, api_url in jobs.api_urls.items():
+        try:
+            outputs = jobs.outputs.get(prompt_id)
+            if outputs is None:
+                outputs = _unfinished_job_outputs(api_url, prompt_id)
+                if outputs is None:
+                    stay.append("ComfyUI could not be asked which files this job left, so "
+                                "some may remain in its output or temp folder")
+                    continue
+            root = _comfy_output_root(comfy_output_dir, api_url=api_url,
+                                      comfy_workdir=comfy_workdir)
+            for info in _listed_files(outputs):
+                if jobs.is_handled(prompt_id, info):
+                    continue
+                jobs.handle(prompt_id, info)
+                kind = info.get("type") or "output"
+                if kind not in ("output", "temp"):
+                    continue
+                reason = _remove_listed_file(api_url, info, root, kind)
+                if reason:
+                    (temp if kind == "temp" else stay).append(reason)
+            clear_comfy_history(api_url, prompt_id)
+        except Exception as e:
+            stay.append(f"files of this job may remain in ComfyUI's folders ({e})")
+    return list(dict.fromkeys(stay)), list(dict.fromkeys(temp))
+
+
+def _unfinished_job_outputs(api_url: str, prompt_id: str) -> Optional[dict]:
+    """The outputs ComfyUI lists for a job that did not finish, after stopping it
+    and waiting (at most ``_PRIVATE_STOP_WAIT_S``) until it has left the queue.
+    ``{}`` when ComfyUI lists none, None when it cannot be asked or the job does
+    not stop."""
+    if not _comfy_job_stopped(api_url, prompt_id):
+        return None
+    deadline = time.monotonic() + _PRIVATE_STOP_WAIT_S
+    while True:
+        lists = _comfy_queue_lists(api_url, prompt_id)
+        if lists is None:
+            return None
+        if not any(lists):
+            break
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.25)
+    try:
+        with _comfy_urlopen(f"{api_url}/history/{prompt_id}", timeout=10) as response:
+            entry = json.loads(response.read().decode("utf-8")).get(prompt_id) or {}
+        return entry.get("outputs") or {}
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("reading the ComfyUI history entry of %s failed: %s", prompt_id, e)
+        return None
+
+
+def _listed_files(outputs: dict) -> list:
+    """Every file info (a dict with a ``filename``) in a history entry's outputs."""
+    return [item for node in outputs.values() if isinstance(node, dict)
+            for value in node.values() if isinstance(value, list)
+            for item in value if isinstance(item, dict) and item.get("filename")]
+
+
+def _remove_listed_file(api_url: str, info: dict, root: Optional[Path], kind: str) -> str:
+    """Delete the file *info* names in ComfyUI's *kind* ("output" or "temp") folder,
+    the temp folder being the output folder's sibling. Returns "" once it is gone,
+    else why it stays."""
+    if root is None:
+        return (f"a file of this job remains in ComfyUI's {kind} folder: localm cannot tell "
+                "where that folder is until you set the ComfyUI output dir")
+    rel = "/".join(p for p in (str(info.get("subfolder") or ""), str(info["filename"])) if p)
+    try:
+        copy = confined_under(root if kind == "output" else root.parent / "temp", rel)
+    except ValueError:
+        return (f"ComfyUI listed an out-of-bounds {kind} filename ({rel!r}); that file was "
+                "not removed")
+    try:
+        digest = _comfy_file_sha256(api_url, info, kind)
+    except Exception as e:
+        if not copy.exists():
+            return ""
+        return f"a file of this job remains in ComfyUI's {kind} folder ({e})"
+    if kind == "output":
+        return _delete_job_output(copy, digest)
+    reason = _delete_job_output(copy, digest)
+    return reason and ("a preview of this job may remain in ComfyUI's temp folder until "
+                       "ComfyUI restarts")
+
+
+def _comfy_file_sha256(api_url: str, info: dict, kind: str) -> str:
+    """The sha256 of the file ComfyUI serves for *info*."""
+    params = urllib.parse.urlencode({"filename": info.get("filename"),
+                                     "subfolder": info.get("subfolder") or "",
+                                     "type": kind})
+    digest = hashlib.sha256()
+    with _comfy_urlopen(f"{api_url}/view?{params}", timeout=60) as response:
+        for chunk in iter(lambda: response.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 # The name ``_upload_image`` sends, and ComfyUI's " (1)" form of it for a clash.
@@ -3241,6 +3414,9 @@ def comfy_submit_prompt(api_url: str, workflow: dict, *, timeout: float = 10.0):
             prompt_id = json.loads(response.read().decode("utf-8")).get("prompt_id")
         if not prompt_id:
             return SUBMIT_NO_ID, None
+        private = _PRIVATE_JOBS.get()
+        if private is not None:
+            private.submitted(api_url, str(prompt_id))
         from localm.debuglog import logger
         for name in workflow_model_names(workflow):
             logger.info("comfy: job uses model %s", name)
@@ -3371,6 +3547,9 @@ def comfy_poll_until_done(
                     if is_comfy_device_error(err) and spawned_pid(api_url) is not None:
                         mark_comfy_device_error(api_url, err)
                     return POLL_EXEC_ERROR, err
+                private = _PRIVATE_JOBS.get()
+                if private is not None:
+                    private.finished(str(prompt_id), entry)
                 return POLL_FINISHED, entry
         except Exception as e:
             # Keep retrying within the loop (ComfyUI may just be busy), but

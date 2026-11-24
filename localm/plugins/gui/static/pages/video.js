@@ -25,6 +25,7 @@ const videoGallery = createGallery({
   listKey: "videos",
   itemKey: "video.item",
   gridId: "video-history",
+  heldAfterId: "video-result",
   bulkId: "video-bulk",
   moveDestKey: "localm.videoMoveDest",
   emptyIcon: "video",

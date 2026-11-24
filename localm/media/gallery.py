@@ -23,6 +23,7 @@ from typing import Optional
 
 from fastapi import HTTPException, Request
 
+from localm.media import held as _held
 from localm.storekit import atomic_write
 
 _LOCK = threading.Lock()
@@ -202,6 +203,57 @@ def stamp_owner(media_kind: str, name: str, owner: Optional[str]) -> Optional[st
         return None
 
 
+def record_owner(media_kind: str, path: Path, owner: Optional[str]) -> Optional[str]:
+    """:func:`stamp_owner` for the generated file *path*; a held file
+    (``localm.media.held``) gets its owner in memory only, and None is
+    returned."""
+    if _held.is_held(path):
+        _held.set_owner(media_kind, path.name, owner)
+        return None
+    return stamp_owner(media_kind, path.name, owner)
+
+
+HELD_NOTE = ("Privacy mode: this is not kept. It is removed when localm stops; save it "
+             "to keep it.")
+
+
+def push_held(job) -> None:
+    """Tell the followers of *job* that its result is not kept."""
+    job.push({"type": "held"})
+    job.push({"type": "line", "text": HELD_NOTE})
+
+
+def job_output_path(job, media_kind: str, name: str, kept: bool) -> Optional[Path]:
+    """The path *job* generates its *media_kind* file *name* into
+    (``paths.output_dir``), or None after saying in *job* why that folder cannot
+    be used."""
+    from localm.media import paths
+    try:
+        return paths.output_dir(media_kind, kept) / name
+    except OSError as e:
+        job.push({"type": "line", "outcome": True, "text":
+                  f"The folder for the generated {media_kind} cannot be used: {e}"})
+        return None
+
+
+def held_items(request: Request, media_kind: str, show_path) -> list[dict]:
+    """The held files of *media_kind* the caller may see, newest first, in the
+    history item shape with no settings. *show_path* formats a path for the
+    caller."""
+    items = []
+    for p in _held.files(media_kind):
+        if not (_held.tracks(media_kind, p.name)
+                and _caller_may_see(request, _held.owner_of(media_kind, p.name))):
+            continue
+        try:
+            st = p.stat()
+        except FileNotFoundError:
+            continue
+        items.append({"name": p.name, "meta": {}, "path": show_path(p),
+                      "size_bytes": st.st_size, "mtime": st.st_mtime, "held": True})
+    return items
+
+
 def held_stamp_warning(media_kind: str, name: str) -> Optional[str]:
     """The `stamp_owner` warning for *name* while its owner is held in memory
     only, else None."""
@@ -228,6 +280,8 @@ def owner_of(media_kind: str, name: str) -> Optional[str]:
     `stamp_owner`); never writes. Raises GalleryIndexUnreadable when the index
     exists but cannot be read - `require_owner` turns that into a deny (fail
     closed)."""
+    if _held.tracks(media_kind, name):
+        return _held.owner_of(media_kind, name)
     with _LOCK:
         return _read_effective(media_kind).get(name)
 
@@ -240,7 +294,11 @@ def rename_owner(media_kind: str, old_name: str, new_name: str) -> Optional[str]
     read or written, the rename is held in memory (applied by every ownership
     check, written with the next successful index write; a corrupt index is
     never overwritten) and the return value is the user-facing warning to show
-    with the result. Never raises for an index read or write failure."""
+    with the result. Never raises for an index read or write failure. A held
+    file's owner moves in memory."""
+    if _held.tracks(media_kind, old_name):
+        _held.rename(media_kind, old_name, new_name)
+        return None
     with _LOCK:
         pending = _pending(media_kind)
         if old_name in pending:
@@ -275,7 +333,10 @@ def forget_owner(media_kind: str, name: str) -> None:
     including a change held in memory, and write every other held change out
     with it. When the index cannot be read or written, the removal is held in
     memory instead (a corrupt index is never overwritten). Never raises for an
-    index read or write failure."""
+    index read or write failure. A held file's owner is dropped from memory."""
+    if _held.tracks(media_kind, name):
+        _held.forget(media_kind, name)
+        return
     with _LOCK:
         pending = _pending(media_kind)
         pending.pop(name, None)
@@ -330,13 +391,17 @@ def owned_names(request: Request, media_kind: str, names: list[str]) -> list[str
 
     An unreadable index fails closed: a scoped key sees NOTHING (not everything)
     until it is repaired, while a privileged caller still sees the full list."""
-    from localm.inference.http_server import job_owner_ok
     try:
         with _LOCK:
             idx = _read_effective(media_kind)
     except GalleryIndexUnreadable:
         return list(names) if _privileged(request) else []
-    return [n for n in names if job_owner_ok(request, idx.get(n))]
+    return [n for n in names if _caller_may_see(request, idx.get(n))]
+
+
+def _caller_may_see(request: Request, owner: Optional[str]) -> bool:
+    from localm.inference.http_server import job_owner_ok
+    return job_owner_ok(request, owner)
 
 
 def read_sidecar(media_kind: str, path: Path) -> dict:

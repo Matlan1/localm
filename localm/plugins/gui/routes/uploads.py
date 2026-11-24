@@ -87,9 +87,13 @@ def register(app: FastAPI, ctx) -> None:
     async def list_uploads(request: Request):
         """R37: list files in <home>/uploads/ (name, size, mtime) for the Settings
         'Uploaded files' list."""
-        base = _web._uploads_dir()
+        base = _web._uploads_dir(create=False)
         items = []
-        for p in sorted(base.iterdir()):
+        try:
+            entries = sorted(base.iterdir())
+        except FileNotFoundError:
+            entries = []
+        for p in entries:
             if not p.is_file():
                 continue
             try:

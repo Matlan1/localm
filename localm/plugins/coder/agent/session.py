@@ -465,11 +465,17 @@ class _SessionMixin:
         except Exception as e:
             print_warning("episodic memory: reflection skipped (%s)" % e)
 
-    def _write_session_markdown(self) -> Path:
+    def session_markdown_path(self, ts_label: str) -> Path:
+        """The transcript file ``_write_session_markdown`` writes for the time
+        *ts_label* (``YYYY-MM-DD_HHMMSS``)."""
+        return (self.cwd / ".localcoder" / "sessions"
+                / f"{ts_label}_{self._checkpoint_id}.md")
+
+    def _write_session_markdown(self, out_path: Path | None = None) -> Path:
         """
-        Write a human-readable Markdown transcript of the session to
-        ``.localcoder/sessions/<YYYY-MM-DD_HHMMSS>_<checkpoint id>.md`` inside
-        the project working directory.
+        Write a human-readable Markdown transcript of the session to *out_path*,
+        or to ``.localcoder/sessions/<YYYY-MM-DD_HHMMSS>_<checkpoint id>.md``
+        inside the project working directory.
 
         Tool-result messages (which are large XML blobs) are skipped.
         Tool calls embedded in assistant messages are extracted and listed
@@ -480,10 +486,13 @@ class _SessionMixin:
         ts_label = _time.strftime("%Y-%m-%d_%H%M%S")
         ts_human = _time.strftime("%Y-%m-%d %H:%M:%S")
 
-        out_dir = self.cwd / ".localcoder" / "sessions"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        ensure_private_state_ignored(self.cwd)
-        out_path = out_dir / f"{ts_label}_{self._checkpoint_id}.md"
+        in_sessions = out_path is None or (
+            out_path.parent == self.session_markdown_path(ts_label).parent)
+        if out_path is None:
+            out_path = self.session_markdown_path(ts_label)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        if in_sessions:
+            ensure_private_state_ignored(self.cwd)
 
         tokens_line = (
             f"**Tokens (billed est.)**: ~{self._total_tokens:,}  "

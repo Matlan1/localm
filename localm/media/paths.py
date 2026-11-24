@@ -27,6 +27,7 @@ from pathlib import Path
 from fastapi import HTTPException, Request
 
 from localm import pathsafe as _pathsafe
+from localm.media import held as _held
 
 # The gallery subdirectories of the data dir, one per media plugin. Defined here
 # and consumed by each plug.py, so the input policy below and the directories the
@@ -43,6 +44,49 @@ UPLOADS_DIR_NAME = "uploads"
 def gallery_dir(dir_name: str) -> Path:
     from localm.config import home_dir
     return home_dir() / dir_name
+
+
+_GALLERY_NAMES = {"image": IMAGE_DIR_NAME, "music": MUSIC_DIR_NAME,
+                  "video": VIDEO_DIR_NAME}
+
+
+def output_dir(kind: str, kept: bool) -> Path:
+    """The folder a new *kind* ("image", "music", "video") file is generated into:
+    the gallery when it is *kept*, else this process's held folder
+    (``localm.media.held``). Created when missing; raises ``OSError`` when it
+    cannot be."""
+    if not kept:
+        return _held.folder(kind)
+    d = gallery_dir(_GALLERY_NAMES[kind])
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def media_dirs(kind: str) -> list[Path]:
+    """The folders a *kind* file of a known name may be in: this process's held
+    folder when it has one, then the gallery."""
+    held = _held.current_folder(kind)
+    return ([held] if held is not None else []) + [gallery_dir(_GALLERY_NAMES[kind])]
+
+
+def media_file(kind: str, name: str, noun: str) -> Path:
+    """The held or gallery file *name*; raises the ``HTTPException`` of
+    ``pathsafe.confined_file`` (400 for an unsafe name, 404 *noun* not found)."""
+    dirs = media_dirs(kind)
+    for d in dirs[:-1]:
+        path = _pathsafe.confined_name(d, name)
+        if path.is_file() and _held.tracks(kind, path.name):
+            return path
+    return _pathsafe.confined_file(dirs[-1], name, noun)
+
+
+def rename_target(kind: str, path: Path, new_name: str) -> Path:
+    """The path *path* becomes when renamed to *new_name* in its own folder. An
+    unsafe name is a 400, a name a held or gallery file already has a 409."""
+    target = _pathsafe.confined_name(path.parent, new_name)
+    if any((d / target.name).exists() for d in media_dirs(kind)):
+        raise HTTPException(409, f"Already exists: {new_name}")
+    return target
 
 
 def _resolved_home() -> Path | None:
@@ -64,8 +108,10 @@ def _resolved_home() -> Path | None:
 
 def _home_input_roots(home: Path) -> list[Path]:
     """The subdirectories of the data dir an input_image may come from."""
-    return [home / name for name in (UPLOADS_DIR_NAME, IMAGE_DIR_NAME,
-                                     VIDEO_DIR_NAME, MUSIC_DIR_NAME)]
+    roots = [home / name for name in (UPLOADS_DIR_NAME, IMAGE_DIR_NAME,
+                                      VIDEO_DIR_NAME, MUSIC_DIR_NAME)]
+    held = [_held.current_folder(kind) for kind in _held.KINDS]
+    return roots + [d.resolve() for d in held if d is not None]
 
 
 def _under(path: Path, root: Path) -> bool:

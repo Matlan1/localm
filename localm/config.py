@@ -1020,6 +1020,7 @@ DEFAULT_CONFIG: dict = {
     "memory_recall_in_privacy": False,
     "memory_recall_in_privacy_chat": True,      # applies only when the master is on
     "memory_recall_in_privacy_coder": True,     # applies only when the master is on
+    "privacy_keep": [],    # what privacy mode keeps (audit.PRIVACY_KEEP_KINDS)
     # Keep diagnostics for bug reports even in privacy mode. Off by default:
     # privacy mode writes NO automatic trace (the hang watchdog trace, the
     # crash-restart breadcrumbs, and the debug log are all suppressed). On =

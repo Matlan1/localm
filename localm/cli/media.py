@@ -199,8 +199,52 @@ def _say_comfy_left_running(api_url: str, what: str) -> None:
                   "free its VRAM.")
 
 
+def _refuse_unsaved_private(explicit: bool) -> None:
+    """Exit 2, before anything runs, when the result could only be thrown away:
+    privacy mode keeps no media, no output path was given and nobody is at the
+    terminal to save it."""
+    if explicit or _media_kept() or _is_interactive():
+        return
+    console.print("[red]Privacy mode keeps no generated media: give an output file with -o, "
+                  "or turn on keeping media with[/red] localm config privacy_keep media")
+    sys.exit(2)
+
+
+def _media_kept() -> bool:
+    """Whether a file written without a path from the user may stay on disk."""
+    from ..audit import SessionMode, effective_mode, privacy_keeps
+    return effective_mode("server") != SessionMode.PRIVACY or privacy_keeps("media")
+
+
+def _offer_save(held_path: Path, out_path: Path) -> None:
+    """Ask whether to keep the held *held_path* as *out_path*, then remove what is
+    held. Says so when a file could not be removed."""
+    import shutil
+
+    from rich.markup import escape
+
+    from ..media import held
+    try:
+        ans = console.input(f"  Privacy mode: not kept. Save it as {escape(str(out_path))}? "
+                            "[Y/n] ", markup=False).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        console.print("")
+        ans = "n"
+    if ans in ("", "y", "yes"):
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(held_path, out_path)
+            console.print(f"[green]Saved to {escape(str(out_path))}[/green]")
+        except OSError as e:
+            console.print(f"[red]Could not save it: {escape(str(e))}[/red]")
+            sys.exit(1)
+    if not held.discard_all():
+        console.print("[yellow]The held file could not be removed yet (another program has it "
+                      "open); localm removes it at its next start.[/yellow]")
+
+
 def _via_backend(media_backend, s: dict, prompt: str, out_path: Path, what: str,
-                 **gen_kwargs) -> None:
+                 *, explicit: bool, **gen_kwargs) -> None:
     """``localm image`` / ``localm music`` / ``localm video`` through the
     plugin's backend facade (``media_config.generate_media``), whichever backend
     is selected: configuration notes, the backend's request refusal,
@@ -209,7 +253,9 @@ def _via_backend(media_backend, s: dict, prompt: str, out_path: Path, what: str,
     of the running render and the offer to apply the ``__func__`` fix. *what*
     names the worker in the interrupt message; *gen_kwargs* go to ``generate``
     together with the privacy, sidecar and VRAM-swap arguments set here. Exits 1
-    on failure."""
+    on failure. With *explicit* False (no ``-o``) in privacy mode that keeps no
+    media, the file is held for this command and the person is asked whether to
+    save it as *out_path*."""
     import os
 
     from rich.markup import escape
@@ -223,6 +269,15 @@ def _via_backend(media_backend, s: dict, prompt: str, out_path: Path, what: str,
 
     is_privacy = effective_mode("server") == SessionMode.PRIVACY
     localm_url = localm_v1_base(os.environ.get("LOCALM_URL"))
+    asked_path = out_path
+    holding = not explicit and not _media_kept()
+    if holding:
+        from ..media import held
+        try:
+            out_path = held.folder(what) / out_path.name
+        except OSError as e:
+            console.print(f"[red]Cannot use the folder for held media: {escape(str(e))}[/red]")
+            sys.exit(1)
 
     def run():
         return media_config.generate_media(
@@ -252,6 +307,8 @@ def _via_backend(media_backend, s: dict, prompt: str, out_path: Path, what: str,
     if not ok:
         sys.exit(1)
     _offer_open(path)
+    if holding:
+        _offer_save(path, asked_path.with_suffix(path.suffix))
 
 
 @main.command("image")
@@ -291,6 +348,10 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
     running, or startable from comfy_launch_cmd. The CLI cannot show the image,
     so it is saved to --out (or ./image_<timestamp>.png) and, in an interactive
     terminal, you are offered to open it.
+
+    In privacy mode nothing is kept unless you say so: without --out you are
+    asked whether to save it (with nobody to ask, --out is required), unless
+    'localm config privacy_keep media' is set.
     """
     import time as _time
 
@@ -311,6 +372,7 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
         if parsed:
             width, height = parsed
 
+    _refuse_unsaved_private(bool(out))
     out_path = Path(out) if out \
         else Path(f"image_{_time.strftime('%Y%m%d_%H%M%S')}.png")
     _cfg = load_config()
@@ -324,7 +386,7 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
         kwargs["input_image"] = Path(input_image)
     if width is not None:
         kwargs["width"], kwargs["height"] = width, height
-    _via_backend(image_backend, s, prompt, out_path, "image", **kwargs)
+    _via_backend(image_backend, s, prompt, out_path, "image", explicit=bool(out), **kwargs)
 
 
 @main.command("music")
@@ -359,6 +421,7 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
     from rich.markup import escape
 
     from ..config import load_config
+    _refuse_unsaved_private(bool(out))
     music_backend = _media_plugin("music", "backend")
     lyr = Path(lyrics).read_text(encoding="utf-8") if lyrics else None
     kwargs = {k: v for k, v in
@@ -374,7 +437,7 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
                       f"{declared} files; give an output path ending in {declared}.[/red]")
         sys.exit(2)
     _via_backend(music_backend, _s, tags, out_path, "music", lyrics=lyr,
-                 duration_seconds=duration, **kwargs)
+                 explicit=bool(out), duration_seconds=duration, **kwargs)
 
 
 @main.command("video")
@@ -420,6 +483,7 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
 
     from ..config import load_config
 
+    _refuse_unsaved_private(bool(out))
     out_path = Path(out) if out \
         else Path(f"video_{_time.strftime('%Y%m%d_%H%M%S')}.mp4")
     kwargs = {k: v for k, v in
@@ -429,6 +493,6 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
     _cfg = load_config()
     video_backend = _media_plugin("video", "backend")
     s = video_backend.prepare_for_job(video_backend.settings(_cfg), _cfg)
-    _via_backend(video_backend, s, prompt, out_path, "video",
+    _via_backend(video_backend, s, prompt, out_path, "video", explicit=bool(out),
                  seconds=duration, fps=fps,
                  input_image=Path(input_image) if input_image else None, **kwargs)

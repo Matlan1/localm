@@ -342,6 +342,23 @@ def automatic_write_allowed(surface: str, cwd=None) -> bool:
         return False
 
 
+PRIVACY_KEEP_KINDS = ("media",)
+
+
+def privacy_keeps(kind: str) -> bool:
+    """True when the ``privacy_keep`` setting lists *kind* (one of
+    :data:`PRIVACY_KEEP_KINDS`): privacy mode keeps that kind of data. False when
+    it does not, and when the setting cannot be read. Never raises."""
+    try:
+        from localm.config import load_config_checked
+        cfg, read_ok = load_config_checked()
+        kept = cfg.get("privacy_keep")
+        return (read_ok and isinstance(kept, list)
+                and kind in PRIVACY_KEEP_KINDS and kind in kept)
+    except Exception:   # noqa: BLE001 - an unreadable setting must fail closed
+        return False
+
+
 _mgmt_events.set_write_gate(lambda: automatic_write_allowed("server"))
 
 

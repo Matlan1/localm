@@ -28,6 +28,7 @@ const imageGallery = createGallery({
   listKey: "images",
   itemKey: "images.item",
   gridId: "img-history",
+  heldAfterId: "img-result",
   bulkId: "img-bulk",
   moveDestKey: "localm.imgMoveDest",
   emptyIcon: "image",

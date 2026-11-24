@@ -737,6 +737,11 @@ CORE_FIELDS: list = [
                  "override.",
                  group="Privacy", owner="coder", options=_PRIVACY_INHERIT,
                  tier=Tier.OWNER),
+    SettingField("privacy_keep", Widget.LIST, "Keep in privacy mode",
+                 "What privacy mode keeps on disk. media = generated images, music and "
+                 "video stay in their History. Empty (default) = they can be seen and "
+                 "saved while localm runs, then they are removed.",
+                 group="Privacy", options=["media"], tier=Tier.OWNER),
     SettingField("memory_enabled", Widget.TOGGLE, "Memory recall",
                  "Recall the durable facts localm has learned about you and add them to "
                  "the system prompt each chat turn. Off = keep the facts, but stop "
@@ -1598,7 +1603,13 @@ def _validate_one(key: str, val, field: SettingField, default):
         raise ValueError(f"{key}: {val!r} is not one of {field.options}")
 
     if widget == Widget.LIST:
-        return _to_str_list(key, val)
+        items = _to_str_list(key, val)
+        if field.options:
+            unknown = [i for i in items if i not in field.options]
+            if unknown:
+                raise ValueError(f"{key}: {unknown[0]!r} is not one of {field.options}")
+            items = [o for o in field.options if o in items]
+        return items
 
     if widget == Widget.PATHLIST:
         # A list of folder paths. Run each through the RAG indexer's hard floor

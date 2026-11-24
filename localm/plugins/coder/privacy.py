@@ -15,8 +15,11 @@ Shell history coverage by shell:
   cmd.exe      No persistent history at all.  Nothing to do.
   PowerShell   PSReadLine writes incrementally to a plain-text file.  We
                remove any localcoder-referencing lines on exit.
-  bash/zsh     $HISTFILE (defaults to ~/.bash_history / ~/.zsh_history).
-               Cleaned on exit; also suppressed in child shells via env vars.
+  bash/zsh     $HISTFILE (defaults to ~/.bash_history / ~/.zsh_history), Git
+               Bash included. Cleaned on exit; also suppressed in child shells
+               via env vars. The open shell writes its own list of commands when
+               it closes, after localm, so the command line of this session is
+               removed by the next privacy session.
   fish         Non-interactive fish sessions never save history.  No action.
 
 Online providers (--online / --anthropic) and an off-machine --url are the
@@ -200,15 +203,13 @@ def _psreadline_history_paths() -> list[Path]:
 
 def _unix_history_paths() -> list[Path]:
     """
-    Return candidate shell history file paths (Unix/Mac only).
+    Return candidate bash/zsh/sh history file paths, on Windows those of Git Bash.
 
     Priority:
       1. $HISTFILE (set by the parent shell - covers bash, zsh, and others).
-      2. Well-known defaults as fallbacks for shells that don't export HISTFILE.
+      2. Well-known defaults as fallbacks for shells that don't export HISTFILE,
+         in the home directory and in $HOME when it names another one.
     """
-    if sys.platform == "win32":
-        return []
-
     seen: set[Path] = set()
     paths: list[Path] = []
 
@@ -220,13 +221,16 @@ def _unix_history_paths() -> list[Path]:
 
     # Parent shell's explicit HISTFILE (bash, zsh both export this by default)
     env_histfile = os.environ.get("HISTFILE", "")
-    if env_histfile and env_histfile not in (os.devnull, "/dev/null"):
+    if env_histfile and env_histfile not in (os.devnull, "/dev/null", "NUL"):
         _add(Path(env_histfile))
 
     # Common defaults in case HISTFILE isn't exported
-    home = Path.home()
-    for name in (".bash_history", ".zsh_history", ".history", ".sh_history"):
-        _add(home / name)
+    homes = [Path.home()]
+    if os.environ.get("HOME"):
+        homes.append(Path(os.environ["HOME"]))
+    for home in homes:
+        for name in (".bash_history", ".zsh_history", ".history", ".sh_history"):
+            _add(home / name)
 
     return paths
 
@@ -308,7 +312,8 @@ def clear_shell_history_traces(binary_name: str = "localcoder") -> int:
 
     Cleans:
       Windows  - PSReadLine ConsoleHost_history.txt
-      Unix     - $HISTFILE, ~/.bash_history, ~/.zsh_history, ~/.history
+      bash/zsh - $HISTFILE, ~/.bash_history, ~/.zsh_history, ~/.history
+                 (Git Bash on Windows included)
 
     cmd.exe has no persistent history - nothing to clean there.
 
