@@ -287,7 +287,7 @@ def _assistant_turn_text(session_text: str) -> str:
     return "\n".join(lines)
 
 
-def _is_grounded(fact: str, user_stems: set, reply_stems: set = frozenset()) -> bool:
+def _is_grounded(fact: str, user_stems: set, reply_stems: set) -> bool:
     """True when *fact* is written about the user (it says "user" or speaks in
     the first person), shares a content word, by its first letters, with
     *user_stems* (what the user stated about themselves), and takes no more of its

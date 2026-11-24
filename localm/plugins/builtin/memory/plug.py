@@ -256,7 +256,7 @@ def _embedder_download_status(request: Request | None) -> dict:
                 rag_mounted = True
             except NoMatchFound:
                 rag_mounted = False
-        button = (rag_mounted and _hs.caller_grants(request, "rag")
+        button = (request is not None and rag_mounted and _hs.caller_grants(request, "rag")
                   and _hs.caller_grants(request, scopes.CONFIG_WRITE))
         if button or (request is not None and _hs.caller_is_operator(request)):
             model = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL)

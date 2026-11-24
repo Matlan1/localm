@@ -1446,7 +1446,11 @@ namespace.
 When the memory plugin recalls facts for a chat turn, `POST /v1/chat/completions`
 returns an `X-Localm-Memory` response header: a compact JSON blob with the count
 of injected facts, the items, and a degrade reason when semantic recall could not
-be used (for example `no_embedder` before `localm setup-embeddings`).
+be used (for example `no_embedder` before `localm setup-embeddings`, or
+`embedder_failed` when the installed embedding model could not be loaded). When the
+message asked to remember something, `saved` holds its outcome, `{"text", "status"}`
+with status `saved`, `exists`, `full`, `failed` or `off` (memory is off); with several
+requests in one message `saved.facts` lists every fact as `{"text", "status"}`.
 
 ## Other routes the GUI and plugins serve
 
