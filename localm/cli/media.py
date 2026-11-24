@@ -225,7 +225,7 @@ def _offer_save(held_path: Path, out_path: Path) -> None:
 
     from ..media import held
     try:
-        ans = console.input(f"  Privacy mode: not kept. Save it as {escape(str(out_path))}? "
+        ans = console.input(f"  Privacy mode: not kept. Save it as {out_path}? "
                             "[Y/n] ", markup=False).strip().lower()
     except (EOFError, KeyboardInterrupt):
         console.print("")

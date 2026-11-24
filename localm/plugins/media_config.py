@@ -274,7 +274,7 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
     ``privacy_keep`` setting does not list media) makes a backend that declares
     ``NEEDS_COMFY_SERVER`` also remove every other file the job left in ComfyUI's
     output and temp folders, however the job ended
-    (``comfy_client.private_comfy_jobs``): an output file that stays counts like
+    (``comfy_client.run_leaving_nothing``): an output file that stays counts like
     the job's own copy, a temp file that stays is named in the message. It passes the
     backend ``delete_outputs`` as True when ``privacy`` is set and as the
     settings' ``delete_outputs`` otherwise; a caller that passes
