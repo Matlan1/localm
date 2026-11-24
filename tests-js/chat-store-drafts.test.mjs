@@ -1266,6 +1266,7 @@ test("when another server answers at the address, nothing of the old one is show
   const c = await open(win, "One");
   say(win, c, "more");
   win.document.getElementById("chat-input").value = "typed for the old server";
+  await drain();
   // Another page of this browser noticed first: the cache is the new server's already.
   server.instance = "backend-y";
   server.files.clear();

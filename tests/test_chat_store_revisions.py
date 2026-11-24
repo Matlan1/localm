@@ -327,15 +327,17 @@ HOSTILE_IDS = {
 def test_a_hostile_id_is_refused_by_every_route_and_touches_nothing(store, bad_id):
     client, chats, _ = store
     _put(client, "c1", "kept")
-    before = {p.name: p.read_bytes() for p in chats.iterdir()}
+    def tree():
+        return {str(p): p.is_file() and p.read_bytes() for p in chats.parent.rglob("*")}
+    before = tree()
+    assert str(chats / "c1.json") in before
     url = f"/api/conversations/{bad_id}"
     body = {"title": "t", "messages": _msgs("x")}
     answers = [client.get(url), client.delete(url), client.put(url, json=body),
                client.put(url, json={**body, "base_rev": None}),
                client.put(url, json={**body, "base_rev": "abc"})]
     assert [r.status_code for r in answers] == [400] * 5
-    assert {p.name: p.read_bytes() for p in chats.iterdir()} == before
-    assert sorted(p.name for p in chats.parent.iterdir()) == ["chats"]
+    assert tree() == before
     assert _put(client, "c1", "kept", "more").status_code == 200, "c1 is not counted as deleted"
 
 
