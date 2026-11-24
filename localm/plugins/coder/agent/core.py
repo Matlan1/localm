@@ -472,11 +472,13 @@ class Agent(
         # Ids of the calls of that reply that were refused for their format or as
         # an example.
         self._loose_refused: set[int] = set()
+        # The calls of this task that also stand in foreign text and were refused.
+        self._refused_quotations: list = []
         # Calls that stand in text that did not come from the user: tool -> the
         # arguments of each, and whether some text held more than were read (see
         # context._note_foreign_text).
         self._foreign_calls: dict[str, list[dict]] = {}
-        self._foreign_unread = False
+        self._foreign_unread: set[str] = set()
         self._foreign_read: list[dict] = []
         # Ids of the calls of the reply being executed that localm answered
         # itself with an example call.

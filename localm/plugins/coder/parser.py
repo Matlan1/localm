@@ -792,8 +792,11 @@ def reasoning_spans(text: str, inside=()) -> list[tuple[int, int]]:
     return spans
 
 
+# A "name" key and its value, either also spelled with JSON string escapes.
 _RE_NAME_VALUE = re.compile(
-    r"""(?:["']name["']|\bname)\s{0,40}:\s{0,40}["']([\w.-]{1,128})["']""")
+    r"""(?:["'](?:n|\\u006[eE])(?:a|\\u0061)(?:m|\\u006[dD])(?:e|\\u0065)["']|\bname)"""
+    r"""\s*:\s*["']{1,3}((?:[\w.-]|\\u[0-9a-fA-F]{4}){1,128})["']""")
+_RE_JSON_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
 _RE_BARE_KEY = re.compile(r"([{,]\s{0,200})([A-Za-z_]\w{0,64})(?=\s{0,40}:)")
 # What a tool or a viewer puts in front of each line of a text it shows: a line
 # number, a path and line number, a diff or quote sign, a comment sign.
@@ -801,8 +804,8 @@ _RE_LINE_PREFIX = re.compile(
     r"^[ \t]*(?:(?:[^\s{}\"']{1,200}[:-])?\d{1,7}[ \t]*[:|\t-]?[ \t]?|[+\-][ \t]?"
     r"|[>#|*]{1,6}[ \t]?|//+[ \t]?)", re.MULTILINE)
 _MAX_STANDING_CALLS = 200
-_MAX_STANDING_OBJECT = 20000
-_MAX_STANDING_BRACES = 4
+# Characters looked at to find the objects around the names in one text.
+_MAX_STANDING_SCAN = 1_000_000
 
 
 def _readings_of(text: str) -> list[str]:
@@ -845,44 +848,53 @@ def _standing_call(body: str) -> Optional[tuple[str, dict]]:
     return obj["name"], {**beside, **args}
 
 
-def calls_standing_in(text: str, tool_names: set) -> tuple[list[ToolCall], bool]:
-    """``(calls, complete)``: every call of one of *tool_names* that stands in
-    *text*, however it is written there: wrapped, fenced, bare, nested in other
-    JSON, numbered line by line or escaped. *complete* is False when *text* holds
-    more of them than are looked at."""
+def calls_standing_in(text: str, tool_names: set) -> tuple[list[ToolCall], set]:
+    """``(calls, unread)``: every call of one of *tool_names* that stands in
+    *text*, however it is written there: in every notation
+    :func:`parse_tool_calls` reads, and nested in other JSON, numbered line by
+    line or escaped. *unread* holds the tools named in a part of *text* that was
+    not read to its end: more calls, markers or braces than are looked at."""
     found: list[ToolCall] = []
-    complete = True
+    unread: set = set()
     if not isinstance(text, str) or not text or not tool_names:
-        return found, complete
+        return found, unread
+    left = _MAX_STANDING_SCAN
     for reading in _readings_of(text):
-        if any(mark in reading for mark in ("tool_call", "TOOL_CALLS", "tool_code")):
-            found += [c for c in parse_tool_calls(reading, tool_names=tool_names)
-                      if c.name in tool_names]
-        seen = 0
-        for m in _RE_NAME_VALUE.finditer(reading):
-            if m.group(1) not in tool_names:
-                continue
-            seen += 1
-            if seen > _MAX_STANDING_CALLS:
-                complete = False
-                break
+        names = [(m, _unescaped(m.group(1))) for m in _RE_NAME_VALUE.finditer(reading)]
+        names = [(m, name) for m, name in names if name in tool_names]
+        if (len(names) > _MAX_STANDING_CALLS
+                or sum(1 for _ in _RE_TOOL_MARKER.finditer(reading))
+                > _MAX_EXPENSIVE_MARKER_RESCANS
+                or reading.count("[TOOL_CALLS]") > _MAX_MISTRAL_SCANS):
+            plain = _unescaped(reading)
+            unread |= {name for name in tool_names if name in plain}
+            continue
+        found += [c for c in parse_tool_calls(reading, tool_names=tool_names)
+                  if c.name in tool_names]
+        last_close = reading.rfind("}")
+        for m, name in names:
             at = m.start()
-            floor = max(0, at - _MAX_STANDING_OBJECT)
-            for _ in range(_MAX_STANDING_BRACES):
-                at = reading.rfind("{", floor, at)
+            while left > 0:
+                at = reading.rfind("{", 0, at)
                 if at < 0:
                     break
-                window = reading[at:at + _MAX_STANDING_OBJECT]
-                end = _object_end_from(window, 0, window.rfind("}"))
-                if end < 0 or at + end <= m.start():
+                end = _object_end_from(reading, at, last_close)
+                left -= max(1, (end if end >= 0 else last_close) - at)
+                if end <= m.start():
                     continue
-                body = window[:end]
-                parsed = _standing_call(body)
-                if parsed is not None and parsed[0] == m.group(1):
-                    found.append(ToolCall(name=parsed[0], args=parsed[1], raw=body,
-                                          start=at, end=at + end, lenient=True))
+                parsed = _standing_call(reading[at:end])
+                left -= end - at
+                if parsed is not None and parsed[0] == name:
+                    found.append(ToolCall(name=name, args=parsed[1], raw=reading[at:end],
+                                          start=at, end=end, lenient=True))
                     break
-    return found, complete
+            else:
+                unread.add(name)
+    return found, unread
+
+
+def _unescaped(text: str) -> str:
+    return _RE_JSON_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), text)
 
 
 def split_response(text: str, calls: list[ToolCall]) -> list[str | ToolCall]:

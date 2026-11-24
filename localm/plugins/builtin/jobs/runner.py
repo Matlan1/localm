@@ -1129,6 +1129,11 @@ def _run_coder(job: Job, *, engine=None) -> str:
         if notes:
             joined = "\n\n".join(notes)
             out = f"{joined}\n\n{out}" if out else joined
+        denied = tuple(getattr(agent, "denied_unconfirmed", ()))
+        if denied or getattr(agent, "last_run_ok", True) is False:
+            from localm.plugins.coder.runner import describe_denied
+            raise RuntimeError("The coder run did not finish its task.\n\n" + "\n\n".join(
+                part for part in (out, describe_denied(denied)) if part))
         return out
     finally:
         close = getattr(agent, "close", None)

@@ -253,14 +253,53 @@ def _comparable_args(call) -> dict:
     return {str(k): text(v) for k, v in args.items()}
 
 
-def _same_call(a: dict, b: dict) -> bool:
-    """Whether two calls of one tool with the comparable arguments *a* and *b*
-    are the same call: equal, or one carries every argument of the other and
-    more."""
+def same_call(one, other) -> bool:
+    """Whether the calls *one* and *other* are the same call: of one tool, and
+    equal in every argument that tool requires. For a tool that requires none:
+    equal, or one carries every argument of the other and more."""
+    if one.name != other.name:
+        return False
+    from ..prompts import tool_params
+    a, b = _comparable_args(one), _comparable_args(other)
+    required = [n for n, spec in tool_params(_agent.TOOL_REGISTRY.get(one.name)).items()
+                if spec.get("required")]
+    if required:
+        return a == b or all(n in a and a.get(n) == b.get(n) for n in required)
     if not a or not b:
         return a == b
     small, large = (a, b) if len(a) <= len(b) else (b, a)
     return all(large.get(k) == v for k, v in small.items())
+
+
+def _without_lines(text: str, typed: str) -> str:
+    """*text* without the whole lines that are *typed*, the first time they
+    stand there."""
+    at = text.find(typed) if typed else -1
+    while at >= 0:
+        end = at + len(typed)
+        if text[at - 1:at] in ("", "\n") and text[end:end + 1] in ("", "\n"):
+            return text[:at] + text[end:]
+        at = text.find(typed, at + 1)
+    return text
+
+
+def _without_tool_docs(text: str) -> str:
+    """*text* without the documentation localm itself shows of its tools."""
+    if "## " in text:
+        from ..prompts import tool_doc_block
+        for name, tool in list(_agent.TOOL_REGISTRY.items()):
+            if f"## {name} - " in text:
+                text = text.replace(tool_doc_block(name, tool), "")
+    return text
+
+
+def _texts_in(value) -> list:
+    """Every text in *value*, the keys and values of nested containers."""
+    if isinstance(value, dict):
+        return [t for pair in value.items() for part in pair for t in _texts_in(part)]
+    if isinstance(value, (list, tuple)):
+        return [t for part in value for t in _texts_in(part)]
+    return [value] if isinstance(value, str) else []
 
 
 # The key the arguments of one call object stand under in tool_grammar's output.
@@ -566,7 +605,9 @@ class _ContextMixin:
         _loose_unasked: dict
         _foreign_calls: dict[str, list[dict]]
         _foreign_read: list
-        _foreign_unread: bool
+        _foreign_unread: set
+        _project_map: Any
+        _refused_quotations: list
         _typed_now: str
 
         def _rebuild_system_prompt(self) -> None: ...
@@ -1792,11 +1833,17 @@ ws     ::= [ \t\n\r]*
             reply=shown)
         return {"[run]": True, "[example]": False}.get(answer)
 
-    def _ask_if_request_open(self) -> Optional[bool]:
+    def _ask_if_request_open(self, refused: str = "") -> Optional[bool]:
         """What the model answers on whether the user's request still needs a
-        tool to run: True, False, or None for neither."""
+        tool to run: True, False, or None for neither. With *refused*, the calls
+        of its reply that were refused, whether it needs one of them."""
         request = (getattr(self, "_last_user_request", "") or "").strip()[:600]
         answer = self._ask_aside(
+            (f"[request check] Refused, so it has not run: {refused}\nThe user's "
+             f"request was: {request}\nAnswer [yes] if the user asked for this to be "
+             "run. Answer [no] if the user only wanted it read, quoted or described, "
+             "and all the request asks for is done. Answer with nothing else."
+             ) if refused else
             "[request check] Nothing in your reply has run.\nThe user's request "
             f"was: {request}\nWhat did the user ask for? Answer [yes] if the user "
             "asked for something to be carried out. Answer [no] if the user asked "
@@ -1853,32 +1900,32 @@ ws     ::= [ \t\n\r]*
         reply's reasoning, or it also stands in text that did not come from the
         user in this session. The example calls of localm's own tool
         documentation do not count."""
-        from .execution import _IN_REASONING, _QUOTED
+        from .execution import _IN_REASONING
         if getattr(call, "in_reasoning", False):
             return _IN_REASONING
-        return _QUOTED if self._stands_in_foreign_text(call) else ""
+        return self._stands_in_foreign_text(call)
 
     def _note_foreign_text(self, text) -> None:
         """Remember the calls that stand in *text*, which did not come from the
         user: a tool result, a file, a page, a skill, another agent's words."""
         from ..parser import calls_standing_in
-        calls, complete = calls_standing_in(
-            str(text or ""), set(_agent.TOOL_REGISTRY) - self.disabled_tools)
-        if not complete:
-            self._foreign_unread = True
+        calls, unread = calls_standing_in(
+            _without_tool_docs(str(text or "")),
+            set(_agent.TOOL_REGISTRY) - self.disabled_tools)
+        self._foreign_unread |= unread
         for call in calls:
             known = self._foreign_calls.setdefault(call.name, [])
-            args = _comparable_args(call)
-            if args not in known:
-                if len(known) >= _MAX_FOREIGN_CALLS:
-                    self._foreign_unread = True
-                    break
-                known.append(args)
+            if any(c.args == call.args and c.beside == call.beside for c in known):
+                continue
+            if len(known) >= _MAX_FOREIGN_CALLS:
+                self._foreign_unread.add(call.name)
+            else:
+                known.append(call)
 
     def _note_foreign_messages(self) -> None:
         """Read the messages of this conversation that were not read when they
         were added: those of a restored session and a compaction's summary."""
-        typed = list(self.__dict__.get("_typed_requests", []))
+        typed = {str(t).strip() for t in self.__dict__.get("_typed_requests", [])}
         live = {id(m) for m in self._messages}
         self._foreign_read = [m for m in self._foreign_read if id(m) in live]
         read = {id(m) for m in self._foreign_read}
@@ -1889,55 +1936,77 @@ ws     ::= [ \t\n\r]*
             content = m.get("content", "")
             if isinstance(content, list):
                 content = "\n".join(p.get("text", "") for p in content if isinstance(p, dict))
-            for text in typed:
-                content = content.replace(str(text), "", 1)
-            self._note_foreign_text(content)
+            if str(content).strip() not in typed:
+                self._note_foreign_text(content)
 
     def _prompt_texts(self) -> list:
-        """The parts of the system prompt that did not come from localm or the
-        person: project memory, instructions, and the documentation of MCP
-        servers, plugins and skills."""
-        return [str(t) for t in (
+        """The texts the model is shown with every request that did not come from
+        localm or the person: project memory, instructions, the documentation of
+        skills, and the names, descriptions and parameters of the tools of MCP
+        servers and plugins."""
+        texts = [str(t) for t in (
             getattr(self, name, None) for name in (
                 "_memory", "_custom_instructions", "_mcp_docs", "_plugin_docs",
                 "_skill_docs")) if t]
+        if self._project_map.file_count():
+            texts.append(str(self._project_map.to_context_string()))
+        for name in self._foreign_tools() - self.disabled_tools:
+            tool = _agent.TOOL_REGISTRY[name]
+            texts.append("\n".join(_texts_in([tool.description, tool.params])))
+        return texts
 
-    def _stands_in_prompt(self, name: str, mine: dict) -> bool:
-        """Whether a call of *name* with the comparable arguments *mine* stands in
-        the system prompt (the project map included) and is not one of the
-        example calls of localm's own documentation."""
+    @staticmethod
+    def _foreign_tools() -> frozenset:
+        """The registered tools whose documentation did not come from localm."""
+        return frozenset(n for n, t in _agent.TOOL_REGISTRY.items()
+                         if getattr(t, "untrusted_docs", False) is True)
+
+    def _stands_in_prompt(self, call) -> str:
+        """As :meth:`_stands_in_foreign_text`, for the rest of the system prompt
+        (the project map included): what neither localm's documentation of its
+        own tools nor the example localm writes for a foreign tool says."""
         from ..parser import calls_standing_in
-        calls, complete = calls_standing_in(str(self._system_prompt), {name})
-        same = [c for c in calls if _same_call(mine, _comparable_args(c))]
-        if complete and not same:
-            return False
+        from .execution import _QUOTED, _UNREAD
+        calls, unread = calls_standing_in(
+            _without_tool_docs(str(self._system_prompt)), {call.name})
+        same = [c for c in calls if same_call(call, c)]
+        if not same:
+            return _UNREAD if unread else ""
         from ..prompts import build_system_prompt
-        own, _complete = calls_standing_in(str(build_system_prompt(
-            self.cwd, agent_name=self.name, disabled_tools=self.disabled_tools)), {name})
+        own, _unread = calls_standing_in(str(build_system_prompt(
+            self.cwd, agent_name=self.name,
+            disabled_tools=self.disabled_tools | self._foreign_tools())), {call.name})
         documented = [_comparable_args(c) for c in own]
-        return not complete or any(_comparable_args(c) not in documented for c in same)
+        if any(_comparable_args(c) not in documented for c in same):
+            return _QUOTED
+        return _UNREAD if unread else ""
 
-    def _stands_in_foreign_text(self, call) -> bool:
-        """Whether *call* also stands in text this agent, or an agent above it,
-        was given by anything but the user."""
+    def _stands_in_foreign_text(self, call) -> str:
+        """The reason *call* never counts as meant because of a text this agent,
+        or an agent above it, was given by anything but the user: it also stands
+        there, or its tool is named in one that was not read whole. Else ""."""
         from ..parser import calls_standing_in
-        mine = _comparable_args(call)
+        from .execution import _QUOTED, _UNREAD
+        reason = ""
         agent = self
         while agent is not None:
-            if agent._foreign_unread:
-                return True
             agent._note_foreign_messages()
-            if any(_same_call(mine, args)
-                   for args in agent._foreign_calls.get(call.name, [])):
-                return True
+            if any(same_call(call, c) for c in agent._foreign_calls.get(call.name, [])):
+                return _QUOTED
+            if call.name in agent._foreign_unread:
+                reason = _UNREAD
             for text in agent._prompt_texts():
-                calls, complete = calls_standing_in(text, {call.name})
-                if not complete or any(_same_call(mine, _comparable_args(c)) for c in calls):
-                    return True
-            if agent._stands_in_prompt(call.name, mine):
-                return True
+                calls, unread = calls_standing_in(text, {call.name})
+                if any(same_call(call, c) for c in calls):
+                    return _QUOTED
+                if unread:
+                    reason = _UNREAD
+            in_prompt = agent._stands_in_prompt(call)
+            if in_prompt == _QUOTED:
+                return _QUOTED
+            reason = in_prompt or reason
             agent = getattr(agent, "parent", None)
-        return False
+        return reason
 
     def can_force_tool_calls(self) -> bool:
         """True when this backend + config can bind the tool-call grammar from
@@ -2319,7 +2388,8 @@ ws     ::= [ \t\n\r]*
         text, typed = str(content), str(self._typed_now or "")
         self._typed_now = ""
         if typed:
-            text = text.replace(typed, "", 1)
+            text = _without_lines(text, typed)
+            self._refused_quotations.clear()
         if not text.startswith("<tool_result"):
             self._note_foreign_text(text)
         # Only log human-originating messages (skip tool results, which are very long)

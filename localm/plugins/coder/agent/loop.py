@@ -650,6 +650,7 @@ class _LoopMixin:
         _loose_answers: dict
         _loose_unasked: dict
         _loose_refused: set
+        _refused_quotations: list
         _answered_with_example: set
         _typed_now: str
         _force_not: frozenset
@@ -902,6 +903,7 @@ class _LoopMixin:
                                            # the session-wide flag, set in the finally.
         self._last_verify_state = None     # per-run: this run is unverified until
                                            # its own gate says otherwise
+        self._refused_quotations = []
         self._denied_unconfirmed = []      # per-run: see Agent.denied_unconfirmed
         self._reply_limit = None           # per-run: see _raise_reply_limit
         self._disarm_forced_call()
@@ -930,7 +932,7 @@ class _LoopMixin:
                              budget_reminded=0, invented_count=0,
                              question_answered=False, example_replies=0,
                              example_open=None, quoted_replies=0,
-                             quotations_in_a_row=0,
+                             quotations_in_a_row=0, refused_calls="",
                              cut_off_count=0,
                              unfounded_checked=False,
                              plan_submitted=False, plan_nudges=0,
@@ -1128,6 +1130,7 @@ class _LoopMixin:
                     # recorded like any other final reply.
                     self._loose_answers = {}
                     self._show_examples(response, parsed_calls, interactive)
+                    st.refused_calls = ""
                     st.example_open = self._ask_if_request_open()
                     self._messages.pop()
                     should_break, fr = self._handle_no_tool_calls(
@@ -1169,16 +1172,18 @@ class _LoopMixin:
                 st.plan_submitted = st.plan_submitted or any(
                     c.name == "exit_plan_mode" for c in calls)
                 request = getattr(self, "_last_user_request", "") or ""
-                from .execution import _QUOTED
+                from .execution import _FOREIGN, _call_key
                 quoted = all(id(c) in self._loose_refused
-                             and self._loose_unasked.get(id(c)) == _QUOTED for c in calls)
+                             and self._loose_unasked.get(id(c)) in _FOREIGN for c in calls)
                 st.quotations_in_a_row = st.quotations_in_a_row + 1 if quoted else 0
                 if (st.quotations_in_a_row > 1 and self._used_tools_this_task(st)
                         and not self._change_still_owed(request, st)
                         and self._messages[-1].get("role") == "assistant"):
                     # A reply that goes on quoting, refused calls and nothing
                     # else, is the answer and is judged like any final reply.
-                    st.example_open = False
+                    st.refused_calls = "; ".join(
+                        f"{c.name} {_call_key(c)[:200]}" for c in calls)
+                    st.example_open = self._ask_if_request_open(st.refused_calls)
                     self._audit.notice("quoting_answer", "the reply again only quotes "
                                        "calls that were refused; it is taken as the answer")
                     self._show_examples(response, parsed_calls, interactive,
@@ -1689,9 +1694,11 @@ class _LoopMixin:
                 return gated
             unfinished = gated or ""
             if examples and not unfinished and st.example_open is not False:
-                unfinished = ("\n\n[not finished: the model called the tool calls in "
-                              "this answer examples, so they were not run, and did "
-                              "not say that the request needs nothing done]")
+                what = ("were refused" if st.refused_calls else
+                        "were called examples by the model")
+                unfinished = (f"\n\n[not finished: the tool calls in this answer {what}, "
+                              "so they were not run, and the model did not say that "
+                              "the request needs nothing done]")
 
         # Code shown for a workspace file that defines names the file does not
         # contain is invented file content, whatever the reply says it read.
@@ -1777,11 +1784,13 @@ class _LoopMixin:
             self._emit("info", text=(
                 f"unverified code: {where} - the code in this answer is not "
                 "the content of the file it names"))
+        not_run = (f"\n\n[refused, not run: {st.refused_calls}]"
+                   if examples and st.refused_calls else "")
         footer = self._grounding_footer()
         sensitive = self._sensitive_changes_notice()
         if unfinished:
             self._last_run_ok = False
-        final_text = (response + enforcement + unfinished + unverified
+        final_text = (response + enforcement + unfinished + not_run + unverified
                       + (footer or "") + sensitive)
         if interactive and self.on_event is None:
             print_warning = _agent.print_warning
@@ -1789,6 +1798,8 @@ class _LoopMixin:
                 print_warning(enforcement.strip())
             if unfinished.strip():
                 print_warning(unfinished.strip())
+            if not_run:
+                print_warning(not_run.strip())
             if unverified.strip():
                 print_warning(unverified.strip())
             task_files = self._files_changed_this_task(st)
