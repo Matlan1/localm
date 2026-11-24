@@ -11,9 +11,71 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Added
+- Feedback and Suggestion in Settings > System, opened from a "feedback" button in the sidebar, and `localm feedback` in a terminal: send a comment, question or idea to the maintainer without a GitHub account. Only your text and the localm version are included, and you see it before it is sent.
+- **Revoking a key lists the jobs it ran.** `DELETE /v1/keys/{id}` answers with `jobs`.
+
 ### Changed
-- **The bundled AMD ROCm llama.cpp runtime moved from b1372 to b1384.** An existing install picks it up with `localm setup-llama --force`.
+- **The bundled AMD ROCm llama.cpp runtime moved from b1372 to b1384.** An update, or the next start, replaces the installed one on its own.
 - **localm's managed ComfyUI now installs v0.46.0, up from v0.45.0.** An existing install picks it up with `localm comfy update --reinstall-requirements` (this release's Python requirements changed).
+- **A login survives a change of port, and two installs on one machine keep separate logins.** The session cookie is named by the install instead of the port. A login made before the update is kept; the key is asked for once when the browser also holds a login cookie of an older version that has ended or belongs to another install, and once after the data folder moved. A browser has one login per install: signing in with another key ends the earlier login.
+- The automated browser uses Chromium 159; after the update, the Browser page offers the one-time download again.
+
+### Fixed
+- On Windows, clicking Launch in the launcher with an API key entered no longer waits several seconds before LocaLM starts.
+- Scheduled jobs that use a cron schedule (for example "every day at 9") now run at their scheduled time; before, they were never started.
+- `localm rag repair` with a mistyped collection name now says "No such collection" and exits 1, like the other `rag` commands.
+- `localm rag repair` and `rag add` now name the files that are gone from disk, and a repeated `rag resync` keeps listing documents whose file is still missing.
+- `localm rag add --force` now asks before it removes a collection's embeddings (`--yes` accepts), as `rag repair` does, and `rag add` and `rag resync` say when new documents were indexed without embeddings into a collection that has them.
+- Re-adding a file that was only touched, with the same content, is skipped instead of being re-read and re-embedded.
+- `localm rag` counts read "1 doc" and "1 chunk" instead of "1 docs" and "1 chunks".
+- The coder's `grep` and `search_files` now say "Path not found" for a folder that does not exist instead of reporting no matches, and `git_diff` and `git_log` do the same for an unknown path.
+- The coder's `tree` tool now prints its file-limit line once instead of once per folder level.
+- The coder's `git_push` now pushes a new branch that has no upstream yet, sets its upstream and says so, and answers plainly when there is no remote, the remote name is unknown, HEAD is detached, or the remote has commits the branch does not have.
+- `localm info` no longer prints tokens, API keys and passwords; it shows `(set)` or `(not set)` instead. Its values line up, and `localm config` no longer repeats a token you set.
+- `localm list` shows the real format of a model file, such as `pth`, instead of `gguf`.
+- On an install without PyTorch, localm now says how to add it before it offers to install a model's packages, instead of repeating the same command.
+- A JSON reply (`response_format`, Ollama's `format`, and the JSON formats of `/v1/responses` and `/v1/messages`) no longer ends with stray newlines, tabs or spaces after the closing brace.
+- A number in such a reply can no longer run on until the length limit.
+- Ollama's `/api/show` lists `tools` and `thinking` only for models whose chat template supports them, and no longer guesses from the model's name.
+- A request that requires a reasoning model is matched by the model's chat template, not by its name, and tool support is recognised for Hugging Face folders that keep their chat template in its own file.
+- Settings > Security: the first key created in the GUI now shows that it also set an owner key; owner-only scopes explain why they cannot be ticked; the key form offers every scope; failed key actions show the server's reason; revoking a new key clears its secret; removing the owner key warns that named keys are deleted; signing in on a server without a key and a refused bind address say so.
+- Re-indexing a Knowledge collection that has embeddings (`rag add --force`, `rag repair`, or the Knowledge routes) keeps them when they cannot be recomputed; before, they were dropped when no embedding model could be reached.
+- Re-indexing without embeddings through the Knowledge add and upload routes asks for confirmation before it drops existing embeddings.
+- A Knowledge collection whose save is interrupted (a crash, a killed process, a full disk) is left as it was or as saved; before, it could lose its embeddings, match them to the wrong text, or list a document it had not indexed.
+- The scheduled Knowledge re-sync keeps listing documents that are still missing, and repairing a collection names the sources that no longer exist.
+- Knowledge and job summaries say "1 chunk" instead of "1 chunks".
+- Moving or copying a file into the models folder no longer takes it away, or leaves an unlisted copy behind, when its content is already registered, the name is taken, or the import is interrupted. Adding identical content under the same name says it is already registered.
+- A download stopped while it is being checked is no longer listed as a local model; pulling again continues it and records where it came from.
+- `localm pull <url>` no longer takes a different file of the same name for the download, and it recognises embedding and other non-chat models like a Hugging Face pull does.
+- `localm pull --redownload` replaces a damaged or outdated file or repository. The old files stay until the new ones are complete and verified.
+- A damaged file of a split model no longer makes the download delete its good parts, and repairing a repository no longer leaves it half updated when the download fails.
+- Pulling vision projectors of the same name from two repositories no longer replaces one with the other.
+- A truncated GGUF file added by its path is refused instead of registered.
+- The coder gets work done with models that write their tool calls as plain JSON: the model is asked about each such call whether it meant it, so auto-approve, "always allow" and unattended runs work with such models. A call it only shows as an example, or that localm also finds in a file, a page or a tool result, does not run by itself.
+- The coder no longer takes a tool result the model made up as real, reports a call that was cut off as cut off, and does not stop a task because the tests it is fixing still fail.
+- A coder run that uses all its turns ends with an account of what is done and what is not, and the saved transcript keeps how the run ended.
+- The coder shows progress while a long tool call is being written, also to MCP clients that ask for it.
+- `localm coder --verbose` prints tool output in a one-shot run; patch mode leaves out a change that does not apply; dry run and patch mode name themselves in the terminal; the session record lists files changed by commands.
+- The coder no longer asks to approve an edit that cannot succeed.
+- **A misspelled scope no longer mints a key.** `localm key create` and `POST /v1/keys` refuse a scope that is neither localm's own nor an installed plugin's and name the closest one.
+- **Revoking a key stops its running jobs too.** Model downloads, indexing, browser downloads and ComfyUI setup the key started are cancelled, also when the key expires or is revoked from a terminal. Runtime and ComfyUI updates, a model removal, and embedding and speech model downloads run to their end.
+- **Stop on an indexing job ends it at the next file.** Before, it kept indexing to the end; stopping a browser download now ends the installer too.
+- **A page load no longer loses a file when the server is briefly out of reach behind its own port.** The connection is tried again, and a failure is logged.
+- **`localm key` says what is true.** With `require_auth` on and no key, `key show` and `key clear` no longer say the server is open; `key create` names `--allow-privileged`, the right command for a missing plugin, and no longer calls a second key the only one; `key list` shows a fresh 24 hour key as `in 1d`.
+- Two tabs or browsers editing one chat no longer overwrite each other: both versions are kept.
+- A chat deleted in one browser no longer comes back from another.
+- Another server at the same address, or another key in the same browser, no longer sees or saves the chats kept for the first.
+- Leaving privacy mode no longer saves the private chat, and entering it says how many chats saved earlier are still on disk. A mode changed from a terminal applies before the page saves anything.
+- A question sent while the compact button works is no longer lost.
+- Unsent text, pictures and documents belong to their chat and survive switching chats, a reload and a server restart (outside privacy mode); edit and revert ask before replacing them.
+- Pinning or renaming a chat that was not opened in this browser no longer empties it.
+- A chat's system prompt and sampling values follow it to another browser.
+- One unreadable picture no longer makes the chat stop sending the earlier pictures.
+- Copy and chat summaries no longer cut a message at a mention of `<think>`.
+
+### Security
+- Reading a PDF (chat attachments and Knowledge) uses pypdf 7.1.1, which limits how much memory a crafted PDF can take.
 
 ## [0.3.4b4] - 2026-11-18
 
