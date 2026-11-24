@@ -801,7 +801,7 @@ def test_after_no_everything_is_back_and_the_same_plan_goes_again(root, rel):
     asked: list = []
     with held(root / rel, share=1):
         with pytest.raises(mover.StepFailed) as e:
-            forward(plan, wait_s=0.1, ask=lambda h: asked.append(h))
+            forward(plan, wait_s=0.1, ask=lambda h: bool(asked.append(h)))
     assert len(asked) == 1 and e.value.errors == []
     check_held(e.value.held, rel)
     assert uv.tree(root) == before
@@ -822,7 +822,7 @@ def test_a_file_held_on_the_way_back_is_asked_about_and_named(root, rel):
         result = uv.undo(root, wait_s=0.1)
         assert result.state == "failed"
         check_held(result.held, rel)
-        assert uv.undo(root, wait_s=0.1, ask=lambda h: asked.append(h)).state == "failed"
+        assert uv.undo(root, wait_s=0.1, ask=lambda h: bool(asked.append(h))).state == "failed"
         assert len(asked) == 1
     block = held(root / rel, share=1)
     block.__enter__()
@@ -844,7 +844,7 @@ def test_an_edited_file_held_at_the_end_is_asked_about_and_named(root, monkeypat
     old = root / ".localm-update" / ID / "old" / "localm" / "changed.py"
     asked: list = []
     with job.Lock(root) as lock, held(old):
-        result = job.finish(lock, ask=lambda h: asked.append(h))
+        result = job.finish(lock, ask=lambda h: bool(asked.append(h)))
     assert result.state == "new" and len(asked) == 1
     check_held(result.held, "changed.py")
 
@@ -875,7 +875,8 @@ def test_a_program_that_stands_in_a_folder_in_the_way_is_asked_about(root, way):
 
     def ask(h) -> bool:
         asked.append(h)
-        program.communicate(b"\n", timeout=30)
+        program.kill()
+        program.wait(timeout=30)
         return True
     try:
         if way == "there":
@@ -896,7 +897,7 @@ def test_one_no_is_not_asked_again_for_the_next_file_of_the_same_run(root):
     mover.forward(root, ID, plan)
     asked: list = []
     with held(root / "localm" / "changed.py"), held(root / "localm" / "added.py"):
-        result = uv.undo(root, wait_s=0.1, ask=lambda h: asked.append(h))
+        result = uv.undo(root, wait_s=0.1, ask=lambda h: bool(asked.append(h)))
     assert len(asked) == 1 and len(result.held) == 2 and result.state == "failed"
     assert uv.undo(root).state == "old"
 
