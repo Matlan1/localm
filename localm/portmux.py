@@ -71,6 +71,10 @@ _PATH_RE = re.compile(r"^/[!-~]*$")
 
 _READ_CHUNK = 65536
 
+# Waits, in seconds, before each further try to connect to the internal uvicorn
+# for an accepted connection.
+_UPSTREAM_RETRY_DELAYS = (0.05, 0.25, 1.0)
+
 # Signals routed to a graceful stop of run_server() (see route_stop_signals).
 # Names this platform does not define are skipped.
 STOP_SIGNALS = ("SIGHUP", "SIGTERM", "SIGBREAK")
@@ -746,15 +750,34 @@ async def _handle_conn(reader, writer, internal_port, public_port) -> None:
         _safe_close(writer)
 
 
+async def _open_upstream(internal_port):
+    """A connection to the internal uvicorn as ``(reader, writer)``, tried again
+    after each of ``_UPSTREAM_RETRY_DELAYS`` when it cannot be opened. None, with
+    a warning logged (DEBUG while the server stops), when every try failed; the
+    caller's client is then closed without an answer."""
+    for delay in (*_UPSTREAM_RETRY_DELAYS, None):
+        try:
+            return await asyncio.open_connection("127.0.0.1", internal_port)
+        except OSError as e:
+            if delay is None or stopping():
+                _log.log(logging.DEBUG if stopping() else logging.WARNING,
+                         "portmux: an accepted connection could not be handed to "
+                         "the server (%s: %s) and was closed unanswered",
+                         type(e).__name__, e)
+                return None
+        await asyncio.sleep(delay)
+    return None
+
+
 async def _relay(first, c_reader, c_writer, internal_port) -> None:
     """Transparently pipe a connection to the internal uvicorn. The already
     consumed first byte is written through first so the stream is intact. Generic
     over scheme: the TLS path relays the ClientHello onward; the plain path relays
     the HTTP request line onward."""
-    try:
-        u_reader, u_writer = await asyncio.open_connection("127.0.0.1", internal_port)
-    except OSError:
+    upstream = await _open_upstream(internal_port)
+    if upstream is None:
         return
+    u_reader, u_writer = upstream
     try:
         u_writer.write(first)
         await u_writer.drain()

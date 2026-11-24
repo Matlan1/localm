@@ -149,6 +149,63 @@ def test_relay_pumps_bytes_both_directions_byte_for_byte():
     asyncio.run(go())
 
 
+def _relay_once_with_failing_hops(monkeypatch, failures):
+    """The reply a client gets through ``_relay`` while the first *failures*
+    connections from portmux to the internal server fail."""
+    async def go():
+        echo_server, internal_port = await _make_echo_server()
+        real = asyncio.open_connection
+        left = [failures]
+
+        async def hop(*a, **kw):
+            if kw.pop("client", False):
+                return await real(*a, **kw)
+            if left[0]:
+                left[0] -= 1
+                raise OSError(10055, "no buffer space")
+            return await real(*a, **kw)
+
+        monkeypatch.setattr(portmux.asyncio, "open_connection", hop)
+
+        async def on_client(reader, writer):
+            first = await reader.readexactly(1)
+            await portmux._relay(first, reader, writer, internal_port)
+            writer.close()
+
+        front = await asyncio.start_server(on_client, host="127.0.0.1", port=0)
+        try:
+            reader, writer = await hop(
+                "127.0.0.1", front.sockets[0].getsockname()[1], client=True)
+            writer.write(b"hello")
+            await writer.drain()
+            writer.write_eof()
+            try:
+                return await asyncio.wait_for(reader.read(-1), timeout=10)
+            except ConnectionError:
+                return b""
+            finally:
+                writer.close()
+        finally:
+            front.close()
+            echo_server.close()
+    return asyncio.run(go())
+
+
+def test_a_connection_survives_a_failed_hop_to_the_internal_server(monkeypatch, caplog):
+    monkeypatch.setattr(portmux, "_UPSTREAM_RETRY_DELAYS", (0.01, 0.01))
+    assert _relay_once_with_failing_hops(monkeypatch, 2) == b"hello"
+    assert "could not be handed" not in caplog.text
+
+
+def test_a_connection_that_cannot_be_handed_over_is_logged(monkeypatch, caplog):
+    monkeypatch.setattr(portmux, "_UPSTREAM_RETRY_DELAYS", (0.01, 0.01))
+    monkeypatch.setattr(portmux, "stopping", lambda: False)
+    with caplog.at_level("WARNING", logger="localm.portmux"):
+        assert _relay_once_with_failing_hops(monkeypatch, 3) == b""
+    assert "could not be handed to the server" in caplog.text
+    assert "no buffer space" in caplog.text
+
+
 # --------------------------------------------------------------------------- #
 #  _serve_async_plain / _serve_async: real end-to-end lifecycle
 # --------------------------------------------------------------------------- #
