@@ -19,6 +19,8 @@ from tests._update_mechanism_venv import ALPHA1, ALPHA2, BETA, GAMMA, ID, SITE
 from tests.test_update_mechanism_safety import planned, to_starting
 
 OTHER_ID = "f" * 32
+#: A version of alpha that is neither the old nor the new one.
+THEIRS = ("alpha", "1.5", {"alpha/__init__.py": "V = 15", "alpha/extra.py": "e", "alpha/new.py": "t"})
 NEW_FILE = f".venv/{SITE}/alpha/new.py"
 insensitive = pytest.mark.skipif(os.name != "nt", reason="a system that keeps case and ignores it")
 
@@ -226,15 +228,16 @@ def test_a_reinstall_after_a_failed_restore_is_the_users(root, monkeypatch):
 
 
 @pytest.mark.parametrize("version", ["1.5", "2.0"])
-def test_another_version_after_a_failed_restore_is_the_users(root, monkeypatch, version):
+@pytest.mark.parametrize("new", ["theirs", ALPHA2[2]["alpha/new.py"]], ids=["theirs", "same"])
+def test_another_version_after_a_failed_restore_is_the_users(root, monkeypatch, version, new):
     moved(root)
     failed_once(root, NEW_FILE, monkeypatch)
-    theirs = ("alpha", version, {"alpha/__init__.py": "V = 'theirs'", "alpha/new.py": "theirs"})
+    theirs = ("alpha", version, {"alpha/__init__.py": "V = 'theirs'", "alpha/new.py": new})
     uv.install(root / ".venv", theirs)
     result = uv.undo(root)
     assert (result.state, result.errors) == ("old", [])
     assert packages_in(root) == [f"alpha-{version}.dist-info", "beta-1.0.dist-info"]
-    assert (site(root) / "alpha" / "new.py").read_bytes() == b"theirs"
+    assert (site(root) / "alpha" / "new.py").read_bytes() == new.encode()
     assert (site(root) / "alpha" / "__init__.py").read_bytes() == b"V = 'theirs'"
     assert sum(n.startswith("The package alpha:") for n in result.notes) == 1
 
@@ -280,13 +283,14 @@ def test_what_the_user_did_before_the_first_move_is_the_users(root, change):
     assert sum("alpha" in n for n in result.notes) == (change != "reinstall")
 
 
-def test_a_move_that_was_marked_and_not_made_is_not_lost(root, monkeypatch):
+def killed_before(root: Path, rel: str, monkeypatch) -> None:
+    """A package step that ends right before the move of the old file *rel*."""
     uv.begun(root)
     plan = uv.package_step(root)
     real = os.rename
 
     def stop(src, dst):
-        if "data.txt" in str(src):
+        if Path(src).as_posix().endswith(f"{SITE}/{rel}"):
             raise SystemExit("killed")
         real(src, dst)
     with monkeypatch.context() as m:
@@ -294,6 +298,31 @@ def test_a_move_that_was_marked_and_not_made_is_not_lost(root, monkeypatch):
         m.setattr(packages, "back", lambda *a, **kw: mover.Outcome())
         with pytest.raises(mover.StepFailed):
             uv.forward(root, plan)
+
+
+@pytest.mark.parametrize("stop", ["alpha-1.0.dist-info/METADATA", "alpha-1.0.dist-info/RECORD",
+                                  "alpha/old.py"])
+def test_another_version_over_half_of_the_old_one_is_the_users_as_a_whole(root, monkeypatch, stop):
+    killed_before(root, stop, monkeypatch)
+    uv.install(root / ".venv", THEIRS)
+    result = uv.undo(root)
+    assert (result.state, result.errors) == ("old", [])
+    assert packages_in(root) == ["alpha-1.5.dist-info", "beta-1.0.dist-info"]
+    assert packages._is_complete(site(root), root / ".venv", "alpha-1.5.dist-info", "alpha")
+    assert not (site(root) / "alpha" / "old.py").exists()
+    assert {p.read_bytes() for p in (root / ".venv" / mover.VENV_KEPT).rglob("*") if p.is_file()}
+
+
+def test_a_package_removed_with_a_part_of_it_moved_stays_removed(root, monkeypatch):
+    killed_before(root, "alpha-1.0.dist-info/METADATA", monkeypatch)
+    uv.uninstall(root / ".venv", "alpha")
+    result = uv.undo(root)
+    assert (result.state, result.errors) == ("old", [])
+    assert packages_in(root) == ["beta-1.0.dist-info"] and not (site(root) / "alpha").exists()
+
+
+def test_a_move_that_was_marked_and_not_made_is_not_lost(root, monkeypatch):
+    killed_before(root, "alpha/data.txt", monkeypatch)
     (site(root) / "alpha" / "data.txt").write_bytes(b"MINE")
     failed = [disk.Held("x", "y")]
     move = disk.move
@@ -732,7 +761,6 @@ def rebuild(root: Path) -> None:
     uv.install(root / ".venv", BETA)
 
 
-THEIRS = ("alpha", "1.5", {"alpha/__init__.py": "V = 15", "alpha/extra.py": "e", "alpha/new.py": "t"})
 ACTIONS = {
     "edit-package": edit(f".venv/{SITE}/alpha/data.txt"),
     "edit-release": edit("localm/changed.py"),
