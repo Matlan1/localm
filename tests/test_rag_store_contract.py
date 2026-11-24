@@ -274,13 +274,13 @@ class TestLifecycle:
         c = Collection("kb", base=base).create()
         res = c.add_paths([folder], on_progress=said.append)
         assert res == {"added": 2, "updated": 0, "skipped": 0, "failed": [],
-                       "chunks": 2}
+                       "not_found": [], "chunks": 2}
         rel = sorted(Path(d["path"]).relative_to(folder.resolve()).as_posix()
                      for d in c.docs())
         assert rel == ["a.txt", "sub/b.md"]
         assert c.roots() == [str(folder.resolve())]
-        assert said == ["[1/2] reading a.txt...", "indexed a.txt (1 chunks)",
-                        "[2/2] reading b.md...", "indexed b.md (1 chunks)"]
+        assert said == ["[1/2] reading a.txt...", "indexed a.txt (1 chunk)",
+                        "[2/2] reading b.md...", "indexed b.md (1 chunk)"]
         entry = c.docs()[0]
         assert sorted(entry) == ["chunks", "hash", "mtime", "path", "size"]
         chunk = c.query("banana", k=1)[0]
@@ -316,7 +316,7 @@ class TestLifecycle:
         empty.mkdir()
         c = Collection("kb", base=base).create()
         assert c.add_paths([empty]) == {"added": 0, "updated": 0, "skipped": 0,
-                                        "failed": [], "chunks": 0}
+                                        "failed": [], "not_found": [], "chunks": 0}
         assert Collection("kb", base=base).roots() == [str(empty.resolve())]
 
     def test_query_hybrid_and_lexical(self, base, folder):
@@ -368,7 +368,7 @@ class TestResync:
         (folder / "sub" / "b.md").unlink()
         res = c.resync(on_progress=said.append)
         assert sorted(res) == sorted([
-            "added", "updated", "skipped", "failed", "chunks", "roots",
+            "added", "updated", "skipped", "failed", "not_found", "chunks", "roots",
             "unavailable_roots", "blocked_roots", "missing", "still_missing",
             "restored", "pruned", "missing_total", "vector_degrade_reason"])
         b_key = str((folder / "sub" / "b.md").resolve())
@@ -445,7 +445,7 @@ class TestUploads:
         assert {(k["phase"], k["total"], k["unit"]) for k in structured} == {
             ("indexing uploads", 4, "files")}
         assert calls[0] == ("[1/4] reading a.txt...", {})
-        assert calls[1] == ("indexed a.txt (1 chunks)",
+        assert calls[1] == ("indexed a.txt (1 chunk)",
                             {"phase": "indexing uploads", "done": 1, "total": 4,
                              "unit": "files"})
         again = c.add_uploads(_uploads({"a.txt": "apple notes"}), on_progress=progress)
