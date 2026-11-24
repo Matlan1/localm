@@ -34,11 +34,11 @@ retested.
 
 THE NAMES ARE CHECKED TOO, and that half needs neither MSVC nor a build. Every
 ``tokenizer_pre`` string ``llama-vocab.cpp`` accepts is mapped to its pattern
-list. A list that reaches ``std::regex`` must belong to a name in
-``localm.inference.pretokenizer_guard.UNSAFE_PRE_TYPES`` or be one of
-``MEASURED_SAFE_LISTS``, and every name that shares a list with a name in that
-table must be in it: a new string for an old unsafe list, a new list and a
-changed list each fail (``name_problems``). ``scripts/bump_llama_pin.py`` and
+list. A name in ``localm.inference.pretokenizer_guard.UNSAFE_PRE_TYPES`` must
+keep the list its limits were measured on (``GUARDED_LISTS``). Any other list
+that reaches ``std::regex`` must be one of ``MEASURED_SAFE_LISTS``, and no name
+outside that table may use a list of it: a new string for an old unsafe list, a
+new list and a changed or moved list each fail (``name_problems``). ``scripts/bump_llama_pin.py`` and
 ``scripts/bump_rocm_pin.py`` refuse to move a pin that fails it.
 
 KNOWN LIMITATION: the timing half needs an MSVC toolchain (Visual Studio Build
@@ -296,6 +296,38 @@ MEASURED_SAFE_LISTS = {
     "8b0b0464eac48332": "ZONOS3",
 }
 
+# list_digest of the pattern list each name of UNSAFE_PRE_TYPES had at b12617 and
+# b12676, which its limits were measured on.
+GUARDED_LISTS = {
+    "afmoe": "eaed97eeca183f33",
+    "cohere2moe": "28b1e01f7005c516",
+    "deepseek-llm": "d0e57e4f663c10fa",
+    "deepseek-v3": "bfb6cd412a9c9638",
+    "exaone-moe": "1b5d04e3ba68c430",
+    "flint": "ce72e3542ea54910",
+    "gpt-4o": "e14833d7e0962861",
+    "granite-embed-multi-97m": "e14833d7e0962861",
+    "hunyuan-dense": "bfb6cd412a9c9638",
+    "hy_v4": "bfb6cd412a9c9638",
+    "inkling2": "e14833d7e0962861",
+    "jais-2": "a222d586d542e6ee",
+    "joyai-llm": "bfb6cd412a9c9638",
+    "kanana2": "e14833d7e0962861",
+    "llama4": "e14833d7e0962861",
+    "minicpm5": "89927421eed34d2e",
+    "minimax-m2": "e14833d7e0962861",
+    "nemotron-3.5-embed": "a5b9b3e5145cc001",
+    "pixtral": "a5b9b3e5145cc001",
+    "seed-coder": "b52969e3c183b7a9",
+    "superbpe": "2d06780e586e18c1",
+    "talkie": "e14833d7e0962861",
+    "tekken": "a5b9b3e5145cc001",
+    "tekken-num3": "00bf6a86a61ec545",
+    "tiny_aya": "28b1e01f7005c516",
+    "ufakzeka": "4aa23009821560c0",
+    "youtu": "21d12859c3adb6ca",
+}
+
 _NAME_OR_ENUM = re.compile(
     r'tokenizer_pre\s*==\s*"([^"]+)"|\bpre_type\s*=\s*LLAMA_VOCAB_PRE_TYPE_(\w+)')
 _CASE_OR_LIST = re.compile(
@@ -378,10 +410,12 @@ def pattern_lists_by_name(vocab_src: str) -> dict:
 
 
 def name_problems(vocab_src: str, unicode_src: str, guarded, safe=None) -> list:
-    """Why a tokenizer_pre string of *vocab_src* is not covered, one line each;
-    [] when every one is in *guarded*, or uses only patterns
-    unicode_regex_split_custom handles, or uses a list in *safe*
-    (:data:`MEASURED_SAFE_LISTS` by default) that no name in *guarded* uses."""
+    """Why a tokenizer_pre string of *vocab_src* is not covered, one line each.
+
+    *guarded* maps each guarded name to the digest of the list its limits were
+    measured on. [] when every guarded name still has that list, and every other
+    one uses only patterns unicode_regex_split_custom handles, or a list in
+    *safe* (:data:`MEASURED_SAFE_LISTS` by default) that no guarded name uses."""
     safe = MEASURED_SAFE_LISTS if safe is None else safe
     by_name = pattern_lists_by_name(vocab_src)
     custom = extract_custom_triggers(unicode_src)
@@ -391,9 +425,15 @@ def name_problems(vocab_src: str, unicode_src: str, guarded, safe=None) -> list:
             unsafe.setdefault(list_digest(patterns), []).append(name)
     out = []
     for name, patterns in sorted(by_name.items()):
-        if name in guarded or all(p in custom for p in patterns):
-            continue
         digest = list_digest(patterns)
+        if name in guarded:
+            if digest != guarded[name]:
+                out.append(f"{name!r} no longer uses the pattern list its limits were "
+                           f"measured on ({guarded[name]}, now {digest}): measure it again, "
+                           f"then set its limits and GUARDED_LISTS")
+            continue
+        if all(p in custom for p in patterns):
+            continue
         if digest in unsafe:
             out.append(f"{name!r} uses the pattern list of {', '.join(unsafe[digest])}, which "
                        f"pretokenizer_guard.UNSAFE_PRE_TYPES bounds: add it there")
@@ -409,13 +449,15 @@ def check_names(ref: str) -> list:
     cannot be fetched."""
     vocab_src, unicode_src = (_fetch_bytes(ref, name).decode("utf-8").replace("\r\n", "\n")
                               for name in ("llama-vocab.cpp", "unicode.cpp"))
-    return name_problems(vocab_src, unicode_src, _guarded_names())
+    return name_problems(vocab_src, unicode_src, _guarded_lists())
 
 
-def _guarded_names() -> frozenset:
+def _guarded_lists() -> dict:
+    """{name: GUARDED_LISTS digest} of every name in UNSAFE_PRE_TYPES, with ""
+    for one that has none, which no list matches."""
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from localm.inference.pretokenizer_guard import UNSAFE_PRE_TYPES
-    return frozenset(UNSAFE_PRE_TYPES)
+    return {name: GUARDED_LISTS.get(name, "") for name in UNSAFE_PRE_TYPES}
 
 
 # --------------------------------------------------------------------------- #
@@ -602,9 +644,10 @@ def main() -> int:
         vocab_src = (workdir / "llama-vocab.cpp").read_text(encoding="utf-8")
         unicode_src = (workdir / "unicode.cpp").read_text(encoding="utf-8")
 
-        names = name_problems(vocab_src, unicode_src, _guarded_names())
+        guarded = _guarded_lists()
+        names = name_problems(vocab_src, unicode_src, guarded)
         unguarded = {p for name, patterns in pattern_lists_by_name(vocab_src).items()
-                     if name not in _guarded_names() for p in patterns}
+                     if name not in guarded for p in patterns}
         _print_names(names, ref)
 
         blocks = extract_regex_exprs_blocks(vocab_src)

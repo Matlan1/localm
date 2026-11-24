@@ -669,6 +669,56 @@ class TestVisionPathIsGuardedToo:
         mock_api.llama_free.assert_not_called()
 
 
+class TestRefusedRuns:
+    """``refused_runs`` is the one definition of a run: check_text refuses what
+    it yields, and the coder cuts what it yields."""
+
+    def test_it_yields_every_run_with_the_size_the_limit_counts(self):
+        text = "a" + "\n \n" * 3 + "b" + "\n" * 5 + "c"
+        runs = list(guard.refused_runs("line breaks", 4, text))
+        assert [(text[r.start:r.end], r.size) for r in runs] == [
+            ("\n \n" * 3, 6), ("\n" * 5, 5)]
+        assert list(guard.refused_runs("line breaks", 6, text)) == []
+
+    @pytest.mark.parametrize("kind,unit", [
+        ("letters", "a"), ("letters and spaces", "a "), ("digits", "5"),
+        ("whitespace characters", " "), ("line breaks", "\n"), (guard.BLOCK, "\u4e2d")])
+    def test_a_run_at_the_limit_is_not_yielded(self, kind, unit):
+        for limit in (10, 700):
+            text = (unit * limit)[:limit]
+            assert list(guard.refused_runs(kind, limit, f".{text}" if kind != guard.BLOCK
+                                           else text)) == []
+            assert len(list(guard.refused_runs(kind, limit, (unit * limit)[:limit] + unit))) == 1
+
+    def test_the_refusals_of_an_older_server_still_read_back(self):
+        old = ("This model's pre-tokenizer (tekken) crashes on an unbroken run of more than "
+               "256 line breaks; this input has a run of 300. Break the run with punctuation")
+        assert guard.parse_refusal(old) == guard.Refusal("run", 256, 300, "line breaks")
+
+
+class TestOnlyAPolicyWithALengthLimitIsSplit:
+    def test_can_split_matches_what_plan_chunks_cuts(self):
+        assert guard.can_split("gpt-4o") and guard.can_split("deepseek-llm")
+        for pre_type in ("exaone-moe", "llama-bpe", None,
+                         *sorted(TestCalibration.MEASURED_NEWLINE_ONLY)):
+            assert not guard.can_split(pre_type), pre_type
+
+    @pytest.mark.parametrize("pre_type,parts", [("deepseek-v3", False), ("gpt-4o", True)])
+    def test_the_load_log_announces_parts_only_where_text_is_split(self, pre_type, parts, caplog):
+        import logging
+        with caplog.at_level(logging.INFO, logger="localm"), \
+                patch(_LLAMA_API) as api, \
+                patch.object(guard, "read_pre_type", return_value=pre_type), \
+                patch.object(guard, "read_separators", return_value=(("<s>",), ())), \
+                patch.object(_Tokenizer, "_tokens_join_across_cuts", return_value=True):
+            api.llama_model_get_vocab.return_value = MagicMock()
+            tok = _Tokenizer.__new__(_Tokenizer)
+            tok.__init__(MagicMock(), None)
+        assert tok._chunkable is parts
+        assert ("tokenised in parts" in caplog.text) is parts
+        assert pre_type in caplog.text
+
+
 class TestAFailedPreTypeReadIsVisible:
     """A read that fails leaves the guard OFF for that model, so it must not be
     passed over in silence."""
@@ -716,6 +766,8 @@ class TestScannerCacheKeysAreDistinct:
                     pairs.add((guard._CLASS_WHITESPACE, p.newline_run))
                 if p.digit_run is not None:
                     pairs.add((guard._CLASS_DIGIT, p.digit_run))
+                if p.cost_budget is not None:
+                    pairs.add((guard._CLASS_UNBROKEN, p.cost_budget // p.max_chars))
         assert len(guard._SCANNERS) == len(pairs)
         for cls, limit in pairs:
             scanner = guard._SCANNERS[(cls, limit)]
@@ -1714,6 +1766,17 @@ class TestANewlineRunIsRefusedBeforeNativeCode:
         with pytest.raises(PretokenizerUnsafeInputError, match="line breaks"):
             guard.check_text(pre_type, "a" + blank_lines + "\nb")
 
+    @pytest.mark.parametrize("pre_type", _NEWLINE_BOUNDED)
+    def test_the_advice_is_for_line_breaks(self, pre_type):
+        # A line break does not end a run of line breaks, and spaces between
+        # them do not make the run an unbroken one.
+        with pytest.raises(PretokenizerUnsafeInputError) as exc:
+            guard.check_text(pre_type, "a" + "\n  " * 300 + "b")
+        msg = str(exc.value)
+        assert "Remove blank lines" in msg and "unbroken" not in msg
+        assert "punctuation" not in msg and "or a line break" not in msg
+        assert "unbroken run of more than 256 line breaks" not in guard.hazard_note(pre_type)
+
     def test_ordinary_blank_lines_still_pass(self):
         # Paragraph breaks and a generously blank-padded document are nowhere
         # near the bound.
@@ -1919,7 +1982,8 @@ class TestTheTableCannotShipAnUncompilableLimit:
             if p.digit_run is not None:
                 assert (guard._CLASS_DIGIT, p.digit_run) in guard._SCANNERS, pre_type
             if p.cost_budget is not None:
-                assert (p.cost_budget, p.max_chars) in guard._COST_SCANNERS, pre_type
+                assert (guard._CLASS_UNBROKEN, guard._BLOCK_FLOOR) in guard._SCANNERS, pre_type
+                assert guard._BLOCK_FLOOR <= p.cost_budget // p.max_chars, pre_type
 
 
 class TestTheLoadTimeWarningDoesNotOverstateTheHazard:

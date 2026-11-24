@@ -157,7 +157,8 @@ def _make_self_embed(self_url: str, active_model):
     """Embed via this server's own /v1/embeddings - the endpoint holds the
     inference semaphore, so indexing never races a chat reply. Raises when the
     backend has no embedding support (GGUF ctypes binding); callers degrade to
-    lexical-only.
+    lexical-only. Raises EmbedTextRefused when the model's pre-tokenizer refuses
+    one of the texts.
 
     Sends the EMBEDDING model's registered name (from the ``embedding_model``
     config key), not the chat model name. /v1/embeddings recognises a registry
@@ -182,6 +183,10 @@ def _make_self_embed(self_url: str, active_model):
                 detail = (r.json() or {}).get("detail") or ""
             except Exception:
                 detail = (r.text or "").strip()
+            from localm.inference.pretokenizer_guard import parse_refusal
+            if parse_refusal(str(detail)) is not None:
+                from localm.rag.store import EmbedTextRefused
+                raise EmbedTextRefused(str(detail))
             raise RuntimeError(detail or f"embeddings endpoint returned HTTP {r.status_code}")
         from localm.jsonreply import response_json
         return [d["embedding"] for d in response_json(r)["data"]]

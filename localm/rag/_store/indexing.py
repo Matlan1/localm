@@ -21,7 +21,7 @@ from ..extract import (BLACKLISTED_SUFFIXES, UNINDEXABLE_SUFFIXES,
                        is_secret_index_name)
 from .confine import is_credential_path
 from .types import (ClassifyFn, DescribeImageFn, EmbedFn, EmbeddingLossRefused,
-                    ProgressFn, count_noun)
+                    EmbedTextRefused, ProgressFn, count_noun)
 from .vectors import _first_dim, _vectors_finite
 
 
@@ -383,7 +383,8 @@ class _CollectionIndexing:
                    keep_vectors: bool = False) -> tuple[list, bool]:
         """Vectors for one document's *new_chunks*, all None when embedding is
         unavailable, fails, or yields non-finite values, and whether embedding is
-        now broken for the rest of the batch. *position* (``[i/n]``) and *label*
+        now broken for the rest of the batch. A refusal of this document's text
+        (``EmbedTextRefused``) breaks nothing for the next. *position* (``[i/n]``) and *label*
         (the document's name) go into the progress messages.
 
         Raises ``ValueError``, after saving the documents this call already
@@ -405,8 +406,12 @@ class _CollectionIndexing:
             except Exception as e:
                 if keep_vectors:
                     raise self._loss_refusal(label, f"embedding failed: {e}") from e
-                embed_broken = True
-                say(f"embeddings unavailable ({e}) - indexing lexical-only")
+                if isinstance(e, EmbedTextRefused):
+                    say(f"the embedding model refused {label} ({e}) - indexing it "
+                        "lexical-only")
+                else:
+                    embed_broken = True
+                    say(f"embeddings unavailable ({e}) - indexing lexical-only")
             else:
                 if len(vecs) != len(new_chunks):
                     if keep_vectors:

@@ -64,8 +64,8 @@ _MAX_FLUSH_NOTES = 8        # notes one flush may add
 _MAX_NOTE_CHARS = 300
 _MAX_INPUT_FITS = 4         # pre-tokenizer refusals one LLM call may cut the history for
 _TYPED_MIN_MATCH = 32       # typed text this long protects any message containing it
-_REMOVED_TYPED_MESSAGE = ("[a message from the user was removed here: it was longer than "
-                          "this model can take in one message]")
+_REMOVED_TYPED_MESSAGE = ("[a message from the user was removed here: this model cannot "
+                          "take its text]")
 
 _NOTE_MARKER_RE = re.compile(r"^\s*(?:[-*+]|\d{1,2}[.)])\s+")
 

@@ -116,9 +116,10 @@ def _named(name, enum):
 def problems(redos):
     lists = redos.pattern_lists_by_name(_vocab())
     safe = {redos.list_digest(lists[n]) for n in ("falcon", "default")}
+    measured = {name: redos.list_digest(lists[name]) for name in _GUARDED}
 
     def run(vocab, guarded=_GUARDED):
-        return redos.name_problems(vocab, _UNICODE, guarded, safe)
+        return redos.name_problems(vocab, _UNICODE, {n: measured[n] for n in guarded}, safe)
     return run
 
 
@@ -160,6 +161,38 @@ def test_a_new_name_for_a_measured_or_a_handled_list_passes(problems):
         "an enum with no case uses the default list")
 
 
+def test_a_guarded_list_that_changed_fails(problems):
+    found = problems(_vocab(gpt4o=GPT4O + "|x"))
+    assert [p.split(" ", 1)[0] for p in found] == ["'gpt-4o'", "'llama4'", "'minimax-m2'"]
+    assert all("no longer uses the pattern list" in p for p in found)
+
+
+def test_a_guarded_name_moved_to_another_list_fails(problems):
+    for target in ("FALCON", "KIMI"):
+        moved = _vocab().replace(
+            'tokenizer_pre == "llama4") {\n                pre_type = LLAMA_VOCAB_PRE_TYPE_GPT4O;',
+            'tokenizer_pre == "x") {\n                pre_type = LLAMA_VOCAB_PRE_TYPE_GPT4O;'
+            f'\n            }} else if (tokenizer_pre == "llama4") {{ pre_type = '
+            f"LLAMA_VOCAB_PRE_TYPE_{target};")
+        assert moved != _vocab()
+        found = problems(moved)
+        assert any(p.startswith("'llama4' no longer uses") for p in found), (target, found)
+
+
+def test_every_guarded_name_has_the_digest_of_its_measured_list(redos):
+    from localm.inference.pretokenizer_guard import UNSAFE_PRE_TYPES
+    assert set(redos.GUARDED_LISTS) == set(UNSAFE_PRE_TYPES)
+    assert all(len(d) == 16 and int(d, 16) >= 0 for d in redos.GUARDED_LISTS.values())
+    assert not set(redos.GUARDED_LISTS.values()) & set(redos.MEASURED_SAFE_LISTS)
+
+
+def test_a_guarded_name_without_a_digest_matches_no_list(redos, monkeypatch):
+    monkeypatch.setattr(redos, "GUARDED_LISTS", {})
+    lists = redos._guarded_lists()
+    assert lists["gpt-4o"] == ""
+    assert len(redos.name_problems(_vocab(), _UNICODE, {"gpt-4o": ""}, set())) >= 1
+
+
 def test_a_changed_list_is_not_covered_by_its_old_measurement(problems):
     found = problems(_vocab(safe=SAFE + "x"))
     assert len(found) == 2 and all("nothing has measured" in p for p in found)
@@ -186,4 +219,4 @@ def test_the_shipped_safe_lists_are_digests(redos):
 
 def test_the_names_are_compared_with_the_guard_table(redos):
     from localm.inference.pretokenizer_guard import UNSAFE_PRE_TYPES
-    assert redos._guarded_names() == frozenset(UNSAFE_PRE_TYPES)
+    assert redos._guarded_lists() == {n: redos.GUARDED_LISTS[n] for n in UNSAFE_PRE_TYPES}
