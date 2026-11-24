@@ -201,7 +201,7 @@ class TestFailedSave:
         failures = []
 
         def no_space_for_meta(path, data):
-            if Path(path).name == "meta.json" and not failures:
+            if Path(path).name.startswith("meta.json.") and not failures:
                 failures.append(path)
                 raise OSError(errno.ENOSPC, "No space left on device")
             return real_write(path, data)

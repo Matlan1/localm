@@ -45,9 +45,9 @@ _JSON_CONTAINERS = (dict, list)
 
 
 def _collection_cache_fingerprint(coll_dir: Path) -> dict:
-    """(file id, mtime_ns, size) for meta.json, chunks.jsonl and vectors.json,
-    None for a file that does not exist. Every atomic replace gives the file a
-    new id."""
+    """(file id, mtime_ns, size) for meta.json, chunks.jsonl, vectors.json and
+    the marker of a pending save, None for a file that does not exist. Every
+    atomic replace gives the file a new id."""
     def _stat(name: str) -> tuple[int, int, int] | None:
         try:
             st = os.stat(coll_dir / name)
@@ -58,6 +58,7 @@ def _collection_cache_fingerprint(coll_dir: Path) -> dict:
         "meta": _stat("meta.json"),
         "chunks": _stat("chunks.jsonl"),
         "vectors": _stat("vectors.json"),
+        "pending": _stat("save.pending"),
     }
 
 

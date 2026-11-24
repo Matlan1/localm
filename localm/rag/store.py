@@ -11,6 +11,8 @@ Layout - one directory per collection under ``<data dir>/rag/``:
     rag/<name>/vectors.json   optional: {"dim", "vectors": [[...]|null, ...]}
                               aligned with chunks.jsonl line order
 
+    The three are saved as one change; see ``_store/commit.py``.
+
 ``roots`` records the FOLDERS that were indexed, alongside the per-file ``docs``
 entries the folder walk produced. ``resync()`` re-walks these roots through the
 ordinary incremental path.
@@ -49,6 +51,7 @@ from ._store.cache import (  # noqa: F401
     _collection_cache_fingerprint, _copy_json, _files_changing, _freeze_rows,
     _freeze_snapshot, _get_cached_collection_data, _invalidate_collection_cache,
     _json_nbytes)
+from ._store.commit import finish_save
 from ._store.confine import (  # noqa: F401
     _INDEX_MODES, _SENSITIVE_HOME_SUBDIRS, _SENSITIVE_NAMES, ConfinementError,
     _network_drives_allowed_fresh, _path_within, confine_index_path,
@@ -191,6 +194,11 @@ def record_embedding_model_refs(base: Optional[Path] = None) -> list:
         try:
             with collection_write_lock(lock_path_for(coll_dir), collection=name,
                                        op="recording a model ID"):
+                try:
+                    finish_save(coll_dir)
+                except OSError:
+                    busy.append(name)
+                    continue
                 found = Collection._peek_meta(name, base)
                 if found is None or not found[2].get("embedding_model"):
                     continue
@@ -296,6 +304,7 @@ class Collection(_CollectionFiles, _CollectionSidecar, _CollectionIndexing,
         self._load(use_cache=False)
 
 
+    @contextlib.contextmanager
     def _write_lock(self, op: str, on_progress: Optional[ProgressFn] = None):
         """The CROSS-PROCESS write lock for this collection.
 
@@ -309,10 +318,14 @@ class Collection(_CollectionFiles, _CollectionSidecar, _CollectionIndexing,
         bounds both (see its docstring).
 
         The wait is reported through the caller's existing progress channel.
+
+        Once held, a save an earlier writer left pending is finished.
         """
-        return collection_write_lock(
-            lock_path_for(self.dir), collection=self.name, op=op,
-            on_wait=on_progress)
+        with collection_write_lock(
+                lock_path_for(self.dir), collection=self.name, op=op,
+                on_wait=on_progress):
+            finish_save(self.dir)
+            yield
 
     def create(self) -> Collection:
         """Create the collection if it does not exist yet.
