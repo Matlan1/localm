@@ -768,13 +768,13 @@ def test_what_holds_a_file_of_the_record_is_named(make):
 def test_the_program_that_holds_a_file_is_the_one_windows_names(make):
     import _winapi
 
-    from localm.updater_runtime import _rm_holders
+    from localm._apply_update import rm_holders
     inst = make()
     other = _planted(inst)
     path = _file(inst, *_key_of(other.pid))
     handle = _winapi.CreateFile(str(path), 0x80000000, 0, 0, 3, 0, 0)
     try:
-        way = next(e for e in procs.list(inst.root, holders=_rm_holders)
+        way = next(e for e in procs.list(inst.root, holders=rm_holders)
                    if e.pid == other.pid).in_the_way
     finally:
         _winapi.CloseHandle(handle)
