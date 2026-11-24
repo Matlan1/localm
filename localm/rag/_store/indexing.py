@@ -20,7 +20,8 @@ from ..extract import (BLACKLISTED_SUFFIXES, UNINDEXABLE_SUFFIXES,
                        ExtractError, classify_format, extract_text,
                        is_secret_index_name)
 from .confine import is_credential_path
-from .types import ClassifyFn, DescribeImageFn, EmbedFn, ProgressFn
+from .types import (ClassifyFn, DescribeImageFn, EmbedFn, EmbeddingLossRefused,
+                    ProgressFn, count_noun)
 from .vectors import _first_dim, _vectors_finite
 
 
@@ -40,11 +41,6 @@ def _is_file_or_dir(p) -> bool:
         return Path(p).is_file() or Path(p).is_dir()
     except OSError:
         return False
-
-
-def count_noun(n: int, noun: str) -> str:
-    """``"1 chunk"`` / ``"2 chunks"``: the count with the noun in the right number."""
-    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
 
 
 def _walk_files(root: Path, *, max_depth: int = _MAX_WALK_DEPTH):
@@ -189,10 +185,13 @@ class _CollectionIndexing:
                           on_progress: Optional[ProgressFn] = None,
                           policy: Optional[dict] = None,
                           force: bool = False,
+                          allow_vector_loss: bool = False,
                           model_name: Optional[str] = None) -> dict:
         """The add_paths read-modify-write body. MUST run under
         _collection_lock(self.name) after a fresh _load() (see add_paths)."""
         say = on_progress or (lambda _t: None)
+        guarded = (self._sources_with_vectors()
+                   if force and not allow_vector_loss else frozenset())
         # confine_index_path returns the RESOLVED path it validated, and that is
         # what the walk below starts from, rather than the caller's original
         # string. With no policy it enforces only the hard floor.
@@ -267,7 +266,8 @@ class _CollectionIndexing:
 
             vectors, embed_broken = self._embed_doc(
                 new_chunks, f"[{index}/{len(files)}]", f.name, embed_fn=embed_fn,
-                embed_broken=embed_broken, model_name=model_name, say=say)
+                embed_broken=embed_broken, model_name=model_name, say=say,
+                keep_vectors=key in guarded)
 
             # Replace any previous chunks (and vectors) for this document
             if known:
@@ -302,6 +302,7 @@ class _CollectionIndexing:
                             describe_image_fn: Optional[DescribeImageFn] = None,
                             on_progress: Optional[ProgressFn] = None,
                             force: bool = False,
+                            allow_vector_loss: bool = False,
                             model_name: Optional[str] = None) -> dict:
         """The add_uploads body. MUST run under _collection_lock after _load().
 
@@ -315,6 +316,8 @@ class _CollectionIndexing:
         failed: list = []
         embed_broken = embed_fn is None
         n_total = len(uploads)
+        guarded = (self._sources_with_vectors()
+                   if force and not allow_vector_loss else frozenset())
 
         def _finished(n: int, text: str) -> None:
             """Report one item DONE, whatever its outcome.
@@ -352,7 +355,8 @@ class _CollectionIndexing:
 
             vectors, embed_broken = self._embed_doc(
                 new_chunks, f"[{n_done}/{n_total}]", filename, embed_fn=embed_fn,
-                embed_broken=embed_broken, model_name=model_name, say=say)
+                embed_broken=embed_broken, model_name=model_name, say=say,
+                keep_vectors=key in guarded)
 
             if known:
                 updated += 1
@@ -372,7 +376,8 @@ class _CollectionIndexing:
 
     def _embed_doc(self, new_chunks: list, position: str, label: str, *,
                    embed_fn: Optional[EmbedFn], embed_broken: bool,
-                   model_name: Optional[str], say: ProgressFn) -> tuple[list, bool]:
+                   model_name: Optional[str], say: ProgressFn,
+                   keep_vectors: bool = False) -> tuple[list, bool]:
         """Vectors for one document's *new_chunks*, all None when embedding is
         unavailable, fails, or yields non-finite values, and whether embedding is
         now broken for the rest of the batch. *position* (``[i/n]``) and *label*
@@ -380,21 +385,43 @@ class _CollectionIndexing:
 
         Raises ``ValueError``, after saving the documents this call already
         finished, when the vectors' dimensionality differs from the
-        collection's."""
+        collection's.
+
+        *keep_vectors* is set for a forced re-index of a document that has
+        vectors: when they cannot be recomputed, ``EmbeddingLossRefused`` is
+        raised instead of indexing it lexical-only, and the caller saves
+        nothing."""
         vectors: list = [None] * len(new_chunks)
+        if keep_vectors and new_chunks and (embed_fn is None or embed_broken):
+            raise self._loss_refusal(label, "no embedding model was available")
         if not embed_broken and new_chunks:
             say(f"{position} embedding {label} "
                 f"({count_noun(len(new_chunks), 'chunk')})...")
             try:
                 vecs = embed_fn([c["text"] for c in new_chunks])
             except Exception as e:
+                if keep_vectors:
+                    raise self._loss_refusal(label, f"embedding failed: {e}") from e
                 embed_broken = True
                 say(f"embeddings unavailable ({e}) - indexing lexical-only")
             else:
-                if len(vecs) == len(new_chunks):
+                if len(vecs) != len(new_chunks):
+                    if keep_vectors:
+                        raise self._loss_refusal(
+                            label, f"the embedder returned {len(vecs)} vectors "
+                                   f"for {count_noun(len(new_chunks), 'chunk')}")
+                    say(f"embeddings unavailable (the embedder returned "
+                        f"{count_noun(len(vecs), 'vector')} for "
+                        f"{count_noun(len(new_chunks), 'chunk')}) - indexing "
+                        f"{label} lexical-only")
+                else:
                     if not _vectors_finite(vecs):
                         # A NaN/inf component: no vectors are stored for this
                         # doc (lexical-only) and the degrade is reported.
+                        if keep_vectors:
+                            raise self._loss_refusal(
+                                label, "the embedder returned non-finite "
+                                       "(NaN/inf) values")
                         say(f"embeddings had non-finite (NaN/inf) values for "
                             f"{label} - indexing it lexical-only")
                     else:
@@ -425,6 +452,21 @@ class _CollectionIndexing:
                             # spanning more than one.
                             self._meta["embedding_model_mixed"] = True
         return vectors, embed_broken
+
+    def _sources_with_vectors(self) -> frozenset:
+        """The sources that have at least one stored vector."""
+        if not self._vectors:
+            return frozenset()
+        return frozenset(c.get("source")
+                         for c, v in zip(self._chunks, self._vectors, strict=False)
+                         if v)
+
+    def _loss_refusal(self, label: str, why: str) -> EmbeddingLossRefused:
+        """The refusal for a forced re-index that could not keep *label*'s
+        vectors."""
+        return EmbeddingLossRefused(
+            f"{label}: {why}. Re-indexing it would remove the embeddings "
+            f"'{self.name}' has for it, so nothing was changed.")
 
     def _put_doc_chunks(self, key: str, replace: bool, new_chunks: list,
                         vectors: list) -> None:

@@ -27,6 +27,7 @@ absolute relevance floor, so an unrelated query returns nothing.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os  # noqa: F401
 import re
@@ -68,7 +69,8 @@ from ._store.search import (  # noqa: F401
     _CollectionSearch, refers_to_conversation)
 from ._store.sidecar import (  # noqa: F401
     _MAX_REJECTED_KEPT, _REJECTED_VECTORS, _CollectionSidecar)
-from ._store.types import ClassifyFn, DescribeImageFn, EmbedFn, ProgressFn  # noqa: F401
+from ._store.types import (  # noqa: F401
+    ClassifyFn, DescribeImageFn, EmbedFn, EmbeddingLossRefused, ProgressFn)
 from ._store.vectors import (  # noqa: F401
     _NUMPY_DEGRADE_LOGGED, _NUMPY_IS_STUB, _cosine, _first_dim, _maxnorm, _numpy,
     _vectors_finite, _warn_numpy_degrade, _well_formed_vectors)
@@ -333,6 +335,7 @@ class Collection(_CollectionFiles, _CollectionSidecar, _CollectionIndexing,
                   on_progress: Optional[ProgressFn] = None,
                   policy: Optional[dict] = None,
                   force: bool = False,
+                  allow_vector_loss: bool = False,
                   model_name: Optional[str] = None) -> dict:
         """
         Index files/folders. Unchanged files (same size and content hash,
@@ -341,7 +344,10 @@ class Collection(_CollectionFiles, _CollectionSidecar, _CollectionIndexing,
         (``localm rag add --force`` / repair). Returns counters plus per-file
         failures, and ``not_found``: the named paths that are neither a file
         nor a folder any more. embed_fn failures degrade to lexical-only,
-        never abort.
+        never abort, except under ``force``: re-indexing a document that has
+        vectors without being able to recompute them raises
+        ``EmbeddingLossRefused`` (a ``ValueError``) before anything is saved,
+        unless *allow_vector_loss* says the caller chose that loss.
 
         When *policy* is given (the HTTP API passes ``indexing_policy()``), an
         out-of-bounds top-level path raises ``ValueError`` and nested escapes are
@@ -360,11 +366,23 @@ class Collection(_CollectionFiles, _CollectionSidecar, _CollectionIndexing,
         # both locks.
         with _collection_lock(self.name), self._write_lock("an index", on_progress):
             self._load_reporting(on_progress)
-            return self._add_paths_locked(
-                paths, embed_fn=embed_fn, classify_fn=classify_fn,
-                describe_image_fn=describe_image_fn,
-                on_progress=on_progress, policy=policy, force=force,
-                model_name=model_name)
+            with self._unchanged_on_refusal():
+                return self._add_paths_locked(
+                    paths, embed_fn=embed_fn, classify_fn=classify_fn,
+                    describe_image_fn=describe_image_fn,
+                    on_progress=on_progress, policy=policy, force=force,
+                    allow_vector_loss=allow_vector_loss, model_name=model_name)
+
+    @contextlib.contextmanager
+    def _unchanged_on_refusal(self):
+        """Run a write that may raise ``EmbeddingLossRefused``; on that refusal
+        this instance is re-read from disk, so the documents the write had
+        already replaced in memory are not left behind."""
+        try:
+            yield
+        except EmbeddingLossRefused:
+            self._load(use_cache=False)
+            raise
 
     def resync(self, *, embed_fn: Optional[EmbedFn] = None,
                classify_fn: Optional[ClassifyFn] = None,
@@ -373,6 +391,7 @@ class Collection(_CollectionFiles, _CollectionSidecar, _CollectionIndexing,
                policy: Optional[dict] = None,
                force: bool = False,
                prune_missing: bool = False,
+               allow_vector_loss: bool = False,
                model_name: Optional[str] = None) -> dict:
         """Bring the index back in line with the folders it was built from.
 
@@ -400,7 +419,7 @@ class Collection(_CollectionFiles, _CollectionSidecar, _CollectionIndexing,
         now. Callers that run unattended (the jobs runner) always pass one.
 
         *model_name*: see ``add_paths()`` - forwarded to the same first-embed
-        recording.
+        recording. *allow_vector_loss*: see ``add_paths()``.
 
         Returns the ``add_paths`` counters plus ``missing`` (newly flagged),
         ``still_missing`` (flagged by an earlier run and still gone),
@@ -411,17 +430,19 @@ class Collection(_CollectionFiles, _CollectionSidecar, _CollectionIndexing,
         """
         with _collection_lock(self.name), self._write_lock("a re-sync", on_progress):
             self._load_reporting(on_progress)
-            return self._resync_locked(
-                embed_fn=embed_fn, classify_fn=classify_fn,
-                describe_image_fn=describe_image_fn, on_progress=on_progress,
-                policy=policy, force=force, prune_missing=prune_missing,
-                model_name=model_name)
+            with self._unchanged_on_refusal():
+                return self._resync_locked(
+                    embed_fn=embed_fn, classify_fn=classify_fn,
+                    describe_image_fn=describe_image_fn, on_progress=on_progress,
+                    policy=policy, force=force, prune_missing=prune_missing,
+                    allow_vector_loss=allow_vector_loss, model_name=model_name)
 
     def add_uploads(self, uploads: list, *, embed_fn: Optional[EmbedFn] = None,
                     classify_fn: Optional[ClassifyFn] = None,
                     describe_image_fn: Optional[DescribeImageFn] = None,
                     on_progress: Optional[ProgressFn] = None,
                     force: bool = False,
+                    allow_vector_loss: bool = False,
                     model_name: Optional[str] = None) -> dict:
         """Index documents UPLOADED from the caller's own device (the per-device
         path for a client that cannot browse the server disk).
@@ -440,14 +461,17 @@ class Collection(_CollectionFiles, _CollectionSidecar, _CollectionIndexing,
         persist, they just cannot be re-embedded from source.
 
         *model_name*: see ``add_paths()`` - the embedding model's name, recorded
-        the first time this collection is actually embedded.
+        the first time this collection is actually embedded. *force* and
+        *allow_vector_loss*: see ``add_paths()``.
         """
         with _collection_lock(self.name), self._write_lock("an upload", on_progress):
             self._load_reporting(on_progress)
-            return self._add_uploads_locked(
-                uploads, embed_fn=embed_fn, classify_fn=classify_fn,
-                describe_image_fn=describe_image_fn,
-                on_progress=on_progress, force=force, model_name=model_name)
+            with self._unchanged_on_refusal():
+                return self._add_uploads_locked(
+                    uploads, embed_fn=embed_fn, classify_fn=classify_fn,
+                    describe_image_fn=describe_image_fn,
+                    on_progress=on_progress, force=force,
+                    allow_vector_loss=allow_vector_loss, model_name=model_name)
 
     def reembed(self, *, embed_fn: EmbedFn, model_name: Optional[str] = None,
                 on_progress: Optional[ProgressFn] = None,

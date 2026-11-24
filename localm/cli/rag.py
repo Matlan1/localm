@@ -30,10 +30,21 @@ def _refuse_if_locked(console):
 @contextlib.contextmanager
 def _refuse_bad_path(console):
     """Turn a ValueError raised while indexing (a refused path, a dimension
-    mismatch) into a red message and exit 1 instead of a traceback."""
+    mismatch, a re-index that could not keep its embeddings) into a red message
+    and exit 1 instead of a traceback."""
     from rich.markup import escape
+
+    from ..rag import EmbeddingLossRefused
     try:
         yield
+    except EmbeddingLossRefused as e:
+        console.print(f"[red]{escape(str(e))}[/red]")
+        console.print(
+            "[yellow]Start a localm server that has an embedding model "
+            "('localm setup-embeddings') and run this again, or pass --yes "
+            "without --embed to re-index lexical-only and drop the "
+            "embeddings.[/yellow]")
+        sys.exit(1)
     except ValueError as e:
         console.print(f"[red]{escape(str(e))}[/red]")
         sys.exit(1)
@@ -50,14 +61,20 @@ def _require_collection(console, coll, name):
 def _guard_vector_loss(console, coll, name, *, embed, yes, doing, doing_short):
     """Warn and ask before a re-index drops the embeddings *name* has.
 
-    Returns the ``embed`` flag to use. With no vectors, ``--embed`` or ``--yes``
-    nothing is asked. Answering no aborts. With no one to answer (no terminal)
-    the embeddings are kept by re-embedding, never dropped silently and never
-    refused. *doing* names the action in the warning, *doing_short* in the
-    non-interactive note."""
+    Returns ``(embed, allow_loss)``: the ``embed`` flag to use, and whether the
+    person chose to lose the embeddings (``--yes`` without ``--embed``, or an
+    answered yes). With no vectors, ``--embed`` or ``--yes`` nothing is asked.
+    Answering no aborts. With no one to answer (no terminal) the embeddings are
+    kept by re-embedding, and if that cannot be done the re-index is refused
+    rather than dropping them. *doing* names the action in the warning,
+    *doing_short* in the non-interactive note."""
     from rich.markup import escape
-    if embed or yes or not coll.stats().get("has_vectors"):
-        return embed
+    if embed:
+        return True, False
+    if not coll.stats().get("has_vectors"):
+        return False, True
+    if yes:
+        return False, True
     console.print(
         f"[yellow]'{escape(name)}' currently has semantic (hybrid) search. "
         f"{doing} without --embed will REMOVE the existing embeddings for "
@@ -71,12 +88,13 @@ def _guard_vector_loss(console, coll, name, *, embed, yes, doing, doing_short):
     except click.Abort:
         console.print(
             "[yellow]Not an interactive terminal, so nothing can answer that. "
-            f"{doing_short} WITH embeddings so they are not lost - pass --yes to "
-            "continue lexical-only instead, or --embed to silence this.[/yellow]")
-        return True
+            f"{doing_short} WITH embeddings so they are not lost, and refuses if "
+            "they cannot be computed - pass --yes to continue lexical-only "
+            "instead, or --embed to silence this.[/yellow]")
+        return True, False
     if not proceed:
         raise click.Abort()
-    return embed
+    return False, True
 
 
 def _note_vector_gap(console, name, *, had_vectors, embedded, result):
@@ -193,7 +211,9 @@ def rag_add(collection, paths, force, embed, url, yes):
     --force on a collection that HAS embeddings, without --embed, would drop
     them for every re-indexed document, so you are asked first. Run
     non-interactively there is nothing to answer, so the embeddings are kept by
-    re-embedding; pass --yes to accept the drop.
+    re-embedding, and the command stops with exit 1, changing nothing, when no
+    embedder can be reached; pass --yes to accept the drop. --embed with an
+    unreachable embedder stops the same way.
 
     \b
     Examples:
@@ -218,8 +238,9 @@ def rag_add(collection, paths, force, embed, url, yes):
     from ..rag._store.indexing import count_noun
     coll = run_or_die(Collection, collection)
     had_vectors = bool(coll.exists() and coll.stats().get("has_vectors"))
+    allow_loss = False
     if force:
-        embed = _guard_vector_loss(
+        embed, allow_loss = _guard_vector_loss(
             console, coll, collection, embed=embed, yes=yes,
             doing="Re-indexing with --force", doing_short="Re-indexing")
     embed_fn = _cli_rag_embed_fn(url) if embed else None
@@ -238,6 +259,7 @@ def rag_add(collection, paths, force, embed, url, yes):
         try:
             result = coll.add_paths(
                 list(paths), force=force, embed_fn=embed_fn, model_name=model_name,
+                allow_vector_loss=allow_loss,
                 on_progress=lambda t, **_: console.print(f"  [dim]{escape(t)}[/dim]"))
         except ValueError:
             if created_here:
@@ -277,9 +299,9 @@ def rag_repair(collection, embed, url, yes):
     re-indexed chunk gets no vector and a collection that had semantic search
     drops to lexical-only (BM25). On a collection that HAS embeddings you are
     asked before that happens. Run non-interactively (cron, CI, a script) there
-    is nothing to answer, so repair keeps the embeddings rather than dropping
-    them silently or refusing to run; pass --yes to accept the drop, or --embed
-    to recompute them explicitly.
+    is nothing to answer, so repair keeps the embeddings by re-embedding, and
+    stops with exit 1, changing nothing, when no embedder can be reached; pass
+    --yes to accept the drop, or --embed to recompute them explicitly.
     """
     from localm.console import SafeConsole as Console
     from rich.markup import escape
@@ -342,8 +364,9 @@ def rag_repair(collection, embed, url, yes):
     # A repair is force=True on every doc: without --embed, every re-indexed
     # chunk gets NO vector, dropping a collection that currently has semantic
     # search back to BM25-only. Surface that and require an explicit yes.
-    embed = _guard_vector_loss(console, coll, collection, embed=embed, yes=yes,
-                               doing="Repairing", doing_short="Repairing")
+    embed, allow_loss = _guard_vector_loss(
+        console, coll, collection, embed=embed, yes=yes,
+        doing="Repairing", doing_short="Repairing")
     embed_fn = _cli_rag_embed_fn(url) if embed else None
     # See `rag add`: record the model this repair actually re-embeds with.
     model_name = None
@@ -355,6 +378,7 @@ def rag_repair(collection, embed, url, yes):
     with _refuse_if_locked(console), _refuse_bad_path(console):
         result = coll.add_paths(
             paths, force=True, embed_fn=embed_fn, model_name=model_name,
+            allow_vector_loss=allow_loss,
             on_progress=lambda t, **_: console.print(f"  [dim]{escape(t)}[/dim]"))
     console.print(f"[green]repaired: {result['updated']} re-indexed, "
                   f"{result['added']} added[/green] - "
