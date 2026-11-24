@@ -827,7 +827,7 @@ still goes ahead and the missed policy is logged rather than silently dropped.
 localm's HTTP surface is protected by a bearer key. Manage the owner key and mint named, scope-limited keys from the CLI:
 
 ```bash
-localm key show [--reveal]      # show the active owner key (masked, or full with --reveal) or "open mode"
+localm key show [--reveal]      # show the active owner key (masked, or full with --reveal), or that no key is set: "open mode", or locked by require_auth
 localm key generate             # generate a random owner key, persist it, print it once
 localm key set KEY              # persist a specific owner key you provide (8+ characters: letters, digits, - and _)
 localm key clear [-y]           # remove every key, return to open mode (-y skips the confirmation, except for the last key, which needs a terminal and always asks)
@@ -847,6 +847,8 @@ Removing the last key (`key clear`, or `key rm` of the only key with no owner ke
 - `--fs-access [none|host]` - host filesystem reach for the coder/file tools. Defaults to `none` (device-upload-only); `host` grants the whole server disk, same as the owner.
 - `--rag-root DIR` (repeatable) - confines the key's whole RAG reach (indexing and every other collection route) to exactly these folders instead of the global folder policy. Omit for no per-key restriction. See [docs/rag.md](rag.md#per-key-folder-scoping).
 - `--expires-in SECONDS` - the key stops working this many seconds after creation. Omitted means it never expires.
+
+A scope is one of localm's own or the scope of an installed plugin; any other is refused and nothing is minted, so install a third-party plugin before making a key for it.
 
 Privileged scopes (`config:write`, `plugins:admin`, `keys:admin`, `admin`, `coder:full`) are refused by `key create` unless you pass `--allow-privileged`; an owner-authenticated `POST /v1/keys` API call can mint them too. See [security.md](security.md) for the auth and scope model, and [docs/tls.md](tls.md) for serving over a LAN.
 

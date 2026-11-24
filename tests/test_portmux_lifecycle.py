@@ -149,6 +149,104 @@ def test_relay_pumps_bytes_both_directions_byte_for_byte():
     asyncio.run(go())
 
 
+def _relay_once_with_failing_hops(monkeypatch, failures):
+    """The reply a client gets through ``_relay`` while the first *failures*
+    connections from portmux to the internal server fail."""
+    async def go():
+        echo_server, internal_port = await _make_echo_server()
+        real = asyncio.open_connection
+        left = [failures]
+
+        async def hop(*a, **kw):
+            if kw.pop("client", False):
+                return await real(*a, **kw)
+            if left[0]:
+                left[0] -= 1
+                raise OSError(10055, "no buffer space")
+            return await real(*a, **kw)
+
+        monkeypatch.setattr(portmux, "_UPSTREAM_RETRY_DELAYS", (0.01, 0.01))
+        monkeypatch.setattr(portmux.asyncio, "open_connection", hop)
+
+        async def on_client(reader, writer):
+            first = await reader.readexactly(1)
+            await portmux._relay(first, reader, writer, internal_port)
+            writer.close()
+
+        front = await asyncio.start_server(on_client, host="127.0.0.1", port=0)
+        try:
+            reader, writer = await hop(
+                "127.0.0.1", front.sockets[0].getsockname()[1], client=True)
+            writer.write(b"hello")
+            await writer.drain()
+            writer.write_eof()
+            try:
+                return await asyncio.wait_for(reader.read(-1), timeout=10)
+            except ConnectionError:
+                return b""
+            finally:
+                writer.close()
+        finally:
+            asyncio.open_connection = real
+            front.close()
+            echo_server.close()
+    return asyncio.run(go())
+
+
+@pytest.fixture
+def portmux_log(monkeypatch):
+    """Every record portmux logs, as ``(level, text)``, with no outage pending."""
+    import logging
+    records = []
+    monkeypatch.setattr(portmux, "_upstream_down", False)
+    monkeypatch.setattr(portmux, "stopping", lambda: False)
+    monkeypatch.setattr(portmux._log, "log",
+                        lambda lv, msg, *a: records.append((lv, msg % a)))
+    monkeypatch.setattr(portmux._log, "info",
+                        lambda msg, *a: records.append((logging.INFO, msg % a)))
+    return records
+
+
+def test_a_connection_survives_a_failed_hop_to_the_internal_server(
+        monkeypatch, portmux_log):
+    assert _relay_once_with_failing_hops(monkeypatch, 2) == b"hello"
+    assert portmux_log == []
+
+
+def test_an_outage_is_warned_about_once_and_its_end_is_logged(monkeypatch, portmux_log):
+    import logging
+    for _ in range(3):
+        assert _relay_once_with_failing_hops(monkeypatch, 99) == b""
+    levels = [lv for lv, _ in portmux_log]
+    assert levels == [logging.WARNING, logging.DEBUG, logging.DEBUG]
+    assert "no buffer space" in portmux_log[0][1]
+    assert _relay_once_with_failing_hops(monkeypatch, 0) == b"hello"
+    assert portmux_log[-1][0] == logging.INFO
+
+
+def test_handing_a_connection_over_takes_a_bounded_time(monkeypatch, portmux_log):
+    async def never(*a, **kw):
+        await asyncio.sleep(60)
+
+    async def go():
+        monkeypatch.setattr(portmux.asyncio, "open_connection", never)
+        begun = asyncio.get_running_loop().time()
+        assert await portmux._open_upstream(9) is None
+        return asyncio.get_running_loop().time() - begun
+
+    assert asyncio.run(go()) < portmux._UPSTREAM_BUDGET_S + 1.0
+    assert "TimeoutError" in portmux_log[0][1]
+
+
+def test_a_refused_port_is_given_up_within_the_budget(portmux_log):
+    async def go():
+        begun = asyncio.get_running_loop().time()
+        assert await portmux._open_upstream(_free_port()) is None
+        return asyncio.get_running_loop().time() - begun
+
+    assert asyncio.run(go()) < portmux._UPSTREAM_BUDGET_S + 1.0
+
+
 # --------------------------------------------------------------------------- #
 #  _serve_async_plain / _serve_async: real end-to-end lifecycle
 # --------------------------------------------------------------------------- #

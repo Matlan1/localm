@@ -601,8 +601,13 @@ def _job_progress(job):
     The structured branch reuses the SAME ``done``/``total``/``unit`` the text was
     already formatted from - rag/_store/indexing.py builds both from one set of
     numbers in a single call - rather than a second, independent computation here
-    that could drift from the line a viewer reads."""
+    that could drift from the line a viewer reads.
+
+    Raises ``jobmanager.JobCancelled`` once the job was cancelled, which ends the
+    run: an index being written is finished first, otherwise nothing of the run is
+    saved."""
     def _cb(text: str, *, phase=None, done=None, total=None, unit=None) -> None:
+        job.raise_if_cancelled()
         job.push({"type": "line", "text": text})
         _log_progress(text)
         if done is not None or total is not None:

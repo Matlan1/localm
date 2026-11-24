@@ -67,7 +67,7 @@ def register(app: FastAPI, ctx) -> None:
         # Mint an OPAQUE server-side session; the cookie carries the session id,
         # never the raw key. The scope/identity/fs-access snapshot is taken now, so
         # the session stays valid across a key roll.
-        from localm import scopes as S, sessions
+        from localm import scopes as S
         from localm.auth import _hash_key, _is_owner_key, fs_access_for, rag_roots_for
 
         def _snapshot():
@@ -90,13 +90,10 @@ def register(app: FastAPI, ctx) -> None:
         # write auth.kdf.json under its cross-process lock) run off the event loop.
         fs, rag_roots, key_hash, owner_key_minted = await run_in_threadpool(_snapshot)
         sid = await run_in_threadpool(
-            lambda: sessions.create(scopes=held, key_hash=key_hash,
-                                    fs_access=fs, rag_roots=rag_roots,
-                                    owner_key_minted=owner_key_minted))
-        secure = request.url.scheme == "https"
-        response.set_cookie(_hs.session_cookie_name(request), sid, httponly=True,
-                            secure=secure, samesite="strict", path="/",
-                            max_age=_hs.SESSION_MAX_AGE)
+            lambda: _hs.start_session(request, response, scopes=held,
+                                      key_hash=key_hash, fs_access=fs,
+                                      rag_roots=rag_roots,
+                                      owner_key_minted=owner_key_minted))
         # CSRF token is DERIVED from the session (not a separate cookie that could
         # be cleared independently and desync); hand it back for the client to echo
         # as X-CSRF-Token on state-changing requests.
@@ -105,33 +102,27 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/api/session/logout", include_in_schema=False)
     async def session_logout(request: Request, response: Response):
-        """Sign the browser out: revoke the session and clear its cookie.
+        """Sign the browser out: revoke every session of this install it presents
+        and clear their cookies.
 
         A POST from the cookie-authenticated browser GUI is subject to the same CSRF
         check as every other state-changing endpoint (the X-CSRF-Token header must
         match the token derived from the session). A bearer-header caller (CLI / SDK)
         is CSRF-exempt because it cannot be driven cross-site."""
-        token, source = _request_token(request)
+        _, source = _request_token(request)
         if source == "cookie" and not _csrf_ok(request):
             raise HTTPException(
                 403,
                 "Missing or invalid CSRF token. Send the session's csrf token "
                 "(from GET /api/session) in the X-CSRF-Token header.")
-        # Real, server-side logout: drop the session row so the cookie value can
-        # never be replayed.
+        # Real, server-side logout: drop the session rows so a cookie value can
+        # never be replayed. A store that could not be written leaves the ids
+        # VALID on the server, so that is not a clean sign-out; sessions has
+        # already logged the failure and its cause locally.
+        from localm import sessions
         warnings: list[str] = []
-        if source == "cookie" and token:
-            from localm import sessions
-            if await run_in_threadpool(sessions.revoke, token) is None:
-                # The store write failed, so the session id is STILL VALID on the
-                # server. Clearing the cookie below stops this browser using it,
-                # but the session survives, so this does not report a clean
-                # sign-out. sessions.revoke has already logged the failure and
-                # its cause locally.
-                warnings.append(sessions.REVOKE_FAILURE_LABEL)
-        secure = request.url.scheme == "https"
-        for _name in {_hs.session_cookie_name(request), _hs.SESSION_COOKIE}:
-            response.delete_cookie(_name, path="/", httponly=True, secure=secure, samesite="strict")
+        if not await run_in_threadpool(_hs.end_sessions, request, response):
+            warnings.append(sessions.REVOKE_FAILURE_LABEL)
         # "authed" stays False and is honest either way: this browser's cookie is
         # gone. The warning says the SERVER-side session was not dropped, which is
         # a different fact and the one a caller cannot otherwise discover.
@@ -174,14 +165,8 @@ def register(app: FastAPI, ctx) -> None:
         # everywhere - and READ THE RESULT: revoke_all returns None when the store
         # could not be written, which is a failed sign-out, not an empty store.
         from localm import sessions
+        await run_in_threadpool(_hs.end_sessions, request, response)
         revoked = await run_in_threadpool(sessions.revoke_all)
-        secure = request.url.scheme == "https"
-        # Invalidate the session cookie immediately so the browser is forced
-        # back to the key gate on the next navigation (the old cookie value
-        # no longer matches any key). Also clear the CSRF token.
-        for _name in {_hs.session_cookie_name(request), _hs.SESSION_COOKIE}:
-            response.delete_cookie(_name, path="/", httponly=True,
-                                   secure=secure, samesite="strict")
         from localm.debuglog import logger as _dbg
         # A security step that failed must never report success. BOTH halves of
         # this route are such a step, and each can fail on its own: a surviving
@@ -321,18 +306,13 @@ def register(app: FastAPI, ctx) -> None:
         # Loopback + open-mode only: a network bind already required a key up
         # front, so this never fires there.
         if was_open and _is_loopback(getattr(app.state, "bind_host", "127.0.0.1")):
-            from localm import sessions
             # owner_key_minted is PROVEN, not assumed: _is_owner_key re-compares
             # against the live value, so a write that somehow did not take reports
             # False instead of stamping a privilege nothing established.
-            sid = await run_in_threadpool(
-                lambda: sessions.create(scopes={scopes.ADMIN},
-                                        key_hash=auth._hash_key(key), fs_access="host",
-                                        owner_key_minted=auth._is_owner_key(key)))
-            secure = request.url.scheme == "https"
-            response.set_cookie(_hs.session_cookie_name(request), sid, httponly=True,
-                                secure=secure, samesite="strict", path="/",
-                                max_age=_hs.SESSION_MAX_AGE)
+            await run_in_threadpool(
+                lambda: _hs.start_session(request, response, scopes={scopes.ADMIN},
+                                          key_hash=auth._hash_key(key), fs_access="host",
+                                          owner_key_minted=auth._is_owner_key(key)))
 
         from localm.debuglog import logger as _dbg
         # Never the key itself, and no filesystem path: this log is attached to bug
@@ -347,13 +327,15 @@ def register(app: FastAPI, ctx) -> None:
                 "warnings": warnings}
 
     @app.get("/api/session", include_in_schema=False)
-    async def session_state(request: Request):
+    async def session_state(request: Request, response: Response):
         """Report whether the caller is authenticated, so the GUI can show or hide
         its key gate without ever reading the key. *authed* reflects the presented
         cookie/header; *required* is True when a key is configured. For a cookie
         session it also returns the ``csrf`` token derived from that session, so the
         client always has a token in lockstep with its session (it can never desync)
-        and can refresh it after a server restart rotated the secret.
+        and can refresh it after a server restart rotated the secret. A session that
+        arrived under a cookie name of an older build, or of the other scheme, is
+        moved to this install's own name.
         *session_mode* is the mode a chat from this caller, sent with these same
         headers, is recorded under (another localm instance reads it before
         forwarding a chat here)."""
@@ -368,6 +350,8 @@ def register(app: FastAPI, ctx) -> None:
             held = prin[0] if prin else None
             csrf = (_hs.csrf_token_for(request, token)
                     if (held is not None and source == "cookie" and token) else "")
+            if csrf and not _hs.move_session_to_own_name(request, response):
+                held, csrf = None, ""
             return {"authed": held is not None,
                     "scopes": sorted(held) if held else [],
                     "required": configured or require_auth_enabled(),

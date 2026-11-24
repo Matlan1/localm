@@ -71,7 +71,7 @@ def test_login_sets_httponly_session_and_returns_csrf_token(client):
     r = _login(client)
     assert r.status_code == 200, r.text
     cookies = " ; ".join(_set_cookies(r))
-    session_sc = [c for c in _set_cookies(r) if c.startswith(SESSION_COOKIE + "=")]
+    session_sc = [c for c in _set_cookies(r) if c.startswith(SESSION_COOKIE + "_")]
     assert session_sc, f"no {SESSION_COOKIE} cookie set: {cookies}"
     # auth cookie: NOT readable by JS, not sent cross-site
     assert "httponly" in session_sc[0].lower()
@@ -90,7 +90,7 @@ def test_session_cookie_is_persistent(client):
     r = _login(client)
     assert r.status_code == 200, r.text
     session_sc = [c for c in _set_cookies(r)
-                  if c.startswith(SESSION_COOKIE + "=")][0].lower()
+                  if c.startswith(SESSION_COOKIE + "_")][0].lower()
     assert f"max-age={SESSION_MAX_AGE}" in session_sc, session_sc
     assert SESSION_MAX_AGE > 0
 
@@ -98,7 +98,7 @@ def test_session_cookie_is_persistent(client):
 def test_login_with_bad_key_rejected_no_cookie(client):
     r = client.post("/api/session", json={"key": "wrong-key"})
     assert r.status_code == 401
-    assert not [c for c in _set_cookies(r) if c.startswith(SESSION_COOKIE + "=")]
+    assert not [c for c in _set_cookies(r) if c.startswith(SESSION_COOKIE)]
 
 
 def test_session_cookie_is_opaque_not_the_key(client):
@@ -106,7 +106,7 @@ def test_session_cookie_is_opaque_not_the_key(client):
     secret must not sit in a browser cookie jar (the pre-rework design flaw)."""
     r = _login(client)
     assert r.status_code == 200
-    sid = client.cookies.get(SESSION_COOKIE)
+    [sid] = [v for n, v in client.cookies.items() if n.startswith(SESSION_COOKIE)]
     assert sid and sid != SECRET
     assert SECRET not in " ".join(_set_cookies(r))
 
@@ -328,7 +328,7 @@ def test_login_in_open_mode_no_bypass(tmp_path, monkeypatch):
         r = c.post("/api/session", json={"key": "anything"})
     assert r.status_code in (400, 403), r.text
     assert not [x for x in r.headers.get_list("set-cookie")
-                if x.startswith(SESSION_COOKIE + "=")]
+                if x.startswith(SESSION_COOKIE)]
 
 
 def test_require_auth_no_key_fails_closed_even_with_forged_cookie(tmp_path, monkeypatch):

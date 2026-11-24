@@ -413,7 +413,7 @@ def test_get_and_post_require_config_scopes_not_the_plugins_own_scope(env):
 
     _install_real_plugin(env)
     auth.set_api_key("owner-secret-key-plugsettings")
-    myplug_only = auth.create_key("user", ["myplug"])["key"]
+    myplug_only = auth.create_key("user", ["myplug"], plugin_scopes={"myplug"})["key"]
     client = TestClient(create_app(None))
     hdr = {"Authorization": f"Bearer {myplug_only}"}
     assert client.get("/v1/plugins/settings", headers=hdr).status_code == 403

@@ -584,7 +584,7 @@ class _Installer:
         self._result = result or provision.ProvisionResult(
             ok=True, message="Chromium installed at /fake/chrome.")
 
-    def __call__(self, *, force=False, on_progress=None):
+    def __call__(self, *, force=False, on_progress=None, should_cancel=None, kill=None):
         self.calls += 1
         if on_progress is not None:
             on_progress("downloading 10%")
