@@ -273,8 +273,8 @@ def _plans_folder(root, update_id: str) -> Path:
 
 
 def write_plan(root, update_id: str, plan: Plan) -> None:
-    """Put *plan* on disk. Raises OSError, and ValueError for a plan that could not
-    be read back."""
+    """Put *plan* on disk. Raises OSError, and :class:`Unreadable` or
+    :class:`Unsafe` for a plan that could not be read back."""
     raw = {"format": FORMAT, **asdict(plan)}
     parse(raw)
     disk.write_json(_plans_folder(root, update_id) / f"{plan.number:02d}-{plan.step}.json", raw)
@@ -326,7 +326,7 @@ def _protected(rel: str, protect: Iterable[str]) -> bool:
 
 
 def plan_files(root, update_id: str, new_files: Mapping, old_files: Optional[Mapping] = None, *,
-               swap: Iterable[str] = (), protect: Iterable[str] = ()) -> Plan:
+               swap: Iterable[str] = (), protect: Iterable[str]) -> Plan:
     """The plan that turns the install at *root* into the release extracted in
     ``<id>/new``. Reads only.
 
@@ -334,14 +334,15 @@ def plan_files(root, update_id: str, new_files: Mapping, old_files: Optional[Map
     installed one to ``{"sha256", "size"}`` (the ``files`` of their statements).
     A file only *old_files* names is removed; with None nothing is removed and no
     file counts as edited. *swap* are the paths that are never absent; they go
-    first, in that order. *protect* are further paths, relative to *root*, that are
-    left alone with everything below them (the data folder, a models folder).
+    first, in that order. *protect* are the user's own folders below *root* besides
+    the ones no update touches (a data or models folder kept there), relative to
+    *root*; they are left alone with everything in them.
 
     Raises :class:`Refused` for an extracted file that differs from its statement,
     a path on another volume or a name that is taken by something else,
     :class:`Unsafe` for a path outside *root* or through a link, and OSError."""
     a = area(root, update_id, FILES)
-    swap, protect = list(swap), list(protect)
+    swap, protect = list(swap), [disk.clean(p) for p in protect]
     volume = os.lstat(a.new).st_dev
     package = shared.update_package
     stated = dict(new_files)
@@ -509,16 +510,12 @@ def check(a: Area, plan: Plan) -> list:
 def back(root, update_id: str, plan: Plan, *, wait_s: Optional[float] = None) -> list:
     """Put back what *plan* replaced and take out what it added, from what is on
     disk now, and check every file. Safe to repeat, and to run on a plan of which
-    nothing or only a part was done. Returns one line per file that is not as it
-    was before the step; empty when all are."""
+    nothing or only a part was done. A file somebody wrote meanwhile in the place of
+    one this step moved goes to the area's *kept* folder. Returns one line per file
+    that is not as it was before the step; empty when all are."""
     a = area(root, update_id, plan.step)
     wait = Wait(wait_s)
     errors: dict = {}
-    if plan.before is not None:
-        try:
-            _take_out_extra(a, plan, wait, errors)
-        except OSError as e:
-            errors[plan.step] = str(e)
     created = frozenset(plan.folders)
     for op in reversed(plan.ops):
         try:
@@ -535,16 +532,18 @@ def back(root, update_id: str, plan: Plan, *, wait_s: Optional[float] = None) ->
             if op.old is None:
                 if st is not None and not stat.S_ISDIR(st.st_mode):
                     errors[op.path] = f"{op.path} was added and is still there"
-            elif not disk.same(path, op.old):
+            elif not disk.same(path, op.old) and (st is None or not _edited_since(a, op, path)):
                 errors[op.path] = f"{op.path} is not the file it was before the update"
         except (OSError, Unsafe) as e:
             errors[op.path] = f"{op.path} cannot be checked: {e}"
-    if plan.before is not None and not errors:
-        try:
-            _compare(a, plan.before, errors)
-        except (OSError, Unsafe) as e:
-            errors[plan.step] = str(e)
     return list(errors.values())
+
+
+def _edited_since(a: Area, op: Op, path: Path) -> bool:
+    """Whether the file at *path*, which is not the old one, is somebody's later
+    version of it that this update did not touch. Only in an area whose plan knows
+    the new files."""
+    return a.exact and (op.new is None or not disk.same(path, op.new))
 
 
 def _undo(a: Area, op: Op, wait: Wait) -> None:
@@ -553,7 +552,7 @@ def _undo(a: Area, op: Op, wait: Wait) -> None:
     kept, kept_st = a.beside(a.old, op.path)
     if op.old is None:
         if present:
-            _aside(a, op, path, wait)
+            aside(a, op, path, wait)
         return
     if kept_st is None:
         return
@@ -564,7 +563,7 @@ def _undo(a: Area, op: Op, wait: Wait) -> None:
         disk.put_over(kept, path, wait)
         return
     if present:
-        _aside(a, op, path, wait)
+        aside(a, op, path, wait)
     disk.move(kept, path, wait)
 
 
@@ -577,7 +576,10 @@ def _prune_created(a: Area, rel: str, created: frozenset) -> None:
         parent = parent.rpartition("/")[0]
 
 
-def _aside(a: Area, op: Op, path: Path, wait: Wait) -> None:
+def aside(a: Area, op: Op, path: Path, wait: Wait) -> None:
+    """Move the file at *path* out of the install: to *new* when it is the new file
+    of *op*, else to *kept* under a free name. Raises :class:`.disk.Held` or
+    OSError."""
     target, st = a.beside(a.new, op.path)
     if st is not None or op.new is None or not disk.same(path, op.new):
         target, st = a.beside(a.kept, op.path)
@@ -586,56 +588,3 @@ def _aside(a: Area, op: Op, path: Path, wait: Wait) -> None:
             n += 1
             target, st = a.beside(a.kept, f"{op.path}.{n}")
     disk.move(path, target, wait)
-
-
-def _take_out_extra(a: Area, plan: Plan, wait: Wait, errors: dict) -> None:
-    before = (plan.before or {})["files"]
-    planned = {op.path for op in plan.ops}
-    for rel in listing(a.base)["files"]:
-        if rel in before or rel in planned:
-            continue
-        try:
-            _aside(a, Op(rel, REMOVE), a.find(rel)[0], wait)
-        except (OSError, Held, Unsafe) as e:
-            errors.setdefault(rel, str(e))
-
-
-def _compare(a: Area, before: dict, errors: dict) -> None:
-    for rel in before["folders"]:
-        path, st = a.find(rel)
-        if st is None:
-            path.mkdir(parents=True, exist_ok=True)
-    now = listing(a.base)
-    extra = set(now["folders"]) - set(before["folders"])
-    for rel in sorted(extra, key=lambda f: f.count("/"), reverse=True):
-        path = a.find(rel)[0]
-        disk.prune(path, path.parent)
-        if disk.lstat(path) is not None:
-            errors[rel] = f"the folder {rel} was added and is still there"
-    for rel in sorted(set(before["files"]) | set(now["files"])):
-        if before["files"].get(rel) != now["files"].get(rel):
-            errors[rel] = f"{rel} was changed and cannot be put back"
-
-
-def listing(base: Path) -> dict:
-    """``{"files": {path: identity}, "folders": [path]}`` of everything in the venv
-    at *base* except compiled Python files, uv's lock file and what a package step
-    keeps there. A link is listed and not followed. Raises OSError."""
-    files: dict = {}
-    folders: list = []
-    todo = [("", base)]
-    while todo:
-        prefix, folder = todo.pop()
-        with os.scandir(folder) as entries:
-            names = sorted(e.name for e in entries)
-        for name in names:
-            rel = prefix + name
-            if name == disk.PYCACHE or rel in (VENV_FOLDER, ".lock"):
-                continue
-            st = os.lstat(folder / name)
-            if stat.S_ISDIR(st.st_mode) and not disk.is_link(st):
-                folders.append(rel)
-                todo.append((rel + "/", folder / name))
-            else:
-                files[rel] = disk.quick_identity(folder / name)
-    return {"files": files, "folders": sorted(folders)}

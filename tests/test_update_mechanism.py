@@ -51,7 +51,7 @@ def planned(root: Path, **kw):
     with job.Lock(root) as lock:
         job.start(lock, ID, old="1", new="2")
         job.advance(lock, job.MOVING)
-        plan = mover.plan_files(root, ID, new_files, protect=["mydata"], **kw)
+        plan = mover.plan_files(root, ID, new_files, protect=["MyData"], **kw)
         mover.write_plan(root, ID, plan)
     return plan
 
@@ -130,10 +130,12 @@ def test_a_file_changed_after_the_plan_takes_the_whole_step_back(root):
     plan = planned(root)
     (root / "localm" / "changed.py").write_bytes(b"edited meanwhile")
     before = um.tree(root)
-    with pytest.raises(mover.StepFailed, match="localm/changed.py changed while"):
+    with pytest.raises(mover.StepFailed, match="localm/changed.py changed while") as e:
         mover.forward(root, ID, plan)
     now = um.tree(root)
     assert now == before
+    assert e.value.errors == []
+    assert undo(root).state == "old" and um.tree(root) == before
 
 
 def test_an_edited_file_is_kept_after_the_update(root):
@@ -422,7 +424,9 @@ def test_a_path_outside_the_install_is_refused(root, bad):
     with pytest.raises(disk.Unsafe):
         planned(root, new_files={**files, bad: digest})
     with pytest.raises(disk.Unsafe):
-        mover.plan_files(root, ID, files, {**um.stated(um.OLD), bad: digest})
+        mover.plan_files(root, ID, files, {**um.stated(um.OLD), bad: digest}, protect=())
+    with pytest.raises(disk.Unsafe):
+        mover.plan_files(root, ID, files, protect=[bad])
     assert outside.read_bytes() == b"not mine"
 
 
@@ -432,7 +436,7 @@ def test_a_path_outside_the_install_is_refused(root, bad):
 def test_a_windows_spelling_of_another_path_is_refused(root, bad):
     digest = um.stated({"x": "x"})["x"]
     with pytest.raises(disk.Unsafe):
-        mover.plan_files(root, ID, {**um.stage(root), bad: digest})
+        mover.plan_files(root, ID, {**um.stage(root), bad: digest}, protect=())
 
 
 @windows_only

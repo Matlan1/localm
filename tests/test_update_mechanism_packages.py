@@ -515,6 +515,18 @@ def test_a_changed_file_that_nobody_planned_is_a_failure_that_is_named(root, wor
     assert versions(root)["alpha"] == "1.0"
 
 
+def test_a_file_no_package_lists_does_not_stop_the_way_back(root, world):
+    """A program may write its own files into the venv while the new version runs."""
+    own = site(root) / "beta_cache.txt"
+    own.write_bytes(b"cache")
+    made = plan(root, world)
+    forward(root, world, made)
+    own.write_bytes(b"cache written again")
+    result = undo(root)
+    assert (result.state, result.errors) == ("old", [])
+    assert own.read_bytes() == b"cache written again" and versions(root)["alpha"] == "1.0"
+
+
 def test_a_removed_file_that_nobody_planned_is_a_failure_that_is_named(root, world):
     made = plan(root, world)
     run = tampering(world, lambda: (site(root) / "beta.py").unlink())
@@ -699,7 +711,8 @@ def test_packages_are_put_back_before_the_files_of_the_release(template, world, 
     with job.Lock(root) as lock:
         job.start(lock, ID, old="1", new="2")
         job.advance(lock, job.MOVING)
-        files = mover.plan_files(root, ID, new_files, um.stated(um.OLD), swap=um.SWAP)
+        files = mover.plan_files(root, ID, new_files, um.stated(um.OLD), swap=um.SWAP,
+                                 protect=())
         mover.write_plan(root, ID, files)
         mover.forward(root, ID, files)
         job.advance(lock, job.STEPS)

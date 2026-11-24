@@ -52,7 +52,7 @@ def _update(um, spec):
         um.job.advance(lock, um.job.MOVING)
         if spec.get("new_files"):
             plan = um.mover.plan_files(root, update_id, spec["new_files"], spec["old_files"],
-                                       swap=spec["swap"])
+                                       swap=spec["swap"], protect=["mydata"])
             um.mover.write_plan(root, update_id, plan)
             um.mover.forward(root, update_id, plan)
         um.job.advance(lock, um.job.STEPS)

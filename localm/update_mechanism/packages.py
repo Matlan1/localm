@@ -14,6 +14,7 @@ import contextlib
 import os
 import posixpath
 import re
+import stat
 import subprocess
 import time
 from pathlib import Path
@@ -142,7 +143,7 @@ def plan_packages(root, update_id: str, argv: Iterable, *, env: Mapping, project
         raise Refused(f"{venv} has no site-packages")
     if not project and any(name == _OWN for name, _v in removed + installed):
         raise Refused("uv would replace localm itself")
-    before = mover.listing(venv)
+    before = listing(venv)
     infos = shared.updater_components.dist_infos(site)
     paths: dict = {}
     for name in sorted({name for name, _v in removed}):
@@ -206,7 +207,7 @@ def _verify(a: Area, site: Path, plan: Plan) -> list:
         metadata = f"{inner}/{folder}/METADATA"
         if metadata not in before or metadata in moved:
             allowed.update(_record_paths(site, a.base, folder, name))
-    now = mover.listing(a.base)["files"]
+    now = listing(a.base)["files"]
     wrong = [f"{rel} was removed" for rel in before if rel not in now and rel not in moved]
     wrong += [f"{rel} was changed" for rel in before
               if rel in now and rel not in moved and now[rel] != before[rel]]
@@ -230,9 +231,90 @@ def back(root, update_id: str, plan: Plan, *, wait_s: Optional[float] = None,
     try:
         venv = mover.venv_of(root)
         with _uv_lock(venv, uv_wait_s):
-            return mover.back(root, update_id, plan, wait_s=wait_s)
+            a = mover.area(root, update_id, PACKAGES)
+            errors = _take_out_extra(a, plan, Wait(wait_s))
+            errors += mover.back(root, update_id, plan, wait_s=wait_s)
+            return errors or _differences(a, plan)
     except (OSError, Unsafe, Refused) as e:
         return [str(e)]
+
+
+def _take_out_extra(a: Area, plan: Plan, wait: Wait) -> list:
+    """Move every file out that is neither in the listing *plan* has nor one of its
+    own."""
+    before = (plan.before or {})["files"]
+    planned = {op.path for op in plan.ops}
+    errors = []
+    for rel in listing(a.base)["files"]:
+        if rel in before or rel in planned:
+            continue
+        try:
+            mover.aside(a, Op(rel, REMOVE), a.find(rel)[0], wait)
+        except (OSError, Held, Unsafe) as e:
+            errors.append(str(e))
+    return errors
+
+
+def _differences(a: Area, plan: Plan) -> list:
+    """What still differs from the listing *plan* has, once its files are back:
+    folders are made and removed, and each file of an installed package that is not
+    the listed one is named. A file no package lists is the user's or a program's own
+    and is not."""
+    before = plan.before or {}
+    for rel in before["folders"]:
+        path, st = a.find(rel)
+        if st is None:
+            path.mkdir(parents=True, exist_ok=True)
+    now = listing(a.base)
+    errors = []
+    extra = set(now["folders"]) - set(before["folders"])
+    for rel in sorted(extra, key=lambda f: f.count("/"), reverse=True):
+        path = a.find(rel)[0]
+        disk.prune(path, path.parent)
+        if disk.lstat(path) is not None:
+            errors.append(f"the folder {rel} was added and is still there")
+    wrong = {rel for rel in before["files"] if now["files"].get(rel) != before["files"][rel]}
+    if wrong:
+        wrong &= _listed(a.base)
+    return errors + [f"{rel} was changed and cannot be put back" for rel in sorted(wrong)]
+
+
+def _listed(base: Path) -> set:
+    """The files the installed packages of the venv at *base* list."""
+    site = shared.updater_components.site_packages(base)
+    if site is None:
+        return set()
+    found: set = set()
+    for name, _version, folder in shared.updater_components.dist_infos(site):
+        try:
+            found.update(_record_paths(site, base, folder, name))
+        except Refused:
+            found.add(f"{site.relative_to(base).as_posix()}/{folder}/RECORD")
+    return found
+
+
+def listing(base: Path) -> dict:
+    """``{"files": {path: identity}, "folders": [path]}`` of everything in the venv
+    at *base* except compiled Python files, uv's lock file and what a package step
+    keeps there. A link is listed and not followed. Raises OSError."""
+    files: dict = {}
+    folders: list = []
+    todo = [("", base)]
+    while todo:
+        prefix, folder = todo.pop()
+        with os.scandir(folder) as entries:
+            names = sorted(e.name for e in entries)
+        for name in names:
+            rel = prefix + name
+            if name == disk.PYCACHE or rel in (mover.VENV_FOLDER, ".lock"):
+                continue
+            st = os.lstat(folder / name)
+            if stat.S_ISDIR(st.st_mode) and not disk.is_link(st):
+                folders.append(rel)
+                todo.append((rel + "/", folder / name))
+            else:
+                files[rel] = disk.quick_identity(folder / name)
+    return {"files": files, "folders": sorted(folders)}
 
 
 @contextlib.contextmanager
