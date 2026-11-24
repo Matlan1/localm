@@ -587,6 +587,8 @@ def load_lib() -> ctypes.CDLL:
         )
     lib_path = binary_dir / name
     _warn_if_not_bundled(binary_dir)
+    from localm import comgr_temp
+    comgr_temp.register_if_hip(binary_dir)
 
     # Keep the Vulkan backend's model weights in DEDICATED VRAM. Must run before
     # ggml-vulkan initialises, i.e. before the preload below.
@@ -1213,7 +1215,9 @@ def _spawn_probe_daemon():
     ``sys.executable`` for ordinary venv processes and only redirects where that
     would fail."""
     import subprocess
+    from localm import comgr_temp
     from localm._mp_spawn import interpreter_for_localm_children
+    comgr_temp.watch()
     return subprocess.Popen(
         [interpreter_for_localm_children(), "-u", "-m",
          "localm.inference.backends.llamacpp._vram_probe"],

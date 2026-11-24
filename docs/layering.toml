@@ -107,6 +107,11 @@ role = "Store mechanics every JSON and JSONL store shares: atomic writes, the ch
 units = ["storekit"]
 
 [[tier]]
+name = "process-leftovers"
+role = "What an ended GPU process of localm leaves outside the data folder and its removal. Below configuration, which hands it the data folder, so every place that starts or is such a process can use it."
+units = ["comgr_temp"]
+
+[[tier]]
 name = "process"
 role = "Process and host identity (whether a pid is running, when a process or thread started, which pid table a pid belongs to) and the full paths of the system's own programs. Stdlib only, so the store lock, instance discovery and every liveness-based lock read one answer."
 units = ["procid", "sysprog"]

@@ -5548,6 +5548,15 @@ def _dbg_swallow(msg: str, *, level: str = "debug") -> None:
         pass
 
 
+def _finish_comgr_temp() -> None:
+    """Remove the empty temp folders this server's ended GPU processes left."""
+    try:
+        from localm import comgr_temp
+        comgr_temp.finish()
+    except Exception:
+        _dbg_swallow("removing the GPU runtime's empty temp folders failed (non-fatal)")
+
+
 def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
     """The stop sequence, WITHOUT the process exit.
 
@@ -5692,6 +5701,7 @@ def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
     except Exception:
         _dbg_swallow("removing generated media held for this run failed during shutdown; "
                      "the next start removes it", level="warning")
+    _finish_comgr_temp()
     try:
         from localm import bugreport
         bugreport.disarm_crash_guard(instance_id=instance_id)
@@ -6037,6 +6047,7 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     except Exception:
         _dbg_swallow("removing generated media held for this run failed during restart; "
                      "the next start removes it", level="warning")
+    _finish_comgr_temp()
 
     # Wait for the frees above to actually land before re-exec. The re-exec'd
     # process spawns a brand-new GGUF worker that constructs a fresh
@@ -6410,6 +6421,8 @@ def _make_lifespan():
             from localm.debuglog import logger as _dbg
             _dbg.warning("removing generated media left by an earlier run failed",
                          exc_info=True)
+        from localm import comgr_temp
+        comgr_temp.sweep()
         # Route an uncaught asyncio task exception through the bug reporter
         # instead of a silent "Task exception was never retrieved". Skipped under
         # pytest so the test runner keeps its own loop handling.

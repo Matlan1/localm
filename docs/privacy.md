@@ -183,7 +183,9 @@ which models:
   crash marker of the running server, removed at a normal stop.
 - **Caches.** `<data dir>/cache/` holds what the GPU driver compiles for a model
   (`cache/comgr` on AMD ROCm) and package and download caches. On AMD ROCm the driver
-  also leaves empty `comgr-<pid>-...` folders in the temp folder.
+  also makes empty `comgr-<pid>-...` folders in the temp folder; localm removes those of
+  its own processes when they end, or at its next start (`<data dir>/run/comgr-temp/`
+  lists the running ones by process id and start time).
 
 ### Another localm instance answering for this one
 

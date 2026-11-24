@@ -485,6 +485,8 @@ def load_library(runtime_dir: Path, extra_dll_dirs: Optional[list] = None) -> ct
     imports cannot be loaded, and :class:`AbiMismatch` when it lacks a function
     in ``_FUNCTIONS`` or the layout check fails."""
     runtime_dir = Path(runtime_dir)
+    from localm import comgr_temp
+    comgr_temp.register_if_hip(runtime_dir)
     _add_dll_dir(runtime_dir)
     for d in extra_dll_dirs or []:
         _add_dll_dir(Path(d))

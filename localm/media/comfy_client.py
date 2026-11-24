@@ -1944,6 +1944,9 @@ def _kill_process_tree(proc) -> None:
     pid = getattr(proc, "pid", None)
     if not pid:
         return
+    from localm import comgr_temp
+    comgr_temp.adopt_tree(pid)
+    comgr_temp.watch()
     if _sys.platform == "win32":
         try:
             _sp.run([_sysprog.require("taskkill"), "/F", "/T", "/PID", str(pid)],

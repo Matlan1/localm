@@ -1887,7 +1887,9 @@ def _ask_torch_probe_child(timeout: float) -> Optional[list]:
     active. How long the child took is logged at debug level, whatever it
     answered."""
     import subprocess
+    from localm import comgr_temp
     from localm._mp_spawn import interpreter_for_localm_children
+    comgr_temp.watch()
     started = time.monotonic()
     try:
         with _gpu_probe_lock:
