@@ -79,6 +79,10 @@ def test_a_privacy_mode_memory_job_loads_no_model(tmp_path, monkeypatch):
         {"mode": "privacy", "plugins_enabled": ["memory", "jobs"]}), encoding="utf-8")
     from localm.plugins.builtin.jobs import runner
     from localm.plugins.builtin.jobs.store import Job
+    import localm.plugins.builtin.memory.plug as plug
+    import localm.plugins.lookup as lookup
+    monkeypatch.setattr(lookup, "plugin_api", lambda name, sub=None: plug)
+    monkeypatch.setattr(plug, "_persist_enabled", lambda: False)
     monkeypatch.setattr(runner, "_register_live_run", lambda job: None)
     monkeypatch.setattr(runner, "_creator_refusal", lambda job: None)
     called = []
