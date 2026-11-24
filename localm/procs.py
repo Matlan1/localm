@@ -656,7 +656,8 @@ def _boot() -> str:
         _BOOT = ""
         if sys.platform.startswith("linux"):
             with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as fh:
-                _BOOT = fh.read().strip().replace("-", "")
+                number = int(fh.read().strip().replace("-", ""), 16)
+            _BOOT = f"{number:032x}"
     return _BOOT
 
 
