@@ -3,7 +3,7 @@ name: Release attestations and SBOM
 # On a published release: build the sdist and wheel from the tag, generate a
 # CycloneDX SBOM from uv.lock, attest the release zip, sdist, wheel and SBOM with
 # actions/attest-build-provenance, and attach the sdist, wheel and SBOM to the
-# release. Verification is documented in SECURITY.md.
+# release. Verification is documented in docs/security.md.
 #
 # This workflow is independent of publish-pypi.yml. PyPI files carry their own
 # PEP 740 attestations from that workflow; the files attested here are the ones

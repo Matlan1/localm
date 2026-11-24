@@ -195,12 +195,14 @@ const PAGE_SCRIPTS = [
  * Loads the app scripts via loadApp, then the per-page scripts in the same
  * realm. The page scripts rely on helpers from the app scripts, so they run
  * after them, and their top-level `$("...").onclick = ...` wiring runs against
- * the real index.html elements. Takes and forwards the same options as loadApp.
+ * the real index.html elements. Takes and forwards the same options as loadApp,
+ * plus beforePages(window), called before the page scripts run.
  * window.onViewShown, which the boot deep-link/restore path ends in, is
  * installed only by pages/dispatch.js, so that path needs this loader.
  */
 export function loadAppWithPages(opts = {}) {
   const { dom, window } = loadApp(opts);
+  if (opts.beforePages) opts.beforePages(window);
   for (const name of PAGE_SCRIPTS) {
     runScript(window, readClassic(`pages/${name}.js`));
   }
