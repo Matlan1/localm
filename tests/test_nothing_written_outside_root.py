@@ -10,7 +10,8 @@ AppData, LocalAppData, the temp folders and the XDG folders. Afterwards:
     Python-level hook cannot see), and
   * a Python audit hook that ran inside the server and every process it started
     recorded no file write, create, rename or directory creation outside the data
-    folder.
+    folder, but for the record of running processes: it names the processes of the
+    install, whatever its data folder is, and lies in the install's own folder.
 
 A control run, with a child process that does write into a redirected folder, proves
 both instruments can see a violation.
@@ -31,6 +32,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+#: See localm/procs.py. The one thing a server writes that is not in its data folder.
+PROCESS_RECORD = ROOT / ".localm-run"
 
 _HOOK = r'''
 import os, sys
@@ -218,6 +221,17 @@ def test_the_instrument_sees_a_write_outside_the_root(sandbox):
     assert _listing(sandbox["redirected"]["appdata"]) == ["stray.txt"]
 
 
+def test_the_record_of_processes_is_the_only_thing_allowed_beside_the_data_folder(sandbox):
+    from localm import procs
+    assert PROCESS_RECORD.name == procs.FOLDER
+    log = sandbox["log"]
+    log.write_text("".join(f"write\t{p}\n" for p in (
+        PROCESS_RECORD / "x.json", ROOT / "stray.txt", ROOT / ".localm-running" / "x")),
+        encoding="utf-8")
+    bad = _violations(log, [sandbox["home"], PROCESS_RECORD])
+    assert [Path(p).name for _k, p in bad] == ["stray.txt", "x"]
+
+
 def test_a_write_inside_the_profile_skeleton_is_still_caught(sandbox):
     """The profile folders a real Windows profile already has are not a write;
     a file put inside them is."""
@@ -279,7 +293,7 @@ def test_a_running_server_writes_only_inside_its_own_root(sandbox):
     for name in sandbox["redirected"]:
         new = _new_entries(sandbox, name)
         assert new == [], f"{name} was written to: {new}"
-    bad = _violations(sandbox["log"], [home, sandbox["log"].parent])
+    bad = _violations(sandbox["log"], [home, sandbox["log"].parent, PROCESS_RECORD])
     assert bad == [], f"writes outside the root: {bad[:20]}"
     assert sandbox["log"].exists() and sandbox["log"].stat().st_size > 0, (
         "the audit hook recorded nothing, so the check above proved nothing")

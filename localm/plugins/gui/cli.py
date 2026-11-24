@@ -13,6 +13,7 @@ from pathlib import Path
 
 import click
 
+from localm import procs
 from localm.netlisten import is_wildcard_host
 
 
@@ -705,7 +706,7 @@ def _open_attached(url: str) -> None:
     sep = "&" if "?" in url else "?"
     open_url = f"{url}{sep}lm={secrets.token_hex(3)}"
     if not appface.run_native_window(open_url, hide_on_close=False):
-        webbrowser.open(open_url)
+        procs.open_for_user(webbrowser.open, open_url)
 
 
 def _sync_models_folder(console) -> None:
@@ -1162,7 +1163,7 @@ def _open_when_ready(url: str, self_host: str, port: int, timeout: float = 20.0)
         except OSError:
             time.sleep(0.25)
     try:
-        webbrowser.open(url)
+        procs.open_for_user(webbrowser.open, url)
     except Exception:
         pass
 
@@ -1297,7 +1298,7 @@ def _serve_beside_native_window(serve, plan: _BindPlan, open_url: str, *, on_qui
             open_url, on_quit=quit_app, server_stopped=server_stopped)
         if not window_loaded and not server_stopped.is_set():
             hs.set_restart_ui("browser")
-            webbrowser.open(open_url)
+            procs.open_for_user(webbrowser.open, open_url)
         # Returns only once the server thread has ended.
         # See test_native_window_close_waits_for_the_server_to_stop.
         server_thread.join()

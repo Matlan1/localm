@@ -229,7 +229,11 @@ def _spawn_detached(cmd: list, *, cwd: str, env: dict | None = None,
                     f"{shlex.join(cmd)} in a terminal, or set TERMINAL")
             cmd = wrapped
         kwargs["start_new_session"] = True
-    return subprocess.Popen(cmd, **kwargs)
+    try:
+        from localm import procs
+    except ImportError:
+        return subprocess.Popen(cmd, **kwargs)
+    return procs.start(cmd, purpose="launcher window", **kwargs)
 
 
 def _invalid_numeric_fields(port: str, ctx: str, gpu: str):

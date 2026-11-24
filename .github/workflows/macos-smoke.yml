@@ -15,6 +15,7 @@ on:
     paths:
       - "localm/hwdetect*"
       - "localm/instances.py"
+      - "localm/procs.py"
       - "localm/sysprog.py"
       - "localm/updater.py"
       - "localm/uv_tool.py"
@@ -144,9 +145,10 @@ jobs:
           tests/test_setup_llama_backends.py
           -m "not integration" -q -rs
 
-      - name: Process start identity, host id and download locks on macOS
+      - name: Process record, start identity, host id and download locks on macOS
         run: >-
           .venv/bin/python -m pytest
+          tests/test_procs.py
           tests/test_instances.py
           tests/test_pull_part_lock.py
           tests/test_hf_pull_resume.py
