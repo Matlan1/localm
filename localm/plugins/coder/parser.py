@@ -800,9 +800,11 @@ _RE_RESULT_NEXT = re.compile(r"\s*<tool_result\b")
 
 
 def invented_result_without_call(text: str) -> int:
-    """Where a reply that makes no call starts to invent a result: the first
-    ``<tool_result`` that directly follows a code block, as if the block had been
-    run; -1 when there is none."""
+    """Where a reply that makes no call starts to invent a result: a
+    ``<tool_result`` it opens with, or the first one that directly follows a code
+    block, as if the block had been run; -1 when there is none."""
+    if _RE_RESULT_NEXT.match(text or ""):
+        return 0
     for _start, end, _lang, _body in _iter_fenced_blocks(text or ""):
         m = _RE_RESULT_NEXT.match(text, end)
         if m:

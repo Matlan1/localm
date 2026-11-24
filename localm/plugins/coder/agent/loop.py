@@ -1148,10 +1148,13 @@ class _LoopMixin:
                 prose = "".join(seg for seg in segments if isinstance(seg, str))
                 leftover = strip_orphan_closers(prose)
                 cut_off = unfinished_call(prose, tool_names)
+                request = getattr(self, "_last_user_request", "") or ""
+                as_command = (demands_action(request)
+                              and names_a_tool_as_command(leftover, tool_names))
                 if cut_off and st.partial_notice_count < _MAX_TOOL_REPAIRS:
                     st.partial_notice_count += 1
                     result_blocks.append(self._cut_off_note(cut_off, interactive))
-                elif looks_like_tool_attempt(leftover, tool_names):
+                elif as_command or looks_like_tool_attempt(leftover, tool_names):
                     if st.partial_notice_count < _MAX_TOOL_REPAIRS:
                         st.partial_notice_count += 1
                         if interactive:
@@ -1194,13 +1197,14 @@ class _LoopMixin:
                             "already reached, not reported to the model "
                             "this turn")
 
-                request = getattr(self, "_last_user_request", "") or ""
                 tests_fail = (self._consecutive_errors.get("run_tests", 0) > 0
                               and self._write_total() == writes_before
                               and demands_action(request) and asks_for_change(request))
                 if (st.code_reminded < 2 and _has_file_code_block(leftover)
                         and (tests_fail or self._change_still_owed(request, st))):
                     st.code_reminded += 1
+                    if st.code_reminded > 1 and as_command and self.can_force_tool_calls():
+                        self._force_tool_grammar = True
                     result_blocks.append(
                         "[nothing written] The code block in your reply changed no "
                         "file: only a tool call does. If it belongs in the project, "
@@ -1691,7 +1695,7 @@ class _LoopMixin:
             self._force_tool_grammar = True
         self._audit.notice("invented_result", "the reply showed a result of a "
                            "command that no tool ran; cut off there")
-        self._add_assistant(kept)
+        self._add_assistant(kept.strip() or "(a made-up tool result, dropped)")
         self._add_user(
             "[invented result] Nothing ran: the <tool_result> in your reply was "
             "written by you, so it is not real and was dropped. A code block runs "

@@ -1077,7 +1077,7 @@ the model emits. Background jobs started before plan mode keep running. When the
 has a plan it presents it with `exit_plan_mode`, and you answer `y` (approve; plan mode
 ends and edits ask as they did before), `a` (approve and auto-run: for the rest of that
 task gated tools run without asking, except what the shell safety gate or an
-always-confirm setting holds back, a call the model wrote in a loose format and a call
+always-confirm setting holds back, a loosely written call the model did not confirm and a call
 that reaches localm's own data folder, and the project's verification check runs before the
 task finishes, detected when none is set; if the fix attempts run out the task is
 reported as not verified), or `n` or any text (the agent stays in plan mode and gets

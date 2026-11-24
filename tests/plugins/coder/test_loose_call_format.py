@@ -533,8 +533,8 @@ PRETENDED = ("Let's run the tests.\n\n" + FENCE + "sh\nrun_tests\n" + FENCE
 
 def test_a_result_after_a_code_block_is_found(tmp_path):
     assert PRETENDED[invented_result_without_call(PRETENDED):].startswith("<tool_result>")
+    assert invented_result_without_call("\n<tool_result name=\"x\">\ny\n</tool_result>\nDone.") == 0
     for text in ("The harness answers in a <tool_result> block.",
-                 "<tool_result>\nx\n</tool_result>",
                  FENCE + "\nx\n" + FENCE + "\nand then <tool_result>",
                  FENCE + "\n<tool_result>\n" + FENCE):
         assert invented_result_without_call(text) == -1
@@ -570,6 +570,16 @@ def test_a_result_shown_in_an_explanation_is_left_alone(tmp_path):
     result = agent.run_task("what would a run of the tests look like?")
     assert result.startswith(PRETENDED)
     assert "[invented result]" not in "\n".join(_texts(agent, "user"))
+
+
+def test_a_reply_that_opens_with_a_result_is_sent_back(tmp_path):
+    made_up = "<tool_result name=\"write_file\">\nok\n</tool_result>\nI have written a.txt."
+    backend = _Backend([made_up, _xml("write_file", path="a.txt", content="1"), "Done."])
+    agent = _agent(tmp_path, backend)
+    agent.run_task("create a.txt containing 1")
+    assert (tmp_path / "a.txt").exists()
+    assert _texts(agent, "user")[1].startswith("[invented result]")
+    assert all(_texts(agent, "assistant")) and "I have written" not in _texts(agent, "assistant")[0]
 
 
 def test_a_question_in_a_run_nobody_answers_is_sent_back_once(tmp_path):
@@ -986,6 +996,35 @@ def test_code_shown_while_the_tests_fail_is_named_as_not_written(tmp_path):
         agent.run_task("fix the failing test")
     notes = [i for i, t in enumerate(_texts(agent, "user")) if "changed no file" in t]
     assert notes == [3]
+
+
+SHOWN_EDIT = (FENCE + "python\nedit_file({\n    \"path\": \"a.py\",\n    \"old\": \"x = 1\",\n"
+              "    \"new\": \"x = 2\"\n})\n" + FENCE + "\n")
+
+
+def test_a_call_shown_as_code_beside_a_real_one_is_named_and_then_forced(tmp_path):
+    from localm.plugins.coder.agent import TOOL_REGISTRY
+    replies = [_xml("write_file", path="a.py", content="x = 1\n"),
+               "First.\n" + SHOWN_EDIT + _xml("run_tests"),
+               "Once more, with other words.\n" + SHOWN_EDIT + _xml("run_tests", path="."),
+               _xml("edit_file", path="a.py", old="x = 1", new="x = 2"), "Done."]
+    backend = _Backend(replies)
+    agent = _agent(tmp_path, backend, max_turns=30)
+    with patch.object(TOOL_REGISTRY["run_tests"], "fn",
+                      lambda cwd, **kw: _run_tests_result(False)):
+        agent.run_task("fix the failing test")
+    told = [t for t in _texts(agent, "user") if "looked like another tool call" in t]
+    assert len(told) == 2
+    assert ["grammar_lazy" not in kw for _m, kw in backend.calls] == [False, False, False, True, False]
+    assert (tmp_path / "a.py").read_text() == "x = 2\n"
+
+
+def test_a_call_shown_as_code_in_an_answer_is_not_named(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    reply = SHOWN_EDIT + _xml("read_file", path="a.py")
+    agent = _agent(tmp_path, _Backend([reply, "That is how."]))
+    agent.run_task("how would I change a.py?")
+    assert "looked like another tool call" not in "\n".join(_texts(agent, "user"))
 
 
 def test_a_denied_tool_says_it_stays_denied(tmp_path):
