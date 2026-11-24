@@ -811,8 +811,8 @@ function applySessionMode(cfg, upTo) {
   }
   if (chat.privacy) {
     chat.persist = false;
-    // GUI-LIVE-WIPE: the in-memory reset runs only the first time privacy mode
-    // is confirmed; the mode is read again for the tab's whole lifetime.
+    // The in-memory reset runs only the first time privacy mode is confirmed;
+    // the mode is read again for the tab's whole lifetime.
     if (!chat.privacyWiped) {
       chat.privacyWiped = true;
       enterPrivacyMode();
@@ -830,8 +830,8 @@ function applySessionMode(cfg, upTo) {
       showPrivacyLeftovers();
     }
   } else {
-    // GUI-LIVE-WIPE re-arm: the next time privacy mode is confirmed, what this
-    // page shows from a non-privacy session is wiped again.
+    // The next time privacy mode is confirmed, what this page shows from a
+    // non-privacy session is wiped again.
     chat.privacyWiped = false;
     document.getElementById("privacy-hint")?.remove();
     document.getElementById("privacy-leftovers")?.remove();
@@ -846,7 +846,8 @@ function applySessionMode(cfg, upTo) {
  *  this tab only, and so does what is typed in the message box. */
 function enterPrivacyMode() {
   const live = chatBusy() ? currentConv() : null;
-  const held = chat.conversations.filter((c) => c.tabOnly || c.unsaved || c === live);
+  const held = chat.conversations.filter((c) => c.tabOnly || c === live ||
+    (c.unsaved && !c._meta && (c.messages.length || (c.branches || []).length)));
   for (const c of held) keepInTabOnly(c);
   chat.conversations = held;
   if (!held.some((c) => c.id === chat.activeId)) {
@@ -942,10 +943,9 @@ export function confirmSessionMode() {
   return _modeCheck;
 }
 
-// LM-DA-047: privacy mode writes nothing to localStorage. Every instance-scoped
-// write goes through lsSetScoped, saveConversations or the draft store, and all
-// three queue here: a queued write lands only after the server confirmed, later
-// than the write was queued, that the mode allows it.
+// Every instance-scoped browser write goes through lsSetScoped, saveConversations
+// or the draft store, and all three queue here: a queued write lands only after
+// the server confirmed, later than the write was queued, that the mode allows it.
 
 // Queued lsSetScoped writes by key, as { value, seq }. Last write per key wins.
 const _pendingScopedWrites = new Map();
@@ -1130,9 +1130,24 @@ export function saveConversations(changed) {
   _flushPendingWrites();
 }
 
+// The ids this page deleted, dropped or gave up: never kept in the cache.
+const _goneIds = new Set();
+
+/** The conversations the browser cache gets: those this page holds, and a copy
+ *  another tab cached with a change it has not saved yet. R40: server index-only
+ *  rows (_meta) carry no messages and are not cached. */
+function cacheableConversations() {
+  const mine = chat.conversations.filter((c) => !c._meta && convPersistable(c));
+  const unsavedHere = new Set(mine.filter((c) => c.unsaved).map((c) => c.id));
+  const others = readStoredJSON("localm.conversations", []).filter((c) => c && c.unsaved &&
+    (c.messages || []).length && !unsavedHere.has(c.id) && !_goneIds.has(c.id));
+  const keep = new Set(others.map((c) => c.id));
+  return [...others, ...mine.filter((c) => !keep.has(c.id))]
+    .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+}
+
 function _writeConversationCache() {
-  // R40: server index-only rows (_meta) carry no messages and are not cached.
-  const cacheable = chat.conversations.filter((c) => !c._meta && convPersistable(c));
+  const cacheable = cacheableConversations();
   let localOk = true;
   let kept = cacheable.slice(0, 50);
   try {
@@ -1311,6 +1326,7 @@ function rekeyConversation(conv, id) {
   clearTimeout(_convPushTimers.get(old));
   _convPushTimers.delete(old);
   _saveFailed.delete(old);
+  _goneIds.add(old);
   conv.id = id;
   if (chat.activeId === old) chat.activeId = id;
   for (const q of chat.queue) if (q.convId === old) q.convId = id;
@@ -1415,11 +1431,14 @@ function dropDeletedElsewhere(conv, { quiet = false } = {}) {
     toast(t("chat.conv.deletedElsewhereKept", { name }), true);
   } else {
     conv.deleted = true;
+    _goneIds.add(conv.id);
     clearTimeout(_convPushTimers.get(conv.id));
     _convPushTimers.delete(conv.id);
     chat.conversations = chat.conversations.filter((c) => c !== conv);
     if (chat.activeId === conv.id) chat.activeId = chat.conversations[0]?.id || null;
     chat.queue = chat.queue.filter((q) => q.convId !== conv.id);
+    // What is typed for it stays in the message box.
+    if (conv.id === _composerOwner && !draftIsEmpty(liveDraft())) _composerOwner = null;
     forgetDrafts([conv.id]);
     if (!quiet) toast(t("chat.conv.deletedElsewhere", { name }));
   }
@@ -1490,6 +1509,7 @@ export async function deleteAllServerConversations() {
 /** Keep only the conversations *keep* accepts, here and in this browser's cache,
  *  and repaint the list and the chat. */
 export function retainConversations(keep) {
+  for (const c of chat.conversations) if (!keep(c)) _goneIds.add(c.id);
   chat.conversations = chat.conversations.filter(keep);
   if (!chat.conversations.some((c) => c.id === chat.activeId)) {
     chat.activeId = chat.conversations[0]?.id || null;
@@ -1611,10 +1631,9 @@ export async function initServerConversations() {
       const keepRow = () => byId.set(local.id, { ...remote, _meta: true, messages: [] });
       if (local.tabOnly) keep();
       else if (!remote) {
-        // AUD-INSTANCEID residual 2: a conversation this backend's index does
-        // not know may belong to another backend at the same origin. Showing it
-        // and uploading it are gated separately: only a confirmed match may
-        // upload, and a confirmed mismatch has emptied the list before this.
+        // A conversation this backend's index does not know may belong to
+        // another backend at the same origin. It is shown unless the backend is
+        // a confirmed mismatch, and uploaded only for a confirmed match.
         if (chat.instanceState === "mismatched") continue;
         if (local.rev && index.complete && chat.instanceMatch &&
             !index.unreadable.has(local.id)) {
@@ -1662,8 +1681,8 @@ export async function initServerConversations() {
     }
     for (const conv of stale) await refreshStored(conv);
     await hydrateConversation(currentConv());   // load the active conversation's body
-    saveConversations();
     if (boot || stale.length || before !== _listPrint()) {
+      saveConversations();
       renderConvList();
       if (!chatBusy()) renderChat();
     }
@@ -2202,6 +2221,7 @@ async function openTabs() {
 
 /** Queues a write of the drafts; text typed in quick succession is one write. */
 export function saveDraftsSoon() {
+  if (_composerHeld && draftIsEmpty(liveDraft())) _composerHeld = false;
   if (chat.privacy || !_draftsRestored || _draftTimer) return;
   _draftTimer = setTimeout(saveDraftsNow, 250);
 }
@@ -2235,7 +2255,7 @@ function draftRows() {
   };
   add(_composerOwner, liveDraft());
   for (const [id, d] of _drafts) add(id, d);
-  const queued = chat.queue.filter((q) => !q.held &&
+  const queued = chat.queue.filter((q) =>
     convPersistable(chat.conversations.find((c) => c.id === q.convId)));
   if (queued.length) {
     rows.set(`|${tabId()}|queue`, {
@@ -2661,6 +2681,7 @@ export function buildConvItem(conv, snippet) {
     // Marked deleted: pushConversation never writes it again, also not at the
     // end of a reply still streaming into it.
     conv.deleted = true;
+    _goneIds.add(conv.id);
     clearTimeout(_convPushTimers.get(conv.id));
     _convPushTimers.delete(conv.id);
     chat.conversations = chat.conversations.filter((c) => c.id !== conv.id);
@@ -2685,7 +2706,7 @@ export function buildConvItem(conv, snippet) {
 
   item.onclick = async () => {
     chat.activeId = conv.id;
-    // The row stays in place, so a double-click on its title reaches it.
+    // Marks this row active without rebuilding the list.
     for (const row of document.querySelectorAll("#conv-list .conv-item.active")) {
       if (row !== item) row.classList.remove("active");
     }
@@ -3767,8 +3788,9 @@ export function editMessage(conv, index) {
   // state. Bail while a reply streams, like switchBranch / regenerate do.
   if (chatBusy()) { toast(t("chat.waitForReply"), true); return; }
   const m = conv.messages[index];
+  const shown = chat.activeId;
   confirmReplaceComposer(m, () => {
-    if (chatBusy() || conv.messages[index] !== m || conv !== currentConv()) return;
+    if (chatBusy() || conv.messages[index] !== m || chat.activeId !== shown) return;
     fillComposerFrom(m);
     // Fork instead of destroy: the old timeline (this message and everything
     // after it) stays reachable via ‹ ›, also before the edit is sent.
@@ -3841,10 +3863,11 @@ export function revertTo(conv, index) {
   if (chatBusy()) { toast(t("chat.waitForReply"), true); return; }
   if (index < 0 || index >= conv.messages.length) return;
   const m = conv.messages[index];
+  const shown = chat.activeId;
   const lost = branchesLostByRevert(conv, index);
 
   const apply = () => {
-    if (chatBusy() || conv.messages[index] !== m || conv !== currentConv()) return;
+    if (chatBusy() || conv.messages[index] !== m || chat.activeId !== shown) return;
     const orig = conv.messages;
     // Keep only forks that diverge STRICTLY before the revert point. A fork at
     // or after it (parent inside the removed region, or the live tail being

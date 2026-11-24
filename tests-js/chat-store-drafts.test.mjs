@@ -205,6 +205,46 @@ test("an unsaved turn found at a reload is not dropped for a newer stored copy",
   assert.deepEqual(texts(copy), ["a", "never reached the server"]);
 });
 
+test("a tab does not drop another tab's unsaved turn from the shared browser cache", async () => {
+  const server = makeServer();
+  const rev = server.put("c1", { title: "One", messages: [user("a")] });
+  server.put("c2", { title: "Two", updated_at: 1, messages: [user("b")] });
+  const win = await boot(server);
+  await open(win, "One");
+  await drain();
+  const dirty = { id: "c1", title: "One", rev, unsaved: true, updated_at: Date.now(),
+                  messages: [user("a"), user("typed in the other tab")] };
+  win.localStorage.setItem("localm.conversations", JSON.stringify([dirty]));
+  win.saveConversations();
+  await drain();
+  assert.match(JSON.stringify(cache(win)), /typed in the other tab/);
+});
+
+test("two open pages do not keep rewriting the shared cache at each other", async () => {
+  const server = makeServer();
+  server.put("c1", { title: "One", messages: [user("a")] });
+  const win = await boot(server);
+  await open(win, "One");
+  await drain();
+  win.localStorage.setItem("localm.conversations", "[]");
+  await win.syncConversations();
+  await drain();
+  assert.equal(win.localStorage.getItem("localm.conversations"), "[]",
+    "a sync that finds nothing changed writes nothing");
+});
+
+test("text typed for a chat deleted elsewhere stays in the message box", async () => {
+  const server = makeServer();
+  server.put("c1", { title: "One", messages: [user("a")] });
+  server.put("c2", { title: "Two", messages: [user("b")] });
+  const win = await boot(server);
+  await open(win, "One");
+  win.document.getElementById("chat-input").value = "half typed";
+  server.remove("c1");
+  await win.syncConversations();
+  assert.equal(win.document.getElementById("chat-input").value, "half typed");
+});
+
 test("pinning a chat that was never opened keeps its messages", async () => {
   const server = makeServer();
   server.put("c0", { title: "Open one", updated_at: Date.now() + 5, messages: [user("x")] });

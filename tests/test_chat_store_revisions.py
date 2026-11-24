@@ -214,3 +214,35 @@ def test_privacy_mode_with_no_store_counts_zero_and_creates_nothing(store):
     state["persist"] = False
     assert client.get("/api/conversations").json()["stored"] == 0
     assert not chats.exists()
+
+
+HOSTILE_IDS = {
+    "parent": "%2E%2E", "parent with a backslash": "..%5Cevil", "drive": "C%3A",
+    "drive path": "C%3A%5Cevil", "stream": "c1%3Astream", "device name": "nul",
+    "numbered device name": "COM1", "NUL byte": "c1%00", "line break": "c1%0A",
+    "two lines": "c1%0Ac2", "long": "x" * 65, "space": "a%20b", "non-ASCII": "sp%C3%A4t",
+    "dot": "c1.json",
+}
+
+
+@pytest.mark.parametrize("bad_id", HOSTILE_IDS.values(), ids=HOSTILE_IDS.keys())
+def test_a_hostile_id_is_refused_by_every_route_and_touches_nothing(store, bad_id):
+    client, chats, _ = store
+    _put(client, "c1", "kept")
+    before = {p.name: p.read_bytes() for p in chats.iterdir()}
+    url = f"/api/conversations/{bad_id}"
+    body = {"title": "t", "messages": _msgs("x")}
+    answers = [client.get(url), client.delete(url), client.put(url, json=body),
+               client.put(url, json={**body, "base_rev": None}),
+               client.put(url, json={**body, "base_rev": "abc"})]
+    assert [r.status_code for r in answers] == [400] * 5
+    assert {p.name: p.read_bytes() for p in chats.iterdir()} == before
+    assert sorted(p.name for p in chats.parent.iterdir()) == ["chats"]
+    assert _put(client, "c1", "kept", "more").status_code == 200, "c1 is not counted as deleted"
+
+
+@pytest.mark.parametrize("name", ["..", "C:", "nul", "c1\x00", "c1\n", "x" * 65, "a/b", "a\\b", ""])
+def test_the_id_check_itself_refuses_the_same_ids(name):
+    with pytest.raises(plug.HTTPException) as e:
+        plug._conv_path(name)
+    assert e.value.status_code == 400

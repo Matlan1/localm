@@ -64,6 +64,7 @@ test("with host access, export saves in the picked folder and never downloads", 
 test("the next export starts in the folder of the last one", async () => {
   const s = setup({ fsAccess: "host" });
   await s.window.exportConversation();
+  await new Promise((r) => setTimeout(r, 30));
   await s.window.exportConversation();
   assert.equal(s.pickerCalls[1].startPath, "D:/exports");
 });
