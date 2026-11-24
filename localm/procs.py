@@ -293,18 +293,23 @@ def _mac_lib():
 
 
 def _mac_info(pid: int) -> bytes:
-    """``struct proc_bsdinfo`` of *pid*, or b""."""
+    """``struct proc_bsdinfo`` of *pid*, also of one that has ended and was not waited
+    for (without the 1 the system says nothing about it), or b""."""
     import ctypes
     buf = ctypes.create_string_buffer(136)
-    done = _mac_lib().proc_pidinfo(pid, 3, 0, buf, 136)     # PROC_PIDTBSDINFO
+    ctypes.set_errno(0)
+    done = _mac_lib().proc_pidinfo(pid, 3, 1, buf, 136)     # PROC_PIDTBSDINFO
     return buf.raw if done == 136 else b""
 
 
 def _mac_process(pid: int):
+    import ctypes
+    import errno
     import struct
     raw = _mac_info(pid)
     if not raw:
-        return None if _posix_gone(pid) else _UNKNOWN
+        gone = ctypes.get_errno() == errno.ESRCH or _posix_gone(pid)
+        return None if gone else _UNKNOWN
     if struct.unpack_from("=I", raw, 4)[0] == 5:            # SZOMB
         return None
     sec, usec = struct.unpack_from("=QQ", raw, 120)
@@ -723,8 +728,8 @@ def _marks(names) -> list:
                   if len(n) == 21 and n.endswith(".mark") and _hex(n[:-5]))
 
 
-def _hex(text: str) -> bool:
-    return len(text) == 16 and not set(text) - set("0123456789abcdef")
+def _hex(text: str, length: int = 16) -> bool:
+    return len(text) == length and not set(text) - set("0123456789abcdef")
 
 
 def _folder_id(install: str, mark: str) -> str:
@@ -764,12 +769,25 @@ def _parse(name: str):
     parts = name[:-5].split("-") if name.endswith(".json") else []
     if len(parts) != 4 or not _hex(parts[0]) or not _hex(parts[1]) or not _digits(parts[2]):
         return None
-    if int(parts[2]) >= 1 << 32:
+    if not 0 < int(parts[2]) < 1 << 32:
         return None
     boot, _, number = parts[3].rpartition(".")
-    if not _digits(number) or not (boot == "" or (boot.isascii() and boot.isalnum())):
+    if not _digits(number) or not (boot == "" or _hex(boot, 32)):
         return None
     return parts[0], parts[1], int(parts[2]), parts[3]
+
+
+def _name(at: str, host: str, pid: int, started: str) -> str:
+    """The name of the file of an entry: hex, hex, digits, hex and digits, whatever is
+    given. Raises ValueError for anything else than the parts of a name."""
+    boot, _, number = started.rpartition(".")
+    when = f"{int(number)}"
+    if boot:
+        when = f"{int(boot, 16):032x}.{when}"
+    name = f"{int(at, 16):016x}-{int(host, 16):016x}-{int(pid)}-{when}.json"
+    if type(pid) is not int or _parse(name) != (at, host, pid, started):
+        raise ValueError("not the parts of a name")
+    return name
 
 
 def _content(entry: Entry) -> bytes:
@@ -785,7 +803,7 @@ def _content(entry: Entry) -> bytes:
 def _write(place, entry: Entry) -> None:
     """Write the file of *entry* whole, or not at all."""
     folder, at, host = place
-    path = os.path.join(folder, f"{at}-{host}-{entry.pid}-{entry.start}.json")
+    path = os.path.join(folder, _name(at, host, entry.pid, entry.start))
     new = path[:-5] + ".new"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:

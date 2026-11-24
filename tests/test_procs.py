@@ -228,6 +228,20 @@ def test_a_process_that_exited_while_its_handle_is_held_is_not_alive():
     assert p.pid not in procs._table()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="processes nobody waited for")
+def test_an_ended_process_nobody_waited_for_is_not_alive(make):
+    inst = make()
+    p = inst.importer()
+    pid = int(p.first)
+    entry = next(e for e in inst.list() if e.pid == pid)
+    _kill(pid)
+    _until(lambda: not procs.alive(entry), 5.0)
+    assert procs._process(pid) is None
+    os.kill(pid, 0)
+    assert pid not in inst.pids()
+    p.wait(20)
+
+
 def test_an_entry_of_another_machine_is_neither_listed_nor_deleted_for_a_week(make):
     inst = make()
     path = _file(inst, os.getpid(), _me(), host="0" * 16)
@@ -283,6 +297,24 @@ def test_a_malformed_file_is_skipped_and_deleted(make, name, text):
     other = int(inst.importer().first)
     assert inst.pids() >= {other} and os.getpid() not in inst.pids()
     assert len(inst.files()) == 1
+
+
+@pytest.mark.parametrize("part", range(4))
+@pytest.mark.parametrize("value", [
+    "../x", "..\\x", "/etc/x", "C:\\x", "", ".", "..", "x", "1/2", "1\x002", " 5", "+5", "-5", "1_0",
+    "5\n", "\u0665", "0x5", "f" * 15, "f" * 17, "F" * 16, "f" * 31 + ".5", "f" * 32 + "./5",
+    "f" * 32 + ".", ".5/", "9" * 30, -1, 0, 1 << 32, True, 5.0, None, b"5"])
+def test_nothing_from_outside_shapes_the_name_of_a_file(make, part, value):
+    inst = make()
+    folder, at, host = inst.place()
+    parts = [at, host, 5, "5"]
+    assert procs._name(*parts) == f"{at}-{host}-5-5.json"
+    parts[part] = value
+    with pytest.raises((ValueError, TypeError, AttributeError)):
+        procs._name(*parts)
+    with pytest.raises((ValueError, TypeError, AttributeError)):
+        procs._write((folder, parts[0], parts[1]), procs.Entry(parts[2], parts[3], "gui"))
+    assert inst.files() == []
 
 
 def test_a_folder_or_a_pipe_in_the_record_harms_nothing(make):
