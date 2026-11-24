@@ -14,7 +14,7 @@ from localm.rag import store as _st
 from ..collection_lock import (CollectionLockedError, collection_write_lock,
                                lock_path_for)
 from .cache import _files_changing
-from .commit import MARKER, finish_save, read_current
+from .commit import finish_save, read_current
 from .confine import _path_within
 from .files import _STATS_CACHE_KEY
 
@@ -103,11 +103,10 @@ class _CollectionIntrospection:
     @staticmethod
     def _fingerprint_matches(coll_dir: Path, recorded) -> bool:
         """True when *recorded* (the cache's "fingerprint" value) still
-        matches chunks.jsonl and vectors.json on disk RIGHT NOW; False while a
-        save is pending. Duplicates the same two os.stat() calls as
-        _file_fingerprint(); this one runs from peek_stats() BEFORE any
-        Collection exists."""
-        if not isinstance(recorded, dict) or (coll_dir / MARKER).exists():
+        matches chunks.jsonl and vectors.json on disk RIGHT NOW. Duplicates
+        the same two os.stat() calls as _file_fingerprint(); this one runs from
+        peek_stats() BEFORE any Collection exists."""
+        if not isinstance(recorded, dict):
             return False
         def _stat(name: str) -> list[int] | None:
             try:

@@ -389,8 +389,10 @@ policy as an interactive add. Full details in
   reporting a false "0 re-indexed" success. A mixed collection repairs
   whatever has a real source and names the uploaded documents it left alone;
   re-upload those, or remove them with `rag rm-doc`.
-- **Indexing failed.** Indexing is atomic, so a failed index leaves the previous
-  snapshot intact. Check the error in the GUI/CLI and `--debug` log; common causes
+- **Indexing failed.** An index is saved as one change: a run that fails, or a
+  process killed in the middle of it, even while the files are being written,
+  leaves the collection as it was before or as it was saved, never a mix of the
+  two. Check the error in the GUI/CLI and `--debug` log; common causes
   are an unreadable or encrypted file.
 - **"Collection X is being written by another localm process".** Something else
   is indexing that collection right now, most often a scheduled re-sync or an add
