@@ -8,7 +8,8 @@
 #   - Units that share a tier are PEERS: they never import each other at module
 #     level. What two peers both need lives in a lower tier.
 #   - localm/__init__.py (the package root) sits below every tier. It holds only
-#     __version__, which any unit may read.
+#     __version__, which any unit may read, and the call that records this process
+#     (procs, which imports nothing of localm).
 #   - Only an import statement that runs at module import time is seen. A
 #     function-local import (the way a genuine import cycle is broken, and it may
 #     point upward), an importlib.import_module or __import__ call, and a plugin
@@ -108,8 +109,8 @@ units = ["storekit"]
 
 [[tier]]
 name = "process"
-role = "Process and host identity (whether a pid is running, when a process or thread started, which pid table a pid belongs to) and the full paths of the system's own programs. Stdlib only, so the store lock, instance discovery and every liveness-based lock read one answer."
-units = ["procid", "sysprog"]
+role = "Process and host identity (whether a pid is running, when a process or thread started, which pid table a pid belongs to), the full paths of the system's own programs, and the record of this install's running processes. Stdlib only, so the store lock, instance discovery and every liveness-based lock read one answer."
+units = ["procid", "procs", "sysprog"]
 
 [[tier]]
 name = "events"

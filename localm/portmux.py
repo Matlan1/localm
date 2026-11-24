@@ -295,7 +295,7 @@ def _spawn_crash_recovery_watchdog(*, host: str, port: int, tls: bool,
         import os
         import subprocess
 
-        from localm import bugreport, debuglog
+        from localm import bugreport, debuglog, procs
         from localm.bindhost import self_connect_host
         from localm.updater import repo_root
 
@@ -331,7 +331,7 @@ def _spawn_crash_recovery_watchdog(*, host: str, port: int, tls: bool,
                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
         else:
             kwargs["start_new_session"] = True
-        subprocess.Popen(argv, **kwargs)
+        procs.start(argv, purpose="crash watchdog", **kwargs)
     except Exception as e:
         try:
             _log.warning("could not spawn the crash-recovery watchdog: %s", e)

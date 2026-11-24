@@ -139,6 +139,14 @@ loads the model itself. Reached with any other key, that instance records at
 its own mode as checked before each request, so a change it makes to its own
 mode while a request is running is not covered.
 
+### The list of running processes
+
+In every session mode each running localm process, and each long-lived program it
+starts (ComfyUI, a coder shell, an MCP server), has one small file in `.localm-run/`
+in the install folder: its process id, when it started, what kind of process it is
+and the process that started it, never a command line, an environment or any content;
+it is removed when the process ends, or else by the next localm process.
+
 ---
 
 ## 2. Diagnostics (crash/hang capture and the debug log)

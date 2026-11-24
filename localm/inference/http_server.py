@@ -5713,9 +5713,11 @@ def _do_shutdown(*, instance_id: Optional[str] = None) -> None:
     GUI/tray Stop button and the shutdown route. Separated from the route so it
     can be tested without exiting."""
     _shutdown_teardown(instance_id=instance_id)
+    from localm import procs
     from localm.debuglog import flush_log_handlers
     flush_log_handlers()
     import os
+    procs.leave()
     os._exit(0)
 
 
