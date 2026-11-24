@@ -297,6 +297,17 @@ def missing_modules(folder: Path, guarded: bool = False) -> list[str]:
     return sorted(m for m in needed if not is_importable(m))
 
 
+def hf_stack_installed() -> bool:
+    """True when this install has the two packages the Hugging Face backend is
+    built on, PyTorch and transformers. Setup leaves both out for a GGUF runtime
+    that needs no vendor PyTorch (CPU, Vulkan)."""
+    return is_importable("torch") and is_importable("transformers")
+
+
+_ADD_HF_STACK = ("add PyTorch and the Hugging Face packages first, as docs/gpu-setup.md "
+                 "describes under \"HuggingFace Transformers (PyTorch)\"")
+
+
 _NAMES = {"PIL": "pillow", "yaml": "pyyaml", "sklearn": "scikit-learn", "cv2": "opencv",
           "fla": "flash-linear-attention", "google": "protobuf"}
 
@@ -310,10 +321,12 @@ def refusal_for(model_name: str, modules: list[str],
                 addable: Optional[Collection[str]] = None) -> str:
     """The sentence that says model *model_name* needs the packages behind
     *modules*, which this install lacks, and what the user can do about it:
-    repair the install (a package localm ships), add them with
-    ``localm install-packages`` or the Models page (every other package localm
-    can add here), or nothing (a package localm cannot add, with the reason, or
-    one it ships on other platforms but not on this one).
+    repair the install (a package localm ships), add PyTorch and the Hugging Face
+    packages (a package localm ships, in an install that was set up without them:
+    see :func:`hf_stack_installed`), add them with ``localm install-packages`` or
+    the Models page (every other package localm can add here; after the repair
+    when both are needed), or nothing (a package localm cannot add, with the
+    reason, or one it ships on other platforms but not on this one).
 
     *addable* is the set of modules ``model_packages.folder_state`` offers to add
     for this model. When given, the install is offered only if every module localm
@@ -334,6 +347,10 @@ def refusal_for(model_name: str, modules: list[str],
                 "localm cannot run this model here.")
     shipped = [m for m in modules if m in SHIPPED_MODULES]
     if len(shipped) == len(modules):
+        if not hf_stack_installed():
+            return (f"{model_name} cannot be loaded yet: its code needs the Python {noun} "
+                    f"{labels}, and this install was set up without PyTorch. To run it, "
+                    f"{_ADD_HF_STACK}.")
         return (f"{model_name} cannot be loaded: its code needs the Python {noun} "
                 f"{labels}, which localm normally includes but this install is "
                 "missing. Update localm, or run its setup again, to restore it.")
@@ -357,13 +374,18 @@ def refusal_for(model_name: str, modules: list[str],
                 f"import for {', '.join(package_label(m) for m in unreachable)}. "
                 "localm cannot run this model.")
     them = "it" if len(others) == 1 else "them"
-    repair = (" It also needs " + ", ".join(package_label(m) for m in shipped)
-              + ", which localm normally includes: update localm or run its setup again first."
-              if shipped else "")
-    return (f"{model_name} cannot be loaded yet: its own code needs the Python {noun} "
-            f"{labels}, which localm can add to its own environment. Add {them} with "
-            f"`localm install-packages {model_name}`, or with Install packages on the "
-            f"Models page.{repair}")
+    where = (f"`localm install-packages {model_name}`, or with Install packages on the "
+             "Models page.")
+    can_add = (f"{model_name} cannot be loaded yet: its own code needs the Python {noun} "
+               f"{labels}, which localm can add to its own environment.")
+    if not shipped:
+        return f"{can_add} Add {them} with {where}"
+    also = ", ".join(package_label(m) for m in shipped)
+    if hf_stack_installed():
+        repair = f"{also}, which localm normally includes: update localm or run its setup again first."
+    else:
+        repair = f"{also}, and this install was set up without PyTorch: {_ADD_HF_STACK}."
+    return f"{can_add} It also needs {repair} After that, add {labels} with {where}"
 
 
 def folder_refusal(folder: Path) -> Optional[str]:

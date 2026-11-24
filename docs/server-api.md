@@ -300,6 +300,8 @@ A streamed reply carries the entries of each delta's content in that chunk's
 | `{"type": "json_object"}` | One JSON object. |
 | `{"type": "json_schema", "json_schema": {"name": "...", "schema": {...}, "strict": true}}` | JSON matching the schema (the keywords listed for `format` in [ollama-api.md](ollama-api.md)). With `strict: true` a keyword that cannot be enforced (such as `pattern`) is a 400 naming it; otherwise that keyword is left out, the rest of the schema is still enforced, and the omission is written to the debug log. A keyword that gives the schema its shape (`type`, `properties`, `required`, `items`, `anyOf`, ...) is never left out: if it cannot be compiled where it is (for example `type` next to `anyOf`), the request is a 400 in either mode. Without `schema` the reply is any JSON object. |
 
+The reply ends where the JSON value ends: no text or whitespace follows it.
+
 A reasoning model answers without thinking when a format is set, unless the
 request sends `chat_template_kwargs: {"enable_thinking": true}`; then the reply
 may start with a `<think>` block of up to 1900 characters (returned in
