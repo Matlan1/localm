@@ -271,23 +271,34 @@ def _user_turn_text(session_text: str) -> Optional[str]:
     return "\n".join(lines) if seen else None
 
 
-_REQUEST_OPENERS = frozenset({
-    "tell", "give", "show", "explain", "write", "make", "help", "let", "send",
-    "list", "name", "describe", "teach", "find", "get", "bring", "read", "draw",
-    "translate", "summarize", "summarise", "generate", "create", "please", "can",
-    "could", "would", "will", "what", "who", "when", "where", "why", "how",
-    "which", "is", "are", "do", "does", "did"})
+_REQUEST_VERBS = frozenset({
+    "tell", "give", "show", "explain", "write", "help", "send", "describe",
+    "teach", "translate", "summarize", "summarise", "generate", "create", "draw",
+    "erzähl", "erzähle", "gib", "zeig", "zeige", "erkläre", "erklär", "schreib",
+    "schreibe", "hilf", "übersetze", "beschreibe", "nenne"})
+_ASK_AUXILIARIES = frozenset({"can", "could", "would", "kannst", "könntest", "würdest"})
+_ADDRESS = frozenset({"you", "du"})
+_WORD = re.compile(r"[a-zäöüß']+")
 
 
 def _is_request(sentence: str) -> bool:
     """True when *sentence* is a question or an instruction to the assistant
-    ("Tell me one fact about apples."), where "me" is the object of the request
-    and the user states nothing about themselves."""
+    ("Tell me one fact about apples.", "Erzähl mir etwas über Äpfel."), where "me"
+    is the object of the request and the user states nothing about themselves.
+    "please" or "bitte" only introduces a request when an instruction follows
+    ("Please tell me ..."), so "Please note that I am allergic to nuts" is a
+    statement; "Will is my son's name" opens with a name, not a request."""
     text = sentence.strip()
     if text.endswith("?"):
         return True
-    words = re.findall(r"[a-z']+", text.lower())
-    return bool(words) and words[0] in _REQUEST_OPENERS
+    words = _WORD.findall(text.lower())
+    if words and words[0] in ("please", "bitte"):
+        words = words[1:]
+    if not words:
+        return False
+    if words[0] in _REQUEST_VERBS:
+        return True
+    return words[0] in _ASK_AUXILIARIES and len(words) > 1 and words[1] in _ADDRESS
 
 
 def _first_person_stems(user_text: str) -> set:

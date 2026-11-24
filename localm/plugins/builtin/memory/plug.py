@@ -600,37 +600,39 @@ async def memory_put(req: MemoryUpdate, request: Request = None):
 
 _fill_lock = _threading.Lock()
 _fill_pending = False
-_fill_again = False
+_fill_stores: dict = {}
 
 
 def _fill_vectors_later(store) -> None:
     """Embed the records of *store* that have no vector yet on a background thread
-    (one at a time; a request that arrives while it runs makes it go round once
-    more), so a write need not wait for the embedder to load."""
-    global _fill_pending, _fill_again
+    (one thread at a time; it goes round again for every store, of any principal,
+    that asked while it ran), so a write need not wait for the embedder to load."""
+    global _fill_pending
     with _fill_lock:
         if _stop.is_set():
             return
+        _fill_stores[str(store.path)] = store
         if _fill_pending:
-            _fill_again = True
             return
         _fill_pending = True
 
     def _run():
-        global _fill_pending, _fill_again
+        global _fill_pending
         while True:
+            with _fill_lock:
+                if not _fill_stores:
+                    _fill_pending = False
+                    return
+                batch = list(_fill_stores.values())
+                _fill_stores.clear()
             try:
                 embed_fn = _embed_fn()
                 if embed_fn is not None:
-                    store.backfill_vectors(embed_fn)
+                    for st in batch:
+                        st.backfill_vectors(embed_fn)
             except Exception as e:
                 from localm.debuglog import logger
                 logger.warning("memory: could not embed a new fact: %s", e)
-            with _fill_lock:
-                if not _fill_again:
-                    _fill_pending = False
-                    return
-                _fill_again = False
 
     from localm.config import home_bound
     _threading.Thread(target=home_bound(_run, name="memory vector fill"),
@@ -1858,12 +1860,28 @@ def add_user_fact(store, fact: str, embed_fn, *, kind: str = "semantic",
         return "saved", rec
 
 
+def _saved_header(facts: list, statuses: list) -> dict:
+    """The ``memory_saved`` header for several remember requests: the text of the
+    facts that were saved with status "saved", and every other fact with its own
+    status ("exists" or "full") under ``others``. With nothing saved, the status is
+    the first fact's and the text lists them all."""
+    saved = [f for f, s in zip(facts, statuses, strict=True) if s == "saved"]
+    others = [{"text": f, "status": s} for f, s in zip(facts, statuses, strict=True) if s != "saved"]
+    if not saved:
+        return {"text": "; ".join(facts), "status": statuses[0] if statuses else "exists"}
+    header = {"text": "; ".join(saved), "status": "saved"}
+    if others:
+        header["others"] = others
+    return header
+
+
 def _remember_explicit(messages, ctx, before_embed=None) -> None:
     """Store the fact the latest user message asks to remember ("remember that
     ...", "merk dir ..."), without the model. The outcome goes to
     ``ctx.state["memory_saved"]`` for the response header: ``{"text", "status"}``
     with status "saved", "exists" (the same fact is already stored) or "full" (the
-    store is at its cap); "off" and "failed" are set by the callers. Only the user's
+    store is at its cap); with several facts, "text" lists the saved ones and
+    "others" gives each unsaved fact its own status (see _saved_header); "off" and "failed" are set by the callers. Only the user's
     own words count; a user row the client marked with an ``origin`` is not
     examined. Blocking (embedder); the caller runs it off the loop. Nothing is
     stored in privacy mode. *before_embed*, when given, is called before the
@@ -1884,9 +1902,8 @@ def _remember_explicit(messages, ctx, before_embed=None) -> None:
     _migrate_legacy(store)
     embed_fn = _embed_fn()
     statuses = [_add_explicit_fact(store, fact, embed_fn) for fact in facts]
-    status = next((s for s in ("saved", "full", "exists") if s in statuses), "exists")
-    fact = "; ".join(facts)
-    ctx.state["memory_saved"] = {"text": fact, "status": status}
+    ctx.state["memory_saved"] = _saved_header(facts, statuses)
+    status = ctx.state["memory_saved"]["status"]
     from localm.debuglog import logger
     logger.debug("memory: explicit remember request handled (%s)", status)
 

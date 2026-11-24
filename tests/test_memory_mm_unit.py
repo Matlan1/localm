@@ -241,3 +241,77 @@ def test_a_vector_left_beside_changed_text_is_dropped_on_load(tmp_path):
     reopened = MemoryStore.open_file(path)
     assert reopened.vectorless_count() == 1
     assert keep.id in reopened._vectors and edited.id not in reopened._vectors
+
+
+@pytest.mark.parametrize("user_line, fact", [
+    ("Please note that I am allergic to nuts.", "User is allergic to nuts"),
+    ("Will is my name.", "User is named Will"),
+    ("Bitte note: I am vegan.", "User is vegan"),
+])
+def test_a_please_or_a_name_that_opens_a_statement_does_not_make_it_a_request(user_line, fact):
+    session = f"User: {user_line}\nAssistant: Noted."
+    assert [c["text"] for c in extract(_model(fact), session)] == [fact]
+
+
+@pytest.mark.parametrize("user_line", [
+    "Please tell me one fact about apples.",
+    "Can you tell me one fact about apples.",
+    "Could you write a poem about my cat.",
+])
+def test_an_instruction_to_the_assistant_grounds_no_fact(user_line):
+    session = f"User: {user_line}\nAssistant: Sure."
+    assert extract(_model("User is interested in apples", "User has a cat"), session) == []
+
+
+def test_german_requests_are_requests_and_statements_are_not():
+    from localm.memory.consolidate import _is_request
+    for line in ("Erzähl mir etwas über Äpfel.",
+                 "Bitte erzähl mir etwas über Äpfel.",
+                 "Kannst du mir helfen", "Könntest du mir das erklären", "Wer ist Ada?"):
+        assert _is_request(line), line
+    for line in ("Ich bin Vegetarier.", "Bitte beachte, dass ich Vegetarier bin.",
+                 "Kann nicht ohne Kaffee leben.", "Will is my son's name."):
+        assert not _is_request(line), line
+
+
+def test_the_header_says_per_fact_what_was_saved():
+    import localm.plugins.builtin.memory.plug as plug
+    assert plug._saved_header(["a", "b"], ["saved", "full"]) == {
+        "text": "a", "status": "saved", "others": [{"text": "b", "status": "full"}]}
+    assert plug._saved_header(["a", "b"], ["saved", "saved"]) == {
+        "text": "a; b", "status": "saved"}
+    assert plug._saved_header(["a", "b"], ["full", "full"]) == {
+        "text": "a; b", "status": "full"}
+    assert plug._saved_header(["a"], ["exists"]) == {"text": "a", "status": "exists"}
+
+
+def test_a_second_principals_store_is_filled_while_the_first_fill_runs(tmp_path, monkeypatch):
+    import localm.plugins.builtin.memory.plug as plug
+    from localm.memory import MemoryRecord, MemoryStore
+    monkeypatch.setattr(plug, "_stop", threading.Event())
+    monkeypatch.setattr(plug, "_fill_pending", False)
+    monkeypatch.setattr(plug, "_fill_stores", {})
+    first_called = threading.Event()
+    release = threading.Event()
+
+    def embed_fn_resolver():
+        first_called.set()
+        release.wait(10)
+        return lambda texts: [[1.0, 0.0] for _ in texts]
+
+    monkeypatch.setattr(plug, "_embed_fn", embed_fn_resolver)
+    a = MemoryStore.open_file(tmp_path / "a" / "ns.jsonl")
+    b = MemoryStore.open_file(tmp_path / "b" / "ns.jsonl")
+    a.add(MemoryRecord(text="I live in Oslo", kind="semantic", source="user"), embed_fn=None)
+    b.add(MemoryRecord(text="I like tea", kind="semantic", source="user"), embed_fn=None)
+    try:
+        plug._fill_vectors_later(a)
+        assert first_called.wait(10)
+        plug._fill_vectors_later(b)
+    finally:
+        release.set()
+    for t in threading.enumerate():
+        if t.name == "memory vector fill":
+            t.join(10)
+    assert MemoryStore.open_file(tmp_path / "a" / "ns.jsonl").vectorless_count() == 0
+    assert MemoryStore.open_file(tmp_path / "b" / "ns.jsonl").vectorless_count() == 0
