@@ -112,7 +112,7 @@ volumes:
 ## Host names
 
 The server answers only to names it knows as its own (see the Host check in
-[SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md#host-header-check-dns-rebinding)).
+[security.md](security.md#host-header-check-dns-rebinding)).
 Inside a container those are `localhost`, the container id and IP addresses, so
 an IP address always works, but a name you reach it by gets `400 Host not
 allowed`: the Docker host's name (`https://nas:8642`, `nas.local`) or the compose

@@ -622,7 +622,7 @@ localm config autoprune_missing_models true
 localm config language de                        # interface language: en (default), de, es or fr
 ```
 
-`localm config KEY VALUE` always sets a value; `localm info` prints the current ones. Config lives at `<data dir>/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed: requests are then refused whenever no key is configured, for example after the last key is removed (`localm config require_auth true` is itself refused while no key exists, since that would lock you out; the environment variable is not); `localm gui` and `localm serve` refuse to bind past loopback unless an API key of at least 8 characters is set (exit 2; `--insecure` overrides it, and a bind address set in Settings falls back to loopback with a warning instead), and a running one whose last key is removed refuses requests until a key is set; `cors_origins` widens CORS (locked to localhost by default); `allowed_hosts` (or `LOCALM_ALLOWED_HOSTS`, comma-separated) adds host names the server answers to, for a reverse proxy or your own DNS name (by default only its own names and addresses; `"*"` turns the DNS-rebinding check off). See the [API keys](#api-keys) section and [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the auth and scope model, and [docs/tls.md](tls.md) for LAN serving.
+`localm config KEY VALUE` always sets a value; `localm info` prints the current ones. Config lives at `<data dir>/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed: requests are then refused whenever no key is configured, for example after the last key is removed (`localm config require_auth true` is itself refused while no key exists, since that would lock you out; the environment variable is not); `localm gui` and `localm serve` refuse to bind past loopback unless an API key of at least 8 characters is set (exit 2; `--insecure` overrides it, and a bind address set in Settings falls back to loopback with a warning instead), and a running one whose last key is removed refuses requests until a key is set; `cors_origins` widens CORS (locked to localhost by default); `allowed_hosts` (or `LOCALM_ALLOWED_HOSTS`, comma-separated) adds host names the server answers to, for a reverse proxy or your own DNS name (by default only its own names and addresses; `"*"` turns the DNS-rebinding check off). See the [API keys](#api-keys) section and [security.md](security.md) for the auth and scope model, and [docs/tls.md](tls.md) for LAN serving.
 
 ### Dynamic context window
 
@@ -845,7 +845,7 @@ Removing the last key (`key clear`, or `key rm` of the only key with no owner ke
 - `--rag-root DIR` (repeatable) - confines the key's whole RAG reach (indexing and every other collection route) to exactly these folders instead of the global folder policy. Omit for no per-key restriction. See [docs/rag.md](rag.md#per-key-folder-scoping).
 - `--expires-in SECONDS` - the key stops working this many seconds after creation. Omitted means it never expires.
 
-Privileged scopes (`config:write`, `plugins:admin`, `keys:admin`, `admin`, `coder:full`) are refused by `key create` unless you pass `--allow-privileged`; an owner-authenticated `POST /v1/keys` API call can mint them too. See [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the auth and scope model, and [docs/tls.md](tls.md) for serving over a LAN.
+Privileged scopes (`config:write`, `plugins:admin`, `keys:admin`, `admin`, `coder:full`) are refused by `key create` unless you pass `--allow-privileged`; an owner-authenticated `POST /v1/keys` API call can mint them too. See [security.md](security.md) for the auth and scope model, and [docs/tls.md](tls.md) for serving over a LAN.
 
 ---
 
@@ -1338,7 +1338,7 @@ localm issues [NUMBER]          # list the bug reports this install filed, or sh
 Updates are signed: localm verifies an Ed25519 signature from its release key
 before applying anything, and refuses a build that is not newer. The keys are
 pinned in its own source and can be replaced by a signed update.
-See [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the update trust model. The GUI Models page
+See [security.md](security.md) for the update trust model. The GUI Models page
 has an "Update now" button for the same flow.
 
 `--to VERSION` installs the release you name, including an older one. It says when

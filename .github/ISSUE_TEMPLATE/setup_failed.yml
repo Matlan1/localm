@@ -1,11 +1,12 @@
 name: Setup failed
 description: localm did not install, or it does not start after setup.
+title: "Setup failed"
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Only the first box is required. Leave the rest empty if you do not know it.
+        Only "What happened" is required. Leave the rest empty if you do not know it.
         This form is public, so remove anything private first.
   - type: textarea
     id: what-happened
