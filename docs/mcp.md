@@ -165,8 +165,8 @@ The tool appears in the tool call panel with the model's response.
 
 ## Quick start: Claude Code (Agent Plugin)
 
-This repo carries `.claude-plugin/plugin.json` and
-`.claude-plugin/marketplace.json`, a root `.mcp.json`, and a `localm` skill
+This repo carries `.claude-plugin/plugin.json`,
+`.claude-plugin/marketplace.json`, and a `localm` skill
 (`skills/localm/`), so Claude Code can load the MCP server as a
 plugin instead of a manual config paste. Either option below needs
 localm's own `mcp` plugin installed and enabled first:
@@ -198,7 +198,7 @@ claude --plugin-dir /path/to/this/repo
 only (operational guidance on picking a model/quant, when to delegate a
 whole task versus a single chat call, and what image generation needs).
 
-The plugin's `.mcp.json` starts the server with the global `localm mcp`
+The plugin's `plugin.json` starts the server with the global `localm mcp`
 command, because one file has to work for every install and platform. When no
 global `localm` command is on your PATH (a Portable install, for example), the
 plugin's MCP server does not start; the skill still loads. Register the server
