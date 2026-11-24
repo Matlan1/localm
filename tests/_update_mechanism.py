@@ -104,7 +104,7 @@ def stage(root: Path, new: dict | None = None, update_id: str = UPDATE_ID) -> di
     return stated(new)
 
 
-def tree(root: Path, skip=(".localm-update",)) -> dict:
+def tree(root: Path, skip=(".localm-update", ".localm-run")) -> dict:
     """Every file, link and folder of *root* with its content, target and mode,
     compiled Python files and the top-level names *skip* excepted."""
     found: dict = {}
@@ -169,6 +169,13 @@ def phase(root: Path):
     """The phase in the record of *root*, None without one."""
     path = root / ".localm-update" / "job.json"
     return json.loads(path.read_text(encoding="utf-8"))["phase"] if path.exists() else None
+
+
+def done(root: Path, update_id: str = UPDATE_ID) -> bool:
+    """Whether the folder of the update says that it reached DONE or is over."""
+    path = root / ".localm-update" / update_id / "state.json"
+    return path.exists() and json.loads(path.read_text(encoding="utf-8"))["phase"] in (
+        "done", "ended", "left")
 
 
 def left(root: Path) -> list:

@@ -13,7 +13,7 @@ so it can also be imported as ``localm.update_mechanism``.
 - :mod:`.job`: the record of an update, its lock and its phases; :func:`.job.restore`,
   :func:`.job.finish` and :func:`.job.cleanup`.
 - :mod:`.mover`: the plan of one step and the file moves of it.
-- :mod:`.packages`: the step that replaces Python packages with uv.
+- :mod:`.packages`: the step that replaces Python packages.
 - :mod:`.disk`: file identities, confined paths and flushed writes.
 - :mod:`.shared`: code of the build that is used here by file path.
 
@@ -24,6 +24,8 @@ Layout, all on the volume of the install::
     <root>/.localm-update/<id>/new/             the new files
     <root>/.localm-update/<id>/old/             the files they replaced
     <root>/.localm-update/<id>/plans/NN-step.json
+    <root>/.localm-update/<id>/state.json       the same facts as the record
     <root>/.localm-update/kept/<id>/            files of the user, never deleted here
-    <root>/.venv/.localm-old/<id>/              the same for Python packages
+    <root>/.venv/.localm-old/<id>/              ``stage`` and ``old`` of Python packages
+    <root>/.venv/.localm-kept/<id>/             files of the user in the venv
 """

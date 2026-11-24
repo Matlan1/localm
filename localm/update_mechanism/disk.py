@@ -13,7 +13,7 @@ import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PureWindowsPath
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, Optional, TypeVar
 
 from . import shared
 
@@ -22,23 +22,30 @@ HELD_WAIT_S = 30.0
 _RETRY_S = 0.1
 # Seconds a write waits for a reader of the same file to close it.
 _REPLACE_WAIT_S = 10.0
+#: Seconds a read of a record or plan is tried again while it fails.
+READ_WAIT_S = 10.0
 _NAME_SURROGATE = 0x20000000
 PYCACHE = "__pycache__"
+_T = TypeVar("_T")
 
 
 class Unsafe(Exception):
     """A path that is not one of this install's own files."""
 
 
+class Blocked(Exception):
+    """A file that cannot be read now; nothing is known about what it holds."""
+
+
 class Held(Exception):
-    """A file that another program holds, or that may not be moved.
+    """A file that another program holds, or that this account may not use.
 
     *path* is the file; ``str()`` names it and, where the system says so, the
     programs that hold it."""
 
     def __init__(self, path, reason) -> None:
         self.path = str(path)
-        super().__init__(f"{path} cannot be moved ({reason}){_holders(path)}")
+        super().__init__(f"{path} cannot be used ({reason}){_holders(path)}")
 
 
 def _holders(path) -> str:
@@ -51,6 +58,33 @@ def _holders(path) -> str:
     if not found:
         return ""
     return ", held by " + ", ".join(f"{h['name']} (pid {h['pid']})" for h in found)
+
+
+class Wait:
+    """How long the moves of one run wait, in all, for held files."""
+
+    def __init__(self, seconds: Optional[float] = None) -> None:
+        self.seconds = HELD_WAIT_S if seconds is None else seconds
+        self._deadline: Optional[float] = None
+
+    def until(self) -> float:
+        """The time (``time.monotonic``) at which waiting ends; the first call
+        starts the wait."""
+        if self._deadline is None:
+            self._deadline = time.monotonic() + self.seconds
+        return self._deadline
+
+
+def patient(wait: Wait, path, action: Callable[[], _T]) -> _T:
+    """*action*'s result, tried again on Windows until *wait* ends while the file
+    *path* is held. Raises :class:`Held` when it still is, or may not be used."""
+    while True:
+        try:
+            return action()
+        except PermissionError as e:
+            if os.name != "nt" or time.monotonic() >= wait.until():
+                raise Held(path, e.strerror or e) from e
+            time.sleep(_RETRY_S)
 
 
 def long_path(path) -> Path:
@@ -119,13 +153,15 @@ def is_link(st: os.stat_result) -> bool:
 
 # --------------------------------------------------------------- identities
 
-def content_identity(path) -> dict:
+def content_identity(path, wait: Optional[Wait] = None) -> dict:
     """``{"sha256", "size", "mtime_ns"}`` of the regular file at *path*. Raises
-    :class:`Unsafe` for anything that is not one."""
+    :class:`Unsafe` for anything that is not one, :class:`Held` when it cannot be
+    opened within *wait*."""
     before = os.lstat(path)
     if is_link(before) or not stat.S_ISREG(before.st_mode):
         raise Unsafe(f"{path} is not a regular file")
-    return {**shared.update_package._file_entry(Path(path)), "mtime_ns": before.st_mtime_ns}
+    found = patient(wait or Wait(), path, lambda: shared.update_package._file_entry(Path(path)))
+    return {**found, "mtime_ns": before.st_mtime_ns}
 
 
 def quick_identity(path) -> dict:
@@ -137,17 +173,18 @@ def quick_identity(path) -> dict:
     return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
 
 
-def same(path, identity: dict) -> bool:
+def same(path, identity: dict, wait: Optional[Wait] = None) -> bool:
     """Whether the file at *path* has *identity*. The content decides where the
     identity states a checksum, else size and time, or the target of a link. False
-    when there is no file."""
+    when there is no file. Raises :class:`Held` when it cannot be read within
+    *wait*."""
     try:
         have = quick_identity(path)
         if "sha256" not in identity:
             return have == identity
         if have.get("size") != identity["size"]:
             return False
-        return content_identity(path)["sha256"] == identity["sha256"]
+        return content_identity(path, wait)["sha256"] == identity["sha256"]
     except (FileNotFoundError, NotADirectoryError, Unsafe):
         return False
 
@@ -189,50 +226,59 @@ def _flush(path) -> None:
         os.close(fd)
 
 
-def flush_files(paths: Iterable) -> None:
+def flush_files(paths: Iterable, wait: Optional[Wait] = None) -> None:
     """Flush the content of each regular file of *paths* to disk. A read-only file
-    on Windows, which cannot be flushed, is left as it is. Raises OSError."""
+    on Windows, which cannot be flushed, is left as it is. Raises :class:`Held` when
+    one cannot be opened within *wait*, OSError otherwise."""
+    wait = wait or Wait()
+
     def one(path) -> None:
         st = os.lstat(path)
         if is_link(st) or (os.name == "nt" and not st.st_mode & stat.S_IWRITE):
             return
-        _flush(path)
+        patient(wait, path, lambda: _flush(path))
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         for _ in pool.map(one, paths):
             pass
 
 
-def _until(deadline: Callable[[], float], action: Callable[[], object]) -> None:
-    """Run *action*, on Windows again until the time *deadline* returns while the
-    file it needs is held."""
-    while True:
-        try:
-            action()
-            return
-        except PermissionError:
-            if os.name != "nt" or time.monotonic() >= deadline():
-                raise
-            time.sleep(_RETRY_S)
+def replace_through(src: Path, dst: Path) -> None:
+    """Rename *src* over *dst*; the rename is on disk when this returns. Raises
+    OSError."""
+    if sys.platform == "win32":
+        import ctypes
+        replace_existing, write_through = 0x1, 0x8
+        if not ctypes.windll.kernel32.MoveFileExW(str(src), str(dst),
+                                                  replace_existing | write_through):
+            raise ctypes.WinError()
+    else:
+        os.replace(src, dst)
+        sync_folder(dst.parent)
+        if src.parent != dst.parent:
+            sync_folder(src.parent)
 
 
 def write_json(path: Path, obj) -> None:
     """Write *obj* to *path* so that after a power cut the file holds either its
     old content or all of the new one, and is on disk when this returns. Raises
-    OSError."""
+    :class:`Held` or OSError."""
     tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f)
-        f.flush()
-        os.fsync(f.fileno())
-    _until(Wait(_REPLACE_WAIT_S).until, lambda: os.replace(tmp, path))
-    sync_folder(path.parent)
+    wait = Wait(_REPLACE_WAIT_S)
+
+    def write() -> None:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f)
+            f.flush()
+            os.fsync(f.fileno())
+    patient(wait, tmp, write)
+    patient(wait, path, lambda: replace_through(tmp, path))
 
 
 def unlink(path: Path) -> None:
-    """Remove the file at *path* if it is there. Raises OSError."""
+    """Remove the file at *path* if it is there. Raises :class:`Held` or OSError."""
     try:
-        _until(Wait(_REPLACE_WAIT_S).until, lambda: os.unlink(path))
+        patient(Wait(_REPLACE_WAIT_S), path, lambda: os.unlink(path))
     except FileNotFoundError:
         return
     sync_folder(path.parent)
@@ -240,16 +286,28 @@ def unlink(path: Path) -> None:
 
 def read_json(path: Path, limit: int):
     """The JSON value in the regular file *path* of at most *limit* bytes, or None
-    when there is no file. Raises ValueError when it is anything else."""
+    when there is no file. Raises ValueError when it is anything else, and
+    :class:`Blocked` when it cannot be read for a while."""
     st = lstat(path)
     if st is None:
         return None
     if is_link(st) or not stat.S_ISREG(st.st_mode) or st.st_size > limit:
         raise ValueError(f"{path.name} is not a file of the update")
+    deadline = time.monotonic() + READ_WAIT_S
+    while True:
+        try:
+            data = path.read_bytes()
+            break
+        except FileNotFoundError:
+            return None
+        except OSError as e:
+            if time.monotonic() >= deadline:
+                raise Blocked(f"{path} cannot be read ({e}){_holders(path)}") from e
+            time.sleep(_RETRY_S)
     try:
-        return shared.update_package._strict_json(path.read_bytes().decode("utf-8"))
-    except (OSError, ValueError) as e:
-        raise ValueError(f"{path.name} cannot be read: {e}") from None
+        return shared.update_package._strict_json(data.decode("utf-8"))
+    except ValueError as e:
+        raise ValueError(f"{path.name} is damaged: {e}") from None
 
 
 # -------------------------------------------------------------------- locks
@@ -276,43 +334,29 @@ def lock_file(fd: int) -> None:
 
 # -------------------------------------------------------------------- moves
 
-class Wait:
-    """How long the moves of one run wait, in all, for held files."""
-
-    def __init__(self, seconds: Optional[float] = None) -> None:
-        self.seconds = HELD_WAIT_S if seconds is None else seconds
-        self._deadline: Optional[float] = None
-
-    def until(self) -> float:
-        """The time (``time.monotonic``) at which waiting ends; the first call
-        starts the wait."""
-        if self._deadline is None:
-            self._deadline = time.monotonic() + self.seconds
-        return self._deadline
-
-
-def move(src: Path, dst: Path, wait: Wait) -> None:
+def move(src: Path, dst: Path, wait: Wait, *, through: bool = False) -> None:
     """Rename *src* to *dst*, where nothing may be yet, creating the folders above
-    *dst*. Raises :class:`Held` for a file that cannot be moved, FileExistsError
-    when there is something at *dst*, OSError otherwise."""
+    *dst*. *through*: the rename is on disk when this returns. Raises :class:`Held`
+    for a file that cannot be moved, FileExistsError when there is something at
+    *dst*, OSError otherwise."""
     dst.parent.mkdir(parents=True, exist_ok=True)
     if lstat(dst) is not None and spelled(dst):
         raise FileExistsError(f"{dst} is already there")
-    _rename(os.rename, src, dst, wait)
+    _rename(replace_through if through else os.rename, src, dst, wait)
 
 
 def put_over(src: Path, dst: Path, wait: Wait) -> None:
-    """Rename *src* over the file at *dst*, which is never absent in between.
-    Raises :class:`Held` or OSError."""
+    """Rename *src* over the file at *dst*, which is never absent in between; a
+    read-only *dst* is replaced too. Raises :class:`Held` or OSError."""
     dst.parent.mkdir(parents=True, exist_ok=True)
+    st = lstat(dst)
+    if os.name == "nt" and st is not None and not st.st_mode & stat.S_IWRITE:
+        os.chmod(dst, stat.S_IWRITE)
     _rename(os.replace, src, dst, wait)
 
 
 def _rename(call, src: Path, dst: Path, wait: Wait) -> None:
-    try:
-        _until(wait.until, lambda: call(src, dst))
-    except PermissionError as e:
-        raise Held(dst if call is os.replace and lstat(dst) else src, e.strerror or e) from e
+    patient(wait, dst if call is os.replace and lstat(dst) else src, lambda: call(src, dst))
 
 
 def copy_whole(src: Path, dst: Path, wait: Wait) -> None:
@@ -320,13 +364,10 @@ def copy_whole(src: Path, dst: Path, wait: Wait) -> None:
     complete and on disk as soon as it exists. Raises :class:`Held` or OSError."""
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst.with_name(dst.name + ".tmp")
-    try:
-        _until(wait.until, lambda: shutil.copy2(src, tmp, follow_symlinks=False))
-    except PermissionError as e:
-        raise Held(src, e.strerror or e) from e
-    flush_files([tmp])
-    os.replace(tmp, dst)
-    sync_folder(dst.parent)
+    patient(wait, src, lambda: shutil.copyfile(src, tmp, follow_symlinks=False))
+    patient(wait, tmp, lambda: _flush(tmp))
+    shutil.copystat(src, tmp, follow_symlinks=False)
+    patient(wait, dst, lambda: replace_through(tmp, dst))
 
 
 def prune(folder: Path, stop: Path) -> None:

@@ -3,8 +3,8 @@
 
     <python> -I -S _update_mechanism_driver.py <applier folder> <job json> <kill at>
 
-Every call the update mechanism makes to a function of ``os`` in :data:`CALLS` and to
-``json.dump`` is one point; the process is killed right before the call number *kill at* (from 0; -1
+Every call the update mechanism makes to a function of ``os`` in :data:`CALLS` to
+``json.dump`` and to its own write-through rename is one point; the process is killed right before the call number *kill at* (from 0; -1
 never). With -1 the number of points is printed as ``POINTS <n>``. ``FINISH`` is
 printed when the update starts to end as done. Exit status 0: the job ran through.
 """
@@ -26,13 +26,14 @@ def _load(applier):
     spec.loader.exec_module(mod)
     mod.block_localm()
     mod.load_package()
+    import update_mechanism.disk
     import update_mechanism.job
     import update_mechanism.mover
     import update_mechanism.packages
     return update_mechanism
 
 
-def _arm(kill_at):
+def _arm(um, kill_at):
     def wrap(real):
         def call(*args, **kwargs):
             global count
@@ -44,22 +45,10 @@ def _arm(kill_at):
     for name in CALLS:
         setattr(os, name, wrap(getattr(os, name)))
     json.dump = wrap(json.dump)
-
-
-def _kill_after_uv_starts(um):
-    real = um.packages.subprocess.Popen
-
-    class Popen(real):
-        def __init__(self, args, **kwargs):
-            super().__init__(args, **kwargs)
-            if "--dry-run" not in args:
-                os.kill(os.getpid(), signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
-    um.packages.subprocess.Popen = Popen
+    um.disk.replace_through = wrap(um.disk.replace_through)
 
 
 def _update(um, spec):
-    if spec.get("kill_after_uv_starts"):
-        _kill_after_uv_starts(um)
     root, update_id = spec["root"], spec["id"]
     with um.job.Lock(root) as lock:
         um.job.start(lock, update_id, old="1", new="2")
@@ -71,7 +60,8 @@ def _update(um, spec):
             um.mover.forward(root, update_id, plan)
         um.job.advance(lock, um.job.STEPS)
         if spec.get("uv"):
-            plan = um.packages.plan_packages(root, update_id, spec["uv"], env=spec["env"])
+            um.packages.stage_packages(root, update_id, spec["uv"], env=spec["env"])
+            plan = um.packages.plan_packages(root, update_id)
             um.mover.write_plan(root, update_id, plan)
             um.packages.forward(root, update_id, plan, spec["uv"], env=spec["env"])
         um.job.advance(lock, um.job.STARTING)
@@ -97,7 +87,7 @@ def main():
     with open(job, encoding="utf-8") as f:
         spec = json.load(f)
     um = _load(applier)
-    _arm(kill_at)
+    _arm(um, kill_at)
     {"update": _update, "restore": _restore, "hold": _hold}[spec["do"]](um, spec)
     if kill_at < 0:
         print(f"POINTS {count}", flush=True)

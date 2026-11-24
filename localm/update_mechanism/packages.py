@@ -1,47 +1,53 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Replacing Python packages in the venv of the install, with uv, so that the way
-back needs neither uv nor a package source.
+"""Replacing Python packages in the venv of the install.
 
-The files of exactly the packages uv would remove are renamed into a folder inside
-the venv, then uv installs the new ones. The way back renames them again. What uv
-would do is read from its own dry run, and what it did is compared with a listing of
-the whole venv taken before: a change nobody planned is a failure.
+uv installs the new packages into a staging venv inside the venv
+(:func:`stage_packages`), which holds besides them only the metadata of the packages
+that stay, so uv chooses as it would in the venv. From there their files are moved
+into place by :mod:`.mover`, like the files of a release (:func:`plan_packages`,
+:func:`forward`). Nothing else writes to the venv, so the way back needs neither uv
+nor a package source, and a file nobody planned is somebody else's.
 """
 
 from __future__ import annotations
 
+import base64
+import csv
+import hashlib
 import os
 import posixpath
 import re
+import shutil
 import stat
 import subprocess
-import time
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Optional
+from typing import Optional
 
 from . import disk, mover, shared
 from .disk import Held, Unsafe, Wait
-from .mover import PACKAGES, REMOVE, Area, Op, Plan, Refused, StepFailed
+from .mover import PACKAGES, REMOVE, Area, Op, Outcome, Plan, Refused, Unreadable
 
-#: Seconds the way back waits for a uv that is still working in the venv.
-UV_WAIT_S = 120.0
-# The input file of uv: as long as a process has it open, uv is running.
-_INPUT = "uv-input"
 _OWN = "localm"
-_LINE = re.compile(r" ([-+~]) ([A-Za-z0-9][A-Za-z0-9._-]*)(?:==(\S+)(?: \(.*\))?| @ .+)")
+_STAGED = "staged.json"
+_LINE = re.compile(r" ([-+~]) ([A-Za-z0-9][A-Za-z0-9._-]*)(?:==(\S+)(?: \((.*)\))?| @ (.+))")
 _COUNT = re.compile(r"Would (uninstall|install) (\d+) packages?")
 _OTHER_VENV = re.compile(r"Would (?:replace|create|remove)\b.*\benvironment\b")
+# What uv reads of an installed distribution to know that it is there.
+_METADATA = ("METADATA", "WHEEL", "INSTALLER", "REQUESTED", "direct_url.json", "uv_cache.json",
+             "uv_build.json")
+# Largest file compared with its checksum to see whether a user edited it.
+_EDIT_BYTES = 4 * 1024 * 1024
 
-#: Runs a command: ``(argv, cwd, env, stdin) -> (exit status, output)``. The command
-#: gets *stdin* (a file or ``subprocess.DEVNULL``) as its standard input.
-Runner = Callable[[list, str, dict, Any], tuple]
+#: Runs a command: ``(argv, cwd, env) -> (exit status, output)``.
+Runner = Callable[[list, str, dict], tuple]
 
 
-def run_hidden(argv: list, cwd: str, env: dict, stdin: Any) -> tuple:
+def run_hidden(argv: list, cwd: str, env: dict) -> tuple:
     """The default :data:`Runner`: runs *argv* without a window, output and errors
     together."""
     flags: dict = ({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {})
-    done = subprocess.run(argv, cwd=cwd, env=env, stdin=stdin,
+    done = subprocess.run(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                           encoding="utf-8", errors="replace", check=False, **flags)
     return done.returncode, done.stdout
@@ -59,9 +65,27 @@ def command(argv: Iterable, *, project: bool = False) -> list:
 
 def _environment(env: Mapping) -> dict:
     out = {k: v for k, v in env.items()
-           if k not in ("UV_PROJECT_ENVIRONMENT", "VIRTUAL_ENV", "FORCE_COLOR", "CLICOLOR_FORCE")}
+           if k not in ("UV_PROJECT_ENVIRONMENT", "VIRTUAL_ENV", "UV_COMPILE_BYTECODE",
+                        "FORCE_COLOR", "CLICOLOR_FORCE")}
     out["NO_COLOR"] = "1"
     return out
+
+
+def _into(argv: list, root, env: dict, stage: Path) -> tuple:
+    """*argv*, *root* and *env*, changed to install into the venv *stage*."""
+    target = disk.short_path(stage)
+    if argv[1:2] == ["sync"]:
+        return argv, root, {**env, "UV_PROJECT_ENVIRONMENT": target}
+    out: list = []
+    skip = False
+    for arg in argv:
+        if skip or arg.startswith("--python="):
+            skip = False
+        elif arg in ("--python", "-p"):
+            skip = True
+        else:
+            out.append(arg)
+    return [*out, "--python", target], root, env
 
 
 def _last(output: str) -> str:
@@ -71,9 +95,10 @@ def _last(output: str) -> str:
 
 def changes(output: str) -> tuple:
     """``(removed, installed)`` from the output of a uv dry run, each a list of
-    ``(canonical name, version)``, the version empty for a package from a folder.
-    Raises :class:`Refused` when uv would make or replace a venv, or when its counts
-    do not match the packages it names."""
+    ``(canonical name, version, local)``; *local* is true for a package from a folder
+    or file of this machine, whose version may be empty. Raises :class:`Refused` when
+    uv would make or replace a venv, or when its counts do not match the packages it
+    names."""
     canon = shared.updater_components._canon
     removed, installed = [], []
     counts = {"uninstall": 0, "install": 0}
@@ -85,7 +110,8 @@ def changes(output: str) -> tuple:
             counts[count[1]] += int(count[2])
         found = _LINE.fullmatch(line.rstrip())
         if found:
-            entry = (canon(found[2]), found[3] or "")
+            source = found[4] or found[5] or ""
+            entry = (canon(found[2]), found[3] or "", "file:" in source)
             if found[1] in "-~":
                 removed.append(entry)
             if found[1] in "+~":
@@ -95,15 +121,17 @@ def changes(output: str) -> tuple:
     return removed, installed
 
 
-def _record_paths(site: Path, base: Path, folder: str, name: str) -> dict:
-    """``{path in the venv: stated size or None}`` of the files of the distribution
-    *folder* in *site*: its RECORD and everything in its own folder, compiled Python
-    files excepted. Raises :class:`Refused` without a RECORD, and for a path outside
-    the venv."""
+# ------------------------------------------------------ the files of a package
+
+def _records(site: Path, base: Path, folder: str, name: str) -> dict:
+    """``{path in the venv: (stated hash, stated size or None)}`` of the files of the
+    distribution *folder* in *site*: its RECORD and everything in its own folder,
+    compiled Python files excepted. Raises :class:`Refused` without a usable RECORD,
+    and for a path outside the venv."""
     inner = site.relative_to(base).as_posix()
     try:
         rows = shared.updater_components.record_rows(site, folder)
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, csv.Error) as e:
         raise Refused(f"the package {name} has no list of its files (RECORD), so it cannot be "
                       f"replaced safely: {e}") from None
     if not rows:
@@ -116,248 +144,333 @@ def _record_paths(site: Path, base: Path, folder: str, name: str) -> dict:
                 or (os.name == "nt" and ":" in text)):
             raise Refused(f"the package {name} lists a file outside the Python environment: "
                           f"{row[0][:200]}")
+        try:
+            disk.clean(rel)
+        except Unsafe:
+            raise Refused(f"the package {name} has no usable list of its files (RECORD): "
+                          f"{row[0][:80]!r}") from None
         if disk.PYCACHE not in rel.split("/"):
             size = row[2] if len(row) > 2 else ""
-            found[rel] = int(size) if size.isdigit() else None
+            found[rel] = (row[1] if len(row) > 1 else "", int(size) if size.isdecimal() else None)
     for entry in os.listdir(site / folder):
         st = os.lstat(site / folder / entry)
-        if disk.is_link(st) or os.path.isfile(site / folder / entry):
-            found.setdefault(f"{inner}/{folder}/{entry}", None)
+        if disk.is_link(st) or stat.S_ISREG(st.st_mode):
+            found.setdefault(f"{inner}/{folder}/{entry}", ("", None))
     return found
 
 
-def plan_packages(root, update_id: str, argv: Iterable, *, env: Mapping, project: bool = False,
-                  run: Runner = run_hidden) -> Optional[Plan]:
-    """The plan of the package step that runs the uv command *argv*
-    (:func:`command`) in *root*, or None when uv has nothing to do. Changes nothing.
+def _infos(site: Path, names: Iterable[str]) -> list:
+    """``(name, folder)`` of every distribution in *site* that is one of *names*."""
+    names = set(names)
+    return [(n, folder) for n, _v, folder in shared.updater_components.dist_infos(site)
+            if n in names]
+
+
+def _site(venv: Path) -> Path:
+    site = shared.updater_components.site_packages(venv)
+    if site is None:
+        raise Refused(f"{venv} has no site-packages")
+    return site
+
+
+# ------------------------------------------------------------------- staging
+
+def stage_folder(root, update_id: str) -> Path:
+    """The staging venv of the update *update_id*."""
+    return mover.plain_folder(mover.venv_folder(root, update_id) / "stage")
+
+
+def stage_packages(root, update_id: str, argv: Iterable, *, env: Mapping, project: bool = False,
+                   run: Runner = run_hidden) -> bool:
+    """Put what the uv command *argv* (:func:`command`) would install in *root* into
+    the staging venv of *update_id* (made anew), and note what it would remove.
+    Returns False, with nothing staged, when uv has nothing to do. The venv itself is
+    not changed, so this can run while localm does.
 
     Raises :class:`Refused`, naming the package, for one without a RECORD, with a
-    file outside the venv or behind a link, or for localm itself without *project*;
-    also when uv cannot make its plan. Raises OSError."""
+    file outside the venv or behind a link, for localm itself without *project*, for
+    another package from a folder or file, and when uv cannot make its plan or
+    stages something else than it planned; OSError otherwise."""
     venv = mover.venv_of(root)
-    code, output = run([*command(argv, project=project), "--dry-run"], str(root),
-                       _environment(env), subprocess.DEVNULL)
+    site = _site(venv)
+    env = _environment(env)
+    full = command(argv, project=project)
+    code, output = run([*full, "--dry-run"], str(root), env)
     if code != 0:
         raise Refused(f"uv cannot prepare the packages: {_last(output)}")
     removed, installed = changes(output)
     if not removed and not installed:
-        return None
-    site = shared.updater_components.site_packages(venv)
-    if site is None:
-        raise Refused(f"{venv} has no site-packages")
-    if not project and any(name == _OWN for name, _v in removed + installed):
-        raise Refused("uv would replace localm itself")
-    a = mover.area(root, update_id, PACKAGES)
-    before = listing(venv)
-    infos = shared.updater_components.dist_infos(site)
-    paths: dict = {}
-    for name in sorted({name for name, _v in removed}):
-        have = [folder for n, _v, folder in infos if n == name]
-        if not have or len(have) != sum(1 for n, _v in removed if n == name):
+        return False
+    _check_allowed(removed + installed, project)
+    leaving = _leaving(venv, site, removed)
+    for name, folder in leaving:
+        _records(site, venv, folder, name)
+    stage = stage_folder(root, update_id)
+    if not disk.remove_tree(stage):
+        raise Refused(f"{stage} cannot be emptied")
+    stage.parent.mkdir(parents=True, exist_ok=True)
+    _run(run, [full[0], "venv", "--offline", "--no-config", "--relocatable",
+               *(["--system-site-packages"] if _system_site(venv) else []),
+               "--python", disk.short_path(_python(venv)), disk.short_path(stage)], root, env)
+    staged_site = _site(stage)
+    _seed(site, staged_site, {folder for _n, folder in leaving})
+    before = listing(stage)
+    _run(run, *_into(full, root, env, stage))
+    _check_stage(stage, staged_site, before, installed)
+    disk.write_json(stage.parent / _STAGED, {
+        "removed": sorted(leaving), "installed": sorted({n for n, _v, _l in installed})})
+    return True
+
+
+def _run(run: Runner, argv: list, root, env: dict) -> None:
+    code, output = run(argv, str(root), env)
+    if code != 0:
+        raise Refused(f"uv could not install the packages: {_last(output)}")
+
+
+def _check_allowed(entries: list, project: bool) -> None:
+    for name, _version, local in entries:
+        if name == _OWN and not project:
+            raise Refused("uv would replace localm itself")
+        if local and name != _OWN:
+            raise Refused(f"the package {name} comes from a folder or file of this machine, so "
+                          "it cannot be replaced safely")
+
+
+def _leaving(venv: Path, site: Path, removed: list) -> list:
+    """``(name, dist-info folder)`` of the packages *removed*, as they are in the
+    venv. Raises :class:`Refused` for one without a RECORD or behind a link."""
+    out = []
+    wanted = [n for n, _v, _l in removed]
+    a = Area(venv, venv, venv, venv)
+    for name in sorted(set(wanted)):
+        have = _infos(site, [name])
+        if not have or len(have) != wanted.count(name):
             raise Refused(f"the package {name} has no list of its files (RECORD), so it cannot "
                           "be replaced safely")
-        for folder in have:
-            found = _record_paths(site, venv, folder, name)
+        for _n, folder in have:
             try:
-                for rel in found:
+                for rel in _records(site, venv, folder, name):
                     a.find(rel)
             except Unsafe as e:
                 raise Refused(f"the package {name} cannot be replaced safely: {e}") from None
-            paths.update(found)
-    ops = [Op(rel, REMOVE, old=before["files"][rel])
-           for rel in sorted(paths) if rel in before["files"]]
-    return Plan(PACKAGES, mover.next_number(root, update_id), ops, [], before)
+        out += have
+    return out
+
+
+def _system_site(venv: Path) -> bool:
+    text = (venv / "pyvenv.cfg").read_text(encoding="utf-8", errors="replace").lower()
+    return bool(re.search(r"^\s*include-system-site-packages\s*=\s*true\s*$", text, re.M))
+
+
+def _python(venv: Path) -> Path:
+    return venv / "Scripts" / "python.exe" if os.name == "nt" else venv / "bin" / "python"
+
+
+def _seed(site: Path, staged_site: Path, leaving: set) -> None:
+    """Copy the metadata of every distribution of *site* that stays, and nothing
+    else of it, into *staged_site*."""
+    for entry in sorted(os.listdir(site)):
+        source = site / entry
+        if entry in leaving or not entry.endswith((".dist-info", ".egg-info")):
+            continue
+        if source.is_file():
+            shutil.copyfile(source, staged_site / entry)
+            continue
+        names = _METADATA if entry.endswith(".dist-info") else ("PKG-INFO",)
+        (staged_site / entry).mkdir(exist_ok=True)
+        for name in names:
+            if (source / name).is_file():
+                shutil.copy2(source / name, staged_site / entry / name)
+
+
+def _check_stage(stage: Path, site: Path, before: set, installed: list) -> None:
+    """Raise :class:`Refused` unless what uv added to *stage* is exactly the files of
+    the packages *installed*, all of them complete, none naming the staging venv."""
+    stated: dict = {}
+    names = {n for n, _v, _l in installed}
+    for name, folder in _infos(site, names):
+        stated.update(_records(site, stage, folder, name))
+    found = {n for n, _f in _infos(site, names)}
+    if found != names:
+        raise Refused("uv staged other packages than it planned: "
+                      + ", ".join(sorted(found ^ names)))
+    added = listing(stage) - before
+    if added != set(stated):
+        raise Refused("uv staged other files than its packages list: "
+                      + ", ".join(sorted(added ^ set(stated))[:5]))
+    for rel, (_hash, size) in stated.items():
+        path = stage.joinpath(*rel.split("/"))
+        st = os.lstat(path)
+        if size is not None and not disk.is_link(st) and st.st_size != size:
+            raise Refused(f"{rel} was not staged completely")
+        if _may_name_a_path(rel) and not disk.is_link(st) and _names(path, stage):
+            raise Refused(f"{rel} names the staging folder")
+
+
+def _may_name_a_path(rel: str) -> bool:
+    return (".dist-info/" in rel or rel.endswith(".pth")
+            or rel.split("/", 1)[0] in ("Scripts", "bin"))
+
+
+def _names(path: Path, stage: Path) -> bool:
+    text = disk.short_path(stage)
+    data = path.read_bytes().lower()
+    for form in {text, text.replace("\\", "/"), text.replace("\\", "\\\\")}:
+        for encoding in ("utf-8", "utf-16-le"):
+            if form.lower().encode(encoding) in data:
+                return True
+    return False
+
+
+def listing(venv: Path) -> set:
+    """The paths of every file and link in *venv* except compiled Python files and
+    uv's lock file. Raises OSError."""
+    found: set = set()
+    todo = [("", venv)]
+    while todo:
+        prefix, folder = todo.pop()
+        for name in os.listdir(folder):
+            rel = prefix + name
+            if name == disk.PYCACHE or rel == ".lock":
+                continue
+            st = os.lstat(folder / name)
+            if stat.S_ISDIR(st.st_mode) and not disk.is_link(st):
+                todo.append((rel + "/", folder / name))
+            else:
+                found.add(rel)
+    return found
+
+
+# ---------------------------------------------------------------- the moves
+
+def plan_packages(root, update_id: str) -> Plan:
+    """The plan that moves what :func:`stage_packages` staged into the venv and takes
+    out what it replaces. Every file in the place of a new one is moved aside, also
+    one of another package or of the user, whose own file is kept. Reads only.
+
+    Raises :class:`Refused` when nothing is staged or the packages to replace are no
+    longer those, and what :func:`.mover.build` raises."""
+    venv = mover.venv_of(root)
+    site = _site(venv)
+    stage = stage_folder(root, update_id)
+    removed, installed = _read_staged(stage.parent / _STAGED)
+    touched = {n for n, _f in removed} | set(installed)
+    if sorted(_infos(site, touched)) != sorted(removed):
+        raise Refused("the packages of the Python environment changed since the update was "
+                      "prepared")
+    staged_site = _site(stage)
+    new: dict = {}
+    for name, folder in _infos(staged_site, installed):
+        for rel in _records(staged_site, stage, folder, name):
+            new[rel] = disk.quick_identity(stage.joinpath(*rel.split("/")))
+    leaving: dict = {}
+    made: dict = {}
+    for name, folder in removed:
+        listed = _records(site, venv, folder, name)
+        when = os.lstat(site / folder / "RECORD").st_mtime_ns
+        for rel, stated in listed.items():
+            leaving[rel] = stated
+            made[rel] = when
+    owned = set(leaving)
+    for name, _v, folder in shared.updater_components.dist_infos(site):
+        if (name, folder) not in removed:
+            try:
+                owned.update(_records(site, venv, folder, name))
+            except Refused:
+                continue
+
+    def edited(rel: str, old: dict) -> bool:
+        if rel not in owned:
+            return True
+        return rel in leaving and _was_edited(venv, rel, old, leaving[rel], made[rel])
+
+    a = mover.area(root, update_id, PACKAGES)
+    plan = mover.build(a, PACKAGES, mover.next_number(root, update_id), new, leaving,
+                       identify=disk.quick_identity, edited=edited)
+    plan.dists = sorted(touched)
+    return plan
+
+
+def _read_staged(path: Path) -> tuple:
+    try:
+        raw: dict = disk.read_json(path, mover.MAX_PLAN_BYTES) or {}
+        removed = [(str(n), str(f)) for n, f in raw["removed"]]
+        return removed, [str(n) for n in raw["installed"]]
+    except (ValueError, TypeError, KeyError):
+        raise Refused("no packages are staged for this update") from None
+
+
+def _was_edited(venv: Path, rel: str, old: dict, stated: tuple, made: int) -> bool:
+    """Whether the file *rel* of an installed package is not the one its RECORD
+    states, as far as its size and its time give reason to look."""
+    digest, size = stated
+    if "link" in old or size is None or not digest.startswith("sha256="):
+        return False
+    if old["size"] != size:
+        return True
+    if old["mtime_ns"] <= made or size > _EDIT_BYTES:
+        return False
+    data = venv.joinpath(*rel.split("/")).read_bytes()
+    have = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode("ascii")
+    return have != digest[len("sha256="):]
 
 
 def forward(root, update_id: str, plan: Plan, argv: Iterable, *, env: Mapping,
             project: bool = False, run: Runner = run_hidden,
             wait_s: Optional[float] = None) -> None:
-    """Carry out *plan*, a plan of :func:`plan_packages` for the same arguments that
-    is already on disk: move the files aside, run uv, compare the venv with what was
-    planned. Raises :class:`StepFailed`, with everything put back, when any of it
-    fails."""
-    try:
-        a = mover.area(root, update_id, PACKAGES)
-        site = shared.updater_components.site_packages(a.base)
-        if site is None:
-            raise Refused(f"{a.base} has no site-packages")
-        wait = Wait(wait_s)
-        for op in plan.ops:
-            mover.take_out(a, op, wait)
-        for parent in sorted({a.base.joinpath(*op.path.split("/")).parent for op in plan.ops},
-                             key=lambda p: len(p.parts), reverse=True):
-            disk.prune(parent, site if site in parent.parents else parent)
-        with open(_input(root, update_id), "a+b") as busy:
-            if os.name != "nt":
-                disk.lock_file(busy.fileno())
-            code, output = run(_relocated(a, plan, command(argv, project=project)), str(root),
-                               _environment(env), busy)
+    """Make the moves of *plan* (:func:`plan_packages`), then ask uv whether it has
+    anything left to do for *argv*. Raises :class:`.mover.StepFailed`, with
+    everything moved back, when any of it fails or is interrupted."""
+    def nothing_left(_a: Area) -> None:
+        code, output = run([*command(argv, project=project), "--dry-run"], str(root),
+                           _environment(env))
         if code != 0:
-            raise Refused(f"uv could not install the packages: {_last(output)}")
-        added = _verify(a, site, plan)
-        disk.flush_files(a.base.joinpath(*rel.split("/")) for rel in added)
-    except (OSError, Held, Unsafe, Refused) as e:
-        raise StepFailed(str(e), back(root, update_id, plan, wait_s=wait_s)) from e
+            raise Refused(f"uv cannot check the packages: {_last(output)}")
+        removed, installed = changes(output)
+        if removed or installed:
+            raise Refused("uv would still change packages: "
+                          + ", ".join(sorted({e[0] for e in removed + installed})))
+    mover.forward(root, update_id, plan, wait_s=wait_s, then=nothing_left, back=back)
 
 
-def _relocated(a: Area, plan: Plan, argv: list) -> list:
-    """*argv* with its program at the place it was moved to, when it is one of the
-    files *plan* moved."""
-    program = os.path.normcase(disk.real_folder(argv[0]))
-    for op in plan.ops:
-        if os.path.normcase(a.base.joinpath(*op.path.split("/"))) == program:
-            return [disk.short_path(a.beside(a.old, op.path)[0]), *argv[1:]]
-    return argv
-
-
-def _verify(a: Area, site: Path, plan: Plan) -> list:
-    """The files uv added. Raises :class:`Refused` when uv changed, removed or added
-    a file it was not planned to, or left a package incomplete."""
-    before = (plan.before or {})["files"]
-    moved = {op.path for op in plan.ops}
-    allowed: dict = {}
-    inner = site.relative_to(a.base).as_posix()
-    for name, _version, folder in shared.updater_components.dist_infos(site):
-        metadata = f"{inner}/{folder}/METADATA"
-        if metadata not in before or metadata in moved:
-            allowed.update(_record_paths(site, a.base, folder, name))
-    now = listing(a.base)["files"]
-    wrong = [f"{rel} was removed" for rel in before if rel not in now and rel not in moved]
-    wrong += [f"{rel} was changed" for rel in before
-              if rel in now and rel not in moved and now[rel] != before[rel]]
-    added = [rel for rel in now if rel not in before or rel in moved]
-    wrong += [f"{rel} was added" for rel in added if rel not in allowed]
-    for rel, size in allowed.items():
-        if rel not in now:
-            wrong.append(f"{rel} is missing")
-        elif size is not None and now[rel].get("size", size) != size:
-            wrong.append(f"{rel} is incomplete")
-    if wrong:
-        raise Refused("uv did not do what it planned: " + "; ".join(sorted(wrong)[:5]))
-    return added
-
-
-def back(root, update_id: str, plan: Plan, *, wait_s: Optional[float] = None,
-         uv_wait_s: float = UV_WAIT_S) -> list:
-    """:func:`mover.back` for a package step, once the uv of the step has ended, also
-    one that outlived the process that started it. Returns one line per file that is
-    not as it was before the step, or the reason when uv was still running after
-    *uv_wait_s* seconds."""
+def back(root, update_id: str, plan: Plan, *, wait_s: Optional[float] = None) -> Outcome:
+    """:func:`.mover.back` for a package step. A package of the plan that somebody
+    installed in another form since is first moved to the *kept* folder as a whole,
+    which is noted."""
+    out = Outcome()
     try:
         mover.venv_of(root)
-        _wait_for_uv(root, update_id, uv_wait_s)
         a = mover.area(root, update_id, PACKAGES)
-        errors = _take_out_extra(a, plan, Wait(wait_s))
-        errors += mover.back(root, update_id, plan, wait_s=wait_s)
-        return errors or _differences(a, plan)
-    except (OSError, Unsafe, Refused) as e:
-        return [str(e)]
+        a.watch(op.path for op in plan.ops)
+        _set_aside_foreign(a, plan, Wait(wait_s), out)
+    except (OSError, Held, Unsafe, Unreadable, Refused) as e:
+        out.errors.append(str(e))
+        return out
+    return mover.back(root, update_id, plan, wait_s=wait_s, out=out)
 
 
-def _take_out_extra(a: Area, plan: Plan, wait: Wait) -> list:
-    """Move every file out that is neither in the listing *plan* has nor one of its
-    own."""
-    before = (plan.before or {})["files"]
-    planned = {op.path for op in plan.ops}
-    errors = []
-    for rel in listing(a.base)["files"]:
-        if rel in before or rel in planned:
+def _set_aside_foreign(a: Area, plan: Plan, wait: Wait, out: Outcome) -> None:
+    site = _site(a.base)
+    inner = site.relative_to(a.base).as_posix()
+    ops = {op.path: op for op in plan.ops}
+    for name, folder in _infos(site, plan.dists):
+        record = f"{inner}/{folder}/RECORD"
+        op = ops.get(record)
+        path, st = a.find(record)
+        if op is not None and st is not None and any(
+                disk.same(path, i) for i in (op.old, op.new) if i is not None):
+            continue
+        metadata = ops.get(f"{inner}/{folder}/METADATA")
+        if st is None and metadata is not None:
             continue
         try:
-            mover.aside(a, Op(rel, REMOVE), a.find(rel)[0], wait)
-        except (OSError, Held, Unsafe) as e:
-            errors.append(str(e))
-    return errors
-
-
-def _differences(a: Area, plan: Plan) -> list:
-    """What still differs from the listing *plan* has, once its files are back: an
-    added folder that cannot be removed, and each file of an installed package that
-    is not the listed one. A file no package lists is the user's or a program's own
-    and is not named."""
-    before = plan.before or {}
-    now = listing(a.base)
-    errors = []
-    extra = set(now["folders"]) - set(before["folders"])
-    for rel in sorted(extra, key=lambda f: f.count("/"), reverse=True):
-        path = a.find(rel)[0]
-        disk.prune(path, path.parent)
-        if disk.lstat(path) is not None:
-            errors.append(f"the folder {rel} was added and is still there")
-    wrong = {rel for rel in before["files"] if now["files"].get(rel) != before["files"][rel]}
-    if wrong:
-        wrong &= _listed(a.base)
-    return errors + [f"{rel} was changed and cannot be put back" for rel in sorted(wrong)]
-
-
-def _listed(base: Path) -> set:
-    """The files the installed packages of the venv at *base* list."""
-    site = shared.updater_components.site_packages(base)
-    if site is None:
-        return set()
-    found: set = set()
-    for name, _version, folder in shared.updater_components.dist_infos(site):
-        try:
-            found.update(_record_paths(site, base, folder, name))
+            listed = set(_records(site, a.base, folder, name))
         except Refused:
-            found.add(f"{site.relative_to(base).as_posix()}/{folder}/RECORD")
-    return found
-
-
-def listing(base: Path) -> dict:
-    """``{"files": {path: identity}, "folders": [path]}`` of everything in the venv
-    at *base* except compiled Python files, uv's lock file and what a package step
-    keeps there. A link is listed and not followed. Raises OSError."""
-    files: dict = {}
-    folders: list = []
-    todo = [("", base)]
-    while todo:
-        prefix, folder = todo.pop()
-        with os.scandir(folder) as entries:
-            names = sorted(e.name for e in entries)
-        for name in names:
-            rel = prefix + name
-            if name == disk.PYCACHE or rel in (mover.VENV_FOLDER, ".lock"):
-                continue
-            st = os.lstat(folder / name)
-            if stat.S_ISDIR(st.st_mode) and not disk.is_link(st):
-                folders.append(rel)
-                todo.append((rel + "/", folder / name))
-            else:
-                files[rel] = disk.quick_identity(folder / name)
-    return {"files": files, "folders": sorted(folders)}
-
-
-def _input(root, update_id: str) -> Path:
-    return mover.work_folder(root, update_id) / _INPUT
-
-
-def _wait_for_uv(root, update_id: str, wait_s: float) -> None:
-    """Return once no process has the input file of uv open. Raises
-    :class:`Refused` when one still has after *wait_s* seconds."""
-    path = _input(root, update_id)
-    deadline = time.monotonic() + wait_s
-    while not _unused(path):
-        if time.monotonic() >= deadline:
-            raise Refused(f"a package installation is still running in {Path(root) / '.venv'}")
-        time.sleep(0.1)
-
-
-def _unused(path: Path) -> bool:
-    """Whether no process has the file *path* open: Windows does not delete an open
-    file, elsewhere the lock goes with the last open descriptor. Removes the file on
-    Windows."""
-    if disk.lstat(path) is None:
-        return True
-    try:
-        if os.name == "nt":
-            os.unlink(path)
-            return True
-        fd = disk.open_lock(path)
-        try:
-            disk.lock_file(fd)
-        finally:
-            os.close(fd)
-        return True
-    except (PermissionError, BlockingIOError):
-        return False
+            listed = {f"{inner}/{folder}/{e}" for e in os.listdir(site / folder)}
+        mine = [rel for rel in listed if rel not in ops and a.find(rel)[1] is not None]
+        for rel in sorted(mine, key=lambda rel: (rel == record, rel)):
+            mover.aside(a, Op(rel, REMOVE), a.find(rel)[0], wait, out)
+            a.prune(a.find(rel)[0].parent)
+        out.notes.append(f"The package {name} ({folder}) was installed by somebody since; it is "
+                         f"in {a.kept}.")

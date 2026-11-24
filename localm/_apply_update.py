@@ -37,7 +37,7 @@ from typing import Optional
 NEVER_TOUCH = frozenset({
     ".venv", "venv", ".git", ".github", "home", ".localcoder", "issues", "qa",
     "dev-notes", "scratch", "node_modules", ".claude", "__pycache__",
-    "localm-home.cfg", ".localm-venv", ".pytest_cache", ".ruff_cache",
+    "localm-home.cfg", ".localm-venv", ".localm-run", ".pytest_cache", ".ruff_cache",
 })
 
 # Install-root-relative POSIX sub-tree paths that survive a swap, at finer

@@ -105,7 +105,6 @@ def test_without_the_installed_statement_nothing_is_removed(root):
     plan = planned(root, new_files=um.stage(root, new), old_files=None)
     gone = {op.path for op in plan.ops if op.kind == "remove"}
     assert gone == ({"Readme.md"} if os.path.exists(root / "README.MD") else set())
-    assert not any(op.edited for op in plan.ops)
     before = um.tree(root)
     mover.forward(root, ID, plan)
     assert (root / "localm" / "gone.py").is_file() and (root / "README.md").is_file()
@@ -179,7 +178,8 @@ def test_an_edited_file_that_cannot_be_kept_is_not_deleted(root):
     assert old.read_bytes() == b"my version" and um.phase(root) is None
     with job.Lock(root) as lock:
         assert job.restore(lock).state == "none"
-    assert old.read_bytes() == b"my version"
+    kept = root / ".localm-update" / "kept" / ID / "localm" / "changed.py"
+    assert kept.read_bytes() == b"my version" and um.left(root) == ["kept"]
 
 
 def test_a_file_in_the_place_of_a_new_folder_is_refused(root):
@@ -217,7 +217,7 @@ def test_a_kill_at_every_operation_leaves_the_old_or_the_new_version(run_dir, tm
         killed = um.drive(run_dir, spec, n)
         assert killed.returncode != 0 and "POINTS" not in killed.stdout, (n, killed.stderr)
         reached = um.phase(root)
-        ended = "FINISH" in killed.stdout and reached in (job.DONE, None)
+        ended = "FINISH" in killed.stdout and (um.done(root) or reached in (job.DONE, None))
         if ended:
             assert um.tree(root) == new, n
         again = um.restore(run_dir, root)
@@ -503,9 +503,18 @@ def test_a_planted_plan_cannot_touch_what_an_update_never_changes(root, rel):
     lambda raw: raw.update(format="localm-update-plan/9"),
     lambda raw: raw.update(program="calc"),
     lambda raw: raw.update(folders=["../.."]),
-    lambda raw: raw.update(before={"files": {"a": 1}, "folders": []}),
+    lambda raw: raw.update(dists=[1]),
+    lambda raw: raw["ops"][0].update(kind=[]),
+    lambda raw: raw["ops"][0].update(path={}),
+    lambda raw: raw["ops"][0].update(new=5),
+    lambda raw: raw["ops"][0].update(new={"size": "1", "mtime_ns": 2}),
+    lambda raw: raw["ops"].append(None),
+    lambda raw: raw.update(folders=[7]),
+    lambda raw: raw.update(step=["files"]),
+    lambda raw: raw.update(number=True),
 ], ids=["outside", "kind", "field", "twice", "identity", "step", "format", "top-field", "folder",
-        "listing"])
+        "dists", "kind-type", "path-type", "identity-type", "size-type", "op-type", "folder-type",
+        "step-type", "number-type"])
 def test_a_planted_plan_is_not_read(root, change):
     plan = planned(root)
     mover.forward(root, ID, plan)
@@ -514,7 +523,7 @@ def test_a_planted_plan_is_not_read(root, change):
     raw = json.loads(path.read_text(encoding="utf-8"))
     change(raw)
     path.write_text(json.dumps(raw), encoding="utf-8")
-    with pytest.raises((job.Unreadable, disk.Unsafe)):
+    with pytest.raises(job.Unreadable):
         undo(root)
     assert um.tree(root) == before and um.phase(root) == job.MOVING
 
@@ -835,7 +844,7 @@ def test_a_lazy_import_of_localm_raises_in_the_applier(tmp_path):
              "    try:\n        import localm\n"
              "    except ImportError:\n        print('REFUSED', file=sys.stderr)\n"
              "    else:\n        print('IMPORTED', file=sys.stderr)\n")
-    anchor = '    if not lock.held:\n        raise ValueError("the lock of the install is not held")\n    try:\n'
+    anchor = "    _held(lock)\n    record = _current(lock.root)\n    if record is None:\n        cleanup(lock)\n"
     assert text.count(anchor) == 1
     job_py.write_text(text.replace(anchor, probe + anchor), encoding="utf-8")
     root = um.install(tmp_path / "root")
@@ -846,8 +855,9 @@ def test_a_lazy_import_of_localm_raises_in_the_applier(tmp_path):
 
 def test_the_applier_runs_from_a_copy_with_nothing_else_of_the_build(tmp_path):
     run_dir = um.applier(tmp_path / "x" / "applier")
+    also = [f"{m}.py" for m in um.shared.ALSO if (um.REPO / "localm" / f"{m}.py").exists()]
     assert sorted(p.name for p in run_dir.parent.iterdir()) == sorted(
-        ["update_mechanism", "_apply_update.py", "update_package.py", "updater_components.py"])
+        ["update_mechanism", "_apply_update.py", "update_package.py", "updater_components.py", *also])
     root = um.install(tmp_path / "root")
     plan = planned(root)
     mover.forward(root, ID, plan)
@@ -880,10 +890,18 @@ def test_the_mechanism_imports_only_the_standard_library():
 
 
 def test_the_mechanism_is_in_the_wheel_and_the_release():
+    """The wheel takes the whole package, a release what git tracks."""
     import tomllib
     pyproject = tomllib.loads((um.REPO / "pyproject.toml").read_text(encoding="utf-8"))
     assert "localm" in pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"]
-    assert (PACKAGE / "__main__.py").is_file() and (PACKAGE / "__init__.py").is_file()
+    from localm import sysprog
+    git = sysprog.find("git") or shutil.which("git")
+    if not git or not (um.REPO / ".git").exists():
+        pytest.skip("not a git checkout")
+    tracked = subprocess.run([git, "ls-files", "localm/update_mechanism"], cwd=um.REPO, text=True,
+                             capture_output=True, check=True, **um.NO_WINDOW).stdout.split()
+    assert sorted(tracked) == sorted(f"localm/update_mechanism/{p.name}"
+                                     for p in PACKAGE.glob("*.py"))
 
 
 @windows_only

@@ -149,7 +149,8 @@ def copy(template: Path, dest: Path) -> Path:
 
 
 def tree(root: Path) -> dict:
-    return um.tree(root, skip=(".localm-update", ".venv/.lock", ".venv/.localm-old"))
+    return um.tree(root, skip=(".localm-update", ".venv/.lock", ".venv/.localm-old",
+                               ".venv/.localm-kept"))
 
 
 def site(root: Path) -> Path:
@@ -177,9 +178,10 @@ def begin(root: Path) -> None:
 def plan(root: Path, world, command: list | None = None, **kw):
     if um.phase(root) is None:
         begin(root)
-    made = packages.plan_packages(root, ID, command or argv(world), env=world.env, **kw)
-    if made is not None:
-        mover.write_plan(root, ID, made)
+    if not packages.stage_packages(root, ID, command or argv(world), env=world.env, **kw):
+        return None
+    made = packages.plan_packages(root, ID)
+    mover.write_plan(root, ID, made)
     return made
 
 
@@ -266,7 +268,7 @@ def test_the_way_back_needs_no_uv_no_cache_and_no_wheel(template, tmp_path):
     assert tree(root) == before and imported(root, "import alpha; print(alpha.V)") == "1"
 
 
-def test_a_wheel_that_cannot_be_had_offline_leaves_everything_as_it_was(tmp_path):
+def test_a_wheel_that_cannot_be_had_offline_is_refused_before_anything_moves(tmp_path):
     own = World(tmp_path / "own")
     root = tmp_path / "root"
     wheel(own.wheels, "alpha", "1.0", {"alpha/__init__.py": "V = 1\n"})
@@ -275,10 +277,9 @@ def test_a_wheel_that_cannot_be_had_offline_leaves_everything_as_it_was(tmp_path
     own.lock(root, ["alpha==2.0"])
     (own.wheels / "alpha-2.0-py3-none-any.whl").unlink()
     before = tree(root)
-    made = plan(root, own)
-    with pytest.raises(mover.StepFailed, match="uv could not install") as e:
-        forward(root, own, made)
-    assert e.value.errors == [] and tree(root) == before
+    with pytest.raises(mover.Refused, match="uv could not install"):
+        plan(root, own)
+    assert tree(root) == before
 
 
 def test_a_loaded_library_is_replaced_and_put_back_while_it_stays_loaded(root, world):
@@ -308,12 +309,13 @@ def test_a_loaded_library_is_replaced_and_put_back_while_it_stays_loaded(root, w
     assert um.left(root) == [] and not (root / ".venv" / mover.VENV_FOLDER).exists()
 
 
-def test_a_uv_that_is_itself_replaced_runs_from_where_it_was_moved(tmp_path):
+def test_a_uv_that_is_itself_replaced_is_replaced_and_put_back(tmp_path):
     own = World(tmp_path / "own")
     root = tmp_path / "root"
     wheel(own.wheels, "tooluv", "1.0", {"tooluv.py": ""},
           {f"uvcopy{EXE}": Path(own.uv).read_bytes()})
-    wheel(own.wheels, "tooluv", "2.0", {"tooluv.py": ""}, {f"uvcopy{EXE}": "#!python\n"})
+    wheel(own.wheels, "tooluv", "2.0", {"tooluv.py": ""},
+          {f"uvcopy{EXE}": Path(own.uv).read_bytes() + b"\0"})
     own.install(root, ["tooluv==1.0"])
     own.lock(root, ["tooluv==2.0"])
     before = tree(root)
@@ -490,101 +492,338 @@ def test_the_lines_of_a_dry_run_are_read():
             "Would uninstall 2 packages\nWould install 3 packages\n - Alpha_X==1.0\n"
             " + alpha-x==2.0 (from file:///w)\n ~ beta==1.0\n + localm @ file:///a b/c\n")
     assert packages.changes(text) == (
-        [("alpha-x", "1.0"), ("beta", "1.0")],
-        [("alpha-x", "2.0"), ("beta", "1.0"), ("localm", "")])
+        [("alpha-x", "1.0", False), ("beta", "1.0", False)],
+        [("alpha-x", "2.0", True), ("beta", "1.0", False), ("localm", "", True)])
 
 
-# ------------------------------------------------------- uv does something else
+# ---------------------------------------------------------- files of somebody else
 
-def tampering(world, change):
-    """Run uv for real, then *change* the venv as if uv had done it."""
-    def run(command, cwd, env, stdin):
-        done = packages.run_hidden(command, cwd, env, stdin)
-        change()
+def test_wheels_that_share_a_file_are_replaced_and_put_back(tmp_path):
+    """beta, which stays, and the new alpha both ship tests/__init__.py."""
+    own = World(tmp_path / "own")
+    wheel(own.wheels, "alpha", "1.0", {"alpha/__init__.py": "V = 1\n"})
+    wheel(own.wheels, "alpha", "2.0", {"alpha/__init__.py": "V = 2\n",
+                                       "tests/__init__.py": "# of alpha\n"})
+    wheel(own.wheels, "beta", "1.0", {"beta.py": "V = 1\n", "tests/__init__.py": "# of beta\n"})
+    root = own.install(tmp_path / "root", ["alpha==1.0", "beta==1.0"])
+    own.lock(root, ["alpha==2.0", "beta==1.0"])
+    before = tree(root)
+    forward(root, own, plan(root, own))
+    assert (site(root) / "tests" / "__init__.py").read_text(encoding="utf-8") == "# of alpha\n"
+    result = undo(root)
+    assert (result.state, result.errors, tree(root) == before) == ("old", [], True)
+    forward(root, own, plan(root, own))
+    assert end(root).notes == []
+    assert versions(root) == {"alpha": "2.0", "beta": "1.0"}
+
+
+def test_a_file_of_the_user_in_the_place_of_a_new_one_is_kept(tmp_path):
+    own = World(tmp_path / "own")
+    wheel(own.wheels, "alpha", "1.0", {"alpha/__init__.py": "V = 1\n"})
+    wheel(own.wheels, "alpha", "3.0", {"alpha/__init__.py": "V = 3\n", "helper.py": "# of alpha\n"})
+    root = own.install(tmp_path / "root", ["alpha==1.0"])
+    mine = site(root) / "helper.py"
+    mine.write_bytes(b"# mine")
+    own.lock(root, ["alpha==3.0"])
+    before = tree(root)
+    forward(root, own, plan(root, own))
+    assert mine.read_bytes() == b"# of alpha\n"
+    result = undo(root)
+    assert (result.state, result.errors, tree(root) == before) == ("old", [], True)
+    forward(root, own, plan(root, own))
+    result = end(root)
+    kept = root / ".venv" / mover.VENV_KEPT / ID / site(root).relative_to(root / ".venv")
+    assert (kept / "helper.py").read_bytes() == b"# mine"
+    assert result.state == "new" and len(result.notes) == 1 and ID in result.notes[0]
+
+
+def test_an_edited_file_of_a_package_is_kept(root, world):
+    edited = site(root) / "alpha" / "old.py"
+    time.sleep(0.05)
+    edited.write_bytes(b"x = 9\n")
+    same_size = site(root) / "alpha" / "data.txt"
+    same_size.write_bytes(b"ONE\n")
+    before = tree(root)
+    made = plan(root, world)
+    assert {op.path.rpartition("/")[2] for op in made.ops if op.edited} == {"old.py", "data.txt"}
+    forward(root, world, made)
+    assert undo(root).state == "old" and tree(root) == before
+    forward(root, world, plan(root, world))
+    result = end(root)
+    kept = root / ".venv" / mover.VENV_KEPT / ID / site(root).relative_to(root / ".venv") / "alpha"
+    assert (kept / "old.py").read_bytes() == b"x = 9\n"
+    assert (kept / "data.txt").read_bytes() == b"ONE\n"
+    assert "2 file(s)" in result.notes[0]
+
+
+def everything(root: Path) -> set:
+    return {p.read_bytes() for p in (root / ".venv").rglob("*") if p.is_file()}
+
+
+def test_what_the_user_puts_into_the_venv_meanwhile_stays(root, world):
+    wheel(world.wheels, "extra", "1.0", {"extra.py": "EXTRA = 1\n"})
+    forward(root, world, plan(root, world))
+    world.run(root, "pip", "install", "--no-config", "--no-index", "--offline", "--find-links",
+              str(world.wheels), "--python", str(root / ".venv"), "extra==1.0")
+    (site(root) / "note.txt").write_bytes(b"a note")
+    (root / ".venv" / "mydata").write_bytes(b"my data")
+    result = undo(root)
+    assert (result.state, result.errors) == ("old", [])
+    assert versions(root)["alpha"] == "1.0" and versions(root)["extra"] == "1.0"
+    assert (site(root) / "note.txt").read_bytes() == b"a note"
+    assert (root / ".venv" / "mydata").read_bytes() == b"my data"
+    assert imported(root, "import extra; print(extra.EXTRA)") == "1"
+
+
+def test_another_package_upgraded_meanwhile_is_left_alone(root, world):
+    wheel(world.wheels, "beta", "2.0", {"beta.py": "V = 2\n", "beta2.py": "", "shared_ns/b.py": ""})
+    forward(root, world, plan(root, world))
+    world.run(root, "pip", "install", "--no-config", "--no-index", "--offline", "--find-links",
+              str(world.wheels), "--python", str(root / ".venv"), "beta==2.0")
+    result = undo(root)
+    assert (result.state, result.errors) == ("old", [])
+    assert versions(root)["alpha"] == "1.0" and versions(root)["beta"] == "2.0"
+    assert (site(root) / "beta2.py").exists()
+    assert imported(root, "import beta, beta2; print(beta.V)") == "2"
+
+
+@pytest.mark.parametrize("version", ["1.0", "2.0", "3.0"])
+def test_a_package_of_the_update_installed_anew_meanwhile_is_decided_as_a_whole(root, world, version):
+    wheel(world.wheels, "alpha", "3.0", {"alpha/__init__.py": "V = 3\n", "alpha/three.py": "3\n",
+                                         "alpha3_top.py": "top = 3\n"})
+    before = tree(root)
+    forward(root, world, plan(root, world))
+    world.run(root, "pip", "install", "--no-config", "--no-index", "--offline", "--reinstall",
+              "--find-links", str(world.wheels), "--python", str(root / ".venv"),
+              f"alpha=={version}")
+    theirs = {p.read_bytes() for p in (site(root) / "alpha").rglob("*.py")}
+    result = undo(root)
+    assert (result.state, result.errors) == ("old", [])
+    assert tree(root) == before
+    assert any("kept" in note for note in result.notes)
+    assert theirs <= everything(root)
+    if version == "3.0":
+        assert any("alpha-3.0" in note for note in result.notes)
+        kept = root / ".venv" / mover.VENV_KEPT / ID / site(root).relative_to(root / ".venv")
+        assert (kept / "alpha-3.0.dist-info" / "RECORD").exists()
+        assert (kept / "alpha3_top.py").exists() and (kept / "alpha" / "three.py").exists()
+
+
+def test_a_package_removed_by_the_user_meanwhile_comes_back(root, world):
+    before = tree(root)
+    forward(root, world, plan(root, world))
+    world.run(root, "pip", "uninstall", "--no-config", "--python", str(root / ".venv"), "alpha")
+    result = undo(root)
+    assert (result.state, result.errors) == ("old", [])
+    assert tree(root) == before
+
+
+# ------------------------------------------------------------------ the staging venv
+
+def test_staging_changes_nothing_in_the_venv_and_holds_only_what_is_new(root, world):
+    before = tree(root)
+    begin(root)
+    assert packages.stage_packages(root, ID, argv(world), env=world.env) is True
+    assert tree(root) == before
+    stage = packages.stage_folder(root, ID)
+    assert os.lstat(stage).st_dev == os.lstat(site(root)).st_dev
+    staged = stage / site(root).relative_to(root / ".venv")
+    assert not any((staged / n).exists() for n in ("beta.py", "delta", "shared_ns/b.py"))
+    assert sorted(p.name for p in (staged / "beta-1.0.dist-info").iterdir()) == sorted(
+        n for n in packages._METADATA if (site(root) / "beta-1.0.dist-info" / n).exists())
+
+
+def test_a_package_that_changed_after_staging_is_refused(root, world):
+    begin(root)
+    packages.stage_packages(root, ID, argv(world), env=world.env)
+    (site(root) / "alpha-1.0.dist-info").rename(site(root) / "alpha-1.1.dist-info")
+    with pytest.raises(mover.Refused, match="changed since the update was prepared"):
+        packages.plan_packages(root, ID)
+
+
+def test_nothing_staged_is_refused(root):
+    begin(root)
+    with pytest.raises(mover.Refused):
+        packages.plan_packages(root, ID)
+
+
+def staging(change):
+    """Run uv for real, then *change* the staging venv as if uv had done it."""
+    def run(command, cwd, env):
+        done = packages.run_hidden(command, cwd, env)
+        if "--dry-run" not in command and command[1] != "venv":
+            change(Path(env["UV_PROJECT_ENVIRONMENT"]))
         return done
     return run
 
 
-def test_a_file_added_that_nobody_planned_takes_everything_back(root, world):
+@pytest.mark.parametrize(("change", "why"), [
+    (lambda s: (s / "stray.py").write_bytes(b"x"), "other files"),
+    (lambda s: next(s.rglob("alpha/new.py")).unlink(), "other files|not staged"),
+    (lambda s: next(s.rglob("alpha/new.py")).write_bytes(b"cut"), "not staged completely"),
+    (lambda s: shutil.rmtree(next(s.rglob("gamma-1.0.dist-info"))), "other packages"),
+    (lambda s: (next(s.rglob("alpha-2.0.dist-info")) / "INSTALLER").write_text(str(s)),
+     "staging folder|not staged"),
+    (lambda s: next(s.rglob("alpha-2.0.dist-info/RECORD")).write_bytes(b"\0" * 200000), "RECORD"),
+], ids=["stray", "missing", "cut", "package", "path", "zeroed-record"])
+def test_a_staging_venv_that_is_not_the_plan_is_refused(root, world, change, why):
+    before = tree(root)
+    with pytest.raises(mover.Refused, match=why):
+        plan(root, world, run=staging(change))
+    assert tree(root) == before
+
+
+def test_a_zeroed_record_in_the_venv_is_refused_by_name(root, world):
+    (site(root) / "alpha-1.0.dist-info" / "RECORD").write_bytes(b"\0" * 200000)
+    with pytest.raises(mover.Refused, match="alpha has no"):
+        plan(root, world)
+
+
+def test_a_package_from_a_folder_of_this_machine_is_refused_by_name(root, world, tmp_path):
+    local = tmp_path / "local"
+    local.mkdir()
+    wheel(local, "omega", "1.0", {"omega.py": ""})
+    command = [world.uv, "pip", "install", "--no-config", "--no-index", "--python",
+               str(root / ".venv"), str(local / "omega-1.0-py3-none-any.whl")]
+    before = tree(root)
+    with pytest.raises(mover.Refused, match="omega comes from a folder or file"):
+        plan(root, world, command)
+    assert tree(root) == before
+
+
+def test_uv_pip_install_is_staged_like_a_sync(root, world):
+    before = tree(root)
+    command = [world.uv, "pip", "install", "--no-config", "--no-index", "--find-links",
+               str(world.wheels), "--python", str(root / ".venv"), "alpha==2.0", "beta"]
+    forward(root, world, plan(root, world, command), command)
+    assert versions(root) == {"alpha": "2.0", "beta": "1.0", "delta": "1.0"}
+    assert undo(root).state == "old" and tree(root) == before
+
+
+@pytest.mark.parametrize("error", [subprocess.TimeoutExpired("uv", 1), KeyboardInterrupt(),
+                                   RuntimeError("the runner broke")], ids=["timeout", "ctrl-c", "error"])
+def test_an_exception_of_the_runner_goes_through_the_way_back(root, world, error):
     before = tree(root)
     made = plan(root, world)
-    run = tampering(world, lambda: (site(root) / "stray.py").write_bytes(b"x"))
-    with pytest.raises(mover.StepFailed, match="stray.py was added") as e:
+
+    def run(command, cwd, env):
+        assert versions(root)["alpha"] == "2.0"
+        raise error
+    with pytest.raises(mover.StepFailed) as e:
         forward(root, world, made, run=run)
     assert e.value.errors == [] and tree(root) == before
 
 
-def test_a_changed_file_that_nobody_planned_is_a_failure_that_is_named(root, world):
-    made = plan(root, world)
-    run = tampering(world, lambda: (site(root) / "beta.py").write_bytes(b"changed!"))
-    with pytest.raises(mover.StepFailed, match="beta.py was changed") as e:
-        forward(root, world, made, run=run)
-    assert [x for x in e.value.errors if "beta.py" in x]
-    assert versions(root)["alpha"] == "1.0"
-
-
-def test_a_file_no_package_lists_does_not_stop_the_way_back(root, world):
-    """A program may write its own files into the venv while the new version runs."""
-    own = site(root) / "beta_cache.txt"
-    own.write_bytes(b"cache")
-    made = plan(root, world)
-    forward(root, world, made)
-    own.write_bytes(b"cache written again")
-    result = undo(root)
-    assert (result.state, result.errors) == ("old", [])
-    assert own.read_bytes() == b"cache written again" and versions(root)["alpha"] == "1.0"
-
-
-def test_a_removed_file_that_nobody_planned_is_a_failure_that_is_named(root, world):
-    made = plan(root, world)
-    run = tampering(world, lambda: (site(root) / "beta.py").unlink())
-    with pytest.raises(mover.StepFailed, match="beta.py was removed") as e:
-        forward(root, world, made, run=run)
-    assert [x for x in e.value.errors if "beta.py" in x]
-
-
-def test_a_new_package_that_is_incomplete_takes_everything_back(root, world):
+def test_packages_uv_would_still_change_take_everything_back(root, world):
     before = tree(root)
     made = plan(root, world)
-    run = tampering(world, lambda: (site(root) / "alpha" / "new.py").unlink())
-    with pytest.raises(mover.StepFailed, match="alpha/new.py is missing") as e:
-        forward(root, world, made, run=run)
+    command = [world.uv, "pip", "install", "--no-config", "--no-index", "--find-links",
+               str(world.wheels), "--python", str(root / ".venv"), "alpha==1.0"]
+    with pytest.raises(mover.StepFailed, match="uv would still change packages: alpha") as e:
+        forward(root, world, made, command)
     assert e.value.errors == [] and tree(root) == before
 
 
-def test_a_new_file_that_is_cut_short_takes_everything_back(root, world):
-    before = tree(root)
-    made = plan(root, world)
+# ----------------------------------------------------- the same as a direct install
 
-    def cut():
-        path = site(root) / "alpha" / "newdir" / "x.py"
-        path.unlink()
-        path.write_bytes(b"x")
-    with pytest.raises(mover.StepFailed, match="newdir/x.py is incomplete") as e:
-        forward(root, world, made, run=tampering(world, cut))
-    assert e.value.errors == [] and tree(root) == before
+KITCHEN = {"kitchen/__init__.py": "def main():\n    import sys; print('kitchen', sys.prefix)\n"
+                                  "def gui():\n    import sys, pathlib; "
+                                  "pathlib.Path(sys.argv[1]).write_text('gui ' + sys.prefix)\n",
+           "kitchen_top.py": "", "kitchen.pth": "import sys; sys.kitchen_pth = 1\n"}
 
 
-def test_a_uv_killed_half_way_takes_everything_back(template, world, tmp_path):
-    root = world.install(tmp_path / "root", ["big==1.0"])
-    world.lock(root, ["big==2.0"])
-    before = tree(root)
-    made = plan(root, world)
-    killed = []
+def kitchen(folder: Path, version: str, uv_binary: bytes) -> None:
+    info = f"kitchen-{version}.dist-info"
+    data = f"kitchen-{version}.data"
+    wheel(folder, "kitchen", version, {
+        **KITCHEN, "kitchen/version.txt": version,
+        f"{info}/entry_points.txt": "[console_scripts]\nlocalm = kitchen:main\n"
+                                    "localcoder = kitchen:main\n[gui_scripts]\nwin = kitchen:gui\n",
+        f"{data}/data/share/kitchen/data.txt": version,
+        f"{data}/headers/kitchen.h": "#define K 1\n",
+        f"{data}/platlib/kitchen_plat.py": "P = 1\n"},
+        {"kitchen-run": f"#!python\nimport sys; print('run {version}', sys.prefix)\n",
+         f"uvtool{EXE}": uv_binary})
 
-    def run(command, cwd, env, stdin):
-        p = subprocess.Popen([*command, "--link-mode", "copy"], cwd=cwd, env=env, stdin=stdin,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **um.NO_WINDOW)
-        while p.poll() is None and not (site(root) / "big" / "d1").exists():
-            time.sleep(0.002)
-        killed.append(p.poll() is None)
-        p.kill()
-        p.wait(timeout=30)
-        return 1, "killed"
-    with pytest.raises(mover.StepFailed, match="killed") as e:
-        forward(root, world, made, run=run)
-    assert killed == [True]
-    assert e.value.errors == [] and tree(root) == before
+
+def behaviour(root: Path) -> dict:
+    """What each script of the venv does, its own place left out."""
+    bin_dir = root / ".venv" / SCRIPTS
+    prefix = str((root / ".venv").resolve())
+    out = {}
+    for name in ("localm", "localcoder", "kitchen-run"):
+        argv_ = ([str(bin_dir / f"python{EXE}"), str(bin_dir / name)] if name == "kitchen-run" and WINDOWS
+                 else [str(bin_dir / f"{name}{'' if name == 'kitchen-run' else EXE}")])
+        done = subprocess.run(argv_, capture_output=True, encoding="utf-8", timeout=60, stdin=subprocess.DEVNULL,
+                              cwd=root, env={**os.environ, "PYTHONUTF8": "1"}, **um.NO_WINDOW)
+        assert done.returncode == 0, (name, done.stderr)
+        out[name] = done.stdout.strip().replace(prefix, "PREFIX")
+    result = root / "gui.txt"
+    subprocess.run([str(bin_dir / f"win{EXE}"), str(result)], timeout=60, check=True, cwd=root,
+                   env={**os.environ, "PYTHONUTF8": "1"}, **um.NO_WINDOW)
+    deadline = time.monotonic() + 30
+    while not (result.exists() and result.read_text(encoding="utf-8")) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    out["win"] = result.read_text(encoding="utf-8").replace(prefix, "PREFIX")
+    result.unlink()
+    out["uvtool"] = subprocess.run([str(bin_dir / f"uvtool{EXE}"), "--version"], capture_output=True,
+                                   text=True, timeout=60, check=True, **um.NO_WINDOW).stdout.strip()
+    return out
+
+
+def test_the_staged_install_is_the_direct_install(tmp_path):
+    """File by file in a path with spaces and umlauts, the scripts by what they do,
+    also after the whole install was moved."""
+    place = tmp_path / "Meine Dateien \u00e4\u00f6\u00fc"
+    place.mkdir()
+    own = World(place / "own")
+    binary = Path(own.uv).read_bytes()
+    kitchen(own.wheels, "1.0", binary)
+    kitchen(own.wheels, "2.0", binary)
+    wheel(own.wheels, "stays", "1.0", {"stays.py": ""}, {"stays-run": "#!python\nprint('stays')\n"})
+    roots = {}
+    for name in ("staged", "direct"):
+        roots[name] = own.install(place / name, ["kitchen==1.0", "stays==1.0"])
+        own.lock(roots[name], ["kitchen==2.0", "stays==1.0"])
+    staged, direct = roots["staged"], roots["direct"]
+    old_stays = (staged / ".venv" / SCRIPTS / "stays-run").read_bytes()
+    forward(staged, own, plan(staged, own))
+    assert end(staged).state == "new"
+    own.run(direct, *SYNC, "--offline", "--no-install-project")
+    a = tree(staged)
+    b = tree(direct)
+    assert set(a) == set(b)
+    scripts = {f".venv/{SCRIPTS}/{n}" for n in (f"localm{EXE}", f"localcoder{EXE}", f"win{EXE}",
+                                                "kitchen-run")}
+    other = {k for k in a if a[k] != b[k]}
+    record = f".venv/{(site(staged).relative_to(staged / '.venv')).as_posix()}/kitchen-2.0.dist-info/RECORD"
+    venv_own = {k for k in other if k.startswith((".venv/pyvenv.cfg", f".venv/{SCRIPTS}/activate",
+                                                  ".venv/CACHEDIR", ".venv/.gitignore"))}
+    stays = {f".venv/{SCRIPTS}/stays-run"}
+    cache = {k for k in other if k.endswith("uv_cache.json") or k in ("uv.lock", "pyproject.toml")}
+    stays_record = {k for k in other if "stays-1.0.dist-info" in k}
+    assert other - venv_own - cache - stays - stays_record <= scripts | {record}
+    assert (staged / ".venv" / SCRIPTS / "stays-run").read_bytes() == old_stays
+
+    def rows(root):
+        return sorted(tuple(r[:1]) for r in packages.shared.updater_components.record_rows(
+            site(root), "kitchen-2.0.dist-info"))
+    assert rows(staged) == rows(direct)
+    for row in packages.shared.updater_components.record_rows(site(staged), "kitchen-2.0.dist-info"):
+        path = site(staged) / row[0]
+        if len(row) > 2 and row[1]:
+            digest = base64.urlsafe_b64encode(hashlib.sha256(path.read_bytes()).digest())
+            assert row[1] == "sha256=" + digest.rstrip(b"=").decode(), row
+    assert behaviour(staged) == behaviour(direct)
+    assert all("2.0" in v or "PREFIX" in v for k, v in behaviour(staged).items() if k != "uvtool")
+    assert "compatible" in own.run(staged, "pip", "check", "--python", str(staged / ".venv"))
+    said = own.run(staged, *SYNC, "--offline", "--no-install-project", "--dry-run")
+    assert "Would make no changes" in said
+    expected = behaviour(staged)
+    moved = place / "anderswo \u00df"
+    staged.rename(moved)
+    assert behaviour(moved) == expected
+    assert (moved / ".venv" / "share" / "kitchen" / "data.txt").read_text(encoding="utf-8") == "2.0"
 
 
 @windows_only
@@ -657,54 +896,42 @@ def test_a_kill_at_every_operation_of_the_way_back_of_packages_leads_back(templa
     um.each(points, one)
 
 
-@pytest.mark.parametrize("moment", ["just-started", "installing"])
-def test_the_way_back_waits_for_a_uv_that_outlived_the_update(world, tmp_path, moment):
-    """The applier is killed while uv still runs; uv goes on."""
-    run_dir = um.applier(tmp_path / "applier")
-    root = world.install(tmp_path / "x" / "root", ["big==1.0"])
+def test_a_uv_that_is_killed_leaves_nothing_in_the_venv(template, world, tmp_path):
+    root = world.install(tmp_path / "root", ["big==1.0"])
     world.lock(root, ["big==2.0"])
     before = tree(root)
-    (root / ".localm-update" / ID / "new").mkdir(parents=True)
-    spec = tmp_path / "spec.json"
-    spec.write_text(json.dumps({"do": "update", "root": str(root), "id": ID,
-                                "kill_after_uv_starts": moment == "just-started",
-                                "uv": [*argv(world), "--link-mode", "copy"], "env": world.env}),
-                    encoding="utf-8")
-    p = subprocess.Popen([um.PYTHON, "-I", "-S", str(um.DRIVER), str(run_dir), str(spec), "-1"],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **um.NO_WINDOW)
-    deadline = time.monotonic() + 60
-    while moment == "installing" and not (site(root) / "big" / "d1").exists():
-        assert p.poll() is None and time.monotonic() < deadline
-        time.sleep(0.002)
-    if moment == "installing":
+    begin(root)
+    killed = []
+
+    def run(command, cwd, env):
+        if "--dry-run" in command or command[1] == "venv":
+            return packages.run_hidden(command, cwd, env)
+        stage = Path(env["UV_PROJECT_ENVIRONMENT"])
+        p = subprocess.Popen([*command, "--link-mode", "copy"], cwd=cwd, env=env,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **um.NO_WINDOW)
+        while p.poll() is None and not next(stage.glob("[Ll]ib/**/big/d1"), None):
+            time.sleep(0.002)
+        killed.append(p.poll() is None)
         p.kill()
-    assert p.wait(timeout=60) != 0
-    again = um.restore(run_dir, root)
-    assert again.returncode == 0, again.stderr
-    time.sleep(1)
-    assert tree(root) == before
-    assert um.phase(root) is None
+        p.wait(timeout=30)
+        return 1, "killed"
+    with pytest.raises(mover.Refused, match="killed"):
+        packages.stage_packages(root, ID, argv(world), env=world.env, run=run)
+    assert killed == [True] and tree(root) == before
+    assert undo(root).state == "old"
+    assert tree(root) == before and not (root / ".venv" / mover.VENV_FOLDER).exists()
 
 
-def test_the_way_back_gives_up_while_uv_is_still_running(root, world):
-    made = plan(root, world)
-    children = []
-
-    def run(command, cwd, env, stdin):
-        children.append(subprocess.Popen(
-            [um.PYTHON, "-I", "-S", "-c", "import time; time.sleep(60)"], stdin=stdin,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **um.NO_WINDOW))
-        return packages.run_hidden(command, cwd, env, subprocess.DEVNULL)
-    forward(root, world, made, run=run)
-    now = tree(root)
-    try:
-        errors = packages.back(root, ID, made, uv_wait_s=0.3)
-    finally:
-        children[0].kill()
-        children[0].wait(timeout=30)
-    assert len(errors) == 1 and "still running" in errors[0]
-    assert tree(root) == now
-    assert packages.back(root, ID, made) == []
+def test_an_update_that_was_only_prepared_is_discarded(root, world):
+    before = tree(root)
+    (root / ".localm-update" / ID / "new").mkdir(parents=True)
+    packages.stage_packages(root, ID, argv(world), env=world.env)
+    with job.Lock(root) as lock:
+        job.cleanup(lock)
+        assert packages.stage_folder(root, ID).exists()
+        assert job.discard(lock, ID) is True
+    assert tree(root) == before and um.left(root) == []
+    assert not (root / ".venv" / mover.VENV_FOLDER / ID).exists()
 
 
 def test_packages_are_put_back_before_the_files_of_the_release(template, world, tmp_path):

@@ -12,6 +12,8 @@ from pathlib import Path
 #: The modules beside this package that it loads. Each imports only the standard
 #: library at module level.
 MODULES = ("_apply_update", "update_package", "updater_components")
+#: Modules of the build copied beside them when it has them.
+ALSO = ("procs",)
 
 _PACKAGE = Path(__file__).resolve().parent
 
@@ -36,8 +38,9 @@ updater_components = _load("updater_components")
 def copy_applier(localm_dir, dest) -> Path:
     """Copy the update mechanism of the build whose ``localm`` folder is
     *localm_dir* into the new folder *dest*, with the modules it loads
-    (:data:`MODULES`), and return the folder to run. Raises OSError, also when
-    *dest* exists."""
+    (:data:`MODULES`) and, where the build has them, the ones the applier loads
+    (:data:`ALSO`), and return the folder to run. Raises OSError, also when *dest*
+    exists."""
     localm_dir, dest = Path(localm_dir), Path(dest)
     dest.mkdir(parents=True)
     run = dest / _PACKAGE.name
@@ -45,4 +48,7 @@ def copy_applier(localm_dir, dest) -> Path:
                     ignore=shutil.ignore_patterns("__pycache__"))
     for name in MODULES:
         shutil.copyfile(localm_dir / f"{name}.py", dest / f"{name}.py")
+    for name in ALSO:
+        if (localm_dir / f"{name}.py").is_file():
+            shutil.copyfile(localm_dir / f"{name}.py", dest / f"{name}.py")
     return run
