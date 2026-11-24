@@ -1424,3 +1424,190 @@ def test_cron_current_minute_still_fires_once(home):
     assert sched.due(job, now) is True
     sched._cron_fired[job.id] = int(now // 60) * 60     # mark fired this minute
     assert sched.due(job, now) is False
+
+
+# --------------------------------------------------------------------------- #
+#  Scheduler: tick() with cron jobs, real scheduler and real store             #
+# --------------------------------------------------------------------------- #
+
+def _cron_runner(calls, finished):
+    def run(j, *, engine=None):
+        calls.append(j.id)
+        return {"status": "ok", "output": "ran", "error": None,
+                "started": finished, "finished": finished}
+    return run
+
+
+def test_tick_runs_a_cron_job_in_its_minute(home):
+    from localm.plugins.builtin.jobs.scheduler import JobScheduler
+    from localm.plugins.builtin.jobs.store import JobStore
+    store = JobStore()
+    job = store.add(_make_job(schedule_kind="cron", schedule="30 9 * * *"))
+    when = _at(2026, 6, 17, 9, 30)
+    calls: list = []
+    sched = JobScheduler(store, run_job=_cron_runner(calls, when + 1))
+    assert sched.tick(now=when + 2) == [job.id]
+    assert calls == [job.id]
+    assert len(store.list_results(job.id)) == 1
+
+
+def test_tick_runs_a_cron_job_once_per_minute(home):
+    from localm.plugins.builtin.jobs.scheduler import JobScheduler
+    from localm.plugins.builtin.jobs.store import JobStore
+    store = JobStore()
+    job = store.add(_make_job(schedule_kind="cron", schedule="* * * * *"))
+    when = _at(2026, 6, 17, 9, 30)
+    calls: list = []
+    sched = JobScheduler(store, run_job=_cron_runner(calls, when - 1000))
+    assert sched.tick(now=when + 1) == [job.id]
+    assert sched.tick(now=when + 31) == []
+    assert calls == [job.id]
+    assert sched.tick(now=when + 61) == [job.id]
+    assert len(calls) == 2
+
+
+def test_tick_cron_job_run_once_across_two_schedulers(home):
+    from localm.plugins.builtin.jobs.scheduler import JobScheduler
+    from localm.plugins.builtin.jobs.store import JobStore
+    store = JobStore()
+    job = store.add(_make_job(schedule_kind="cron", schedule="* * * * *"))
+    when = _at(2026, 6, 17, 9, 30)
+    calls: list = []
+    first = JobScheduler(store, run_job=_cron_runner(calls, when + 1))
+    second = JobScheduler(JobStore(), run_job=_cron_runner(calls, when + 1))
+    assert first.tick(now=when + 2) == [job.id]
+    assert second.tick(now=when + 3) == []
+    assert calls == [job.id]
+
+
+def test_tick_busy_slot_keeps_the_cron_minute(home):
+    from localm.plugins.builtin.jobs.runguard import run_slot
+    from localm.plugins.builtin.jobs.scheduler import JobScheduler
+    from localm.plugins.builtin.jobs.store import JobStore
+    store = JobStore()
+    job = store.add(_make_job(schedule_kind="cron", schedule="* * * * *"))
+    when = _at(2026, 6, 17, 9, 30)
+    calls: list = []
+    sched = JobScheduler(store, run_job=_cron_runner(calls, when + 10))
+    with run_slot() as held:
+        assert held is True
+        assert sched.tick(now=when + 1) == []
+    assert sched.tick(now=when + 20) == [job.id]
+    assert calls == [job.id]
+
+
+def test_tick_failed_claim_keeps_the_cron_minute(home):
+    from localm.plugins.builtin.jobs.scheduler import JobScheduler
+    from localm.plugins.builtin.jobs.store import JobStore
+
+    class FlakyStore(JobStore):
+        fail = True
+
+        def claim(self, job_id, *, predicate=None):
+            if self.fail:
+                raise OSError("jobs.json is locked")
+            return super().claim(job_id, predicate=predicate)
+
+    store = FlakyStore()
+    job = store.add(_make_job(schedule_kind="cron", schedule="* * * * *"))
+    when = _at(2026, 6, 17, 9, 30)
+    calls: list = []
+    sched = JobScheduler(store, run_job=_cron_runner(calls, when + 10))
+    assert sched.tick(now=when + 1) == []
+    store.fail = False
+    assert sched.tick(now=when + 20) == [job.id]
+    assert calls == [job.id]
+
+
+def test_tick_cron_job_claimed_elsewhere_keeps_the_minute(home):
+    from localm.plugins.builtin.jobs.scheduler import JobScheduler
+    from localm.plugins.builtin.jobs.store import JobStore
+    store = JobStore()
+    job = store.add(_make_job(schedule_kind="cron", schedule="* * * * *"))
+    when = _at(2026, 6, 17, 9, 30)
+    calls: list = []
+    sched = JobScheduler(store, run_job=_cron_runner(calls, when + 10))
+    held = store.claim(job.id)
+    assert held is not None
+    assert sched.tick(now=when + 1) == []
+    store.release_claim(job.id, held.claim)
+    assert sched.tick(now=when + 20) == [job.id]
+
+
+def test_tick_cron_job_edited_before_claim_does_not_run(home):
+    from localm.plugins.builtin.jobs.scheduler import JobScheduler
+    from localm.plugins.builtin.jobs.store import JobStore
+
+    class EditingStore(JobStore):
+        def claim(self, job_id, *, predicate=None):
+            self.update(job_id, schedule="0 3 * * *")
+            return super().claim(job_id, predicate=predicate)
+
+    store = EditingStore()
+    store.add(_make_job(schedule_kind="cron", schedule="* * * * *"))
+    when = _at(2026, 6, 17, 9, 30)
+    calls: list = []
+    from localm.plugins.builtin.jobs.scheduler import JobScheduler
+    sched = JobScheduler(store, run_job=_cron_runner(calls, when + 10))
+    assert sched.tick(now=when + 1) == []
+    assert calls == []
+
+
+def test_tick_skips_a_disabled_cron_job(home):
+    from localm.plugins.builtin.jobs.scheduler import JobScheduler
+    from localm.plugins.builtin.jobs.store import JobStore
+    store = JobStore()
+    store.add(_make_job(schedule_kind="cron", schedule="* * * * *",
+                        enabled=False))
+    when = _at(2026, 6, 17, 9, 30)
+    calls: list = []
+    sched = JobScheduler(store, run_job=_cron_runner(calls, when + 10))
+    assert sched.tick(now=when + 1) == []
+    assert calls == []
+
+
+def test_tick_catches_up_a_missed_cron_slot_once(home):
+    from localm.plugins.builtin.jobs.scheduler import JobScheduler
+    from localm.plugins.builtin.jobs.store import JobStore
+    store = JobStore()
+    job = store.add(_make_job(schedule_kind="cron", schedule="0 9 * * *",
+                              last_run=_at(2026, 6, 16, 9, 0)))
+    now = _at(2026, 6, 17, 9, 5)
+    calls: list = []
+    from localm.plugins.builtin.jobs.scheduler import JobScheduler
+    sched = JobScheduler(store, run_job=_cron_runner(calls, now + 1))
+    assert sched.tick(now=now) == [job.id]
+    assert sched.tick(now=now + 30) == []
+    assert calls == [job.id]
+
+
+def test_tick_failed_cron_run_is_recorded_and_not_rerun_in_its_minute(home):
+    from localm.plugins.builtin.jobs.scheduler import JobScheduler
+    from localm.plugins.builtin.jobs.store import JobStore
+    store = JobStore()
+    job = store.add(_make_job(schedule_kind="cron", schedule="* * * * *"))
+    when = _at(2026, 6, 17, 9, 30)
+    calls: list = []
+
+    def failing(j, *, engine=None):
+        calls.append(j.id)
+        raise RuntimeError("kaboom")
+
+    sched = JobScheduler(store, run_job=failing)
+    assert sched.tick(now=when + 1) == [job.id]
+    assert sched.tick(now=when + 31) == []
+    assert calls == [job.id]
+    assert store.list_results(job.id)[0]["status"] == "error"
+
+
+def test_tick_restart_inside_the_minute_does_not_rerun_a_cron_job(home):
+    from localm.plugins.builtin.jobs.scheduler import JobScheduler
+    from localm.plugins.builtin.jobs.store import JobStore
+    store = JobStore()
+    job = store.add(_make_job(schedule_kind="cron", schedule="* * * * *"))
+    when = _at(2026, 6, 17, 9, 30)
+    calls: list = []
+    JobScheduler(store, run_job=_cron_runner(calls, when + 2)).tick(now=when + 1)
+    restarted = JobScheduler(JobStore(), run_job=_cron_runner(calls, when + 40))
+    assert restarted.tick(now=when + 30) == []
+    assert calls == [job.id]
