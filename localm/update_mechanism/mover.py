@@ -657,7 +657,6 @@ class _Back:
         for op in reversed(rest):
             if op.old is None:
                 self._each(op, lambda op: self._prune_created(op, created))
-        disk.sync_disk()
         for op in reversed(rest):
             self._each(op, self._put_back)
         for op in reversed(swaps):
