@@ -561,7 +561,7 @@ def shutdown_wait(reply) -> float:
     ``wait_s`` it says it needs for private generations (60 at most)."""
     try:
         return STOP_TIMEOUT_S + min(60.0, max(0.0, float(reply.json()["wait_s"])))
-    except (AttributeError, ValueError, KeyError, TypeError):
+    except (AttributeError, ValueError, KeyError, TypeError, RecursionError):
         return STOP_TIMEOUT_S
 
 

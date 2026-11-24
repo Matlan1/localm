@@ -719,6 +719,11 @@ def test_the_stop_route_says_how_long_a_private_generation_may_take(server, monk
         assert 10 <= instances.shutdown_wait(SimpleNamespace(
             json=lambda v=value: {"wait_s": v})) <= 70
 
+    def nested():
+        import json
+        return json.loads("[" * 200_000)
+    assert instances.shutdown_wait(SimpleNamespace(json=nested)) == 10
+
 
 def test_no_private_job_starts_and_no_chat_model_reloads_while_localm_stops(server):
     app, client = server
