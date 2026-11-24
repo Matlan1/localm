@@ -1764,7 +1764,7 @@
   "settings.feedback.title": "Commentaires",
   "settings.feedback.help": "Donnez votre avis ou posez une question. Seuls votre texte et la version de localm sont inclus, sans diagnostic, journal, paramètres ni contenu de conversation. Avant tout envoi, vous voyez le texte complet et vous le confirmez.",
   "settings.feedback.placeholder": "Votre commentaire",
-  "settings.field.privacyKeep.help": "Ce que le mode privé conserve sur le disque. media = les images, la musique et les vidéos générées restent dans leur historique. Vide (par défaut) = elles peuvent être vues et enregistrées tant que localm fonctionne, puis elles sont supprimées.",
+  "settings.field.privacyKeep.help": "Ce que le mode privé conserve. Avec media, les images, la musique et les vidéos générées restent dans leur historique. Sans (par défaut), elles peuvent être vues et enregistrées tant que localm fonctionne, puis elles sont supprimées.",
   "settings.field.privacyKeep.label": "Conserver en mode privé",
   "settings.field.privacyKeep.option.media": "Images, musique et vidéos générées",
   "settings.suggestion.title": "Suggestion",

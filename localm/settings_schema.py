@@ -738,9 +738,9 @@ CORE_FIELDS: list = [
                  group="Privacy", owner="coder", options=_PRIVACY_INHERIT,
                  tier=Tier.OWNER),
     SettingField("privacy_keep", Widget.LIST, "Keep in privacy mode",
-                 "What privacy mode keeps on disk. media = generated images, music and "
-                 "video stay in their History. Empty (default) = they can be seen and "
-                 "saved while localm runs, then they are removed.",
+                 "What privacy mode keeps. With media chosen, generated images, music "
+                 "and video stay in their History. Without it (default) they can be "
+                 "seen and saved while localm runs, then they are removed.",
                  group="Privacy", options=["media"], tier=Tier.OWNER),
     SettingField("memory_enabled", Widget.TOGGLE, "Memory recall",
                  "Recall the durable facts localm has learned about you and add them to "

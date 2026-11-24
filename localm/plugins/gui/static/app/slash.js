@@ -102,7 +102,7 @@ async function runGenerationInChat(spec, promptText) {
     });
     if (end.status === "done" && end.result) {
       untrack();
-      conv.messages.push(spec.result(end.result, held ? " " + t("slash.heldNote") : ""));
+      conv.messages.push(spec.result(end.result, held ? "\n\n" + t("slash.heldNote") : ""));
       saveConversations(conv);
       renderChat();
     } else {

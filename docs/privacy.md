@@ -56,9 +56,10 @@ Notes:
   in open mode); a scoped key's requests are recorded under the global mode,
   and the chat page opened with one follows the global mode too.
 - Images, music and video made from the chat page (`/imagine`, `/generate-music`,
-  `/generate-video`) follow the same rule: under `chat_mode = privacy` they get
-  no prompt sidecar and ComfyUI's own copy is removed, even when the global mode
-  keeps them. The automatic diagnostics the server decides on for such a request
+  `/generate-video`) follow the same rule: under `chat_mode = privacy` they are
+  not kept (see "Generated images, music and video" below), even when the global
+  mode keeps them. Under `chat_mode = log` or `full` with `mode = privacy` they
+  stay in the gallery with the saved chat, with no prompt sidecar. The automatic diagnostics the server decides on for such a request
   and its job are off unless you turned on `keep_diagnostics`: the finished job
   is not kept in the activity record, and a chat model the request or job loads,
   including the one reloaded after the job, gets no crash trace. A model or
@@ -72,6 +73,45 @@ Notes:
   suppress Python's own `readline` history, so what you type is not left
   behind in `~/.python_history` either. This is separate from and in addition
   to not writing a session transcript.
+
+### Generated images, music and video
+
+In privacy mode a generated image, track or clip is not kept unless you choose to:
+
+- **Keep in privacy mode** (`privacy_keep`, in Settings > Privacy & data beside the
+  session modes, or `localm config privacy_keep media`; `localm config privacy_keep ""`
+  turns it off again) is empty by default. With `media` in it, generated media stays in
+  its History in privacy mode as well, without the prompt sidecar. Only the owner can
+  change it. More kinds of data may join it later.
+- **Off (the default).** The result is generated into a folder of the running localm
+  process, `<data dir>/run/private-media/`, readable by your account only. While that
+  process runs it can be seen, played, downloaded, renamed, moved to a folder, used as
+  an input and upscaled; the Images, Music and Video pages list such results under the
+  page's result, not in History, and **Remove all now** deletes them at once. No
+  sidecar, owner index or other record of them is written. The folder is deleted when
+  localm stops or restarts. After a crash or a killed process it is deleted at the next
+  start (`localm gui`, `serve`, `run` or `mcp`). A file another program holds open at
+  that moment is reported in the log and tried again at the next start. Files are
+  deleted, not overwritten: recovery tools may find them on the disk.
+- **Saving always works**: the download and move actions, `-o` of `localm image`,
+  `localm music` and `localm video`, `output_path` of the MCP `generate_image` tool,
+  `/save-media` in `localm run`, and the coder's `generate_image` tool, which writes the
+  project file it was asked for. Without `-o` the three commands ask whether to save the
+  result; with nobody at the terminal to ask they refuse before generating.
+  `POST /v1/images/generations` returns the image in the response and keeps none.
+- Media kept earlier, or made in `log` or `full` mode, is never touched.
+
+When ComfyUI makes the media, localm removes the job's files from ComfyUI's own output
+and temp folders and its history entry, also when the job fails or is cancelled. It
+deletes only files ComfyUI lists for that job whose content is what ComfyUI serves, in
+the output folder it can resolve (localm's own ComfyUI's folder, the ComfyUI output dir
+setting, or the `output` folder inside the ComfyUI folder) and the `temp` folder beside
+it. An output file that stays makes the job fail with "Output withheld" and the reason,
+and localm then keeps no file of it; a preview that stays in the temp folder is named in
+the job's output and is removed by ComfyUI when it next starts. What a ComfyUI you run
+yourself or on another machine writes elsewhere (its own log, files a custom node saves
+without listing them) is outside localm's control. With `media` in `privacy_keep` the
+job's own output file is still removed from ComfyUI, its other files stay.
 
 ### What privacy mode does not cover
 
@@ -93,6 +133,8 @@ yourself - and are written in every session mode, privacy included:
   defaults) is written to `prompts.json`.
 - **GUI uploads.** A file you upload for a model or tool to read is written
   to `<home>/uploads/`.
+- **Files the coder writes.** What the coder is asked to create or change in a
+  project, a generated image included, stays in the project.
 - **Download records.** A model download in progress is recorded in
   `<data dir>/pending-pulls/` so an interrupted one can be resumed. A record
   holds the model spec and options, its source URLs, sizes and digests, the
@@ -122,6 +164,25 @@ keep, not a trace of a conversation. But if you are relying on privacy mode
 alone to leave nothing behind, know that a job you scheduled, a document you
 indexed, a persona you saved, a file you uploaded, a model download that
 stopped before it finished, or a ComfyUI localm started still lands on disk.
+
+localm also keeps its own operational files in every mode. They hold no prompt,
+reply or generated content, but they can show that localm ran, when, and with
+which models:
+
+- **Model facts.** `<data dir>/model_meta.json` holds the file name, size, change
+  time and layer count of every model file loaded (the newest 256), so a later load
+  needs no new measurement. `registry.json` lists the models you added.
+- **Running operations.** While a background operation runs (a generation, a model
+  download), `<data dir>/activity/<pid>-<run>.json` holds its kind, label, start time,
+  process id and the id of the key that started it. In privacy mode its row is removed
+  when it ends, unless "Keep diagnostics" is on; a server that dies leaves it, and the
+  next start reports the operation as interrupted.
+- **Coordination files.** `<data dir>/run/` holds the running instance's entry, locks
+  that keep two localm processes from loading models at once (`run/gpu-lease/`), and the
+  crash marker of the running server, removed at a normal stop.
+- **Caches.** `<data dir>/cache/` holds what the GPU driver compiles for a model
+  (`cache/comgr` on AMD ROCm) and package and download caches. On AMD ROCm the driver
+  also leaves empty `comgr-<pid>-...` folders in the temp folder.
 
 ### Another localm instance answering for this one
 

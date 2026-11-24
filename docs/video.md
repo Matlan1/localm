@@ -4,7 +4,7 @@ localm generates short video clips (MP4, h264) with one of two backends: its bui
 
 ## What you get
 
-Four surfaces: the **Video page** in the GUI, the `localm video` **CLI**, the `/generate-video` **chat** command, and the `POST /api/video` HTTP **API**. See [Usage](#usage) below for each. Generated clips are stored in the localm data directory at `gui_video/` and are always saved (see [Privacy](#privacy) for what metadata is written).
+Four surfaces: the **Video page** in the GUI, the `localm video` **CLI**, the `/generate-video` **chat** command, and the `POST /api/video` HTTP **API**. See [Usage](#usage) below for each. Generated clips are stored in the localm data directory at `gui_video/`; in privacy mode they are held only while localm runs (see [Privacy](#privacy)).
 
 ## Native backend (no ComfyUI)
 
@@ -159,7 +159,7 @@ Generated clips are stored at `<data dir>/gui_video/` as MP4 files, each with an
 
 **Via the API:** `GET /api/video/history` lists clips as JSON with filenames, metadata, file sizes, and modification times; `GET /api/video/file/{name}` serves the clip. The newest 100 clips are kept in the history.
 
-**Via the CLI:** generated clips are saved to your specified output path (or `video_<timestamp>.mp4` by default in the current directory) and are not moved to `gui_video/`.
+**Via the CLI:** generated clips are saved to your specified output path (or `video_<timestamp>.mp4` by default in the current directory; in privacy mode you are asked first) and are not moved to `gui_video/`.
 
 ## VRAM handover
 
@@ -198,7 +198,7 @@ blank.
 
 ## Privacy
 
-In privacy mode (the default) no `<clip>.mp4.json` sidecar is written. The prompt that ComfyUI embeds in the clip's own metadata is stripped in every mode, so the sidecar is the only file that records it. The clip itself is an explicit artifact and is always saved. Privacy mode also forces removal of ComfyUI's own on-disk copy of the clip (and any uploaded image-to-video source) - but that removal needs localm to be able to locate ComfyUI's output folder (localm's own ComfyUI's `output` folder when that is the one in use, else the `comfy_output_dir` setting, or a derived `<comfy_workdir>/output`), and it deletes a file only when its content is what the job produced; otherwise the clip is withheld ("Output withheld") and localm keeps no file of it, instead of silently claiming the copy was removed. Outside privacy mode, the same cleanup is opt-in via the `comfy_delete_outputs` setting (default off, so ComfyUI's own gallery keeps its copy). In `log`/`full` modes the sidecar records prompt, seed, and settings so a clip can be reproduced (`seed` is also shown in the success message either way).
+In privacy mode (the default) no `<clip>.mp4.json` sidecar is written. The prompt that ComfyUI embeds in the clip's own metadata is stripped in every mode, so the sidecar is the only file that records it. The clip itself is not kept either, unless `privacy_keep` lists `media`: it can be played, downloaded and moved while localm runs and is then removed ([docs/privacy.md](privacy.md), "Generated images, music and video"). Privacy mode also forces removal of ComfyUI's own on-disk copy of the clip (and any uploaded image-to-video source) - but that removal needs localm to be able to locate ComfyUI's output folder (localm's own ComfyUI's `output` folder when that is the one in use, else the `comfy_output_dir` setting, or a derived `<comfy_workdir>/output`), and it deletes a file only when its content is what the job produced; otherwise the clip is withheld ("Output withheld") and localm keeps no file of it, instead of silently claiming the copy was removed. Outside privacy mode, the same cleanup is opt-in via the `comfy_delete_outputs` setting (default off, so ComfyUI's own gallery keeps its copy). In `log`/`full` modes the sidecar records prompt, seed, and settings so a clip can be reproduced (`seed` is also shown in the success message either way).
 
 ## Troubleshooting
 

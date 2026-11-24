@@ -1764,7 +1764,7 @@
   "settings.feedback.title": "Comentarios",
   "settings.feedback.help": "Dinos qué te parece o haz una pregunta. Solo se incluyen tu texto y la versión de localm, sin diagnóstico, registro, ajustes ni contenido de los chats. Antes de enviar nada ves el texto completo y lo confirmas.",
   "settings.feedback.placeholder": "Tus comentarios",
-  "settings.field.privacyKeep.help": "Lo que el modo privado conserva en el disco. media = las imágenes, la música y los vídeos generados permanecen en su historial. Vacío (predeterminado) = se pueden ver y guardar mientras localm está en marcha y después se eliminan.",
+  "settings.field.privacyKeep.help": "Lo que conserva el modo privado. Con media, las imágenes, la música y los vídeos generados permanecen en su historial. Sin ello (predeterminado) se pueden ver y guardar mientras localm está en marcha y después se eliminan.",
   "settings.field.privacyKeep.label": "Conservar en modo privado",
   "settings.field.privacyKeep.option.media": "Imágenes, música y vídeos generados",
   "settings.suggestion.title": "Sugerencia",

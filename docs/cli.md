@@ -427,6 +427,8 @@ localm video "a fox runs through snow" --duration 5
 
 Options (all optional): `localm image` takes `--negative`, `--guidance`, `--cfg`, `--seed`, `--image PATH` (image-to-image) with `--denoise`, `--lora`, `--size WIDTHxHEIGHT` and `-o/--out` (default `./image_<timestamp>.png`). `localm music` takes `--lyrics FILE`, `-d/--duration` seconds (1 to 3600, default 120), `-o/--out` (default `./music_<timestamp>.wav` natively, `.flac` with ComfyUI), `--seed`, `--steps` and `--cfg`. `localm video` takes `--negative`, `-d/--duration` seconds (1 to 20, default 5), `--fps` (default 24), `--width`, `--height`, `--image PATH` (image-to-video), `-o/--out` (default `./video_<timestamp>.mp4`), `--seed`, `--steps` (default 30) and `--cfg`. See `localm <command> --help` for each default.
 
+In privacy mode (the default) nothing is kept unless you save it: with `-o` the file is written there; without it you are asked whether to save the result, and with nobody at the terminal the command stops before generating and asks for `-o`. `localm config privacy_keep media` keeps generated media in privacy mode too. In `localm run`, `/generate-image`, `/generate-music` and `/generate-video` hold their result until the chat ends and `/save-media [file]` copies the newest one into the current folder. See [docs/privacy.md](privacy.md).
+
 `localm image`, `localm video` and `localm music` need no ComfyUI: with nothing set up
 they use the built-in native backends (stable-diffusion.cpp for images and video, ACE-Step
 1.5 on KoboldCpp for music), which install their runtimes on first use

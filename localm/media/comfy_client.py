@@ -2974,6 +2974,7 @@ _PRIVATE_JOBS: contextvars.ContextVar[Optional[_PrivateJobs]] = contextvars.Cont
     "localm_private_comfy_jobs", default=None)
 
 _PRIVATE_STOP_WAIT_S = 10.0
+_PRIVATE_ENTRY_WAIT_S = 2.0
 
 
 def run_leaving_nothing(job, *, comfy_output_dir: Optional[str] = None,
@@ -3042,7 +3043,8 @@ def _remove_private_jobs(jobs: _PrivateJobs, comfy_output_dir: Optional[str],
 
 def _unfinished_job_outputs(api_url: str, prompt_id: str) -> Optional[dict]:
     """The outputs ComfyUI lists for a job that did not finish, after stopping it
-    and waiting (at most ``_PRIVATE_STOP_WAIT_S``) until it has left the queue.
+    and waiting (at most ``_PRIVATE_STOP_WAIT_S``) until it has left the queue and
+    (at most ``_PRIVATE_ENTRY_WAIT_S``) until its history entry is there.
     ``{}`` when ComfyUI lists none, None when it cannot be asked or the job does
     not stop."""
     if not _comfy_job_stopped(api_url, prompt_id):
@@ -3057,10 +3059,14 @@ def _unfinished_job_outputs(api_url: str, prompt_id: str) -> Optional[dict]:
         if time.monotonic() >= deadline:
             return None
         time.sleep(0.25)
+    deadline = time.monotonic() + _PRIVATE_ENTRY_WAIT_S
     try:
-        with _comfy_urlopen(f"{api_url}/history/{prompt_id}", timeout=10) as response:
-            entry = json.loads(response.read().decode("utf-8")).get(prompt_id) or {}
-        return entry.get("outputs") or {}
+        while True:
+            with _comfy_urlopen(f"{api_url}/history/{prompt_id}", timeout=10) as response:
+                entry = json.loads(response.read().decode("utf-8")).get(prompt_id)
+            if entry is not None or time.monotonic() >= deadline:
+                return (entry or {}).get("outputs") or {}
+            time.sleep(0.25)
     except Exception as e:
         from localm.debuglog import logger
         logger.debug("reading the ComfyUI history entry of %s failed: %s", prompt_id, e)
@@ -3516,7 +3522,9 @@ def comfy_poll_until_done(
     errors, or times out. Returns ``(status, value)``:
 
       - ``POLL_CANCELLED``  -> value None. ``cancel_check()`` returned truthy; this
-        helper has already issued ``cancel_comfy_prompt`` + ``clear_comfy_history``.
+        helper has already issued ``cancel_comfy_prompt`` + ``clear_comfy_history``
+        (inside :func:`run_leaving_nothing` the history is cleared there, after
+        the files it lists are removed).
       - ``POLL_EXEC_ERROR`` -> value is the ``history_execution_error`` detail (str).
       - ``POLL_FINISHED``   -> value is the finished ``history[prompt_id]`` entry
         (dict); the caller reads its ``"outputs"`` for the medium's artifact.
@@ -3532,7 +3540,8 @@ def comfy_poll_until_done(
     while time.time() - start_time < max_poll_seconds:
         if cancel_check and cancel_check():
             cancel_comfy_prompt(api_url, prompt_id)
-            clear_comfy_history(api_url, prompt_id)
+            if _PRIVATE_JOBS.get() is None:
+                clear_comfy_history(api_url, prompt_id)
             return POLL_CANCELLED, None
         if on_tick is not None:
             on_tick(time.time() - start_time)

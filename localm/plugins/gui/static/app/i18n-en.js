@@ -2119,7 +2119,7 @@ export const I18N_EN = {
 
   // Settings > schema fields: Diagnostics
   "settings.field.privacyKeep.label": "Keep in privacy mode",
-  "settings.field.privacyKeep.help": "What privacy mode keeps on disk. media = generated images, music and video stay in their History. Empty (default) = they can be seen and saved while localm runs, then they are removed.",
+  "settings.field.privacyKeep.help": "What privacy mode keeps. With media chosen, generated images, music and video stay in their History. Without it (default) they can be seen and saved while localm runs, then they are removed.",
   "settings.field.privacyKeep.option.media": "Generated images, music and video",
   "settings.field.keepDiagnostics.label": "Keep diagnostics for bug reports",
   "settings.field.keepDiagnostics.help": "Writes crash and hang diagnostics (stack traces, a debug log) even in privacy mode, never chat content. Debug log, crash guard and stall watchdog change from the next server start, the rest at once.",

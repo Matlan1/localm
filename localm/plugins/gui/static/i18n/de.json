@@ -1649,7 +1649,7 @@
   "settings.bug.sendButton": "An Maintainer senden",
   "settings.bug.sent": "Gesendet.",
   "settings.bug.sentToast": "Fehlerbericht gesendet",
-  "settings.field.privacyKeep.help": "Was der Privatmodus auf der Festplatte behält. media = erzeugte Bilder, Musik und Videos bleiben in ihrem Verlauf. Leer (Standard) = sie können angesehen und gespeichert werden, solange localm läuft, und werden dann entfernt.",
+  "settings.field.privacyKeep.help": "Was der Privatmodus behält. Mit media bleiben erzeugte Bilder, Musik und Videos in ihrem Verlauf. Ohne (Standard) können sie angesehen und gespeichert werden, solange localm läuft, und werden dann entfernt.",
   "settings.field.privacyKeep.label": "Im Privatmodus behalten",
   "settings.field.privacyKeep.option.media": "Erzeugte Bilder, Musik und Videos",
   "settings.recentErrors.title": "Letzte Fehler",
