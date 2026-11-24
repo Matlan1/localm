@@ -3324,26 +3324,10 @@
         ],
         "./localm/inference/pretokenizer_guard.py": [
             {
-                "code": "reportOptionalOperand",
-                "range": {
-                    "startColumn": 48,
-                    "endColumn": 53,
-                    "lineCount": 1
-                }
-            },
-            {
                 "code": "reportArgumentType",
                 "range": {
                     "startColumn": 11,
                     "endColumn": 39,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportArgumentType",
-                "range": {
-                    "startColumn": 58,
-                    "endColumn": 72,
                     "lineCount": 1
                 }
             }
