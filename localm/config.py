@@ -2203,10 +2203,29 @@ class _NotedWrites(dict):
 
 
 def config_key_stored(key: str) -> bool:
-    """Whether config.json itself holds *key*, as opposed to its default applying."""
+    """Whether somebody set *key* in config.json, as opposed to its default applying
+    (see _set_keys). On a running event loop the read follows ``_loop_safe_read``."""
+    return key in _loop_safe_read("config.json keys", _stored_config_keys_now)
+
+
+def _stored_config_keys_now() -> list:
+    """The keys somebody set in config.json, read on the calling thread."""
     with _io_lock:
         stored, _read_ok = _read_json_checked(CONFIG_FILE, {})
-    return isinstance(stored, dict) and key in stored
+    return sorted(_set_keys(stored))
+
+
+def _set_keys(stored) -> set:
+    """The keys of *stored* (config.json as read) that somebody set. In a file of the
+    older full-dump scheme (no version stamp, other keys at their default too) a key
+    at its default says nothing and is left out."""
+    if not isinstance(stored, dict):
+        return set()
+    at_default = {k for k, v in stored.items()
+                  if k in DEFAULT_CONFIG and v == DEFAULT_CONFIG[k]}
+    if CONFIG_VERSION_KEY not in stored and at_default - _KEPT_WHEN_SET:
+        return set(stored) - at_default
+    return set(stored)
 
 
 def _config_for_disk(cfg: dict, written=()) -> dict:
@@ -2231,7 +2250,7 @@ def save_config(cfg: dict) -> None:
     ensure_dirs()
     with _io_lock:
         previous = _read_json(CONFIG_FILE, {})
-        delta = _config_for_disk(cfg, previous if isinstance(previous, dict) else ())
+        delta = _config_for_disk(cfg, _set_keys(previous))
         _atomic_write_json(CONFIG_FILE, delta)
     _refill_after_write()
     _record_config_saved(previous if isinstance(previous, dict) else {}, delta)
@@ -2302,6 +2321,7 @@ def update_config(mutator: Callable[[dict], None]) -> dict:
                 f"would replace its settings with an older copy or with "
                 f"defaults; refused. Fix or remove {CONFIG_FILE.name} (the "
                 f"{CONFIG_FILE.name}.bak next to it may hold a good copy).")
+        set_before = _set_keys(stored)
         refs = stored.pop(model_ids.REFS_KEY, None) if isinstance(stored, dict) else None
         _merge_stored_config(cfg, stored)
         model_ids.config_to_current(cfg, refs, model_index())
@@ -2309,7 +2329,7 @@ def update_config(mutator: Callable[[dict], None]) -> dict:
         noted = _NotedWrites(cfg)
         mutator(noted)
         cfg = dict(noted)
-        written = noted.written | set(stored if isinstance(stored, dict) else ())
+        written = noted.written | set_before
         # The mutator and the return value see the full merged dict; only the
         # user-set delta hits the disk (see _user_delta / save_config).
         lock.assert_held()

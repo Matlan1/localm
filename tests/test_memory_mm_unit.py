@@ -781,6 +781,15 @@ def test_a_chosen_default_stays_chosen_and_an_unrelated_save_chooses_nothing(emb
     assert "n_ctx" not in json.loads(config.CONFIG_FILE.read_text(encoding="utf-8"))
 
 
+def test_the_default_frozen_in_an_old_full_dump_is_no_choice(emb_env):
+    config.CONFIG_FILE.write_text(json.dumps(config.DEFAULT_CONFIG), encoding="utf-8")
+    assert config.config_key_stored("embedding_model") is False
+    config.update_config(lambda c: c.__setitem__("net_mode", "allow"))
+    assert config.config_key_stored("embedding_model") is False
+    config.CONFIG_FILE.write_text('{"embedding_model": "bge-small-en-v1.5"}', encoding="utf-8")
+    assert config.config_key_stored("embedding_model") is True
+
+
 def test_the_explicit_download_still_works_with_one_registered(emb_env):
     _register(emb_env, "embeddinggemma")
     embedder.resolve_embedding_model_path(allow_download=True)
