@@ -59,6 +59,8 @@ export const I18N_EN = {
   "sidebar.status.unloadFailed": "unload failed",
   "sidebar.status.unloading": "unloading {model}…",
   "sidebar.systemLoad": "Live system load (CPU / RAM / VRAM / GPU)",
+  "sidebar.feedback": "feedback",
+  "sidebar.feedbackTitle": "Report a bug, send feedback or suggest something",
   "sidebar.theme": "theme",
   "sidebar.toggleTheme": "Toggle light/dark",
   "sidebar.unloadModel": "unload model",
@@ -2769,6 +2771,25 @@ export const I18N_EN = {
   "toast.moreErrors": "+{count} more",
   "toast.repeatCount": "(x{count})",
 
+  // ---- Settings > Feedback and Suggestion ----
+  "settings.feedback.title": "Feedback",
+  "settings.feedback.help": "Tell us what you think, or ask a question. Only your text and the localm version are included, with no diagnostics, log, settings or chat content. Before anything is sent you see the whole text and confirm it.",
+  "settings.feedback.placeholder": "Your feedback",
+  "settings.suggestion.title": "Suggestion",
+  "settings.suggestion.help": "Suggest an improvement or a new feature. Only your text and the localm version are included, with no diagnostics, log, settings or chat content. Before anything is sent you see the whole text and confirm it.",
+  "settings.suggestion.placeholder": "Your suggestion",
+  "settings.feedback.empty": "Write something first",
+  "settings.feedback.saveButton": "Save",
+  "settings.feedback.reviewHelp": "This is the whole text as it will be sent; the closing note about editing it is removed when it is sent. It becomes a public GitHub issue. Nothing has been sent yet.",
+  "settings.feedback.reviewPrompt": "Saved: {where}  -  review it below, then press Send.",
+  "settings.feedback.previewLabel": "Text to send",
+  "settings.feedback.confirmSendButton": "Send",
+  "settings.feedback.notSent": "Not sent. Your text is saved: {where}",
+  "settings.feedback.sentToast": "Sent",
+  "settings.feedback.couldNotSend": "Could not send: {message}  Your text is saved ({where}) - press Send again, or email {maintainer}.",
+  "settings.feedback.failed": "Could not save it: {message}",
+  "settings.feedback.savedRateLimited": "Saved: {where}  -  rate limited; wait a bit and press Send again.",
+
   // ---- Settings > Report a bug ----
   "settings.bug.title": "Report a bug",
   "settings.bug.help":
@@ -2990,12 +3011,12 @@ export const I18N_EN = {
 
   // ---- Settings > Issues ----
   "settings.issues.title": "Issues",
-  "settings.issues.help": "The bug reports you sent from this install (read-only) - see whether one has been fixed.",
+  "settings.issues.help": "The reports you sent from this install (read-only) - see whether one has been answered or fixed.",
   "settings.issues.refreshButton": "Refresh",
   "settings.issues.loading": "Loading ...",
   "settings.issues.loadError": "Could not load: {error}",
   "settings.issues.emptyTitle": "No reports sent from this install",
-  "settings.issues.emptyBody": "Bugs you report from here show up on this list.",
+  "settings.issues.emptyBody": "Reports you send from here show up on this list.",
   "settings.issues.openSuffix": " (view)",
   "settings.issues.allLink": "All issues on GitHub",
   "settings.issues.rowError": "(could not check: {error})",

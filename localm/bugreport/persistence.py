@@ -11,17 +11,17 @@ from pathlib import Path
 from typing import Callable, Optional, TypeGuard
 
 from localm.bugreport.logs import _recent_hang_traces, _recent_log_tail_result
-from localm.bugreport.assembly import build_report, report_title
+from localm.bugreport.assembly import FEEDBACK_KINDS, build_feedback, build_report, report_title
 import localm.bugreport as _br
 
 
-def _write_new(base: Path, when: str, text: str) -> Path:
-    """Write *text* to ``bug-<when>.md`` in *base*, or to ``bug-<when>-<n>.md``
+def _write_new(base: Path, when: str, text: str, kind: str = "bug") -> Path:
+    """Write *text* to ``<kind>-<when>.md`` in *base*, or to ``<kind>-<when>-<n>.md``
     for the lowest n from 2 whose file does not exist yet; never replaces a
     file. Returns the path written."""
     n = 1
     while True:
-        path = base / (f"bug-{when}.md" if n == 1 else f"bug-{when}-{n}.md")
+        path = base / (f"{kind}-{when}.md" if n == 1 else f"{kind}-{when}-{n}.md")
         try:
             with open(path, "x", encoding="utf-8") as f:
                 f.write(text)
@@ -30,8 +30,9 @@ def _write_new(base: Path, when: str, text: str) -> Path:
             n += 1
 
 
-def save_report(text: str, when: Optional[str] = None) -> Optional[Path]:
+def save_report(text: str, when: Optional[str] = None, kind: str = "bug") -> Optional[Path]:
     """Write the report to the data dir and return its path (or None on failure).
+    *kind* is ``bug`` or one of ``FEEDBACK_KINDS``, the first word of the file name.
     *when* is a caller-supplied timestamp string (kept injectable for tests)."""
     try:
         from localm.config import home_dir
@@ -45,7 +46,7 @@ def save_report(text: str, when: Optional[str] = None) -> Optional[Path]:
         if when is None:
             import time
             when = time.strftime("%Y%m%d-%H%M%S")
-        path = _write_new(base, when, text)
+        path = _write_new(base, when, text, kind)
         # The report carries environment diagnostics and a traceback; on a
         # multi-user box it should not be world-readable. chmod is a no-op on
         # Windows, so this is safe cross-platform.
@@ -68,20 +69,22 @@ _SAVED_REPORT_NAME_MAX = 128
 
 
 def _is_saved_report_name(name: object) -> TypeGuard[str]:
-    """True for ``bug-<stamp>.md`` where <stamp> is one or more ASCII letters,
-    digits, ``_`` or ``-``, and the whole name is at most 128 characters."""
+    """True for ``<kind>-<stamp>.md`` where <kind> is ``bug`` or one of
+    ``FEEDBACK_KINDS``, <stamp> is one or more ASCII letters, digits, ``_`` or
+    ``-``, and the whole name is at most 128 characters."""
     if not isinstance(name, str) or len(name) > _SAVED_REPORT_NAME_MAX:
         return False
-    if not (name.startswith("bug-") and name.endswith(".md")):
+    kind, dash, rest = name.partition("-")
+    if kind not in ("bug", *FEEDBACK_KINDS) or not dash or not rest.endswith(".md"):
         return False
-    stamp = name[len("bug-"):-len(".md")]
+    stamp = rest[:-len(".md")]
     return bool(stamp) and all(c in _SAVED_REPORT_STAMP_CHARS for c in stamp)
 
 
 def read_saved_report(filename: object) -> str:
     """The text of the saved report *filename* in ``<data dir>/bug-reports``.
 
-    *filename* must be a bare ``bug-<stamp>.md`` name as ``save_report``
+    *filename* must be a bare ``<kind>-<stamp>.md`` name as ``save_report``
     writes it. Raises ValueError for anything else (a non-string, a path, a
     separator, a different extension) and OSError when the file cannot be read or is not
     valid UTF-8."""
@@ -209,3 +212,29 @@ def save_user_report(description: str = "", *, summary: str = "",
         if scrub is not None:
             text = scrub(text)
         return _br.save_report(text)
+
+
+def saved_report_kind(filename: object) -> str:
+    """The kind of the saved report *filename* (``bug`` or one of
+    ``FEEDBACK_KINDS``), read from its name. Raises ValueError for anything that
+    is not a saved report's bare name."""
+    if not _is_saved_report_name(filename):
+        raise ValueError("not a saved bug-report file name")
+    return filename.partition("-")[0]
+
+
+def save_feedback(text: str, kind: str, *,
+                  scrub: Optional[Callable[[str], str]] = None) -> Optional[Path]:
+    """Save feedback or a suggestion (*kind*, one of ``FEEDBACK_KINDS``) as
+    ``<kind>-<stamp>.md`` beside the bug reports and return its path (None on a
+    write failure). *scrub*, when given, is applied to the text before the report
+    is built and to the whole report before it is saved. Raises ValueError for any
+    other *kind*."""
+    if kind not in FEEDBACK_KINDS:
+        raise ValueError(f"not a feedback kind: {kind!r}")
+    if scrub is not None:
+        text = scrub(text or "")
+    report = build_feedback(text)
+    if scrub is not None:
+        report = scrub(report)
+    return _br.save_report(report, kind=kind)

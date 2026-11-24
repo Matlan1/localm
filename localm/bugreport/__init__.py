@@ -73,10 +73,12 @@ from localm.bugreport.logs import (
 from localm.bugreport.assembly import (
     _format_error, _kv_lines, _app_state_lines, build_report, _report_footer,
     _strip_report_footer, report_for_review, _client_lines, report_title, _TRACE_REPORT_LIMIT,
-    trim_trace_for_report, report_title_from_markdown,
+    trim_trace_for_report, report_title_from_markdown, FEEDBACK_KINDS, build_feedback,
+    feedback_text,
 )
 from localm.bugreport.persistence import (
     save_report, _SAVE_REPORT_LOCK, save_user_report, read_saved_report, report_digest,
+    save_feedback, saved_report_kind,
 )
 from localm.bugreport.transport import (
     _MAX_PREFILL_BODY, _truncate_body, mailto_url, upload_config, upload_available,
@@ -131,10 +133,10 @@ __all__ = [
     "_recent_hang_traces", "_recent_log_tail", "_recent_log_tail_result",
     "release_crash_trace", "report_failure", "_report_footer",
     "_report_one_crash_marker", "_report_one_stopping_record", "report_title",
-    "report_title_from_markdown", "read_saved_report", "report_digest",
+    "report_title_from_markdown", "FEEDBACK_KINDS", "build_feedback", "feedback_text", "read_saved_report", "report_digest",
     "_REPORTED_DISTS", "_retry_after_from", "_ring_activity", "_runtime_libs",
     "_runtime_state", "_SAFE_CONFIG_KEYS", "_safe_config_subset", "save_report",
-    "_SAVE_REPORT_LOCK", "save_user_report", "_scrub_home",
+    "_SAVE_REPORT_LOCK", "save_user_report", "save_feedback", "saved_report_kind", "_scrub_home",
     "_scrub_query_and_header_secrets", "_scrub_secrets", "_scrub_url_creds",
     "_strip_report_footer", "report_for_review", "_trace_path_for_marker", "_trace_path_for_stopping_record",
     "_TRACE_REPORT_LIMIT", "trim_trace_for_report", "_truncate_body",

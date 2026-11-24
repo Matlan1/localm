@@ -455,6 +455,8 @@ See [docs/llamacpp-binding.md](docs/llamacpp-binding.md) for the binding interna
 | [docs/memory.md](docs/memory.md) | Durable memory: recall across chats, consolidation, privacy, `/api/memory` |
 | [docs/network.md](docs/network.md) | Internet access for coder and chat: modes, domain rules, SSRF guard |
 | [docs/tls.md](docs/tls.md) | API keys, TLS, and reverse proxies for LAN serving |
+| [docs/security.md](docs/security.md) | The security model: authentication, scopes, trust boundaries, updates, verifying a release |
+| [docs/development.md](docs/development.md) | Setting up a development checkout and running the checks |
 | [docs/docker.md](docs/docker.md) | Running the API server in Docker: images, first-run key, volume, certificate, GPU |
 | [docs/privacy.md](docs/privacy.md) | Privacy modes and diagnostics: what localm saves, what it never does, the two independent dials that control it, and how the update check respects network policy |
 | [docs/naming.md](docs/naming.md) | Reaching localm by name on your LAN: the localm.local mDNS address |
@@ -472,7 +474,7 @@ Every `full-ci` matrix run measures coverage (`pytest --cov=localm`) and publish
 - **Bugs and crashes:** open an [Issue](https://github.com/Matlan1/localm/issues), or run `localm bug-report -m "..."` first to attach a safe hardware/backend snapshot.
 - **Setup failed:** use the [Setup failed form](https://github.com/Matlan1/localm/issues/new?template=setup_failed.yml); only one box is required.
 - **No GitHub account:** double-click `report-issue.bat` (Windows) or run `bash report-issue.sh` (Linux/macOS) in the localm folder, even when setup failed. From a pip install, run `localm bug-report -m "..."`. Either way you see the whole report before it is sent, and it becomes a public GitHub issue.
-- **Feedback, setup questions, GPU help (AMD/NVIDIA/Intel), "does this work with my card":** [Discussions](https://github.com/Matlan1/localm/discussions).
+- **Feedback, setup questions, GPU help (AMD/NVIDIA/Intel), "does this work with my card":** [Discussions](https://github.com/Matlan1/localm/discussions). Without a GitHub account: **feedback** in the app's sidebar, or `localm feedback -m "..."`.
 - **Security vulnerabilities:** see [SECURITY.md](SECURITY.md); do not open a public issue.
 
 ## License

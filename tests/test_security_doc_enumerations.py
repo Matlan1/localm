@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Binds the enumerations SECURITY.md, docs/server-api.md, docs/network.md,
+"""Binds the enumerations docs/security.md, docs/server-api.md, docs/network.md,
 docs/privacy.md and README.md publish to the code they describe.
 
 Each test derives the real set from the code (the live app, the settings
@@ -62,7 +62,7 @@ def _keyless_routes() -> set[tuple[str, str]]:
 
 
 def test_security_md_lists_exactly_the_routes_that_take_no_bearer_key():
-    section = _between(_collapsed("SECURITY.md"),
+    section = _between(_collapsed("docs/security.md"),
                        "The routes that take no bearer key are",
                        "*State-changing endpoints* below")
     documented = set(re.findall(r"`(GET|POST|HEAD) (/[^`\s]*)`", section))
@@ -85,7 +85,7 @@ def test_security_md_lists_exactly_the_cross_origin_exempt_paths(app):
             | set(ollama_protocol.CROSS_ORIGIN_OK_PATHS)
             | set(anthropic_protocol.CROSS_ORIGIN_OK_PATHS)
             | set(responses_protocol.CROSS_ORIGIN_OK_PATHS))
-    section = _between(_collapsed("SECURITY.md"),
+    section = _between(_collapsed("docs/security.md"),
                        "Two kinds of route are exempt",
                        'A configured `"cors_origins"`')
     documented = set(re.findall(r"`(/(?:v1|api)/[^`\s]*)`", section))
@@ -93,7 +93,7 @@ def test_security_md_lists_exactly_the_cross_origin_exempt_paths(app):
 
 
 def test_security_md_says_exempt_paths_are_exact_matches():
-    doc = _collapsed("SECURITY.md")
+    doc = _collapsed("docs/security.md")
     assert "matched as an exact route, not a prefix" in doc
 
 
@@ -143,7 +143,7 @@ def _open_mode_exempt_reads(app) -> set[str]:
 
 def test_security_md_lists_exactly_the_open_mode_exempt_reads(app):
     live = _open_mode_exempt_reads(app) - set(_live_cross_origin_ok(app))
-    section = _between(_collapsed("SECURITY.md"),
+    section = _between(_collapsed("docs/security.md"),
                        "The exempt read paths", "never enter this gate")
     documented = {_normalise(p) for p in
                   re.findall(r"`GET (/(?:v1|api)/[^`\s]*)`", section)}
@@ -192,7 +192,7 @@ _ABSOLUTE_OFF_CLAIMS = (
 )
 
 
-@pytest.mark.parametrize("rel", ["README.md", "SECURITY.md", "docs/network.md",
+@pytest.mark.parametrize("rel", ["README.md", "docs/security.md", "docs/network.md",
                                  "docs/privacy.md"])
 def test_docs_do_not_call_net_mode_off_an_absolute(rel):
     doc = _collapsed(rel).lower()
@@ -202,7 +202,7 @@ def test_docs_do_not_call_net_mode_off_an_absolute(rel):
 
 def test_net_allow_model_downloads_is_admin_only_and_documented_where_off_is():
     assert "net_allow_model_downloads" in settings_schema.admin_only_keys()
-    for rel in ("SECURITY.md", "docs/network.md", "docs/privacy.md"):
+    for rel in ("docs/security.md", "docs/network.md", "docs/privacy.md"):
         assert "net_allow_model_downloads" in _collapsed(rel), rel
 
 

@@ -253,7 +253,7 @@ drives (the Download browser button under Settings > Server & network, or
 runs a Chrome, Chromium, Edge or Brave already installed on the machine
 instead of the download; either engine starts with a fresh, empty profile,
 so none of your logged-in sessions are used. An API key needs the separate
-`browser` scope (see [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md)), independent of the
+`browser` scope (see [security.md](security.md)), independent of the
 coding agent's shell access, so you can grant one without the other.
 
 ## What the policy does NOT govern
@@ -262,7 +262,7 @@ coding agent's shell access, so you can grant one without the other.
   localm is limited by the bind address, the API key and the Host check: the
   server answers only to its own names and addresses (plus the `allowed_hosts`
   setting) and refuses every other `Host` with `400`, which stops DNS-rebinding
-  pages. See [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md#host-header-check-dns-rebinding).
+  pages. See [security.md](security.md#host-header-check-dns-rebinding).
 - **Child processes.** `run_shell` commands like `pip install`, `npm install`,
   or `git clone` talk to the network themselves. The gate for those is the
   shell-command approval (and `always_confirm` for `run_shell`), not the
@@ -298,7 +298,7 @@ coding agent's shell access, so you can grant one without the other.
   (`--yes`, an update, the GUI's runtime switch, a generation that installs its
   runtime) never offers it. Under `off` the download is refused, with the
   remedy, unless `net_allow_model_downloads` is on.
-- **Bug-report upload.** A deliberate, one-off action you trigger yourself
+- **Bug-report and feedback upload.** A deliberate, one-off action you trigger yourself
   (see [privacy.md](privacy.md)); it does not call `check_url` and is not
   subject to the domain lists. With `net_mode` set to `off` it is refused before
   any connection opens, as are the issue list (`localm issues`) and the update

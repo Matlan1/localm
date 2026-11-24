@@ -177,6 +177,13 @@ def _join_confirmation_helper():
             assert not t.is_alive(), "the confirmation helper outlived the window loop"
 
 
+@pytest.fixture(autouse=True)
+def _no_helper_outlives_its_test(monkeypatch):
+    """Wait for the confirmation helper before *monkeypatch* is undone."""
+    yield
+    _join_confirmation_helper()
+
+
 def _fake_webview(*, loaded=True, create_raises=False, start_sleep=0.2):
     """A fake `webview` module. `start`'s side_effect sleeps briefly before
     returning - the REAL webview.start() blocks for the whole window

@@ -624,7 +624,7 @@ localm config autoprune_missing_models true
 localm config language de                        # interface language: en (default), de, es or fr
 ```
 
-`localm config KEY VALUE` always sets a value; `localm info` prints the current ones. Config lives at `<data dir>/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed: requests are then refused whenever no key is configured, for example after the last key is removed (`localm config require_auth true` is itself refused while no key exists, since that would lock you out; the environment variable is not); `localm gui` and `localm serve` refuse to bind past loopback unless an API key of at least 8 characters is set (exit 2; `--insecure` overrides it, and a bind address set in Settings falls back to loopback with a warning instead), and a running one whose last key is removed refuses requests until a key is set; `cors_origins` widens CORS (locked to localhost by default); `allowed_hosts` (or `LOCALM_ALLOWED_HOSTS`, comma-separated) adds host names the server answers to, for a reverse proxy or your own DNS name (by default only its own names and addresses; `"*"` turns the DNS-rebinding check off). See the [API keys](#api-keys) section and [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the auth and scope model, and [docs/tls.md](tls.md) for LAN serving.
+`localm config KEY VALUE` always sets a value; `localm info` prints the current ones. Config lives at `<data dir>/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed: requests are then refused whenever no key is configured, for example after the last key is removed (`localm config require_auth true` is itself refused while no key exists, since that would lock you out; the environment variable is not); `localm gui` and `localm serve` refuse to bind past loopback unless an API key of at least 8 characters is set (exit 2; `--insecure` overrides it, and a bind address set in Settings falls back to loopback with a warning instead), and a running one whose last key is removed refuses requests until a key is set; `cors_origins` widens CORS (locked to localhost by default); `allowed_hosts` (or `LOCALM_ALLOWED_HOSTS`, comma-separated) adds host names the server answers to, for a reverse proxy or your own DNS name (by default only its own names and addresses; `"*"` turns the DNS-rebinding check off). See the [API keys](#api-keys) section and [security.md](security.md) for the auth and scope model, and [docs/tls.md](tls.md) for LAN serving.
 
 ### Dynamic context window
 
@@ -847,7 +847,7 @@ Removing the last key (`key clear`, or `key rm` of the only key with no owner ke
 - `--rag-root DIR` (repeatable) - confines the key's whole RAG reach (indexing and every other collection route) to exactly these folders instead of the global folder policy. Omit for no per-key restriction. See [docs/rag.md](rag.md#per-key-folder-scoping).
 - `--expires-in SECONDS` - the key stops working this many seconds after creation. Omitted means it never expires.
 
-Privileged scopes (`config:write`, `plugins:admin`, `keys:admin`, `admin`, `coder:full`) are refused by `key create` unless you pass `--allow-privileged`; an owner-authenticated `POST /v1/keys` API call can mint them too. See [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the auth and scope model, and [docs/tls.md](tls.md) for serving over a LAN.
+Privileged scopes (`config:write`, `plugins:admin`, `keys:admin`, `admin`, `coder:full`) are refused by `key create` unless you pass `--allow-privileged`; an owner-authenticated `POST /v1/keys` API call can mint them too. See [security.md](security.md) for the auth and scope model, and [docs/tls.md](tls.md) for serving over a LAN.
 
 ---
 
@@ -983,7 +983,7 @@ tools, which only the terminal offers (see [gui.md](gui.md)).
 | `kill_shell_job` | Stop a background job and its process tree; for a background sub-agent's job, the sub-agent runs no further tool call and ends after its current reply | yes | no |
 | `git_commit` | Stage and commit (without `files`, every change, new untracked files included; localm's own session files in `.localcoder` are never committed) | yes | no |
 | `git_create_branch` | Create a branch, optionally checking it out | yes | no |
-| `git_push` | Push the current branch | yes | no |
+| `git_push` | Push the current branch; a branch with no upstream is pushed with `--set-upstream` and the result says so | yes | no |
 | `spawn_agent` | Spawn a sub-agent for a sub-task and return its result | yes | no |
 | `spawn_agent_background` | Start a sub-agent in the background, returning a job id | yes | no |
 | `check_agent_job` | Check a background sub-agent's state and result | no | no |
@@ -1332,15 +1332,18 @@ localm update --to 0.3.0 -y --allow-unverified   # non-interactive, even if its 
 localm update --repair          # bring the dependencies, native runtime and components to the installed version
 localm bug-report -m "..."      # generate an editable bug report and offer to send it to the maintainer
 localm bug-report -m "what I did" -e "what I expected" -w "what happened" --send   # non-interactive, send immediately
-localm issues [NUMBER]          # list the bug reports this install filed, or show one by number
+localm feedback -m "..."        # write feedback and offer to send it to the maintainer (--suggestion for a suggestion)
+localm issues [NUMBER]          # list the reports this install filed, or show one by number
 ```
 
 `bug-report` asks three questions (what you were doing, what you expected, what actually happened; Enter skips one) when run in a terminal without `-m`/`-e`/`-w`, and needs at least `-m` or `-w`. It attaches the tail of the running localm server's own debug log when one exists (the most recently started server of this data folder that has one; with no such server, this command's own log), with `--no-log` to leave it out, never chat content, and never the log of a run that has ended. With `--send`, a report that could not be sent exits 1, including one refused because Network access is off. `--send-anyway` sends at once as `--send` does, also while Network access is off: one connection to the bug-report server for this report only, with the setting left off. At the menu, a send refused because Network access is off asks whether to send that report anyway (no is the default). Two reports saved in the same second get separate files. `issues` is read-only and needs the bug-report proxy to be configured; `issues NUMBER` shows any issue of the tracker and says when this install did not file it.
 
+`feedback` saves your text (`-m`, or asked for in a terminal) with the localm version and nothing else, and offers to send it the way `bug-report` does, with the same `--send` and `--send-anyway`. With `--suggestion` it is sent as a suggestion.
+
 Updates are signed: localm verifies an Ed25519 signature from its release key
 before applying anything, and refuses a build that is not newer. The keys are
 pinned in its own source and can be replaced by a signed update.
-See [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the update trust model. The GUI Models page
+See [security.md](security.md) for the update trust model. The GUI Models page
 has an "Update now" button for the same flow.
 
 `--to VERSION` installs the release you name, including an older one. It says when

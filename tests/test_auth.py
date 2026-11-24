@@ -656,7 +656,7 @@ def test_keys_endpoint_reports_no_owner_key_warning_when_keyed(auth, monkeypatch
 
 
 def test_model_read_routes_require_models_read_scope(auth, monkeypatch):
-    """SECURITY.md promises every /v1 route is auth-gated when a key is set.
+    """docs/security.md promises every /v1 route is auth-gated when a key is set.
     /v1/models and /v1/models/{id} must require models:read; /health stays open."""
     from fastapi.testclient import TestClient
     from localm import scopes as S
