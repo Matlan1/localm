@@ -464,10 +464,19 @@ def test_a_stop_during_the_question_runs_nothing(tmp_path):
     assert not (tmp_path / "a.txt").exists()
 
 
-def test_the_check_grammar_is_structurally_valid():
-    from localm.inference.gbnf import check_grammar_structure
+def _undefined_rules(grammar: str) -> set:
+    """The rule names *grammar* uses and does not define."""
+    import re
+    defined = set(re.findall(r"^([\w-]+)\s*::=", grammar, re.MULTILINE))
+    bare = re.sub(r'"(?:\\.|[^"\\])*"|\[(?:\\.|[^\]\\])*\]|\{[^}]*\}|^[\w-]+\s*::=', " ",
+                  grammar, flags=re.MULTILINE)
+    return set(re.findall(r"[a-zA-Z][\w-]*", bare)) - defined
+
+
+def test_the_grammars_define_every_rule_they_use(tmp_path):
     from localm.plugins.coder.agent.context import _CALL_CHECK_GRAMMAR
-    check_grammar_structure(_CALL_CHECK_GRAMMAR)
+    assert _undefined_rules(_CALL_CHECK_GRAMMAR) == set()
+    assert _undefined_rules(_forced_grammar(_agent(tmp_path, _Backend([])))) == set()
 
 
 def test_a_denied_call_that_ran_later_is_not_reported_denied_when_it_failed(tmp_path):
