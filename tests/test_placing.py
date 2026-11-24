@@ -250,6 +250,9 @@ class TestAReplacementKilledAtAnyMoment:
                 twice.models, twice.records = root / "models", root / "locks" / "replacing"
                 twice.base = twice.models / "snap"
                 twice.stage = twice.base / placing.REPO_STAGING
+                for found in placing.unfinished(twice.records):
+                    found.record.write_text(json.dumps({
+                        **json.loads(found.text), "id": os.stat(twice.base).st_ino}))
                 cut = _killed_after(monkeypatch, again, how, twice.put_back)
                 twice.check_all_there()
                 assert twice.put_back() is True
