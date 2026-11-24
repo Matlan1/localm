@@ -3,8 +3,8 @@
 
     <python> -I -S _update_mechanism_driver.py <applier folder> <job json> <kill at>
 
-Every call the update mechanism makes to a function of ``os`` in :data:`CALLS` is one
-point; the process is killed right before the call number *kill at* (from 0; -1
+Every call the update mechanism makes to a function of ``os`` in :data:`CALLS` and to
+``json.dump`` is one point; the process is killed right before the call number *kill at* (from 0; -1
 never). With -1 the number of points is printed as ``POINTS <n>``. ``FINISH`` is
 printed when the update starts to end as done. Exit status 0: the job ran through.
 """
@@ -43,6 +43,7 @@ def _arm(kill_at):
         return call
     for name in CALLS:
         setattr(os, name, wrap(getattr(os, name)))
+    json.dump = wrap(json.dump)
 
 
 def _update(um, spec):

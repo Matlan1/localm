@@ -478,6 +478,14 @@ def test_a_dry_run_that_makes_another_venv_is_refused(text):
         packages.changes(text)
 
 
+def test_uv_runs_offline_and_leaves_the_project_out_unless_asked():
+    assert packages.command(["uv", "sync", "--frozen"]) == [
+        "uv", "sync", "--frozen", "--offline", "--no-install-project"]
+    assert packages.command(["uv", "sync"], project=True) == ["uv", "sync", "--offline"]
+    assert packages.command(["uv", "pip", "install", "torch"]) == [
+        "uv", "pip", "install", "torch", "--offline"]
+
+
 def test_the_lines_of_a_dry_run_are_read():
     text = ("Would use project environment at: .venv\nWould download 1 package\n"
             "Would uninstall 2 packages\nWould install 3 packages\n - Alpha_X==1.0\n"
