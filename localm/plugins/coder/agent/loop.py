@@ -641,6 +641,12 @@ class _LoopMixin:
 
         def _call_llm(self, messages: list[dict], interactive: bool) -> str: ...
 
+        _loose_check: tuple | None
+
+        def _loose_calls_to_check(self, calls: list) -> list: ...
+
+        def _ask_if_calls_meant(self, calls: list) -> bool | None: ...
+
         def _build_messages(self) -> list[dict]: ...
 
         _max_tokens_explicit: bool | None
@@ -1074,6 +1080,25 @@ class _LoopMixin:
                 st.possible_write = st.possible_write or any(
                     _may_write_files(c, self.cwd) for c in calls)
 
+                # A loosely written call is run, or offered for approval, only
+                # once the model was asked whether it meant it.
+                self._add_assistant(response)
+                loose = self._loose_calls_to_check(calls)
+                meant = self._ask_if_calls_meant(loose) if loose else None
+                if (meant is False and len(loose) == len(calls)
+                        and not self._change_still_owed(
+                            getattr(self, "_last_user_request", "") or "", st)):
+                    # Every call in the reply was an example: the reply is the
+                    # answer, judged and recorded like any other final reply.
+                    self._messages.pop()
+                    self._show_examples(response, parsed_calls, interactive)
+                    should_break, fr = self._handle_no_tool_calls(
+                        response, interactive, st, examples=True)
+                    if should_break:
+                        final_response = fr
+                        break
+                    continue
+
                 # Show the non-tool-call text parts when not already streamed
                 segments = split_response(response, parsed_calls)
                 if interactive and not getattr(self, "_streamed_to_terminal", False):
@@ -1091,24 +1116,12 @@ class _LoopMixin:
                 self._emit("assistant_text",
                           text="".join(seg for seg in segments if isinstance(seg, str)))
 
-                self._add_assistant(response)
-
                 # Execute tools - run non-destructive batches in parallel
-                loose = [c for c in calls if c.lenient]
-                check: dict = {"calls": loose}
-                self._loose_check = check if loose else None
+                self._loose_check = (loose, meant) if loose else None
                 try:
                     result_blocks = self._execute_tools(calls, interactive=interactive)
                 finally:
                     self._loose_check = None
-                if (check.get("examples", 0) == len(calls)
-                        and not self._change_still_owed(
-                            getattr(self, "_last_user_request", "") or "", st)):
-                    # Every call in the reply was an example: the reply is the answer.
-                    final_response = response + self._grounding_footer()
-                    if self.on_event is None:
-                        print_assistant_response(final_response, name=self.name)
-                    break
                 st.plan_submitted = st.plan_submitted or any(
                     c.name == "exit_plan_mode" for c in calls)
                 if invented:
@@ -1258,6 +1271,20 @@ class _LoopMixin:
 
         return final_response
 
+    def _show_examples(self, response: str, calls: list, interactive: bool) -> None:
+        """Show a reply whose calls are all examples whole: the live display
+        hides a call."""
+        if self.on_event is not None:
+            self._emit("assistant_text", text=response)
+        elif interactive:
+            if getattr(self, "_streamed_to_terminal", False):
+                parts = [response[c.start:c.end].strip() for c in calls]
+            else:
+                parts = [response.strip()]
+            for part in parts:
+                console.print(safe_markup(part))
+            print_info("(an example, as the model said: nothing was run)")
+
     def _remind_of_budget(self, task_turns: int, st) -> None:
         """Past the turn budget, tell the model how many turns are left: once
         when half of the turns after the budget are used, and once when three
@@ -1355,7 +1382,8 @@ class _LoopMixin:
         started, so turns earlier tasks in the session used do not count."""
         return self._turns - self._task_start_turns < self.max_turns
 
-    def _handle_no_tool_calls(self, response, interactive, st) -> tuple[bool, str]:
+    def _handle_no_tool_calls(self, response, interactive, st,
+                              examples: bool = False) -> tuple[bool, str]:
         """Handle a turn that produced no tool calls (split out of _loop).
 
         Runs, in order: the harness-run exit-code oracle (when a verify command is
@@ -1364,7 +1392,8 @@ class _LoopMixin:
         one-shot pre-done reviewer pass, and finally accepting the response as the
         final answer. ``st`` carries the per-task one-shot flags (verify_nudged,
         repair_count, review_done, verify_retries/verify_settled) so they persist
-        across turns.
+        across turns. With *examples* every call in the response is an example, so
+        none of it is read as a broken attempt at a call.
 
         Returns ``(should_break, final_response)``: ``(False, "")`` to continue the
         loop, ``(True, text)`` to end it with that final response."""
@@ -1376,7 +1405,8 @@ class _LoopMixin:
         # self-graded nudge and the reviewer, so a failing check goes straight
         # back as a fix request. Skipped for a response that only looks like a
         # broken tool call - the repair turn below handles that.
-        if not looks_like_tool_attempt(response, tool_names):
+        attempt = not examples and looks_like_tool_attempt(response, tool_names)
+        if not attempt:
             gated = self._run_verify_gate(response, interactive, st)
             if gated is not None:
                 return gated
@@ -1422,8 +1452,9 @@ class _LoopMixin:
         if (
             st.repair_count < _MAX_TOOL_REPAIRS
             and self._task_turns_left()
-            and (looks_like_tool_attempt(response, tool_names)
-                 or (demands_action(getattr(self, "_last_user_request", "") or "")
+            and (attempt
+                 or (not examples
+                     and demands_action(getattr(self, "_last_user_request", "") or "")
                      and names_a_tool_as_command(response, tool_names)))
         ):
             st.repair_count += 1
@@ -1459,7 +1490,7 @@ class _LoopMixin:
         # Still looks like an unparseable tool call after the repair attempts:
         # surface the raw attempt instead of finalising a hidden <tool_call>
         # block, which the streaming display hides.
-        if looks_like_tool_attempt(response, tool_names):
+        if attempt:
             self._emit("info", text=(
                 "the model tried to call a tool but emitted invalid output "
                 f"{st.repair_count + 1} times - surfacing its raw attempt "

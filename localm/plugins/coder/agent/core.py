@@ -467,8 +467,7 @@ class Agent(
         # The loosely written calls of the reply being executed and whether the
         # model meant them to run; None outside a reply (see
         # execution._loose_call_meant).
-        self._loose_check: Optional[dict] = None
-        self._loose_check_lock = threading.Lock()
+        self._loose_check: Optional[tuple] = None
         # The reply limit of the rest of this run when a call was cut off at
         # the default one (see loop._raise_reply_limit); None leaves it alone.
         self._reply_limit: Optional[int] = None

@@ -180,8 +180,7 @@ class _ExecutionMixin:
         _user_declines: int
         _lenient_denials: int
         _writing_commands: int
-        _loose_check: Optional[dict]
-        _loose_check_lock: Any
+        _loose_check: Optional[tuple]
         _files_read: set
         _denied_unconfirmed: list
         _consecutive_errors: dict[str, int]
@@ -191,8 +190,6 @@ class _ExecutionMixin:
         progress_sink: Any
 
         def _record_error(self, tool: str, output: str) -> None: ...
-
-        def _ask_if_calls_meant(self, calls: list) -> Optional[bool]: ...
 
         _patch_overlay: PatchOverlay
         _patch_chunks: list[str]
@@ -775,22 +772,16 @@ class _ExecutionMixin:
                            summary="blocked by network policy (net_mode=off)")
                 return result
 
-        # Project pre_tool_use hooks run before confirmation, so a call a hook
-        # blocks never reaches the prompt.
-        hook_block = self._run_pre_tool_hooks(call, interactive)
-        if hook_block is not None:
-            return hook_block
-
         # Confirmation for destructive tools (diff preview for write_file), for
         # network tools when net_mode is "ask", and for a non-mutating tool that
         # opts in via ask_by_default (see ToolDef.ask_by_default, registry.py).
         #
-        # call.lenient forces confirmation too, same as always_confirm: a call
-        # recovered only via parser.py's name-gated fallback (a bare JSON object
-        # or an unlabelled fence) never engaged the lazy-grammar trigger, so
-        # nothing constrained its content. auto_approve does not skip the human
-        # look for such a call on a destructive/network/ask-by-default tool.
-        # See ToolCall.lenient.
+        # call.lenient: a call recovered only via parser.py's name-gated fallback
+        # (a bare JSON object or an unlabelled fence) may be a quotation. The
+        # model is asked, once per reply, whether it meant it: a call it meant
+        # counts as normally written, an example does not run and is not asked
+        # about, and without a clear answer the call needs confirmation even
+        # under auto_approve. See ToolCall.lenient and _loose_call_meant.
         #
         # isinstance-gated rather than a bare call.lenient or getattr(call,
         # "lenient", False): a ToolCall-shaped MagicMock auto-vivifies any
@@ -838,15 +829,27 @@ class _ExecutionMixin:
         )
         # net_mode "ask" asks under auto_approve too, unless waived above.
         net_ask = net_gated
-        needs_confirm = shell_unchecked or data_hit is not None or tainted or net_ask or (
-            gated and (not self.auto_approve or forced or lenient_call)
-        )
+        # A reason to confirm the call has however it is written.
+        must_confirm = (
+            shell_unchecked or data_hit is not None or tainted or net_ask
+            or (gated and (not self.auto_approve or forced)))
+        if lenient_call:
+            meant = self._loose_call_meant(call)
+            if meant is False:
+                return self._refuse_example(call, interactive)
+            if meant is True:
+                lenient_call = False
+
+        # Project pre_tool_use hooks run before confirmation, so a call a hook
+        # blocks never reaches the prompt.
+        hook_block = self._run_pre_tool_hooks(call, interactive)
+        if hook_block is not None:
+            return hook_block
+
+        needs_confirm = must_confirm or (gated and lenient_call)
         # True when the loose call format is the ONLY reason confirmation is
         # required: the same call in the <tool_call> wrapper would run.
-        lenient_only = (
-            lenient_call and gated and not shell_unchecked and data_hit is None
-            and not tainted and not net_ask and self.auto_approve and not forced
-        )
+        lenient_only = lenient_call and gated and not must_confirm
         # A session allow ("a" at an interactive prompt) never waives a
         # shell-guard verdict, a lenient call or a configured always_confirm.
         # See test_session_allow_never_waives_always_confirm_or_lenient.
@@ -891,9 +894,6 @@ class _ExecutionMixin:
             if interactive:
                 print_info(f"  ({note})")
             self._emit("info", text=note)
-        if (needs_confirm and lenient_only and not can_ask
-                and self._loose_call_meant(call)):
-            needs_confirm = False
         if needs_confirm:
             if self.confirm_handler is not None or interactive:
                 # The terminal prompt (this agent's, or an interactive parent's
@@ -936,18 +936,6 @@ class _ExecutionMixin:
                         "skill output) since the last user message, and this "
                         "run is non-interactive with no approval handler - denied.")
                     reason = "untrusted-content"
-                elif lenient_only and (self._loose_check or {}).get("meant") is False:
-                    if self._loose_check is not None:
-                        self._loose_check["examples"] = self._loose_check.get("examples", 0) + 1
-                    result = ToolResult.error(
-                        f"{call.name} was not run: you said it was an example, not "
-                        "a call. If it should run after all, write it as\n"
-                        '<tool_call>\n{"name": "' + call.name + '", "args": '
-                        "{...}}\n</tool_call>")
-                    self._audit.notice("loose_call_example", result.output)
-                    self._emit("tool_result", tool=call.name, ok=False,
-                               summary="not run: an example, not a call")
-                    return result
                 elif lenient_only:
                     result = ToolResult.error(
                         f"{call.name} requires confirmation: the call was not "
@@ -1140,16 +1128,51 @@ class _ExecutionMixin:
 
         return result
 
-    def _loose_call_meant(self, call: ToolCall) -> bool:
-        """Whether the model, asked once for the whole reply, said that the
-        loosely written calls of this reply were meant to run."""
-        check = self._loose_check
-        if check is None or not any(call is c for c in check["calls"]):
-            return False
-        with self._loose_check_lock:
-            if "meant" not in check:
-                check["meant"] = self._ask_if_calls_meant(check["calls"])
-        return check["meant"] is True
+    def _loose_calls_to_check(self, calls: list) -> list:
+        """The loosely written calls of *calls* the model is asked about before
+        one of them runs or is offered: those that can need a confirmation.
+        Calls that only read, and calls plan mode, patch mode or dry-run takes
+        instead of running them, are left out."""
+        found = []
+        for call in calls:
+            tool_def = _agent.TOOL_REGISTRY.get(call.name)
+            if not isinstance(call, ToolCall) or not call.lenient or tool_def is None:
+                continue
+            runs_code = getattr(tool_def, "executes_project_code", False) is True
+            if self.patch_mode and call.name in _PATCH_MODE_ELIGIBLE_TOOLS:
+                continue
+            if self.plan_mode and plan_mode_refusal(call.name, tool_def) is not None:
+                continue
+            if self.dry_run and (tool_def.destructive or runs_code):
+                continue
+            if (tool_def.destructive or tool_def.ask_by_default or runs_code
+                    or call.name in _NETWORK_TOOLS
+                    or self._data_guard_verdict(call) is not None):
+                found.append(call)
+        return found
+
+    def _loose_call_meant(self, call: ToolCall) -> Optional[bool]:
+        """The model's answer, asked for once per reply (see ``_loop``), on
+        whether the loosely written calls of the reply being executed were meant
+        to run: True, or False for an example. None when it gave neither answer,
+        or when *call* is not one it was asked about."""
+        if self._loose_check is None:
+            return None
+        calls, meant = self._loose_check
+        return meant if any(call is c for c in calls) else None
+
+    def _refuse_example(self, call: ToolCall, interactive: bool) -> ToolResult:
+        """The result of a loosely written call the model called an example."""
+        result = ToolResult.error(
+            f"{call.name} was not run: you said it was an example, not a call. If "
+            "it should run after all, write it as\n"
+            '<tool_call>\n{"name": "' + call.name + '", "args": {...}}\n</tool_call>')
+        self._audit.notice("loose_call_example", result.output)
+        if interactive:
+            print_info(f"  ({call.name} was not run: the model called it an example)")
+        self._emit("tool_result", tool=call.name, ok=False,
+                   summary="not run: an example, not a call")
+        return result
 
     def _drop_unchanged_undo_entries(self, call_id: int) -> None:
         """After a failed call, remove its undo entries whose file still holds the

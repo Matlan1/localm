@@ -1711,6 +1711,7 @@ ws     ::= [ \t\n\r]*
         grammar the reply is held to those two answers; elsewhere it counts only
         when it is exactly one of them. The exchange is not kept in the
         conversation."""
+        from localm.inference.backends.base import ContextCapacityExceededError
         from ..backends.http import CoderServerError
         from .execution import _call_key
         listed = "\n".join(f"- {c.name} {_call_key(c)[:600]}" for c in calls)
@@ -1724,11 +1725,16 @@ ws     ::= [ \t\n\r]*
             kw["grammar"] = _CALL_CHECK_GRAMMAR
         else:
             kw["max_tokens"] = _CALL_CHECK_MAX_TOKENS
+        self._emit("status", code=None, text=(
+            "asking the model whether it meant its tool calls to run"))
         try:
             reply = self.backend.chat(messages, **kw)
-        except CoderServerError as e:
-            if not self._disable_grammar_on_unsupported(e):
-                raise
+        except (CoderServerError, ContextCapacityExceededError) as e:
+            if not (isinstance(e, CoderServerError)
+                    and self._disable_grammar_on_unsupported(e)):
+                from localm.debuglog import logger
+                logger.warning("coder: could not ask whether the calls were meant: %s", e)
+            self._audit.notice("loose_call_check", f"could not be asked: {e}")
             return None
         self._accumulate_usage()
         answer = reply.strip() if isinstance(reply, str) else ""

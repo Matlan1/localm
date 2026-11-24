@@ -155,30 +155,300 @@ def test_without_a_grammar_only_an_exact_answer_counts(tmp_path, check, ran):
     assert (tmp_path / "a.txt").exists() is ran
 
 
-def test_a_person_who_can_be_asked_is_asked_instead_of_the_model(tmp_path):
-    reply = "Writing.\n" + _loose("write_file", path="a.txt", content="1")
-    backend = _Backend([reply, "Not written."])
-    asked = []
+# --- the same question where a person can be asked ------------------------
 
-    def handler(call, agent=None):
-        asked.append(call.name)
-        return False
+class _Person:
+    """A confirm handler that records what it was asked and whether the approval
+    asked for covers one call only."""
 
-    agent = _agent(tmp_path, backend, confirm_handler=handler)
+    def __init__(self, answer=True):
+        self.answer = answer
+        self.asked: list = []
+
+    def __call__(self, call, agent=None):
+        from localm.plugins.coder.display import exact_approval_required
+        self.asked.append((call.name, exact_approval_required()))
+        return self.answer
+
+
+_WRITE = "Writing.\n" + _loose("write_file", path="a.txt", content="1")
+
+
+def test_a_meant_call_counts_as_normally_written_under_auto_approve(tmp_path):
+    person = _Person()
+    backend = _Backend([_WRITE, "Done."])
+    agent = _agent(tmp_path, backend, confirm_handler=person)
     agent.run_task("create a.txt")
-    assert asked == ["write_file"]
-    assert backend.checks == []
+    assert person.asked == []
+    assert len(backend.checks) == 1
+    assert (tmp_path / "a.txt").read_text() == "1"
+
+
+def test_a_meant_call_without_auto_approve_is_asked_and_can_be_allowed(tmp_path):
+    person = _Person()
+    agent = _agent(tmp_path, _Backend([_WRITE, "Done."]), confirm_handler=person,
+                   auto_approve=False)
+    agent.run_task("create a.txt")
+    assert person.asked == [("write_file", False)]
+    assert (tmp_path / "a.txt").exists()
+
+
+@pytest.mark.parametrize("auto_approve", [True, False])
+def test_an_example_is_never_offered_to_the_person(tmp_path, auto_approve):
+    person = _Person()
+    reply = "A call looks like this:\n" + _loose("write_file", path="a.txt", content="1")
+    backend = _Backend([reply, "unused"], check="[example]")
+    agent = _agent(tmp_path, backend, confirm_handler=person, auto_approve=auto_approve)
+    assert agent.run_task("explain with an example how a tool call looks") == reply
+    assert person.asked == []
+    assert not (tmp_path / "a.txt").exists()
+    assert agent.last_run_ok is True
+    assert _texts(agent, "assistant") == [reply]
+
+
+def test_an_example_beside_a_meant_read_is_not_offered_either(tmp_path):
+    (tmp_path / "b.txt").write_text("real")
+    person = _Person()
+    reply = _loose("read_file", path="b.txt") + "\nand like this:\n" \
+        + _loose("write_file", path="a.txt", content="1")
+    agent = _agent(tmp_path, _Backend([reply, "b.txt holds real."], check="[example]"),
+                   confirm_handler=person)
+    agent.run_task("what does b.txt say?")
+    assert person.asked == []
     assert not (tmp_path / "a.txt").exists()
 
 
-def test_the_check_never_waives_another_reason_to_confirm(tmp_path):
-    reply = "Writing.\n" + _loose("write_file", path="a.txt", content="1")
-    backend = _Backend([reply, "Done."])
-    agent = _agent(tmp_path, backend, always_confirm={"write_file"})
+@pytest.mark.parametrize("check", ["", "maybe", "[run]?"])
+def test_without_a_clear_answer_the_person_is_asked_about_this_one_call(tmp_path, check):
+    person = _Person(answer=False)
+    agent = _agent(tmp_path, _Backend([_WRITE, "Not written."], check=check),
+                   confirm_handler=person)
     agent.run_task("create a.txt")
-    assert backend.checks == []
+    assert person.asked == [("write_file", True)]
+    assert not (tmp_path / "a.txt").exists()
+
+
+def test_the_gui_session_allows_a_meant_call_once_allowed(tmp_path):
+    """The real CoderSession handler: "always allow" is taken for a meant loose
+    call, and the next one runs without a card."""
+    import threading
+    from localm.plugins.coder.sessions import CoderSession
+    second = "And this.\n" + _loose("write_file", path="b.txt", content="2")
+    agent = _agent(tmp_path, _Backend([_WRITE, second, "Done."]), auto_approve=False)
+    session = CoderSession.__new__(CoderSession)
+    session.agent, session.cwd = agent, tmp_path
+    session.allowed_tools, session._pending = set(), {}
+    session._lock = threading.Lock()
+    cards = []
+
+    def push(event):
+        if event["type"] == "confirm_request":
+            cards.append(event)
+            session.answer_confirm(event["confirm_id"], True, always_allow=True)
+
+    session._push = push
+    agent.confirm_handler = session._confirm
+    agent.run_task("create a.txt and b.txt")
+    assert [(c["tool"], c["exact"]) for c in cards] == [("write_file", False)]
+    assert (tmp_path / "a.txt").exists() and (tmp_path / "b.txt").exists()
+
+
+def test_the_terminal_session_allow_covers_a_meant_call(tmp_path, monkeypatch):
+    from localm.plugins.coder import display
+    second = "And this.\n" + _loose("write_file", path="b.txt", content="2")
+    prompts = []
+    monkeypatch.setattr(display.console, "input",
+                        lambda prompt="": prompts.append(str(prompt)) or "a")
+    agent = _agent(tmp_path, _Backend([_WRITE, second, "Done."]), auto_approve=False)
+    agent.run_task("create a.txt and b.txt", interactive=True)
+    assert len(prompts) == 1
+    assert (tmp_path / "a.txt").exists() and (tmp_path / "b.txt").exists()
+
+
+def test_an_example_at_the_terminal_is_shown_and_not_asked_about(tmp_path, monkeypatch, capsys):
+    from localm.plugins.coder import display
+    monkeypatch.setattr(display.console, "input", lambda prompt="": pytest.fail("asked"))
+    reply = "A call looks like this:\n" + _loose("write_file", path="a.txt", content="1")
+    agent = _agent(tmp_path, _Backend([reply, "unused"], check="[example]"))
+    agent.run_task("explain with an example how a tool call looks", interactive=True)
+    shown = capsys.readouterr().out
+    assert '"write_file"' in shown and "nothing was run" in shown
+    assert not (tmp_path / "a.txt").exists()
+
+
+def test_an_example_is_shown_whole_and_without_a_tool_card_in_the_gui(tmp_path):
+    events = []
+    reply = "A call looks like this:\n" + _loose("write_file", path="a.txt", content="1")
+    agent = _agent(tmp_path, _Backend([reply, "unused"], check="[example]"),
+                   confirm_handler=_Person())
+    agent.on_event = events.append
+    agent.run_task("explain with an example how a tool call looks")
+    assert [e["text"] for e in events if e["type"] == "assistant_text"] == [reply]
+    assert not any(e["type"] in ("tool_call", "confirm_request") for e in events)
+
+
+def test_an_example_does_not_skip_the_verify_command(tmp_path):
+    import sys
+    reply = "Done. A call looks like this:\n" + _loose("write_file", path="c.txt", content="1")
+    backend = _Backend([_xml("write_file", path="a.txt", content="1"), reply, reply, reply],
+                       check="[example]")
+    agent = _agent(tmp_path, backend, verify_cmd=[sys.executable, "-c", "raise SystemExit(1)"],
+                   verify_max_retries=1)
+    result = agent.run_task("create a.txt and explain with an example how a call looks")
+    assert agent.last_run_ok is False
+    assert "NOT verified" in result
+
+
+# --- [run] never waives another reason to confirm -------------------------
+
+def _ask(tmp_path, reply, *, check="[run]", prepare=None, **kwargs):
+    """Runs *reply* once attended under auto_approve; the calls the person was
+    asked about and the agent."""
+    person = _Person(answer=False)
+    agent = _agent(tmp_path, _Backend([reply, "Done."], check=check),
+                   confirm_handler=person, **kwargs)
+    if prepare is not None:
+        prepare(agent)
+    agent.run_task("do it")
+    return person.asked, agent
+
+
+def test_run_does_not_waive_always_confirm(tmp_path):
+    asked, _ = _ask(tmp_path, _WRITE, always_confirm={"write_file"})
+    assert asked == [("write_file", True)]
+    assert not (tmp_path / "a.txt").exists()
+
+
+def test_run_does_not_waive_always_confirm_unattended(tmp_path):
+    agent = _agent(tmp_path, _Backend([_WRITE, "Done."]), always_confirm={"write_file"})
+    agent.run_task("create a.txt")
     assert not (tmp_path / "a.txt").exists()
     assert agent.denied_unconfirmed == [("write_file", "unconfirmable")]
+
+
+def test_run_without_yes_is_denied_unattended(tmp_path):
+    agent = _agent(tmp_path, _Backend([_WRITE, "Done."]), auto_approve=False)
+    agent.run_task("create a.txt")
+    assert not (tmp_path / "a.txt").exists()
+    assert agent.denied_unconfirmed == [("write_file", "unconfirmable")]
+
+
+def test_run_does_not_waive_a_tool_that_always_confirms(tmp_path, monkeypatch):
+    from localm.plugins.coder.tools import TOOL_REGISTRY
+    monkeypatch.setattr(TOOL_REGISTRY["write_file"], "confirm_always", True)
+    asked, _ = _ask(tmp_path, _WRITE)
+    assert asked == [("write_file", False)]
+    assert not (tmp_path / "a.txt").exists()
+
+
+def test_run_does_not_waive_the_shell_guard(tmp_path):
+    asked, agent = _ask(tmp_path, "Pushing.\n" + _loose(
+        "run_shell", command="git push --force origin master"))
+    assert asked == []
+    assert any("blocked" in t.lower() or "refused" in t.lower() for t in _texts(agent, "user"))
+
+
+def test_run_does_not_waive_a_shell_check_that_could_not_run(tmp_path):
+    with patch("localm.plugins.coder.agent.execution.shell_guard.classify",
+               side_effect=RuntimeError("no")):
+        asked, _ = _ask(tmp_path, "Running.\n" + _loose(
+            "run_shell", command="python -c pass"))
+    assert asked == [("run_shell", True)]
+
+
+def test_run_does_not_waive_the_guard_on_localms_own_data(tmp_path):
+    with patch("localm.plugins.coder.agent.execution.data_guard.check",
+               return_value="localm's data folder"):
+        asked, _ = _ask(tmp_path, _WRITE)
+    assert asked == [("write_file", True)]
+
+
+def test_run_does_not_waive_a_write_outside_the_project(tmp_path):
+    outside = tmp_path / "outside.txt"
+    project = tmp_path / "proj"
+    project.mkdir()
+    asked, _ = _ask(project, "Writing.\n" + _loose(
+        "write_file", path=str(outside), content="1"))
+    strict = tmp_path / "proj2"
+    strict.mkdir()
+    asked_strict, _ = _ask(strict, _xml("write_file", path=str(outside), content="1"))
+    assert asked == asked_strict
+    assert not outside.exists()
+
+
+def test_run_does_not_waive_the_network_question(tmp_path):
+    with patch("localm.netpolicy.network_mode", return_value="ask"):
+        asked, _ = _ask(tmp_path, "Looking.\n" + _loose(
+            "fetch_url", url="https://192.0.2.1/x"))
+    assert [name for name, _exact in asked] == ["fetch_url"]
+
+
+def test_run_does_not_waive_untrusted_content(tmp_path):
+    def untrusted(agent):
+        agent._note_typed_request = lambda *_a: None
+        real = agent._ask_if_calls_meant
+
+        def ask(calls):
+            agent._untrusted_in_context = True
+            return real(calls)
+
+        agent._ask_if_calls_meant = ask
+
+    asked, _ = _ask(tmp_path, _WRITE, prepare=untrusted)
+    assert asked == [("write_file", True)]
+
+
+# --- what is asked about --------------------------------------------------
+
+def test_a_reply_that_only_reads_is_not_asked_about(tmp_path):
+    (tmp_path / "b.txt").write_text("real")
+    backend = _Backend(["Reading.\n" + _loose("read_file", path="b.txt"), "It says real."])
+    _agent(tmp_path, backend).run_task("what does b.txt say?")
+    assert backend.checks == []
+
+
+@pytest.mark.parametrize("kwargs", [{"patch_mode": True}, {"dry_run": True},
+                                    {"plan_mode": True}])
+def test_a_call_that_cannot_run_anyway_is_not_asked_about(tmp_path, kwargs):
+    backend = _Backend([_WRITE, "Done.", "Done.", "Done."])
+    agent = _agent(tmp_path, backend, **kwargs)
+    agent.run_task("create a.txt")
+    assert backend.checks == []
+    assert not (tmp_path / "a.txt").exists()
+
+
+def test_a_question_that_fails_counts_as_no_answer(tmp_path):
+    from localm.plugins.coder.backends.http import CoderServerError
+    backend = _Backend([_WRITE, "Done."])
+    real = backend.chat
+
+    def chat(messages, **kw):
+        if messages[-1]["content"].startswith("[tool-call check]"):
+            raise CoderServerError("the server said no")
+        return real(messages, **kw)
+
+    backend.chat = chat
+    agent = _agent(tmp_path, backend)
+    agent.run_task("create a.txt")
+    assert agent.denied_unconfirmed == [("write_file", "lenient")]
+    assert not (tmp_path / "a.txt").exists()
+
+
+def test_a_stop_during_the_question_runs_nothing(tmp_path):
+    person = _Person()
+    backend = _Backend([_WRITE, "Done."])
+    agent = _agent(tmp_path, backend, confirm_handler=person)
+    real = backend.chat
+
+    def chat(messages, **kw):
+        if messages[-1]["content"].startswith("[tool-call check]"):
+            agent.request_stop()
+        return real(messages, **kw)
+
+    backend.chat = chat
+    agent.run_task("create a.txt")
+    assert person.asked == []
+    assert not (tmp_path / "a.txt").exists()
 
 
 def test_the_check_grammar_is_structurally_valid():
