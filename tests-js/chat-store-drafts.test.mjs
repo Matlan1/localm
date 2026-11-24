@@ -5,7 +5,10 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { loadApp, runScript } from "./harness.mjs";
+import { makeServer } from "./chat-store-server.mjs";
+import { makeChannels, makeIndexedDB } from "./fake-indexeddb.mjs";
 
 const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 const drain = async (n = 15) => { for (let i = 0; i < n; i++) await settle(0); };
@@ -18,70 +21,28 @@ const plain = (x) => JSON.parse(JSON.stringify(x));
 const user = (content) => ({ role: "user", content });
 const reply = (content) => ({ role: "assistant", content });
 
-/** An in-memory server: the conversation store (revision check included) and
- *  /v1/config. `put(id, ...)` writes to the store as another browser would. */
-function makeServer() {
-  const s = { files: new Map(), deleted: new Set(), puts: [], mode: "full", calls: [],
-              failPut: 0, gui: [], chatReply: null };
-  let n = 0;
-  const res = (status, body) => ({ ok: status < 400, status, statusText: String(status),
-    headers: { get: () => null }, text: async () => JSON.stringify(body), json: async () => plain(body) });
-  const row = (r) => ({ id: r.id, title: r.title, updated_at: r.updated_at, rev: r.rev,
-    pinned: !!r.pinned, folder: r.folder || null, n_messages: r.messages.length });
-  const stale = (r) => res(409, { detail: { error: "stale", rev: r ? r.rev : null, row: r ? row(r) : null } });
-  s.put = (id, data) => {
-    const r = { id, title: "t", updated_at: Date.now(), branches: [], params: {}, ...data, rev: "r" + (++n) };
-    s.files.set(id, r);
-    return r.rev;
-  };
-  s.remove = (id) => { s.files.delete(id); s.deleted.add(id); };
-  s.fetch = async (url, opts = {}) => {
-    const u = String(url);
-    const method = opts.method || "GET";
-    s.calls.push(method + " " + u);
-    if (u === "/v1/config") {
-      return res(200, { effective_mode: s.mode, n_ctx_max: 16384, instance_id: "backend-x" });
-    }
-    if (u.startsWith("/api/conversations?")) {
-      if (s.mode === "privacy") return res(200, { enabled: false, conversations: [], stored: s.files.size });
-      const all = [...s.files.values()].map(row);
-      const offset = Number(/offset=(\d+)/.exec(u)?.[1] || 0);
-      const rows = s.pageSize ? all.slice(offset, offset + s.pageSize) : all;
-      return res(200, { enabled: true, conversations: rows, total: all.length, unreadable: [] });
-    }
-    const m = /^\/api\/conversations\/([^?]+)$/.exec(u);
-    if (m) {
-      const id = decodeURIComponent(m[1]);
-      const stored = s.files.get(id);
-      if (s.mode === "privacy") return res(403, { detail: "privacy" });
-      if (method === "GET") return stored ? res(200, stored) : res(404, { detail: "none" });
-      if (method === "DELETE") { s.remove(id); return res(200, { status: "deleted" }); }
-      const body = JSON.parse(opts.body);
-      s.puts.push({ id, body });
-      if (s.failPut) return res(s.failPut, { detail: "no" });
-      if ("base_rev" in body ? (stored ? stored.rev : null) !== body.base_rev : stored) return stale(stored);
-      if (!stored && s.deleted.has(id)) return stale(null);
-      return res(200, { status: "saved", id, rev: s.put(id, body) });
-    }
-    if (u === "/api/gui-error") s.gui.push(String(opts.body));
-    if (u === "/v1/chat/completions" && s.chatReply) return s.chatReply(JSON.parse(opts.body), opts);
-    return res(200, { models: [], active: "", plugins: [], items: [] });
-  };
-  return s;
-}
-
-/** A page talking to *server*. *cached* seeds the browser's conversation cache. */
-async function boot(server, { cached = null } = {}) {
+/** A page talking to *server*. *cached* seeds the browser's conversation cache,
+ *  *storage* more of it; *idb* and *channels* are the browser's IndexedDB and
+ *  BroadcastChannel. */
+async function boot(server, { cached = null, storage = {}, idb = null, channels = null, wait = true } = {}) {
   const { window: win } = loadApp({
     fetchImpl: server.fetch,
-    seedLocalStorage: { "localm.instanceId": "backend-x",
+    seedLocalStorage: { "localm.instanceId": server.instance, ...storage,
       ...(cached ? { "localm.conversations": JSON.stringify(cached) } : {}) },
   });
+  if (idb) win.indexedDB = idb.api;
+  if (channels) win.BroadcastChannel = channels;
   runScript(win, `window.chat = chat; window.__toasts = [];
     const __toast = toast; toast = (m, e) => { window.__toasts.push(String(m)); __toast(m, e); };
-    window.draftStore = draftStore;`);
+    window.draftStore = draftStore; window.__page = PAGE;
+    Object.defineProperty(window, "__restored", { get: () => _draftsRestored });`);
+  if (!wait) return win;
   assert.ok(await waitFor(() => win.chat.modeKnown));
   await drain();
+  if (idb) {
+    assert.ok(await waitFor(() => win.__restored));
+    await settle(700);
+  }
   return win;
 }
 
@@ -117,7 +78,7 @@ test("each save names the revision it replaces and takes the new one", async () 
   assert.equal(c.rev, server.files.get("c1").rev);
   say(win, c, "c");
   assert.ok(await waitFor(() => server.puts.length === 2 && !c.unsaved));
-  assert.equal(server.puts[1].body.base_rev, server.files.get("c1").rev === c.rev ? server.puts[1].body.base_rev : "");
+  assert.notEqual(server.puts[1].body.base_rev, first);
   assert.deepEqual(texts(server.files.get("c1")), ["a", "b", "c"]);
 });
 
@@ -551,11 +512,11 @@ test("the compact button works as a turn: a message sent meanwhile is queued", a
 
 // --------------------------------------------------------------- message box ---
 
-async function twoChats() {
+async function twoChats(options = {}) {
   const server = makeServer();
   server.put("c1", { title: "One", messages: [user("first one"), reply("r1")] });
   server.put("c2", { title: "Two", messages: [user("first two"), reply("r2")] });
-  const win = await boot(server);
+  const win = await boot(server, options);
   return { server, win, input: win.document.getElementById("chat-input") };
 }
 
@@ -626,114 +587,288 @@ test("edit brings back the message's pictures, and the old version stays reachab
   assert.match(win.document.getElementById("chat-messages").textContent, /r1/);
 });
 
-/** Replaces the page's draft store with rows in a Map. */
-function fakeDrafts(win, rows = new Map()) {
-  runScript(win, `
-    draftStore.available = () => true;
-    draftStore.all = async () => new Map(window.__rows);
-    draftStore.write = async (puts, dels) => {
-      for (const [k, v] of puts) window.__rows.set(k, JSON.parse(JSON.stringify(v)));
-      for (const k of dels) window.__rows.delete(k);
-    };
-    draftStore.clear = async () => window.__rows.clear();`.replaceAll("window.__rows", "window.__draftRows"));
-  win.__draftRows = rows;
-  return rows;
+// What a browser keeps: its IndexedDB, and the pages that hear each other.
+const browser = () => ({ idb: makeIndexedDB(), channels: makeChannels() });
+const rowsOf = (b) => [...b.idb.rows().values()];
+const owned = (extra) => ({ inst: "backend-x", prin: "owner", at: Date.now(), ...extra });
+
+/** Puts *rows* into the browser's store before a page opens. */
+function seedRows(b, rows) {
+  b.idb.stores.set("rows", new Map(Object.entries(rows)));
+  const open = b.idb.api.open;
+  let first = true;
+  b.idb.api.open = (name, version) => {
+    const req = open(name, version);
+    if (first) {
+      first = false;
+      queueMicrotask(() => {
+        const set = req.onupgradeneeded;
+        req.onupgradeneeded = (e) => { set(e); b.idb.stores.set("rows", new Map(Object.entries(rows))); };
+      });
+    }
+    return req;
+  };
+}
+
+async function typeDraft(win, text) {
+  const input = win.document.getElementById("chat-input");
+  input.value = text;
+  input.dispatchEvent(new win.Event("input"));
+}
+
+/** The page goes away: a reload, or the tab is closed. */
+async function leave(win) {
+  win.dispatchEvent(new win.Event("pagehide"));
+  win.document.getElementById("chat-input").value = "";
+  if (win.BroadcastChannel) runScript(win, "if (_pages) _pages.close();");
+  await settle(60);
 }
 
 test("a draft, its attachments and the queue survive a reload of the tab", async () => {
-  const { win, input, server } = await twoChats();
-  const rows = fakeDrafts(win);
-  runScript(win, "_draftsRestored = false;");
-  await win.restoreDrafts();
+  const b = browser();
+  const { win, server } = await twoChats(b);
   await open(win, "One");
-  input.value = "unsent words";
-  input.dispatchEvent(new win.Event("input"));
+  await typeDraft(win, "unsent words");
   win.chat.attachments.push({ name: "p.png", dataUri: "data:image/png;base64,AA" });
   win.renderAttachChips();
   win.chat.queue.push({ text: "queued words", attachments: [], docs: [], clips: [], convId: "c2" });
-  assert.ok(await waitFor(() => rows.size === 3), [...rows.keys()].join());
-  const tab = win.sessionStorage.getItem("localm.tabId");
+  assert.ok(await waitFor(() => rowsOf(b).length === 3), JSON.stringify(rowsOf(b)));
+  await leave(win);
+  assert.ok(rowsOf(b).every((r) => r.owner === null), "the page gave its rows up");
 
-  const again = await boot(server);
-  again.sessionStorage.setItem("localm.tabId", tab);
-  fakeDrafts(again, rows);
-  runScript(again, "_draftsRestored = false; _tabId = '';");
-  await again.restoreDrafts();
+  const again = await boot(server, b);
   await open(again, "One");
   assert.equal(again.document.getElementById("chat-input").value, "unsent words");
   assert.equal(again.chat.attachments[0].name, "p.png");
   assert.equal(again.chat.queue.map((q) => q.text).join(), "queued words");
   assert.equal(server.puts.length, 0, "a restored queue is not sent on its own");
+  assert.ok(await waitFor(() => rowsOf(b).every((r) => r.owner === again.__page)));
 
-  again.document.getElementById("chat-input").value = "";
+  await typeDraft(again, "");
   again.chat.attachments = [];
   again.chat.queue = [];
   again.renderAttachChips();
-  assert.ok(await waitFor(() => rows.size === 0), "what is gone from the box is gone from the browser");
+  assert.ok(await waitFor(() => rowsOf(b).length === 0), "what is gone from the box is gone from the browser");
 });
 
 test("a draft typed before the stored one is read is kept beside it", async () => {
-  const { win, input } = await twoChats();
-  await open(win, "One");
-  fakeDrafts(win, new Map([["c1|old|text", { text: "from before", at: Date.now() }]]));
-  input.value = "typed early";
-  runScript(win, "_draftsRestored = false;");
-  await win.restoreDrafts();
-  assert.equal(input.value, "from before\ntyped early");
+  const b = browser();
+  seedRows(b, { k1: owned({ conv: "c1", kind: "text", text: "from before", owner: null }) });
+  const server = makeServer();
+  server.put("c1", { title: "One", messages: [user("a")] });
+  const win = await boot(server, { ...b, wait: false });
+  win.document.getElementById("chat-input").value = "typed early";
+  assert.ok(await waitFor(() => win.__restored));
+  await settle(700);
+  assert.equal(win.document.getElementById("chat-input").value, "from before\ntyped early");
 });
 
-test("a draft a closed tab left is not removed before this tab's own copy is written", async () => {
-  const { win, input } = await twoChats();
-  const rows = fakeDrafts(win, new Map([
-    ["c1|old|text", { text: "left behind", at: Date.now() }],
-    ["|old|queue", { items: [{ convId: "c1", text: "q", attachments: [], docs: [], clips: [] }], at: Date.now() }]]));
-  const steps = [];
-  win.__note = (puts, dels) => steps.push([puts.length, dels.length]);
-  runScript(win, `{ const real = draftStore.write;
-    draftStore.write = async (puts, dels) => { window.__note(puts, dels); return real(puts, dels); }; }
-    _draftsRestored = false;`);
+test("the drafts two closed tabs left for one chat are both put back, and neither again later", async () => {
+  const b = browser();
+  seedRows(b, {
+    k1: owned({ conv: "c1", kind: "text", text: "older", owner: null, at: Date.now() - 5000 }),
+    k2: owned({ conv: "c1", kind: "text", text: "newer", owner: null }) });
+  const { win, server } = await twoChats(b);
   await open(win, "One");
-  await win.restoreDrafts();
-  assert.equal(input.value, "left behind");
-  assert.equal(win.chat.queue.length, 1);
-  assert.ok(await waitFor(() => rows.size === 2 && ![...rows.keys()].some((k) => k.includes("|old|"))));
-  assert.deepEqual(steps, [[2, 2]], "one write stores the copy and removes the old rows");
+  assert.equal(win.document.getElementById("chat-input").value, "older\nnewer");
+  assert.ok(await waitFor(() => rowsOf(b).length === 1));
+  assert.equal(rowsOf(b)[0].text, "older\nnewer");
+  await typeDraft(win, "");
+  assert.ok(await waitFor(() => rowsOf(b).length === 0));
+  await leave(win);
+  const again = await boot(server, b);
+  await open(again, "One");
+  assert.equal(again.document.getElementById("chat-input").value, "");
 });
 
-test("stored drafts of a chat that is deleted are removed", async () => {
-  const { win } = await twoChats();
-  const rows = fakeDrafts(win, new Map([
-    ["c1|old|text", { text: "x", at: Date.now() }], ["gone|old|text", { text: "y", at: Date.now() }]]));
-  runScript(win, "_draftsRestored = false;");
-  await win.restoreDrafts();
-  assert.ok(![...rows.keys()].some((k) => k.startsWith("gone|")));
-  rows.set("c2|other|media", { attachments: [], docs: [], clips: [], at: 1 });
+test("a row another open page owns is neither taken nor changed", async () => {
+  const b = browser();
+  const first = await twoChats(b);
+  await open(first.win, "One");
+  await typeDraft(first.win, "mine");
+  first.win.chat.queue.push({ text: "queued once", attachments: [], docs: [], clips: [], convId: "c1" });
+  assert.ok(await waitFor(() => rowsOf(b).length === 2));
+  const second = await boot(first.server, b);
+  await open(second, "One");
+  assert.equal(second.document.getElementById("chat-input").value, "");
+  assert.equal(second.chat.queue.length, 0);
+  await typeDraft(second, "the second tab's");
+  assert.ok(await waitFor(() => rowsOf(b).length === 3));
+  await typeDraft(second, "");
+  assert.ok(await waitFor(() => rowsOf(b).length === 2));
+  assert.deepEqual(rowsOf(b).map((r) => r.text || r.item.text).sort(), ["mine", "queued once"]);
+});
+
+test("without a way to ask the other pages, only given up or long untouched rows are taken", async () => {
+  const b = { idb: makeIndexedDB() };
+  seedRows(b, {
+    fresh: owned({ conv: "c1", kind: "text", text: "another tab's", owner: "p1" }),
+    old: owned({ conv: "c2", kind: "text", text: "abandoned", owner: "p2", at: Date.now() - 3600e3 }),
+    queue: owned({ conv: "c1", kind: "queue", state: "queued", owner: "p1",
+      item: { id: "q1", convId: "c1", text: "queued", attachments: [], docs: [], clips: [] } }) });
+  const { win } = await twoChats(b);
+  await open(win, "One");
+  assert.equal(win.document.getElementById("chat-input").value, "");
+  assert.equal(win.chat.queue.length, 0);
+  await open(win, "Two");
+  assert.equal(win.document.getElementById("chat-input").value, "abandoned");
+});
+
+test("two pages that both show a queued message send it once", async () => {
+  const b = browser();
+  const { win, server } = await twoChats(b);
+  await open(win, "One");
+  win.chat.queue.push({ text: "queued once", attachments: [], docs: [], clips: [], convId: "c1" });
+  win.renderAttachChips();
+  assert.ok(await waitFor(() => rowsOf(b).length === 1));
+  // The first tab is frozen: it answers nobody, and its row is taken.
+  runScript(win, "_pages.close();");
+  const second = await boot(server, b);
+  assert.equal(second.chat.queue.length, 1);
+  const sent = [];
+  for (const w of [win, second]) {
+    w.__sent = sent;
+    runScript(w, `modelCache.active = 'm'; dispatchChatTurn = async (c, text) => { window.__sent.push(text); };`);
+    await open(w, "One");
+  }
+  await win.processChatQueue();
+  await second.processChatQueue();
+  await drain();
+  assert.deepEqual(sent, ["queued once"]);
+  assert.equal(win.chat.queue.length + second.chat.queue.length, 0);
+  assert.ok(await waitFor(() => rowsOf(b).length === 0));
+});
+
+test("a message another page was sending when it went away waits and asks", async () => {
+  const b = browser();
+  seedRows(b, { k: owned({ conv: "c1", kind: "queue", state: "sending", owner: "dead",
+    item: { id: "q1", convId: "c1", text: "maybe sent", attachments: [], docs: [], clips: [] } }) });
+  const { win } = await twoChats(b);
+  const sent = [];
+  win.__sent = sent;
+  runScript(win, `modelCache.active = 'm'; dispatchChatTurn = async (c, text) => { window.__sent.push(text); };`);
+  await open(win, "One");
+  await win.processChatQueue();
+  assert.deepEqual(sent, []);
+  const row = win.document.querySelector(".msg-row.queued");
+  assert.match(row.textContent, /may have been sent already/);
+  row.querySelector("button[title='Send']").click();
+  await drain();
+  assert.deepEqual(sent, ["maybe sent"]);
+});
+
+test("a queued message whose claim fails waits and asks, and is not sent", async () => {
+  const b = browser();
+  const { win } = await twoChats(b);
+  await open(win, "One");
+  win.chat.queue.push({ text: "q", attachments: [], docs: [], clips: [], convId: "c1" });
+  win.renderAttachChips();
+  assert.ok(await waitFor(() => rowsOf(b).length === 1));
+  const sent = [];
+  win.__sent = sent;
+  runScript(win, `modelCache.active = 'm'; dispatchChatTurn = async (c, text) => { window.__sent.push(text); };`);
+  b.idb.failWrites = 1;
+  await win.processChatQueue();
+  assert.deepEqual(sent, []);
+  assert.equal(win.chat.queue[0].held, true);
+});
+
+test("a page that loses its connection to the browser's storage opens it again", async () => {
+  const b = browser();
+  const { win } = await twoChats(b);
+  await open(win, "One");
+  await typeDraft(win, "first");
+  assert.ok(await waitFor(() => rowsOf(b).length === 1));
+  for (const c of b.idb.connections) c.closed = true;
+  await typeDraft(win, "second");
+  assert.ok(await waitFor(() => rowsOf(b)[0].text === "second"));
+});
+
+test("stored drafts and queued messages of a chat that is deleted are removed", async () => {
+  const b = browser();
+  seedRows(b, {
+    k1: owned({ conv: "c1", kind: "text", text: "x", owner: null }),
+    k2: owned({ conv: "gone", kind: "text", text: "y", owner: null }),
+    k3: owned({ conv: "c2", kind: "queue", state: "queued", owner: "another", item: { id: "q", convId: "c2", text: "z" } }) });
+  const { win } = await twoChats(b);
+  assert.ok(await waitFor(() => !rowsOf(b).some((r) => r.conv === "gone")));
   win.retainConversations((c) => c.id !== "c2");
-  assert.ok(await waitFor(() => ![...rows.keys()].some((k) => k.startsWith("c2|"))));
+  assert.ok(await waitFor(() => !rowsOf(b).some((r) => r.conv === "c2")));
+  assert.ok(rowsOf(b).some((r) => r.conv === "c1"));
 });
 
 test("privacy mode keeps no draft in this browser and empties what was there", async () => {
-  const { win, input, server } = await twoChats();
-  const rows = fakeDrafts(win);
-  runScript(win, "_draftsRestored = false;");
-  await win.restoreDrafts();
+  const b = browser();
+  const { win, input, server } = await twoChats(b);
   await open(win, "One");
-  input.value = "unsent words";
-  input.dispatchEvent(new win.Event("input"));
-  assert.ok(await waitFor(() => rows.size === 1));
+  await typeDraft(win, "unsent words");
+  assert.ok(await waitFor(() => rowsOf(b).length === 1));
   server.mode = "privacy";
-  input.value = "unsent private words";
-  input.dispatchEvent(new win.Event("input"));
+  await typeDraft(win, "unsent private words");
   assert.ok(await waitFor(() => win.chat.privacy));
-  assert.ok(await waitFor(() => rows.size === 0));
+  assert.ok(await waitFor(() => rowsOf(b).length === 0));
   assert.equal(input.value, "unsent private words", "what is typed stays in the box");
-  assert.equal(win.sessionStorage.getItem("localm.tabId"), null);
   server.mode = "full";
   await win.refreshCtxLimit();
-  input.value = "unsent private words, more";
-  input.dispatchEvent(new win.Event("input"));
-  await settle(400);
-  assert.equal(rows.size, 0, "what was typed under privacy mode is not written after it either");
+  await typeDraft(win, "unsent private words, more");
+  await settle(500);
+  assert.equal(rowsOf(b).length, 0, "what was typed under privacy mode is not written after it either");
+});
+
+test("a privacy wipe that fails is said and tried again until it succeeds", async () => {
+  const b = browser();
+  const { win, server } = await twoChats(b);
+  await open(win, "One");
+  await typeDraft(win, "private words");
+  assert.ok(await waitFor(() => rowsOf(b).length === 1));
+  b.idb.failWrites = 2;
+  server.mode = "privacy";
+  await win.refreshCtxLimit();
+  assert.ok(await waitFor(() => win.document.getElementById("privacy-wipe-failed")));
+  assert.ok(win.__toasts.some((m) => /could not remove/.test(m)));
+  assert.equal(rowsOf(b).length, 1);
+  assert.ok(await waitFor(() => rowsOf(b).length === 0, 9000));
+  assert.ok(await waitFor(() => !win.document.getElementById("privacy-wipe-failed")));
+});
+
+test("privacy mode of one install leaves another install's rows alone", async () => {
+  const b = browser();
+  seedRows(b, { k1: { ...owned({ conv: "z", kind: "text", text: "theirs", owner: null }), inst: "another-install" },
+                k2: owned({ conv: "c1", kind: "text", text: "ours", owner: null }) });
+  const server = makeServer();
+  server.mode = "privacy";
+  await boot(server, { ...b, wait: false });
+  assert.ok(await waitFor(() => b.idb.writes > 0 && rowsOf(b).length === 1));
+  assert.equal(rowsOf(b)[0].text, "theirs");
+});
+
+test("another key or install does not see, take or remove a draft or a queued message", async () => {
+  const b = browser();
+  const item = { id: "q1", convId: "c1", text: "A's queued", attachments: [], docs: [], clips: [] };
+  seedRows(b, {
+    a: { ...owned({ conv: "c1", kind: "text", text: "A's words", owner: null }), prin: "key-a" },
+    b: { ...owned({ conv: "", kind: "text", text: "typed with no chat", owner: null }), prin: "key-a" },
+    c: { ...owned({ conv: "c1", kind: "queue", state: "queued", owner: null, item }), prin: "key-a" },
+    d: { ...owned({ conv: "", kind: "text", text: "at another install", owner: null }), inst: "elsewhere" } });
+  const server = makeServer({ principal: "key-b" });
+  server.put("c1", { title: "One", messages: [user("a")] });
+  const win = await boot(server, b);
+  await open(win, "One");
+  assert.equal(win.document.getElementById("chat-input").value, "");
+  assert.equal(win.chat.queue.length, 0);
+  win.retainConversations(() => false);
+  await settle(300);
+  assert.equal(rowsOf(b).length, 4);
+});
+
+test("a draft of a sent slash command is not kept", async () => {
+  const b = browser();
+  const { win } = await twoChats(b);
+  await open(win, "One");
+  await typeDraft(win, "/pin");
+  assert.ok(await waitFor(() => rowsOf(b).length === 1));
+  await win.sendChat();
+  assert.ok(await waitFor(() => rowsOf(b).length === 0));
 });
 
 test("a restored queue waits while there is no model to answer", async () => {
@@ -887,4 +1022,448 @@ test("the first click of a double-click on a closed chat keeps its row", async (
   input.onblur();
   assert.ok(conv(win, "Renamed"));
   assert.equal(win.document.querySelector("#conv-list input"), null);
+});
+
+// ----------------------------------------------------- the store's own rules ---
+
+test("the stand-in for the store answers as the contract says", async () => {
+  const { steps } = JSON.parse(readFileSync(new URL("./fixtures/chat-store-contract.json", import.meta.url), "utf-8"));
+  const server = makeServer();
+  const revs = {};
+  assert.ok(steps.length > 20);
+  for (const [n, step] of steps.entries()) {
+    const body = { title: "t" };
+    if (step.picture) {
+      body.messages = [{ role: "user", content: [{ type: "text", text: "look" },
+        { type: "image_url", image_url: { url: "data:image/png;base64," + step.picture } }] }];
+    } else if (step.texts) body.messages = step.texts.map((x, i) => (i % 2 ? reply : user)(x));
+    if ("base" in step) body.base_rev = step.base ? revs[step.base] : null;
+    for (const key of ["instance", "principal"]) if (step[key]) body[key] = step[key];
+    const headers = step.store ? { "X-LocaLM-Chat-Store": step.store
+      .replace("{instance}", server.instance).replace("{principal}", server.principal) } : {};
+    const r = server.store(step.do, step.id, body, headers);
+    const data = await r.json();
+    const where = `step ${n}: ${JSON.stringify(step)} ${r.status} ${JSON.stringify(data)}`;
+    assert.equal(r.status, step.status, where);
+    if (step.as) revs[step.as] = data.rev;
+    if (step.answer) assert.equal(data.status, step.answer, where);
+    if (r.status === 409) {
+      assert.equal(data.detail.rev, step.rev ? revs[step.rev] : null, where);
+      assert.equal(data.detail.deleted, step.deleted, where);
+    }
+  }
+});
+
+// ----------------------------------------------------- sending while it loads ---
+
+/** Holds the requests *match*(method, url) answers true for until released. */
+function gate(server, match) {
+  let release;
+  const held = new Promise((r) => { release = r; });
+  server.hold = async (method, url) => { if (match(method, url)) await held; };
+  return () => { server.hold = null; release(); };
+}
+
+const answering = (win) => runScript(win, `modelCache.active = 'm'; maybeCompactConversation = async () => null;
+  readSSE = async (r, on) => { on(JSON.stringify({ choices: [{ delta: { content: "ANSWER" } }] }));
+    on(JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })); };`);
+
+async function loadingChat() {
+  const server = makeServer();
+  server.put("c1", { title: "One", updated_at: Date.now() + 9, messages: [user("a")] });
+  server.put("c2", { title: "Two", updated_at: 1, messages: [user("b"), reply("c")] });
+  const win = await boot(server);
+  answering(win);
+  await open(win, "One");
+  const release = gate(server, (method, url) => method === "GET" && url.endsWith("/c2"));
+  [...win.document.querySelectorAll("#conv-list .conv-item")].find((r) => r.textContent.includes("Two")).click();
+  await drain(3);
+  return { server, win, release, input: win.document.getElementById("chat-input") };
+}
+
+test("a message sent while its chat loads is sent there, after the chat's own messages", async () => {
+  const { server, win, release, input } = await loadingChat();
+  input.value = "my question";
+  const sending = win.sendChat();
+  await drain(3);
+  assert.equal(server.chatPosts.length, 0, "nothing is sent before the chat is loaded");
+  assert.equal(input.value, "");
+  release();
+  await sending;
+  assert.ok(await waitFor(() => server.chatPosts.length === 1));
+  const sent = server.chatPosts[0].messages.filter((m) => m.role === "user").map((m) => m.content);
+  assert.deepEqual(sent, ["b", "my question"]);
+  assert.ok(await waitFor(() => server.files.get("c2").messages.length === 4));
+  assert.deepEqual(texts(server.files.get("c2")), ["b", "c", "my question", "ANSWER"]);
+  assert.deepEqual(texts(server.files.get("c1")), ["a"]);
+});
+
+test("what is typed while a chat loads belongs to it", async () => {
+  const { win, release, input } = await loadingChat();
+  input.value = "typed for two";
+  release();
+  await drain();
+  assert.equal(input.value, "typed for two");
+  await open(win, "One");
+  assert.equal(input.value, "");
+  await open(win, "Two");
+  assert.equal(input.value, "typed for two");
+});
+
+test("a chat that cannot be loaded sends nothing and keeps the message", async () => {
+  const { server, win, release, input } = await loadingChat();
+  input.value = "my question";
+  server.files.delete("c2");
+  const sending = win.sendChat();
+  release();
+  await sending;
+  assert.equal(server.chatPosts.length, 0);
+  assert.equal(win.chat.queue[0].text, "my question");
+  assert.ok(win.__toasts.some((m) => /could not be loaded/.test(m)));
+});
+
+test("a message sent while the page itself loads keeps the chat's stored messages", async () => {
+  const server = makeServer();
+  server.put("c1", { title: "One", messages: [user("a"), reply("b")] });
+  const release = gate(server, (method, url) => method === "GET" && url.endsWith("/c1"));
+  server.active = "m";
+  const win = await boot(server, { wait: false });
+  answering(win);
+  assert.ok(await waitFor(() => win.chat.conversations.length === 1));
+  await drain();
+  win.document.getElementById("chat-input").value = "my question";
+  const sending = win.sendChat();
+  await drain(3);
+  release();
+  await sending;
+  assert.ok(await waitFor(() => server.files.get("c1").messages.length === 4));
+  assert.deepEqual(texts(server.files.get("c1")), ["a", "b", "my question", "ANSWER"]);
+});
+
+// --------------------------------------------------------- deletions and losses ---
+
+test("a chat deleted while its first save is on its way is not stored", async () => {
+  const server = makeServer();
+  const win = await boot(server);
+  win.newConversation();
+  const c = win.chat.conversations[0];
+  c.title = "Secret";
+  const release = gate(server, (method) => method === "PUT");
+  say(win, c, "secret words");
+  assert.ok(await waitFor(() => server.calls.some((x) => x.startsWith("PUT"))));
+  const row = [...win.document.querySelectorAll("#conv-list .conv-item")].find((r) => r.textContent.includes("New chat") || r.textContent.includes("Secret"));
+  [...row.querySelectorAll("button.del")].at(-1).click();
+  win.document.querySelector("#modal-body button.btn-danger").click();
+  await drain(3);
+  assert.ok(!server.calls.some((x) => x.startsWith("DELETE")), "the delete waits for the save");
+  release();
+  assert.ok(await waitFor(() => server.calls.some((x) => x.startsWith("DELETE"))));
+  await settle(50);
+  assert.equal(server.files.size, 0);
+});
+
+test("a stored chat whose file is missing is saved again from this browser, and that is said once", async () => {
+  const server = makeServer();
+  server.put("c0", { title: "Other", messages: [user("x")] });
+  const win = await boot(server, { cached: [
+    { id: "c1", title: "Missing", updated_at: 5, rev: "r9", messages: [user("a")] },
+    { id: "c2", title: "Missing too", updated_at: 4, rev: "r8", messages: [user("b")] }] });
+  assert.ok(await waitFor(() => server.files.size === 3));
+  assert.deepEqual(texts(server.files.get("c1")), ["a"]);
+  assert.equal(win.__toasts.filter((m) => /missing from the data folder/.test(m)).length, 1);
+  assert.ok(conv(win, "Missing") && conv(win, "Missing too"));
+});
+
+test("a turn added to a chat whose file went missing is stored, not kept in the tab", async () => {
+  const server = makeServer();
+  server.put("c1", { title: "One", messages: [user("a")] });
+  const win = await boot(server);
+  const c = await open(win, "One");
+  server.files.delete("c1");
+  say(win, c, "more");
+  assert.ok(await waitFor(() => server.files.has("c1")));
+  assert.deepEqual(texts(server.files.get("c1")), ["a", "more"]);
+  assert.ok(!c.tabOnly);
+});
+
+test("a chat deleted here while a sync reads the list does not come back as a row", async () => {
+  const server = makeServer();
+  server.put("c1", { title: "One", messages: [user("a")] });
+  server.put("c2", { title: "Two", messages: [user("b")] });
+  const win = await boot(server);
+  await open(win, "One");
+  const real = win.fetch;
+  win.fetch = async (url, opts) => {
+    const answer = await real(url, opts);
+    if (String(url).startsWith("/api/conversations?")) {
+      const row = [...win.document.querySelectorAll("#conv-list .conv-item")].find((r) => r.textContent.includes("Two"));
+      if (row) {
+        [...row.querySelectorAll("button.del")].at(-1).click();
+        win.document.querySelector("#modal-body button.btn-danger").click();
+        await drain();
+      }
+    }
+    return answer;
+  };
+  await win.syncConversations();
+  await drain();
+  assert.equal(conv(win, "Two"), undefined);
+});
+
+test("a pin set on a chat that was never opened does not undo a rename made elsewhere", async () => {
+  const server = makeServer();
+  server.put("c0", { title: "Open one", updated_at: Date.now() + 5, messages: [user("x")] });
+  server.put("c1", { title: "Old name", updated_at: 1, messages: [user("a")] });
+  const win = await boot(server);
+  server.put("c1", { title: "New name", folder: "work", updated_at: 2, messages: [user("a")] });
+  const row = [...win.document.querySelectorAll("#conv-list .conv-item")].find((r) => r.textContent.includes("Old name"));
+  row.querySelector("button.del").click();
+  assert.ok(await waitFor(() => server.files.get("c1").pinned));
+  assert.equal(server.files.get("c1").title, "New name");
+  assert.equal(server.files.get("c1").folder, "work");
+});
+
+test("a save whose answer was lost is recognised as this page's own", async () => {
+  const server = makeServer();
+  server.put("c1", { title: "One", messages: [user("a")] });
+  const win = await boot(server);
+  const c = await open(win, "One");
+  server.loseAnswer = 1;
+  say(win, c, "q1");
+  assert.ok(await waitFor(() => server.files.get("c1").messages.length === 2));
+  await settle(50);
+  say(win, c, "q2");
+  assert.ok(await waitFor(() => server.files.get("c1").messages.length === 3, 6000));
+  assert.deepEqual(texts(server.files.get("c1")), ["a", "q1", "q2"]);
+  assert.equal(server.files.size, 1);
+  assert.ok(!win.__toasts.some((m) => /changed in another tab/.test(m)));
+});
+
+test("a save whose answer was lost is recognised after a reload", async () => {
+  const server = makeServer();
+  server.put("c1", { title: "One", messages: [user("a")] });
+  const win = await boot(server);
+  const c = await open(win, "One");
+  server.loseAnswer = 1;
+  say(win, c, "q1");
+  assert.ok(await waitFor(() => server.files.get("c1").messages.length === 2));
+  win.saveConversations();
+  await drain();
+  const again = await boot(server, { cached: cache(win) });
+  await settle(800);
+  assert.equal(server.files.size, 1);
+  assert.deepEqual([...texts(conv(again, "One"))], ["a", "q1"]);
+});
+
+// --------------------------------------------------------------- whose chats ---
+
+const cachedFor = (prin, extra) => ({ updated_at: 5, inst: "backend-x", prin, messages: [user(prin + " words")], ...extra });
+
+test("when another server answers at the address, nothing of the old one is shown or saved there", async () => {
+  const server = makeServer();
+  server.put("c1", { title: "One", messages: [user("of the old server")] });
+  const win = await boot(server);
+  const c = await open(win, "One");
+  say(win, c, "more");
+  win.document.getElementById("chat-input").value = "typed for the old server";
+  // Another page of this browser noticed first: the cache is the new server's already.
+  server.instance = "backend-y";
+  server.files.clear();
+  server.puts.length = 0;
+  win.localStorage.setItem("localm.instanceId", "backend-y");
+  win.localStorage.removeItem("localm.conversations");
+  win.localStorage.removeItem("localm.chatOwner");
+  runScript(win, "window.__read = refreshCtxLimit()");
+  await win.__read;
+  assert.equal(win.chat.conversations.length, 0);
+  assert.equal(win.document.getElementById("chat-input").value, "");
+  await settle(1500);
+  assert.equal(server.puts.length, 0);
+  assert.equal(server.files.size, 0);
+  assert.ok(!(win.localStorage.getItem("localm.conversations") || "").includes("old server"));
+  assert.deepEqual(plain(win.__toasts), []);
+});
+
+test("a cache read before another page noticed the new server is not taken for the new server's", async () => {
+  const server = makeServer();
+  const cached = [{ id: "old1", title: "Old", updated_at: 5, messages: [user("of the old server")] }];
+  const win = await boot(server, { cached, storage: { "localm.instanceId": "backend-old" }, wait: false });
+  win.localStorage.setItem("localm.instanceId", server.instance);
+  win.localStorage.removeItem("localm.conversations");
+  assert.ok(await waitFor(() => win.chat.persist));
+  await settle(900);
+  assert.equal(win.chat.instanceMatch, true);
+  assert.equal(win.chat.conversations.length, 0);
+  assert.equal(server.puts.length, 0);
+});
+
+test("a delete made just after the key changed does not reach the new key's store", async () => {
+  const server = makeServer();
+  server.put("c1", { title: "One", messages: [user("a")] });
+  const win = await boot(server);
+  const c = await open(win, "One");
+  server.principal = "key-b";
+  runScript(win, "window.del = (x) => deleteConversationRemote(x)");
+  await win.del(c);
+  assert.ok(server.files.has("c1"));
+  assert.ok(!server.deleted.has("c1"));
+  assert.equal(win.__toasts.length, 1);
+});
+
+test("a cached chat of another key is not shown, uploaded or removed while that key is not the last one", async () => {
+  const server = makeServer({ principal: "key-b" });
+  const win = await boot(server, {
+    storage: { "localm.chatOwner": JSON.stringify({ inst: "backend-x", prin: "key-b" }) },
+    cached: [cachedFor("key-a", { id: "ca", title: "A's" }), cachedFor("key-b", { id: "cb", title: "B's" })] });
+  assert.ok(await waitFor(() => server.files.has("cb")));
+  await settle(700);
+  assert.equal(conv(win, "A's"), undefined);
+  assert.ok(!win.document.getElementById("conv-list").textContent.includes("A's"));
+  assert.deepEqual([...server.files.keys()], ["cb"]);
+  assert.ok(cache(win).some((c) => c.id === "ca"), "it is left as it is");
+});
+
+test("signing in with another key removes what this browser kept for the old one", async () => {
+  const b = browser();
+  seedRows(b, { k: { ...owned({ conv: "ca", kind: "text", text: "A's words", owner: null }), prin: "key-a" } });
+  const server = makeServer({ principal: "key-b" });
+  const win = await boot(server, { ...b,
+    storage: { "localm.chatOwner": JSON.stringify({ inst: "backend-x", prin: "key-a" }) },
+    cached: [cachedFor("key-a", { id: "ca", title: "A's" }), { id: "old", title: "Unmarked", updated_at: 5, messages: [user("x")] }] });
+  await settle(700);
+  assert.equal(win.chat.conversations.length, 0);
+  assert.equal(server.puts.length, 0, "nothing of key A reaches key B's store");
+  assert.ok(!JSON.stringify(cache(win)).includes("key-a words"));
+  assert.ok(await waitFor(() => rowsOf(b).length === 0));
+  assert.equal(JSON.parse(win.localStorage.getItem("localm.chatOwner")).prin, "key-b");
+});
+
+test("a key that changed under an open page keeps the old key's chats out of the new store", async () => {
+  const server = makeServer({ principal: "key-a" });
+  server.put("c1", { title: "One", messages: [user("a")] });
+  const win = await boot(server);
+  const c = await open(win, "One");
+  server.principal = "key-b";
+  server.files.clear();
+  say(win, c, "typed under key A");
+  assert.ok(await waitFor(() => server.puts.length === 1));
+  await settle(200);
+  assert.equal(server.files.size, 0);
+  assert.equal(win.chat.conversations.length, 0);
+});
+
+test("chats cached before rows were marked stay this browser's and are marked", async () => {
+  const server = makeServer();
+  const win = await boot(server, { cached: [{ id: "c1", title: "Old cache", updated_at: 5, messages: [user("a")] }] });
+  assert.ok(await waitFor(() => server.files.has("c1")));
+  assert.ok(await waitFor(() => cache(win)[0] && cache(win)[0].prin === "owner"));
+});
+
+test("signing out removes what this browser kept, and the page writes nothing more", async () => {
+  const b = browser();
+  const { win } = await twoChats(b);
+  const c = await open(win, "One");
+  await typeDraft(win, "unsent words");
+  assert.ok(await waitFor(() => rowsOf(b).length === 1 && cache(win).length > 0));
+  const out = await win.signOutSession();
+  assert.equal(out.ok, true);
+  assert.equal(win.localStorage.getItem("localm.conversations"), null);
+  assert.equal(rowsOf(b).length, 0);
+  say(win, c, "late");
+  await typeDraft(win, "late words");
+  await settle(500);
+  assert.equal(win.localStorage.getItem("localm.conversations"), null);
+  assert.equal(rowsOf(b).length, 0);
+});
+
+// ----------------------------------------------------------------- mode reads ---
+
+test("a mode read that never answers holds the browser's copy back for a few seconds only", async () => {
+  const server = makeServer();
+  server.put("c1", { title: "One", messages: [user("a")] });
+  const win = await boot(server);
+  const c = await open(win, "One");
+  await drain();
+  server.hold = (method, url) => (url === "/v1/config" ? new Promise(() => {}) : null);
+  say(win, c, "kept here");
+  await settle(300);
+  assert.ok(!JSON.stringify(cache(win)).includes("kept here"));
+  assert.ok(await waitFor(() => JSON.stringify(cache(win)).includes("kept here"), 6000));
+});
+
+test("an older answer that lands after a newer one changes nothing", async () => {
+  const server = makeServer();
+  const win = await boot(server);
+  const real = win.fetch;
+  let release;
+  const held = new Promise((r) => { release = r; });
+  let first = true;
+  win.fetch = async (url, opts) => {
+    if (String(url) === "/v1/config" && first) {
+      first = false;
+      const answer = await real(url, opts);
+      await held;
+      return answer;
+    }
+    return real(url, opts);
+  };
+  const slow = win.refreshCtxLimit();
+  await drain(3);
+  server.mode = "privacy";
+  await win.refreshCtxLimit();
+  assert.equal(win.chat.privacy, true);
+  release();
+  await slow;
+  await drain();
+  assert.equal(win.chat.privacy, true);
+});
+
+test("a page whose first mode read failed still connects once one answers", async () => {
+  const server = makeServer();
+  server.put("c1", { title: "One", messages: [user("a")] });
+  let down = true;
+  server.hold = async (method, url) => {
+    if (down && (url === "/v1/config" || url.startsWith("/api/conversations"))) throw new TypeError("Failed to fetch");
+  };
+  const b = browser();
+  seedRows(b, { k: owned({ conv: "c1", kind: "text", text: "kept draft", owner: null }) });
+  const win = await boot(server, { ...b, wait: false });
+  await settle(100);
+  assert.equal(win.chat.modeKnown, false);
+  down = false;
+  await win.refreshCtxLimit();
+  assert.ok(await waitFor(() => win.__restored));
+  await settle(700);
+  assert.ok(conv(win, "One"));
+  await open(win, "One");
+  assert.equal(win.document.getElementById("chat-input").value, "kept draft");
+});
+
+test("text typed in privacy mode with no chat open does not land in a saved chat", async () => {
+  const server = makeServer();
+  server.put("c1", { title: "Saved", messages: [user("a")] });
+  server.mode = "privacy";
+  const win = await boot(server);
+  win.document.getElementById("chat-input").value = "private words";
+  server.mode = "full";
+  await win.refreshCtxLimit();
+  assert.ok(await waitFor(() => win.chat.persist));
+  await drain();
+  assert.equal(win.document.getElementById("chat-input").value, "private words");
+  assert.notEqual(win.chat.activeId, "c1");
+  await open(win, "Saved");
+  assert.equal(win.document.getElementById("chat-input").value, "");
+});
+
+test("a message queued in a chat stays with it when privacy mode is entered, and nowhere else", async () => {
+  const { win, server } = await twoChats();
+  const c = await open(win, "One");
+  win.chat.queue.push({ text: "q one", attachments: [], docs: [], clips: [], convId: "c1" });
+  win.chat.queue.push({ text: "q closed", attachments: [], docs: [], clips: [], convId: "c2" });
+  server.mode = "privacy";
+  await win.refreshCtxLimit();
+  await drain();
+  assert.deepEqual([...win.chat.conversations], [c]);
+  assert.equal(c.tabOnly, true);
+  assert.deepEqual(win.chat.queue.map((q) => [q.text, q.convId]).join(), ["q one", c.id].join());
 });

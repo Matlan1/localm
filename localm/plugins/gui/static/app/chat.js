@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { $, applyChatBackground, authHeaders, autoGrow, CHAT_SURFACE_HEADERS, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, promptText, readStoredJSON, reconcileInstanceId, renderMarkdown, revealFilledAdvanced, safeAvatarImageSrc, scrubMarkers, stripAsrPrefix, stripThink, toast, updateAdvancedCount } from "./helpers.js";
+import { $, applyChatBackground, authHeaders, autoGrow, CHAT_SURFACE_HEADERS, confirmDanger, el, fetchImageURL, INSTANCE_ID_KEY, INSTANCE_SCOPED_KEYS, promptText, readStoredJSON, reconcileInstanceId, renderMarkdown, revealFilledAdvanced, safeAvatarImageSrc, scrubMarkers, stripAsrPrefix, stripThink, toast, updateAdvancedCount } from "./helpers.js";
 import { restoreRecentGuiErrors, setRecentGuiErrorStore } from "./client-log.js";
 import { t, tn, tOr } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
@@ -125,6 +125,13 @@ export function migrateConversations(list) {
 /* ================================================================ */
 /*  Chat                                                             */
 /* ================================================================ */
+
+// What this browser had recorded when the page loaded: the install its cache
+// belonged to, and the store the cached conversations were last known to be in.
+const _bootInstance = (() => {
+  try { return localStorage.getItem(INSTANCE_ID_KEY); } catch { return null; }
+})();
+const _bootOwner = readStoredJSON("localm.chatOwner", null);
 
 /** The conversations this browser cached, marked as read from its cache. */
 function cachedConversations() {
@@ -757,8 +764,7 @@ export async function refreshCtxLimit() {
       chat.instanceState = instanceState;
       chat.instanceMatch = instanceState === "confirmed";
       if (instanceState === "mismatched") {
-        chat.conversations = [];
-        chat.activeId = null;
+        dropConversations();
         convUI.collapsed = new Set();
         renderConvList();
         renderChat();
@@ -808,7 +814,10 @@ let _modeApplied = 0;
 function applySessionMode(cfg, upTo, read) {
   if (read < _modeApplied) return;
   _modeApplied = read;
-  if (cfg.instance_id) chat.inst = cfg.instance_id;
+  if (cfg.instance_id) {
+    _serverInstance = cfg.instance_id;
+    if (chat.inst && chat.inst !== cfg.instance_id) leaveStore();
+  }
   const wasPrivacy = chat.modeKnown && chat.privacy;
   chat.privacy = (cfg.effective_chat_mode ?? cfg.effective_mode) === "privacy";
   chat.serverPrivacy = cfg.effective_mode === "privacy";
@@ -866,6 +875,9 @@ function applySessionMode(cfg, upTo, read) {
   if (!chat.privacy && _storeAsked && (!chat.persist || !_draftsRestored)) connectStore();
 }
 
+// The install the last applied /v1/config answer named.
+let _serverInstance = "";
+
 // Set once the page has asked for its conversation store.
 let _storeAsked = false;
 let _connecting = false;
@@ -891,9 +903,11 @@ export async function connectStore() {
 function enterPrivacyMode() {
   const live = chatBusy() ? currentConv() : null;
   const held = chat.conversations.filter((c) => c.tabOnly || c === live ||
-    (c.unsaved && !c._meta && (c.messages.length || (c.branches || []).length)));
+    (!c._meta && ((c.unsaved && (c.messages.length || (c.branches || []).length)) ||
+                  chat.queue.some((q) => q.convId === c.id))));
   for (const c of held) keepInTabOnly(c);
   chat.conversations = held;
+  chat.queue = chat.queue.filter((q) => held.some((c) => c.id === q.convId));
   if (!held.some((c) => c.id === chat.activeId)) {
     chat.activeId = null;
     releaseComposer();
@@ -976,7 +990,8 @@ const MODE_READ_TIMEOUT_MS = 4000;
 /** Reads the session mode from the server and applies it. Calls made while a
  *  read is in flight share it. An unreachable server, a refused read, an answer
  *  that names no mode and a read that takes longer than MODE_READ_TIMEOUT_MS
- *  leave the last confirmed mode standing. Never throws. */
+ *  leave the last confirmed mode standing. Resolves to whether the server named
+ *  its mode. Never throws. */
 export function confirmSessionMode() {
   if (!_modeCheck) {
     const upTo = _writeSeq;
@@ -986,13 +1001,15 @@ export function confirmSessionMode() {
     const answer = (async () => {
       try {
         const r = await fetch("/v1/config", { headers: authHeaders(), signal: ctl.signal });
-        if (!r.ok) return;
+        if (!r.ok) return false;
         const cfg = await r.json();
-        if (cfg && (cfg.effective_chat_mode ?? cfg.effective_mode)) applySessionMode(cfg, upTo, read);
-      } catch { /* the last confirmed mode stands */ }
+        if (!cfg || !(cfg.effective_chat_mode ?? cfg.effective_mode)) return false;
+        applySessionMode(cfg, upTo, read);
+        return true;
+      } catch { return false; }   // the last confirmed mode stands
     })();
     const late = new Promise((resolve) => {
-      timer = setTimeout(() => { ctl.abort(); resolve(); }, MODE_READ_TIMEOUT_MS);
+      timer = setTimeout(() => { ctl.abort(); resolve(false); }, MODE_READ_TIMEOUT_MS);
     });
     _modeCheck = Promise.race([answer, late]).finally(() => {
       clearTimeout(timer);
@@ -1034,8 +1051,9 @@ export function settlePendingScopedWrites(upTo = Infinity) {
   }
 }
 
-/** Confirms the mode and settles what is queued, until nothing is. Before the
- *  first confirmation the queue waits for refreshCtxLimit. */
+/** Confirms the mode and settles what is queued, until nothing is; when the mode
+ *  cannot be read, everything queued by then is settled under the last confirmed
+ *  one. Before the first confirmation the queue waits for refreshCtxLimit. */
 async function _flushPendingWrites() {
   if (_flushing || !chat.modeKnown) return;
   _flushing = true;
@@ -1043,8 +1061,8 @@ async function _flushPendingWrites() {
     while (_pendingScopedWrites.size || _pendingConversationSave || _pendingDraftSave) {
       if (_modeCheck) await _modeCheck;
       const upTo = _writeSeq;
-      await confirmSessionMode();
-      settlePendingScopedWrites(upTo);
+      const answered = await confirmSessionMode();
+      settlePendingScopedWrites(answered ? upTo : Infinity);
     }
   } finally {
     _flushing = false;
@@ -1165,8 +1183,11 @@ function _updateUnsavedIndicator() {
 
 /** True when *conv* may be written to this browser or the server store. */
 export function convPersistable(conv) {
-  return !!conv && !conv.tabOnly && !conv.deleted;
+  return !!conv && !conv.tabOnly && !conv.deleted && !_dropped.has(conv);
 }
+
+// The conversations of a store this page is no longer connected to.
+const _dropped = new WeakSet();
 
 // How often each conversation was changed in this page, so a save that ends
 // after another change does not count that change as saved.
@@ -1215,7 +1236,7 @@ function cacheableConversations() {
   const keep = new Set(others.map((c) => c.id));
   const mine = [...others, ...own.filter((c) => !keep.has(c.id))]
     .map((c) => {
-      const row = { ...c, ...tag };
+      const row = c.prin || c._cached ? { ...c } : { ...c, ...tag };
       delete row._cached;
       return row;
     })
@@ -1288,18 +1309,7 @@ function adoptStore(data) {
       !data.principal || !data.instance) return;
   const next = { inst: data.instance, prin: data.principal };
   const known = storeTag();
-  if (known && !sameStore(known, next)) {
-    chat.conversations = [];
-    chat.activeId = null;
-    chat.queue = [];
-    for (const timer of _convPushTimers.values()) clearTimeout(timer);
-    _convPushTimers.clear();
-    _drafts.clear();
-    _rows.clear();
-    _composerOwner = null;
-    showDraft(emptyDraft());
-    _draftsRestored = false;
-  }
+  if (known && !sameStore(known, next)) leaveStore();
   const prev = lastOwner();
   chat.inst = next.inst;
   chat.prin = next.prin;
@@ -1307,9 +1317,38 @@ function adoptStore(data) {
     if (prev && prev.inst === next.inst) clearStoredChats(prev);
     if (!chat.privacy) lsSetScoped(CHAT_OWNER_KEY, JSON.stringify(next));
   }
-  chat.conversations = chat.conversations.filter((c) => !c._cached || c.tabOnly ||
-    (c.prin ? sameStore(c, next) : !prev || sameStore(prev, next)));
+  const untaggedHere = _bootInstance === next.inst && (!_bootOwner?.prin || sameStore(_bootOwner, next));
+  const mine = (c) => c.tabOnly || (c.prin ? sameStore(c, next) : !c._cached || untaggedHere);
+  for (const c of chat.conversations) if (!mine(c)) _dropped.add(c);
+  chat.conversations = chat.conversations.filter(mine);
   for (const c of chat.conversations) delete c._cached;
+}
+
+/** Takes every conversation out of this page and cancels the saves that wait. */
+function dropConversations() {
+  for (const c of chat.conversations) _dropped.add(c);
+  for (const timer of _convPushTimers.values()) clearTimeout(timer);
+  _convPushTimers.clear();
+  chat.conversations = [];
+  chat.activeId = null;
+}
+
+/** The server, or the key, is another one than the store this page holds
+ *  conversations of: all it holds of that store leaves the page, and the page
+ *  connects anew. */
+function leaveStore() {
+  dropConversations();
+  chat.inst = null;
+  chat.prin = null;
+  chat.persist = false;
+  chat.queue = [];
+  _drafts.clear();
+  _rows.clear();
+  _composerOwner = null;
+  showDraft(emptyDraft());
+  _draftsRestored = false;
+  renderConvList();
+  if (!chatBusy()) renderChat();
 }
 
 // Set when this browser was signed out: the page writes nothing more here.
@@ -1699,6 +1738,11 @@ function dropDeletedElsewhere(conv, { quiet = false } = {}) {
   if (!chatBusy()) renderChat();
 }
 
+/** The header that says which store a DELETE means (see plug.py conversation_delete). */
+function storeHeader(tag) {
+  return tag && tag.inst && tag.prin ? { "X-LocaLM-Chat-Store": tag.inst + " " + tag.prin } : {};
+}
+
 /** Deletes *conv* from the server store, after its own saves that are on their
  *  way. */
 export async function deleteConversationRemote(conv) {
@@ -1708,7 +1752,7 @@ export async function deleteConversationRemote(conv) {
   try { await _convPushChain.get(conv); } catch { /* its failure was said when it happened */ }
   try {
     const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id), {
-      method: "DELETE", headers: authHeaders(),
+      method: "DELETE", headers: { ...authHeaders(), ...storeHeader(storeTag()) },
     });
     if (!r.ok) throw new Error("HTTP " + r.status);
   } catch (e) {
@@ -1753,7 +1797,8 @@ export async function deleteAllServerConversations() {
     const outcomes = await Promise.all(todo.map(async (id) => {
       try {
         const r = await fetch("/api/conversations/" + encodeURIComponent(id), {
-          method: "DELETE", headers: authHeaders(),
+          method: "DELETE",
+          headers: { ...authHeaders(), ...storeHeader({ inst: data.instance, prin: data.principal }) },
         });
         return r.ok;
       } catch {
@@ -1864,6 +1909,7 @@ async function fetchServerIndex() {
   if (first.refused) return first;
   adoptStore(first);
   if (!first.enabled) return null;
+  const tag = storeTag();
   const rows = first.conversations || [];
   const byId = new Map(rows.map((c) => [c.id, c]));
   const total = Number.isInteger(first.total) ? first.total : rows.length;
@@ -1875,6 +1921,7 @@ async function fetchServerIndex() {
     for (const c of got) byId.set(c.id, c);
     offset += got.length;
   }
+  if (tag && !sameStore(tag, storeTag())) return null;
   return { rows, byId, complete, unreadable: new Set(first.unreadable || []) };
 }
 
@@ -2747,7 +2794,7 @@ function wipeStoredDrafts(cacheWiped = true) {
   _rows.clear();
   const attempt = async () => {
     if (!chat.privacy) return true;
-    if (draftStore.available()) await draftStore.remove((v) => !v || !v.inst || !chat.inst || v.inst === chat.inst);
+    if (draftStore.available()) await draftStore.remove((v) => !v || !v.inst || !_serverInstance || v.inst === _serverInstance);
     return cacheWiped;
   };
   const run = _draftChain.then(attempt);

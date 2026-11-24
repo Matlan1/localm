@@ -716,3 +716,25 @@ def test_a_share_with_nothing_skipped_names_nothing(share_client):
     share_client.post("/share-target", files={"files": ("photo.png", _PNG, "image/png")},
                       follow_redirects=False)
     assert share_client.get("/api/share/pending").json()["skipped"] == []
+
+
+def test_skipped_names_are_named_to_the_key_that_shared_only(share_app, monkeypatch):
+    a, b = _mk_keys(["chat"], ["chat"])
+    share_app.post("/share-target", headers=_h(a),
+                   files={"files": ("a-only.docx", b"PK", "application/msword")},
+                   follow_redirects=False)
+    monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")
+    for key in (b, "ownersecret"):
+        assert share_app.get("/api/share/pending", headers=_h(key)).json()["skipped"] == []
+    assert share_app.get("/api/share/pending", headers=_h(a)).json()["skipped"] == ["a-only.docx"]
+
+
+def test_skipped_names_nobody_reads_are_dropped(share_client):
+    from localm.plugins.gui.routes import share
+    files = {"files": ("a.docx", b"PK", "application/msword")}
+    share_client.post("/share-target", files=files, follow_redirects=False)
+    names = share._skipped_names(share_client.app)
+    names[:] = [(o, n, 0) for o, n, _exp in names]
+    share_client.post("/share-target", files={"files": ("b.docx", b"PK", "application/msword")},
+                      follow_redirects=False)
+    assert [n for _o, n, _exp in names] == ["b.docx"]

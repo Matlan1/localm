@@ -297,6 +297,10 @@ def _would_lose_turns(stored: dict | None, req: ConversationUpsert) -> bool:
                 - _all_turn_keys(req.messages, req.branches))
 
 
+_NOT_THIS_STORE = {"error": "owner",
+                   "message": "This conversation belongs to another key or install."}
+
+
 def _store_owner(principal: str | None) -> dict:
     """Which store a caller's conversations are in: this install's id and a tag
     for the key behind the request ("owner" for the owner)."""
@@ -371,7 +375,12 @@ def _remember_deleted(conv_id: str, principal: str | None) -> None:
         except _DeletedIdsUnreadable:
             return
         if len(ids) > 2 * _DELETED_MAX:
-            atomic_write(path, "\n".join(reversed(ids[:_DELETED_MAX])) + "\n")
+            try:
+                atomic_write(path, "\n".join(reversed(ids[:_DELETED_MAX])) + "\n")
+            except OSError as e:
+                from localm.debuglog import logger
+                logger.warning("chat store: the list of deleted conversations could "
+                               "not be shortened (%s)", type(e).__name__)
 
 
 def _count_chat_files(principal: str | None) -> int:
@@ -554,8 +563,7 @@ def conversation_upsert(conv_id: str, req: ConversationUpsert, request: Request)
     owner = _store_owner(principal)
     for field in ("instance", "principal"):
         if getattr(req, field) and getattr(req, field) != owner[field]:
-            raise HTTPException(403, {"error": "owner", "message":
-                                      "This conversation belongs to another key or install."})
+            raise HTTPException(403, _NOT_THIS_STORE)
     record = {"id": conv_id, "title": req.title,
               "updated_at": req.updated_at,
               "pinned": req.pinned, "folder": req.folder,
@@ -598,11 +606,17 @@ def conversation_upsert(conv_id: str, req: ConversationUpsert, request: Request)
 def conversation_delete(conv_id: str, request: Request):
     """Delete one conversation and record its id, also when none is stored under
     it (``absent``), so a save still on its way does not store it. Answers 500
-    and deletes nothing when the deletion cannot be recorded."""
+    and deletes nothing when the deletion cannot be recorded. A request whose
+    ``X-LocaLM-Chat-Store`` header (``<instance> <principal>``, as the list names
+    them) is not the store it reaches is refused with 403
+    ``{"detail": {"error": "owner"}}``."""
     if not _persist_enabled():
         raise HTTPException(403, "Chat persistence is off (privacy mode)")
     principal = _principal_dir(request)
     path = _conv_path(conv_id, principal)
+    meant = request.headers.get("x-localm-chat-store")
+    if meant is not None and meant != " ".join(_store_owner(principal).values()):
+        raise HTTPException(403, _NOT_THIS_STORE)
     with _LOCKS.get(str(path)):
         try:
             _remember_deleted(conv_id, principal)

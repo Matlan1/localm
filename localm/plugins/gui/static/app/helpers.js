@@ -84,7 +84,7 @@ export const INSTANCE_SCOPED_KEYS = [
   "localm.recentErrors",
 ];
 
-const INSTANCE_ID_KEY = "localm.instanceId";
+export const INSTANCE_ID_KEY = "localm.instanceId";
 
 /** True when this browser origin already confirmed the connected backend's id on
  *  an EARLIER /v1/config round trip. Gates every instance-scoped localStorage
