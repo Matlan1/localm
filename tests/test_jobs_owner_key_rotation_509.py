@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import json
 import time
-import types
 from pathlib import Path
 
 import pytest
@@ -303,11 +302,10 @@ def _cookie_request(sid):
     principal_id/caller_scopes (which read only cookies + headers)."""
     from localm.inference import http_server as hs
 
-    class _Req:
-        cookies = {hs.SESSION_COOKIE: sid}
-        headers: dict = {}
-        url = types.SimpleNamespace(port=None)
-    return _Req()
+    from starlette.requests import Request
+    return Request({"type": "http", "method": "GET", "scheme": "http", "path": "/",
+                    "query_string": b"", "server": ("127.0.0.1", 80),
+                    "headers": [(b"cookie", f"{hs.SESSION_COOKIE}={sid}".encode())]})
 
 
 def test_expired_admin_keystore_key_over_a_live_cookie_is_not_the_owner(home):
