@@ -454,7 +454,8 @@ test("a chat too large for the server says the browser keeps it only when it doe
     const win = await boot(server);
     const c = await open(win, "One");
     if (!cached) runScript(win, `
-      const older = []; for (let i = 0; i < 60; i++) older.push({ id: "n" + i, title: "n", tabOnly: false, messages: [] });
+      const older = []; for (let i = 0; i < 60; i++) older.push(
+        { id: "n" + i, title: "n", updated_at: Date.now() + 1e9 + i, messages: [{ role: "user", content: "x" }] });
       chat.conversations = [...older, ...chat.conversations];`);
     server.failPut = 413;
     say(win, c, "b");
