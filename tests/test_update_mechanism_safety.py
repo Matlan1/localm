@@ -547,6 +547,13 @@ def replay(template: Path, dest: Path, log: list, *, lost: int | None = None,
             if new is not None:
                 dirty.add(new / p.relative_to(path) if p != path else new)
 
+    def folder(path: Path) -> bool:
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except (FileExistsError, NotADirectoryError):
+            return False
+        return True
+
     for n, entry in enumerate(log):
         kind = entry[0]
         if kind in ("barrier", "sync") or n == lost:
@@ -559,10 +566,7 @@ def replay(template: Path, dest: Path, log: list, *, lost: int | None = None,
                 continue
         if kind == "rename":
             target = dest / entry[2]
-            if not os.path.lexists(path):
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if target.is_dir():
+            if not os.path.lexists(path) or target.is_dir() or not folder(target.parent):
                 continue
             os.replace(path, target)
             forget(target)
@@ -574,7 +578,7 @@ def replay(template: Path, dest: Path, log: list, *, lost: int | None = None,
                 path.unlink()
             forget(path)
         elif kind == "mkdir":
-            path.mkdir(parents=True, exist_ok=True)
+            folder(path)
         elif kind == "rmdir":
             if path.is_dir() and not os.listdir(path):
                 path.rmdir()
@@ -582,13 +586,13 @@ def replay(template: Path, dest: Path, log: list, *, lost: int | None = None,
             shutil.rmtree(path, ignore_errors=True)
             forget(path)
         elif kind == "create":
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(b"")
-            dirty.add(path)
+            if folder(path.parent):
+                path.write_bytes(b"")
+                dirty.add(path)
         elif kind == "content":
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(entry[2])
-            dirty.discard(path)
+            if folder(path.parent):
+                path.write_bytes(entry[2])
+                dirty.discard(path)
     for path in dirty:
         if path.is_file():
             size = path.stat().st_size
