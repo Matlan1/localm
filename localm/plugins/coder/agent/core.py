@@ -477,7 +477,7 @@ class Agent(
         # Calls that stand in text that did not come from the user: tool -> the
         # arguments of each, and whether some text held more than were read (see
         # context._note_foreign_text).
-        self._foreign_calls: dict[str, list[dict]] = {}
+        self._foreign_calls: dict[str, list] = {}
         self._foreign_unread: set[str] = set()
         self._foreign_read: list[dict] = []
         # Ids of the calls of the reply being executed that localm answered

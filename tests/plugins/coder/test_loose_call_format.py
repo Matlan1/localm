@@ -49,6 +49,8 @@ class _Backend:
             return self.check
         if messages[-1]["content"].startswith("[request check]"):
             self.still_asked += 1
+            if "be finished without" in messages[-1]["content"]:
+                return {"[yes]": "[no]", "[no]": "[yes]"}.get(self.still, self.still)
             return self.still
         self.calls.append(([dict(m) for m in messages], kw))
         return self.replies.pop(0) if self.replies else "Done."

@@ -603,7 +603,7 @@ class _ContextMixin:
 
         name: str
         _loose_unasked: dict
-        _foreign_calls: dict[str, list[dict]]
+        _foreign_calls: dict[str, list]
         _foreign_read: list
         _foreign_unread: set
         _project_map: Any
@@ -1836,14 +1836,18 @@ ws     ::= [ \t\n\r]*
     def _ask_if_request_open(self, refused: str = "") -> Optional[bool]:
         """What the model answers on whether the user's request still needs a
         tool to run: True, False, or None for neither. With *refused*, the calls
-        of its reply that were refused, whether it needs one of them."""
+        of its reply that were refused, whether it needs them to run."""
         request = (getattr(self, "_last_user_request", "") or "").strip()[:600]
+        if refused:
+            answer = self._ask_aside(
+                f"[request check] The user's request was: {request}\nCan this request "
+                f"be finished without running {refused}? Answer [no] if it cannot. "
+                "Answer [yes] if it can, because it only wants something read, quoted, "
+                "described or written down. Answer with nothing else.",
+                ("[yes]", "[no]"), "request_check",
+                "asked whether the request is done without the refused calls")
+            return {"[yes]": False, "[no]": True}.get(answer)
         answer = self._ask_aside(
-            (f"[request check] Refused, so it has not run: {refused}\nThe user's "
-             f"request was: {request}\nAnswer [yes] if the user asked for this to be "
-             "run. Answer [no] if the user only wanted it read, quoted or described, "
-             "and all the request asks for is done. Answer with nothing else."
-             ) if refused else
             "[request check] Nothing in your reply has run.\nThe user's request "
             f"was: {request}\nWhat did the user ask for? Answer [yes] if the user "
             "asked for something to be carried out. Answer [no] if the user asked "
