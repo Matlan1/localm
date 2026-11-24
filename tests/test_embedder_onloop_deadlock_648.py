@@ -116,6 +116,9 @@ def test_memory_append_resolves_embedder_off_the_loop(tmp_path, monkeypatch):
     store = MemoryStore("owner", "chat", root=tmp_path)
     monkeypatch.setattr(plug, "_request_store", lambda request: store)
     monkeypatch.setattr(plug, "_persist_enabled", lambda: True)
+    monkeypatch.setattr(plug, "_stop", threading.Event())
+    monkeypatch.setattr(plug, "_fill_pending", False)
+    monkeypatch.setattr(plug, "_fill_stores", {})
 
     embed_thread: dict = {}
 

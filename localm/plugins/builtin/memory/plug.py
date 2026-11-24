@@ -654,28 +654,41 @@ def _fill_vectors_later(store) -> None:
 def _fill_run() -> None:
     global _fill_pending
     from localm.debuglog import logger
-    from localm.memory import MemoryStore
     while True:
+        try:
+            allowed = _fill_allowed()
+        except Exception as e:
+            logger.warning("memory: the vector fill stopped: %s", e)
+            allowed = False
         with _fill_lock:
-            if not _fill_stores or not _fill_allowed():
+            if not _fill_stores or not allowed:
                 _fill_stores.clear()
                 _fill_pending = False
                 return
             key, path = next(iter(_fill_stores.items()))
             del _fill_stores[key]
         try:
-            embed_fn = _embed_fn()
-            if embed_fn is None:
-                logger.debug("memory: no embedder resolved, the new facts stay without "
-                             "a vector for now")
-                continue
-            if MemoryStore.open_file(path).backfill_vectors(
-                    embed_fn, limit=_FILL_STEP, allowed=_fill_allowed):
+            if _fill_one(path):
                 with _fill_lock:
                     _fill_stores.setdefault(key, path)
         except Exception as e:
             logger.warning("memory: could not embed the new facts of %s: %s",
                            path.name, e)
+
+
+def _fill_one(path) -> bool:
+    """Give up to _FILL_STEP records of the store at *path* their vector. True when
+    it went well and records without one are left."""
+    from localm.memory import MemoryStore
+    embed_fn = _embed_fn()
+    if embed_fn is None:
+        from localm.debuglog import logger
+        logger.debug("memory: no embedder resolved, the new facts stay without a "
+                     "vector for now")
+        return False
+    store = MemoryStore.open_file(path)
+    filled = store.backfill_vectors(embed_fn, limit=_FILL_STEP, allowed=_fill_allowed)
+    return bool(filled) and store.lacks_vector()
 
 
 @_router.post("/api/memory/append")

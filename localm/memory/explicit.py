@@ -162,10 +162,10 @@ def _ends_chain(sentence: str) -> bool:
 
 
 def _first_sentence(text: str) -> str:
-    """The first sentence of *text*, whitespace collapsed, terminator kept. A full
-    stop after an abbreviation ("Inc.", "z.B.") or before a lower-case word does
-    not end it."""
-    para = " ".join(text.split())
+    """The first sentence of the first paragraph of *text*, whitespace collapsed,
+    terminator kept. A full stop after an abbreviation ("Inc.", "z.B.") or before
+    a lower-case word does not end it."""
+    para = " ".join(_PARAGRAPH_RE.split(text.strip())[0].split())
     for m in _TERMINATOR_RE.finditer(para):
         end = m.start()
         if end and para[end - 1] == " ":
