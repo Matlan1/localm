@@ -634,6 +634,15 @@ class _LoopMixin:
         # Set by Agent (core.py).
         parent: Any
         gen_kwargs: dict
+        on_event: Any
+        name: str
+        turn_budget: int
+        _messages: list
+
+        def _call_llm(self, messages: list[dict], interactive: bool) -> str: ...
+
+        def _build_messages(self) -> list[dict]: ...
+
         _max_tokens_explicit: bool | None
         _reply_limit: int | None
         _writing_commands: int

@@ -183,6 +183,17 @@ class _ExecutionMixin:
         _loose_check: Optional[dict]
         _loose_check_lock: Any
         _files_read: set
+        _denied_unconfirmed: list
+        _consecutive_errors: dict[str, int]
+        verbose: bool
+        report_progress: bool
+        on_event: Any
+        progress_sink: Any
+
+        def _record_error(self, tool: str, output: str) -> None: ...
+
+        def _ask_if_calls_meant(self, calls: list) -> Optional[bool]: ...
+
         _patch_overlay: PatchOverlay
         _patch_chunks: list[str]
 

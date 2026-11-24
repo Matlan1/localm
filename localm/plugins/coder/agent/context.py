@@ -511,6 +511,15 @@ class _ContextMixin:
         server_side: bool
         _episode_store: Any
         _system_prompt: str
+        gen_kwargs: dict
+
+        @property
+        def disabled_tools(self) -> frozenset: ...
+
+        def _always_denied(self) -> list[str]: ...
+
+        def _say_progress(self, text: str) -> None: ...
+
 
         def _rebuild_system_prompt(self) -> None: ...
 
