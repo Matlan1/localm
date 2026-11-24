@@ -1030,6 +1030,7 @@ class _ExecutionMixin:
         # by the session record and the close-time episode.
         if call.name in _SHELL_EXEC_TOOLS and not self._shell_baseline_captured:
             self._shell_baseline_captured = True
+            self._writing_commands = 0
             self._git_baseline = self._git_status_paths()
 
         # Inject hidden runtime args into specific tools, AFTER the copy so a

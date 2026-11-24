@@ -137,9 +137,7 @@ def looks_like_tool_attempt(text: str, tool_names: Optional[set] = None) -> bool
     though :func:`parse_tool_calls` recovered nothing. Lets the caller
     re-prompt for the correct format rather than show the broken call.
 
-    When *tool_names* is supplied, ALSO recognises a fenced block that starts
-    with one of those names (``_fenced_tool_name``), a reply that ends where a
-    ```json block opens, and an XML-ish open tag naming
+    When *tool_names* is supplied, ALSO recognises an XML-ish open tag naming
     one of those tools - ``<read_file``, ``<edit_file ...>`` - even with none
     of the markers above, which is the shape some finetunes emit instead of
     this project's ``<tool_call>{"name": ...}`` wrapper. A false hit costs one
@@ -156,8 +154,6 @@ def looks_like_tool_attempt(text: str, tool_names: Optional[set] = None) -> bool
             return True
         if re.search(r"\b(?:" + names + r")\s*\(\s*[{\[]", text):
             return True
-        if _fenced_tool_name(text, names) or _RE_DANGLING_FENCE.search(text):
-            return True
     return False
 
 
@@ -165,11 +161,19 @@ def looks_like_tool_attempt(text: str, tool_names: Optional[set] = None) -> bool
 _RE_DANGLING_FENCE = re.compile(r"```[ \t]*(?:json|tool_call|tool_code)[ \t]*\s*\Z")
 
 
-def _fenced_tool_name(text: str, names: str) -> bool:
-    """True when a fenced block of *text* starts with one of the tool *names* (a
-    regex alternation) as a command or a function call: ``run_tests`` alone,
-    ``edit_file(path=...)``, ``write_file -args ...``. Comment lines before it
-    are skipped."""
+def names_a_tool_as_command(text: str, tool_names: set) -> bool:
+    """True when *text* holds a fenced block that starts with one of *tool_names*
+    as a command or a function call (``run_tests`` alone, ``edit_file(path=...)``,
+    ``write_file -args ...``), or ends where a JSON or tool-call block opens.
+
+    Comment lines at the start of a block are skipped. Only names with an
+    underscore count: ``grep`` and ``tree`` are commands of their own. Weaker
+    than :func:`looks_like_tool_attempt`: such a block can be part of an answer."""
+    if _RE_DANGLING_FENCE.search(text):
+        return True
+    names = "|".join(re.escape(n) for n in sorted(tool_names) if "_" in n)
+    if not names:
+        return False
     head = re.compile(r"(?:" + names + r")[ \t]*(?:\(|\{|-|\w+=|$)")
     for _start, _end, _lang, body in _iter_fenced_blocks(text):
         for line in body.splitlines():
@@ -794,9 +798,9 @@ def invented_result_at(text: str, tool_names: Optional[set] = None) -> int:
 
 _RE_ANY_OPENER = re.compile(
     r"<\|?tool_call(?:\s+name=['\"][^'\"]+['\"])?\|?>|\[tool_call\]"
-    r"|```[ \t]*(?:tool_call|tool_code|tool|json)?[ \t]*\r?\n",
+    r"|```[ \t]*(?:[\w+.-]+)?[ \t]*\r?\n",
     re.IGNORECASE)
-_RE_CALL_NAME_HEAD = re.compile(r"""\{\s*["']name["']\s*:\s*["'](\w+)["']""")
+_RE_CALL_NAME_HEAD = re.compile(r"""(?:(?:#|//)[^\n]*\n\s*)*\{\s*["']name["']\s*:\s*["'](\w+)["']""")
 # Openers unfinished_call scans the body of; bounds a text that is all openers.
 _MAX_UNFINISHED_SCANS = 32
 
@@ -804,8 +808,7 @@ _MAX_UNFINISHED_SCANS = 32
 def unfinished_call(text: str, tool_names: Optional[set] = None) -> str:
     """The name of the tool whose call *text* ends in the middle of, or "".
 
-    That is a call opener (a ``<tool_call>`` tag, or a ``json``, ``tool_call``
-    or bare fence) followed by the start of one JSON object that names a tool
+    That is a call opener (a ``<tool_call>`` tag or a code fence) followed by the start of one JSON object that names a tool
     (one of *tool_names* when given) and whose braces or last string are still
     open at the end of the text. A complete object is not unfinished, whatever
     follows it, and neither is a body that some closing tag follows."""
@@ -823,7 +826,7 @@ def unfinished_call(text: str, tool_names: Optional[set] = None) -> str:
         scans += 1
         if not text.startswith("`", m.start()) and _RE_CLOSER.search(text, start):
             continue
-        if _open_at_end(text, start):
+        if _open_at_end(text, text.index("{", start)):
             return head.group(1)
     return ""
 

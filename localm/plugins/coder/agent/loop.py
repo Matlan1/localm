@@ -19,8 +19,8 @@ from ..display import (
     print_tool_result, print_turn_divider, safe_markup,
 )
 from ..parser import (
-    invented_result_at, looks_like_tool_attempt, split_response,
-    strip_orphan_closers, strip_tool_calls, unfinished_call,
+    invented_result_at, looks_like_tool_attempt, names_a_tool_as_command,
+    split_response, strip_orphan_closers, strip_tool_calls, unfinished_call,
 )
 from ..tools import ToolResult
 from ..audit import SessionMode
@@ -651,7 +651,9 @@ class _LoopMixin:
         confirm_handler: Any
         always_confirm: Any
 
-        def _detect_shell_changes(self) -> tuple[list[dict], str]: ...
+        _git_baseline: frozenset | None
+
+        def _git_status_map(self) -> dict[str, str] | None: ...
 
         @property
         def stop_pending(self) -> bool: ...
@@ -875,6 +877,7 @@ class _LoopMixin:
                                            # its own gate says otherwise
         self._denied_unconfirmed = []      # per-run: see Agent.denied_unconfirmed
         self._reply_limit = None           # per-run: see _raise_reply_limit
+        self._files_read = set()           # per-run
         start_turns = self._turns          # turns used by *this* task only
         self._task_start_turns = start_turns
         budget_escalated = False           # uncertainty escalation fires at most once per task
@@ -1052,7 +1055,7 @@ class _LoopMixin:
                         "conversation is intact.]")
                     print_warning(final_response)
                     self._emit("info", text=final_response)
-                    self._add_assistant(response)
+                    self._add_assistant(_with_notices(response, final_response))
                     self._last_run_ok = False
                     break
 
@@ -1410,7 +1413,9 @@ class _LoopMixin:
         if (
             st.repair_count < _MAX_TOOL_REPAIRS
             and self._task_turns_left()
-            and looks_like_tool_attempt(response, tool_names)
+            and (looks_like_tool_attempt(response, tool_names)
+                 or (demands_action(getattr(self, "_last_user_request", "") or "")
+                     and names_a_tool_as_command(response, tool_names)))
         ):
             st.repair_count += 1
             self._add_assistant(response)
@@ -1955,7 +1960,7 @@ class _LoopMixin:
             more = len(by_commands) - _MAX_RECORD_PATHS
             parts.append(f"{len(by_commands)} file(s) changed by commands: {shown}"
                          + (f" and {more} more" if more > 0 else ""))
-        elif self._writing_commands:
+        elif self._shell_baseline_captured and self._writing_commands:
             parts.append(f"{self._writing_commands} command(s) ran whose file "
                          "changes are not recorded")
         if not parts:
@@ -1971,17 +1976,11 @@ class _LoopMixin:
         tree before its first command and now: without the *known* paths the
         write tools recorded and without caches a test run leaves. Empty when no
         command ran or the folder is no git work tree."""
-        if not self._shell_baseline_captured:
+        if not self._shell_baseline_captured or self._git_baseline is None:
             return []
-        try:
-            files, _diff = self._detect_shell_changes()
-        except Exception as e:
-            from localm.debuglog import logger
-            logger.debug("command changes not detected: %r", e)
-            return []
+        current = self._git_status_map()
         found = []
-        for f in files:
-            path = f["path"]
+        for path in sorted(set(current or ()) - self._git_baseline):
             if any(part in _CACHE_DIRS for part in path.split("/")):
                 continue
             if path in known or (path.endswith("/")

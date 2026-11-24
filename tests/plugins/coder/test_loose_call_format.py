@@ -13,7 +13,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from localm.plugins.coder.parser import (
-    invented_result_at, looks_like_tool_attempt, unfinished_call)
+    invented_result_at, looks_like_tool_attempt, names_a_tool_as_command,
+    unfinished_call)
 
 FENCE = "```"
 
@@ -235,10 +236,13 @@ def test_generation_stops_at_the_invented_result(tmp_path):
 # --- a call that was cut off ----------------------------------------------
 
 HALF_XML = '<tool_call>\n{"name": "write_file", "args": {"path": "big.py", "content": "x = 1\\ny'
+HALF_COMMENTED = (FENCE + 'python\n# write it\n{"name": "write_file", "args": '
+                  '{"path": "big.py", "content": "x = 1')
 HALF_FENCE = FENCE + 'json\n{"name": "write_file", "args": {"path": "big.py", "content": "x = 1'
 
 
 @pytest.mark.parametrize("text", [HALF_XML, "Now the file.\n" + HALF_XML, HALF_FENCE,
+                                  HALF_COMMENTED,
                                   _xml("read_file", path="a") + "\n" + HALF_XML])
 def test_a_call_the_reply_ends_in_is_unfinished(text):
     assert unfinished_call(text, {"write_file", "read_file"}) == "write_file"
@@ -317,7 +321,7 @@ def test_a_run_that_only_ever_cuts_off_ends_and_says_so(tmp_path):
     "Next:\n" + FENCE + "json\n",
 ])
 def test_a_tool_written_as_a_command_is_an_attempt(text):
-    assert looks_like_tool_attempt(text, {"run_tests", "write_file", "edit_file"})
+    assert names_a_tool_as_command(text, {"run_tests", "write_file", "edit_file"})
 
 
 @pytest.mark.parametrize("text", [
@@ -325,9 +329,20 @@ def test_a_tool_written_as_a_command_is_an_attempt(text):
     FENCE + "python\ndef run_tests_now():\n    pass\n" + FENCE,
     FENCE + "python\nresult = read_file(path)\n" + FENCE,
     FENCE + "json\n{\"a\": 1}\n" + FENCE,
+    FENCE + "sh\ngrep -rn foo .\n" + FENCE,
+    FENCE + "\ntree\n" + FENCE,
 ])
 def test_other_code_is_not_an_attempt(text):
-    assert not looks_like_tool_attempt(text, {"run_tests", "write_file", "read_file"})
+    names = {"run_tests", "write_file", "read_file", "grep", "tree"}
+    assert not names_a_tool_as_command(text, names)
+    assert not looks_like_tool_attempt(text, names)
+
+
+def test_an_answer_that_shows_a_tool_as_a_command_is_not_a_failed_run(tmp_path):
+    answer = "Use it like this:\n" + FENCE + "python\nread_file(path=\"a\")\n" + FENCE
+    agent = _agent(tmp_path, _Backend([answer] * 8))
+    assert "a tool" not in agent.run_task("how do I use read_file?").replace(answer, "")
+    assert agent.last_run_ok is True
 
 
 def test_a_second_broken_attempt_at_an_owed_change_is_forced(tmp_path):

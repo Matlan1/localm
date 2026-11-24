@@ -460,8 +460,8 @@ class Agent(
         # work tree.
         self._shell_baseline_captured: bool = False
         self._git_baseline: Optional[frozenset] = None
-        # Shell commands run this session that may have written files, and the
-        # paths read_file read, for the session record.
+        # For the session record: shell commands run since the baseline above
+        # that may have written files, and the paths read_file read this run.
         self._writing_commands: int = 0
         self._files_read: set[str] = set()
         # The loosely written calls of the reply being executed and whether the
