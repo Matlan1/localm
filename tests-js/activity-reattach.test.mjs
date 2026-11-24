@@ -601,9 +601,13 @@ test("stalls: an ongoing stall is not toasted until it has ended", async () => {
   assert.match(toastEl.textContent, /its event loop was busy in json\/encoder\.py:258/);
 });
 
-test("notes: a row that is a note to its reader is toasted once and listed", async () => {
+test("notes: a row that is a note to its reader is toasted once, said to be shown, and listed", async () => {
   const { fetchImpl, state } = makeStallFetch({ operations: [], now: 1000, stalls: [] });
-  const { window: win } = loadApp({ fetchImpl });
+  const posted = [];
+  const { window: win } = loadApp({ fetchImpl: (url, init) => {
+    if (init?.method === "POST" && String(url).includes("/api/jobs/")) posted.push(String(url));
+    return fetchImpl(url, init);
+  } });
   await tick(); await tick(); await tick();
   const toastEl = win.document.getElementById("toast");
   state.body = { now: 1001, stalls: [], operations: [
@@ -615,6 +619,7 @@ test("notes: a row that is a note to its reader is toasted once and listed", asy
   toastEl.textContent = "";
   await win.pollActivity();
   assert.equal(toastEl.textContent, "");
+  assert.deepEqual(posted, ["/api/jobs/n1/cancel"]);
   win.showActivityDetails();
   assert.match(win.document.getElementById("modal-body").textContent, /A private job was cut off\./);
 });

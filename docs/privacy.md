@@ -119,15 +119,21 @@ In privacy mode a generated image, track or clip is not kept unless you choose t
   page's result, not in History, and **Remove all now** deletes them at once. No
   sidecar, owner index or other record of them is written, and the browser is told not
   to store them. With several keys, a result can be seen, saved and used as an input only
-  by the key that made it and the owner. The folder is deleted when localm stops or
-  restarts; a generation still running then is cancelled first. After a crash, a killed
+  by the key that made it and the owner; one made before any key existed is the owner's
+  once there is one. The folder is deleted when localm stops or
+  restarts; a generation still running then whose result is not to be kept is cancelled
+  first. Any other generation is not: a job in a ComfyUI you run goes on there, and the
+  built-in backends end with localm. After a crash, a killed
   process or a closed console window it is deleted at the next start (`localm gui`,
   `serve`, `run`, `mcp`, or `image`, `music` and `video` in privacy mode), and so is what a generation that does not end within 12
   seconds of a stop writes after it. A file another program holds open at
   that moment is reported in the log and tried again at the next start. Files are
   deleted, not overwritten: recovery tools may find them on the disk.
-- Whether a result is kept is decided when it is written: what is written after a switch
-  to privacy mode is not kept, each image of one request by itself.
+- On the pages, in the chat page and for `POST /v1/images/generations`, whether a result
+  is kept is decided when it is written: after a switch to privacy mode the result being
+  made and the rest of that request are not kept, nor are the job's files in ComfyUI.
+  Once a request is not kept it stays so. The commands (`localm image`, `music`, `video`
+  and `run`), the MCP tool and the coder decide when the generation starts.
 - **Saving always works**: the download and move actions, `-o` of `localm image`,
   `localm music` and `localm video`, `output_path` of the MCP `generate_image` tool,
   `/save-media` in `localm run`, and the coder's `generate_image` tool, which writes the
@@ -140,8 +146,9 @@ In privacy mode a generated image, track or clip is not kept unless you choose t
 
 When ComfyUI makes the media, localm removes the job's files from ComfyUI's own output
 and temp folders and its history entry, also when the job fails or is cancelled, when
-localm stops or restarts, and when ComfyUI's answer to the job did not arrive (the job
-is then looked for in its queue and history). It
+localm stops or restarts, when the session turned private during it, and when ComfyUI's
+answer to the job did not arrive (a job sent in privacy mode is then looked for in its
+queue and history; for one sent before the switch the job's output says so). It
 deletes only files ComfyUI lists for that job whose content is what ComfyUI serves, in
 the output folder it can resolve (localm's own ComfyUI's folder, the ComfyUI output dir
 setting, or the `output` folder inside the ComfyUI folder) and the `temp` folder beside
@@ -153,8 +160,10 @@ that stays there, and the job's output names the job. After a crash or a kill no
 left to remove what ComfyUI holds: a job queued in a ComfyUI that keeps running stays
 there, with its files, the image it was given and its history entry, until you clear it.
 While a private job is in ComfyUI, `<data dir>/run/private-media/` notes its ComfyUI
-address and job id and nothing else, and the next start says once that the job was cut
-off (on the console, and to the owner in the app). What a ComfyUI you run
+address and job id and nothing else. After a crash the next start of the server says on
+its console that the job was cut off, and the app tells the owner once; until it has, the
+note stays and each start of the server tells it again. `localm image`, `music`, `video`,
+`run` and `mcp` do not tell it. What a ComfyUI you run
 yourself or on another machine writes elsewhere (its own log, files a custom node saves
 without listing them) is outside localm's control. With `media` in `privacy_keep` the
 output file and history entry of a finished job are still removed from ComfyUI; its other

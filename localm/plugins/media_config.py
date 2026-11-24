@@ -29,7 +29,7 @@ from __future__ import annotations
 import copy
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Optional
+from typing import Callable, Optional
 
 MEDIA_PLUGINS = ("image", "music", "video")
 
@@ -268,15 +268,20 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
     declares *capability* (one of ``CAPABILITIES``; any other name raises
     KeyError).
 
-    ``generate`` takes the extra keywords ``privacy``, ``withhold_on_trace``
-    (both default False) and ``leave_nothing``, which are not passed to the
-    backend. ``leave_nothing`` (default: ``privacy`` is set and the
-    ``privacy_keep`` setting does not list media) makes a backend that declares
-    ``NEEDS_COMFY_SERVER`` also remove every other file the job left in ComfyUI's
-    output and temp folders, however the job ended
+    ``generate`` takes the extra keywords ``privacy`` (a bool or a callable),
+    ``withhold_on_trace`` (both default False) and ``leave_nothing`` (a callable),
+    which are not passed to the backend. The callables are asked when the generation
+    starts and again when its result is written; ``leave_nothing`` is also asked from
+    other threads. ``leave_nothing`` (default: ``privacy`` is set and the
+    ``privacy_keep`` setting does not list media, decided at the start) makes a
+    backend that declares ``NEEDS_COMFY_SERVER`` also remove every other file the job
+    left in ComfyUI's output and temp folders, however the job ended
     (``comfy_client.run_leaving_nothing``): an output file that stays counts like
-    the job's own copy, a temp file that stays is named in the message. It passes the
-    backend ``delete_outputs`` as True when ``privacy`` is set and as the
+    the job's own copy, a temp file that stays is named in the message. While localm
+    is stopping such a generation is cancelled or refused, and ``cancel`` is called;
+    any other one is not (``held.run``). When ``privacy`` turns true during the generation, what a finished
+    one left in ComfyUI is removed like that too. It passes the backend
+    ``delete_outputs`` as True when ``privacy`` is set and as the
     settings' ``delete_outputs`` otherwise; a caller that passes
     ``delete_outputs`` itself gets a TypeError. The generation is STRICT when
     ``privacy`` or ``withhold_on_trace`` is set (``withhold_on_trace``: the
@@ -316,49 +321,63 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
     def free_vram(s: dict, *args, **kwargs) -> bool:
         return resolve(s).free_vram(s, *args, **kwargs)
 
-    def generate(s: dict, prompt: str, out_path, *args, privacy: bool = False,
-                 withhold_on_trace: bool = False, leave_nothing: Optional[bool] = None,
+    def generate(s: dict, prompt: str, out_path, *args,
+                 privacy: bool | Callable[[], bool] = False,
+                 withhold_on_trace: bool = False,
+                 leave_nothing: Optional[Callable[[], bool]] = None,
+                 cancel_check: Optional[Callable[[], bool]] = None,
+                 cancel: Optional[Callable[[], None]] = None,
                  **kwargs) -> tuple[bool, str]:
         if "delete_outputs" in kwargs or "containment_required" in kwargs:
             raise TypeError("generate() sets delete_outputs and containment_required "
                             "from the settings, privacy and withhold_on_trace; do not "
                             "pass them")
-        strict = bool(privacy or withhold_on_trace)
+        private = privacy if callable(privacy) else lambda: bool(privacy)
+        at_start = private()
+        strict = at_start or withhold_on_trace
         impl = resolve(s)
         embeds = bool(getattr(impl, "EMBEDS_OUTPUT_METADATA", False))
         if strict and getattr(impl, "NEEDS_COMFY_SERVER", False):
             kwargs["containment_required"] = True
         if leave_nothing is None:
             from localm.audit import privacy_keeps
-            leave_nothing = bool(privacy) and not privacy_keeps("media")
-        before = _file_state(out_path) if strict and embeds else None
+            not_kept = at_start and not privacy_keeps("media")
+            leave_nothing = lambda: not_kept  # noqa: E731
+        before = _file_state(out_path) if embeds else None
 
-        def run() -> tuple[bool, str]:
-            return impl.generate(
+        def run(ending) -> tuple[bool, str]:
+            ok, message = impl.generate(
                 s, prompt, out_path, *args,
-                delete_outputs=bool(privacy or s.get("delete_outputs")), **kwargs)
+                delete_outputs=bool(at_start or s.get("delete_outputs")),
+                cancel_check=lambda: bool(cancel_check and cancel_check()) or ending(),
+                **kwargs)
+            if not (ok and embeds
+                    and Path(out_path).exists() and Path(out_path).stat().st_size > 0):
+                return ok, message
+            from localm.media.output_metadata import strip_output
+            result = strip_output(output_kind, Path(out_path))
+            if not result.failed:
+                return ok, message
+            if strict or private():
+                return False, f"Output withheld: {result.reason}{_remove_withheld(out_path)}"
+            return ok, f"{message}\n{result.reason}"
 
-        if leave_nothing and getattr(impl, "NEEDS_COMFY_SERVER", False):
-            from localm.media.comfy_client import run_leaving_nothing
-            ok, message = run_leaving_nothing(
-                run, comfy_output_dir=s.get("output_dir") or None,
-                comfy_workdir=s.get("workdir") or None)
-        else:
-            ok, message = run()
-        if not ok:
-            if strict and embeds and _file_state(out_path) not in (None, before):
-                message += _remove_withheld(out_path)
-            return False, message
-        if (not embeds
-                or not Path(out_path).exists() or Path(out_path).stat().st_size == 0):
-            return ok, message
-        from localm.media.output_metadata import strip_output
-        result = strip_output(output_kind, Path(out_path))
-        if not result.failed:
-            return ok, message
-        if strict:
-            return False, f"Output withheld: {result.reason}{_remove_withheld(out_path)}"
-        return ok, f"{message}\n{result.reason}"
+        from localm.media import held
+        with held.run(leave_nothing, cancel) as ending:
+            if ending():
+                return False, "localm is stopping."
+            if getattr(impl, "NEEDS_COMFY_SERVER", False):
+                from localm.media.comfy_client import run_leaving_nothing
+                ok, message = run_leaving_nothing(
+                    lambda: run(ending), comfy_output_dir=s.get("output_dir") or None,
+                    comfy_workdir=s.get("workdir") or None, private=leave_nothing,
+                    clean_finished=lambda: not at_start and private())
+            else:
+                ok, message = run(ending)
+        if (not ok and embeds and (strict or private())
+                and _file_state(out_path) not in (None, before)):
+            message += _remove_withheld(out_path)
+        return ok, message
 
     return SimpleNamespace(resolve=resolve, supports=supports,
                            ensure_available=ensure_available,
@@ -376,16 +395,18 @@ def _file_state(path):
 
 
 def _remove_withheld(out_path) -> str:
-    """Delete *out_path* when it exists. Returns "" when it is gone, or a
-    sentence telling the user to delete it by hand when it could not be
-    removed. Never raises."""
-    try:
-        Path(out_path).unlink()
-    except FileNotFoundError:
-        return ""   # See test_withheld_file_already_gone_is_not_reported.
-    except OSError as e:
-        return f" The file could not be removed ({e}); delete {out_path} by hand."
-    return ""
+    """Delete *out_path* and its sidecar when they exist. Returns "" when they are
+    gone, or a sentence telling the user to delete what could not be removed by
+    hand. Never raises."""
+    stays = ""
+    for path in (Path(out_path), Path(f"{out_path}.json")):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue   # See test_withheld_file_already_gone_is_not_reported.
+        except OSError as e:
+            stays += f" The file could not be removed ({e}); delete {path} by hand."
+    return stays
 
 
 def media_session_is_private() -> bool:
@@ -407,22 +428,35 @@ def media_is_kept() -> bool:
     return privacy_keeps("media") or not media_session_is_private()
 
 
+def keep_check(kept_now: Callable[[], bool]) -> Callable[[], bool]:
+    """A callable answering *kept_now* (asked here too) until it once answered
+    False, and False from then on."""
+    kept = kept_now()
+
+    def keeps() -> bool:
+        nonlocal kept
+        kept = kept and kept_now()
+        return kept
+    return keeps
+
+
 def media_keep_check(request):
     """A callable answering :func:`media_is_kept` for the media job *request*
-    starts, for use in the route and again in the job. A request from the
-    owner's chat page (``X-Client-Id: chat``) follows the chat mode instead of
-    the server's, so a chat that is saved keeps the media made in it."""
+    starts, for use in the job; once it is False it stays False
+    (:func:`keep_check`). A request from the owner's chat page
+    (``X-Client-Id: chat``) follows the chat mode instead of the server's, so a
+    chat that is saved keeps the media made in it."""
     from localm.audit import caller_is_recorded, privacy_keeps
     from localm.inference.http_server import _owner_caller_headers
     client, asserted = _owner_caller_headers(request)
 
-    def keeps() -> bool:
+    def kept_now() -> bool:
         if privacy_keeps("media"):
             return True
         if (client or "").strip().lower() != "chat":
             return media_is_kept()
         return caller_is_recorded(client, asserted)
-    return keeps
+    return keep_check(kept_now)
 
 
 #: The generation arguments with a fixed range, by argument name:

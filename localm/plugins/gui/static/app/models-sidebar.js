@@ -374,19 +374,17 @@ function _noteStalls(stalls, serverNow) {
   _stallsPrimed = true;
 }
 
-// Toast each operation that is a note to its reader, once per tab (once per page
-// load where session storage is blocked).
+// Toast each operation that is a note to its reader and tell the server it was
+// shown. A server that was not reached is told at the next page load.
 const _notesToasted = new Set();
 function _toastNotes(ops) {
   for (const op of ops) {
     if (!op.note || _notesToasted.has(op.id)) continue;
     _notesToasted.add(op.id);
-    const key = "localm.noteSeen." + op.id;
-    try {
-      if (sessionStorage.getItem(key)) continue;
-      sessionStorage.setItem(key, "1");
-    } catch { /* blocked storage: the set above still holds */ }
     toast(activityLabel(op), true);
+    fetch(`/api/jobs/${encodeURIComponent(op.id)}/cancel`,
+      { method: "POST", headers: authHeaders() })
+      .catch((e) => console.debug("note not marked as shown:", e));
   }
 }
 

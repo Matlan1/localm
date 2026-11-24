@@ -145,22 +145,20 @@ async def music(req: MusicRequest, request: Request):
     out_name = f"{time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.flac"
     owner = principal_id(request)
     keeps = media_keep_check(request)
-    kept_at_start = keeps()
+
+    def private():
+        return not keeps() or media_session_is_private()
 
     @media_handover_job
     def _generate(job):
         from localm.config import load_config
-        kept = kept_at_start and keeps()
-        out_path = gallery.job_output_path(job, "music", out_name, kept)
+        out_path = gallery.job_output_path(job, "music", out_name, keeps())
         if out_path is None:
             return False
         # Resolved here, in the job's own worker thread, not the route above.
         # See test_comfy_media_routes_offloaded.
         _cfg = load_config()
         s = _backend.prepare_for_job(_backend.settings(_cfg), _cfg)
-        # Privacy mode suppresses the sidecar; the backend facade also forces
-        # ComfyUI's own output copy to be deleted.
-        is_privacy = not kept or media_session_is_private()
         if s.get("warning"):
             job.push({"type": "line", "text": s["warning"]})
         if s.get("backend_note"):
@@ -257,20 +255,21 @@ async def music(req: MusicRequest, request: Request):
                 s, req.tags, track_path,
                 self_url=self_url,
                 instance_token=instance_token,
-                write_sidecar=not is_privacy,
+                write_sidecar=not private(),
                 on_progress=lambda t: job.push({"type": "line", "text": t}),
                 lyrics=req.lyrics,
                 duration_seconds=req.duration_seconds,
                 swap=gen_swap,
                 cancel_check=lambda: job.cancel_requested,
                 placement=placement,
-                privacy=is_privacy,
-                leave_nothing=not kept,
+                cancel=lambda: job.cancel(),
+                privacy=private,
+                leave_nothing=lambda: not keeps(),
                 **kwargs,
             )
             job.push({"type": "line", "text": message})
             if ok:
-                track_path = gallery.settle("music", track_path, keeps)
+                track_path = gallery.settle("music", track_path, keeps, private)
                 job.result = track_path.name
                 gallery.push_stamp_warning(
                     job, gallery.record_owner("music", track_path, owner))

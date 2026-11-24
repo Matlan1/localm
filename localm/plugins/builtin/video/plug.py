@@ -157,13 +157,14 @@ async def video(req: VideoRequest, request: Request):
     out_name = f"{time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.mp4"
     owner = principal_id(request)
     keeps = media_keep_check(request)
-    kept_at_start = keeps()
+
+    def private():
+        return not keeps() or media_session_is_private()
 
     @media_handover_job
     def _generate(job):
         from localm.config import load_config
-        kept = kept_at_start and keeps()
-        out_path = gallery.job_output_path(job, "video", out_name, kept)
+        out_path = gallery.job_output_path(job, "video", out_name, keeps())
         if out_path is None:
             return False
         # Resolved here, in the job's own worker thread, not the route above.
@@ -270,26 +271,26 @@ async def video(req: VideoRequest, request: Request):
             if _backend.supports(s, "SUPPORTS_JOB_OPTIONS"):
                 kwargs["on_preview"] = lambda p: job.push(frame_event(p))
                 kwargs["on_queue_state"] = lambda state: job.progress(phase=state)
-            is_privacy = not kept or media_session_is_private()
             ok, message = _backend.generate(
                 s, req.prompt, out_path,
                 self_url=self_url,
                 instance_token=instance_token,
                 # privacy mode: no sidecar (the clip's own metadata is stripped
                 # in every mode)
-                write_sidecar=not is_privacy,
+                write_sidecar=not private(),
                 on_progress=lambda t: job.push({"type": "line", "text": t}),
                 input_image=input_image,
                 swap=gen_swap,
                 cancel_check=lambda: job.cancel_requested,
                 placement=placement,
-                privacy=is_privacy,
-                leave_nothing=not kept,
+                cancel=lambda: job.cancel(),
+                privacy=private,
+                leave_nothing=lambda: not keeps(),
                 **kwargs,
             )
             job.push({"type": "line", "text": message})
             if ok:
-                out_path = gallery.settle("video", out_path, keeps)
+                out_path = gallery.settle("video", out_path, keeps, private)
                 job.result = out_path.name
                 gallery.push_stamp_warning(
                     job, gallery.record_owner("video", out_path, owner))

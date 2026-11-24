@@ -495,7 +495,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
     from ..audit import MODE_ENV_VAR, SessionMode, effective_mode
     if mode:
         os.environ[MODE_ENV_VAR] = mode.lower()
-    _held.sweep_leftovers(lambda text: console.print(text, style="yellow", markup=False))
+    _held.sweep_leftovers()
     session_mode = effective_mode("chat")
     if session_mode == SessionMode.PRIVACY:
         from ..readline_privacy import suppress_readline_history

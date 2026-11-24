@@ -126,8 +126,9 @@ class Job:
     # its work runs inside one, and the activity record keeps no finished row of
     # it unless diagnostics are kept on purpose.
     private: bool = False
-    # True for a row that only tells its reader something (JobManager.add_note).
-    note: bool = False
+    # What to call once the app has shown a row that only tells its reader something
+    # (JobManager.add_note), until then.
+    note: Optional[Callable[[], None]] = None
     # The sha256 of the key that created this job, or None for a job the owner key
     # or open mode started and for a restored record. Set when the job is
     # registered.
@@ -1220,7 +1221,7 @@ class JobManager:
         _ActivityStore.write reports its own failures and returns False instead
         of raising. An EMPTY set of rows removes the file instead of writing an
         empty one."""
-        rows = [j.to_record() for j in self._jobs.values()]
+        rows = [j.to_record() for j in self._jobs.values() if j.note is None]
         keep_open = contextvars.Context().run(_keeps_finished_records)
         keep_private = contextvars.Context().run(_keeps_private_finished_records)
         kept = []
@@ -1549,16 +1550,28 @@ class JobManager:
                          daemon=True).start()
         return job
 
-    def add_note(self, kind: str, text: str, owner: str | None) -> None:
-        """List *text* as an interrupted operation of *owner*."""
+    def add_note(self, kind: str, text: str, owner: str | None,
+                 shown: Callable[[], None]) -> None:
+        """List *text* as an interrupted operation of *owner*, for as long as this
+        manager lives or until an hour after :meth:`note_shown`, which calls *shown*.
+        Not persisted until then."""
         job = Job(id=uuid.uuid4().hex[:12], kind=kind, argv=[], status="interrupted",
-                  label=text, owner=owner, finished_at=time.time(), note=True)
+                  label=text, owner=owner, finished_at=time.time(), note=shown)
         job.push({"type": "line", "text": text})
         job.push({"type": "end", "status": job.status, "returncode": None, "result": None})
         with self._lock:
             self._jobs[job.id] = job
-            self._persist_locked()
         _livefeed.kick("job registered")
+
+    def note_shown(self, job: Job) -> bool:
+        """Record that the app has shown the note *job*. False when it is none."""
+        with self._lock:
+            shown, job.note = job.note, None
+        if shown is None:
+            return False
+        job.finished_at = time.time()
+        shown()
+        return True
 
     def snapshot(self, visible=None) -> list:
         """Every tracked job as a listing row, newest first.
@@ -1607,7 +1620,7 @@ class JobManager:
         cutoff = time.time() - self._TTL_S
         stale = [
             jid for jid, j in self._jobs.items()
-            if j.status != "running"
+            if j.status != "running" and j.note is None
             and (j.finished_at if j.finished_at is not None else j.created_at) < cutoff
         ]
         for jid in stale:

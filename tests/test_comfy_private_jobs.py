@@ -27,6 +27,7 @@ class _Comfy:
         self.ignores_stop = False
         self.history_ok = True
         self.takes_ids = False
+        self.upload_replies = False
         self.reply = "ok"
         self.sent: list = []
 
@@ -110,6 +111,8 @@ def comfy(tmp_path):
                 return self._json({"prompt_id": pid})
             if self.path == "/upload/image":
                 (state.input / state.uploaded_as(body)).write_bytes(state.upload_bytes)
+                if state.upload_replies:
+                    return self._json({"name": state.uploaded_as(body)})
                 return self.connection.close()
             return self._json({}, 404)
 
@@ -272,26 +275,171 @@ def test_an_uploaded_image_whose_reply_is_lost_is_removed(comfy, tmp_path):
     assert list(comfy.input.iterdir()) == []
 
 
-def test_stopping_localm_ends_a_private_job_and_refuses_a_new_one(comfy, monkeypatch):
+def _facade(generate):
+    from types import SimpleNamespace
+    from localm.plugins import media_config
+    ref = SimpleNamespace(generate=generate, NEEDS_COMFY_SERVER=True, EMBEDS_OUTPUT_METADATA=True)
+    return media_config.make_backend_facade("localm.plugins.builtin.image", ref, "image").generate
+
+
+def _generation(comfy, out, *, during=lambda: None, finish=True):
+    """A backend's ``generate``: submits, polls, fetches and contains like the real
+    ones do. *during* runs while ComfyUI works."""
+    def generate(s, prompt, out_path, *, cancel_check, delete_outputs,
+                 containment_required=False):
+        _submit(comfy)
+        comfy.running.append("p1")
+        during()
+        if finish:
+            comfy.running.clear()
+            comfy.job("p1", ("output", "a.png"), ("temp", "preview.png"))
+        status, entry = cc.comfy_poll_until_done(comfy.url, "p1", max_poll_seconds=20,
+                                                 cancel_check=cancel_check, sleep_seconds=0.02)
+        if status == cc.POLL_CANCELLED:
+            return False, "Generation cancelled."
+        info = cc.select_output_info(entry, ("images",))
+        sha = cc.comfy_fetch_output(comfy.url, info, out_path, timeout=5)
+        warning = cc.contain_comfy_artifacts(
+            comfy.url, "p1", info, comfy_output_dir=str(comfy.output), output_sha256=sha,
+            delete_outputs=delete_outputs)
+        assert warning == ""
+        return True, "saved"
+    return _facade(generate)
+
+
+@pytest.fixture
+def unstripped(monkeypatch):
+    from types import SimpleNamespace
+    result = SimpleNamespace(failed=False, reason="could not strip")
+    monkeypatch.setattr("localm.media.output_metadata.strip_output", lambda kind, path: result)
+    return result
+
+
+@pytest.mark.parametrize("private,ended", [(True, True), (False, False)])
+def test_stopping_localm_ends_a_private_job_only(comfy, tmp_path, unstripped, private, ended):
     from localm.media import held
+
+    def during():
+        held.CLOSING.set()
+        if not private:
+            comfy.running.clear()
+            comfy.job("p1", ("output", "a.png"))
+    generate = _generation(comfy, tmp_path, during=during, finish=False)
+    try:
+        ok, message = generate({"output_dir": str(comfy.output)}, "p", tmp_path / "x.png",
+                               privacy=private, leave_nothing=lambda: private)
+        assert (ok, message) == ((False, "Generation cancelled.") if ended else (True, "saved"))
+        if private:
+            assert generate({}, "p", tmp_path / "y.png", privacy=True,
+                            leave_nothing=lambda: True) == (False, "localm is stopping.")
+    finally:
+        held.CLOSING.clear()
+    assert len(comfy.sent) == 1 and comfy.running == []
+    assert ("prompt_id" in comfy.sent[0]) is private
+    assert _left(comfy) == ([] if ended else ["a.png"])
+    assert ("p1" in comfy.history) is not ended
+
+
+@pytest.mark.parametrize("kept", [False, True])
+def test_what_comfyui_keeps_is_decided_when_the_result_is_written(
+        comfy, tmp_path, unstripped, kept):
+    state = []
+    generate = _generation(comfy, tmp_path, during=lambda: state.append(1))
+    ok, message = generate({"output_dir": str(comfy.output)}, "p", tmp_path / "x.png",
+                           privacy=lambda: bool(state),
+                           leave_nothing=lambda: bool(state) and not kept)
+    assert (ok, message) == (True, "saved") and (tmp_path / "x.png").is_file()
+    assert comfy.sent == [{"prompt": {"1": {"class_type": "SaveImage", "inputs": {}}}}]
+    assert _left(comfy) == [] and comfy.history == {}
+
+
+def test_a_job_that_stays_public_leaves_comfyui_as_it_is(comfy, tmp_path, unstripped):
+    ok, _m = _generation(comfy, tmp_path)({}, "p", tmp_path / "x.png")
+    assert ok and _left(comfy) == ["a.png", "preview.png"] and "p1" in comfy.history
+
+
+def test_what_stays_of_a_job_that_turned_private_is_said(comfy, tmp_path, unstripped):
+    state = []
+    generate = _generation(comfy, tmp_path, during=lambda: state.append(1))
+    elsewhere = tmp_path / "elsewhere" / "output"
+    elsewhere.mkdir(parents=True)
+    ok, message = generate({"output_dir": str(elsewhere)}, "p", tmp_path / "x.png",
+                           privacy=lambda: bool(state), leave_nothing=lambda: bool(state))
+    assert ok is False and message.startswith("Output withheld: WARNING:")
+    assert "output folder" in message and "temp folder" in message
+    assert not (tmp_path / "x.png").exists() and comfy.history == {}
+
+
+def test_a_file_that_keeps_its_metadata_after_the_switch_is_withheld(comfy, tmp_path, unstripped):
+    state = []
+    unstripped.failed = True
+    (tmp_path / "x.png.json").write_text('{"prompt": "SECRET"}')
+    generate = _generation(comfy, tmp_path, during=lambda: state.append(1))
+    ok, message = generate({"output_dir": str(comfy.output)}, "p", tmp_path / "x.png",
+                           privacy=lambda: bool(state), leave_nothing=lambda: bool(state))
+    assert (ok, message) == (False, "Output withheld: could not strip")
+    assert list(tmp_path.glob("x.png*")) == [] and _left(comfy) == [] and comfy.history == {}
+
+
+def test_an_image_sent_before_the_switch_is_removed(comfy, tmp_path, monkeypatch):
+    from tests.media_bytes import png_bytes
+    source = tmp_path / "in.png"
+    source.write_bytes(png_bytes())
+    comfy.upload_bytes, comfy.upload_replies = png_bytes(), True
+    state = []
+
+    def job():
+        name = cc._upload_image(source, comfy.url)
+
+        def rest():
+            state.append(1)
+            return False, "failed"
+        return cc.UploadedInputCopy(name, comfy.url, delete_outputs=False).run(rest)
+    assert cc.run_leaving_nothing(job, comfy_output_dir=str(comfy.output),
+                                  private=lambda: bool(state)) == (False, "failed")
+    assert list(comfy.input.iterdir()) == []
+
+
+def test_an_unanswered_job_sent_before_the_switch_is_said(comfy):
+    comfy.reply = "lost"
+    state = []
+
+    def job():
+        cc.comfy_submit_prompt(comfy.url, {})
+        state.append(1)
+        return False, "not queued"
+    ok, message = cc.run_leaving_nothing(job, private=lambda: bool(state))
+    assert ok is False and "did not confirm this job" in message
+    assert comfy.sent == [{"prompt": {}}]
+
+
+def test_a_finished_job_is_not_lost_when_its_note_cannot_be_deleted(comfy, monkeypatch):
+    from pathlib import Path
+    from localm.media import held
+    real = Path.unlink
+
+    def unlink(self, missing_ok=False):
+        if self.parent.name == "comfy" and not self.name.endswith(".ended"):
+            raise PermissionError(32, "in use")
+        return real(self, missing_ok=missing_ok)
 
     def job():
         _submit(comfy)
-        comfy.running.append("p1")
         comfy.job("p1", ("output", "a.png"))
-        comfy.history.pop("p1")
-        held.CLOSING.set()
-        status, _v = cc.comfy_poll_until_done(comfy.url, "p1", max_poll_seconds=30)
-        assert status == cc.POLL_CANCELLED
-        comfy.job("p1", ("output", "a.png"))
-        assert cc.comfy_submit_prompt(comfy.url, {})[0] == cc.SUBMIT_ERROR
-        return False, "Generation cancelled."
-    try:
-        assert _run(comfy, job) == (False, "Generation cancelled.")
-    finally:
-        held.CLOSING.clear()
-    assert _left(comfy) == [] and len(comfy.sent) == 1
-    assert cc.wait_private_runs(0)
+        return True, "saved"
+    with monkeypatch.context() as m:
+        m.setattr(Path, "unlink", unlink)
+        assert _run(comfy, job) == (True, "saved")
+
+        def broken():
+            _submit(comfy)
+            raise RuntimeError("the real reason")
+        with pytest.raises(RuntimeError, match="the real reason"):
+            _run(comfy, broken)
+    told: list = []
+    held.discard_all()
+    held.sweep_leftovers(lambda *a: told.append(a))
+    assert told == [] and not held.root_dir().exists()
 
 
 def test_a_job_is_noted_while_it_may_leave_something_in_comfyui(comfy):
@@ -318,8 +466,10 @@ def test_a_job_is_noted_while_it_may_leave_something_in_comfyui(comfy):
     held.discard_all()
     assert len(notes()) == 1
     told: list = []
-    held.sweep_leftovers(told.append)
-    assert len(told) == 1 and "p1" in told[0] and notes() == []
+    held.sweep_leftovers(lambda *a: told.append(a))
+    assert len(told) == 1 and "p1" in told[0][0] and len(notes()) == 1
+    held.dismiss_note(told[0][1])
+    assert notes() == []
 
 
 def test_an_output_that_stays_withholds_the_result(comfy, tmp_path):
@@ -390,7 +540,7 @@ def test_outside_a_private_run_nothing_is_removed(comfy):
 
 @pytest.mark.parametrize("privacy,kept,expected", [
     (True, False, True), (True, True, False), (False, False, False)])
-def test_the_facade_asks_for_it_in_privacy_mode_that_keeps_no_media(
+def test_the_facade_leaves_nothing_in_privacy_mode_that_keeps_no_media(
         privacy, kept, expected, monkeypatch, tmp_path):
     from types import SimpleNamespace
     from localm.plugins import media_config
@@ -405,4 +555,7 @@ def test_the_facade_asks_for_it_in_privacy_mode_that_keeps_no_media(
     facade = media_config.make_backend_facade("localm.plugins.builtin.image", ref, "image")
     s = {"output_dir": "o", "workdir": ""}
     assert facade.generate(s, "p", tmp_path / "x.png", privacy=privacy) == (True, "ok")
-    assert asked == ([{"comfy_output_dir": "o", "comfy_workdir": None}] if expected else [])
+    assert (asked[0]["comfy_output_dir"], asked[0]["comfy_workdir"]) == ("o", None)
+    assert (asked[0]["private"](), asked[0]["clean_finished"]()) == (expected, False)
+    monkeypatch.setattr("localm.audit.privacy_keeps", lambda kind: not kept)
+    assert asked[0]["private"]() is expected

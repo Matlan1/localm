@@ -793,8 +793,9 @@ route cannot be fetched by an API client, so `b64_json` is the default and askin
 `url` is a `400`. In privacy mode nothing is kept: the image is generated into a
 private directory, returned as `b64_json` (the default there; asking for `url` is a
 `400`), and the directory is deleted before the response is sent. An image written after
-the session turned private during the request is returned as `b64_json`, whatever format
-was asked for, with a warning, and not kept.
+the session turned private during the request, and each one after it, is returned as
+`b64_json`, whatever format was asked for, with a warning, and not kept, in ComfyUI
+neither.
 
 The image is returned only when its embedded metadata (which can carry the prompt)
 was stripped and, when ComfyUI's own copy is to be removed, that copy is gone;
@@ -986,7 +987,8 @@ still-reclaiming GPU driver). An API-only instance that a second `localm gui`
 attached to comes back with the GUI mounted again. `POST /v1/server/shutdown`
 unloads and exits without relaunching - a clean alternative to force-closing
 the window or a Ctrl+C that does not always land. Both return immediately
-(`{"restarting": true}` / `{"stopping": true}`) while the actual
+(`{"restarting": true}` / `{"stopping": true}`, the latter with `wait_s`, seconds, while
+a private generation has to be ended first) while the actual
 restart/shutdown runs a moment later, so the response reaches the client
 first.
 

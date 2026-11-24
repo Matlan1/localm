@@ -152,7 +152,7 @@ class TestPrivacyMode:
             self, client, backend, home):
         client.post(URL, json={"prompt": "a cat"})
         assert backend.calls[0]["write_sidecar"] is False
-        assert backend.calls[0]["privacy"] is True
+        assert backend.calls[0]["privacy"]() is True
         assert not (home / "gui_images").exists() or _gallery(home) == []
 
     def test_the_private_directory_is_one_a_crash_leftover_sweep_removes(

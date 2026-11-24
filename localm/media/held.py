@@ -10,7 +10,8 @@ processes that ended without doing so. No owner index, sidecar or other record
 of a held file is written: its owner lives in memory here.
 
 A private ComfyUI job in progress is noted in ``<pid>-<random>/comfy/`` by its
-address and job id, so the next start can say that one was cut off.
+address and job id, so a later server start can say that one was cut off. The
+note stays until the app has shown it.
 
 Whether a folder's process still runs is decided by an OS lock on
 ``<pid>-<random>.lock`` beside it, which the system drops when that process ends
@@ -19,6 +20,7 @@ for any reason."""
 from __future__ import annotations
 
 import atexit
+import contextlib
 import filecmp
 import json
 import os
@@ -29,9 +31,8 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import IO, Callable, Optional
+from typing import IO, Callable, Iterator, Optional
 
-from localm import vram
 from localm.debuglog import logger
 from localm.vram import MEDIA_CLOSING as CLOSING
 
@@ -43,8 +44,16 @@ _REMOVE_RETRY_SECONDS = 0.2
 _LOCK = threading.RLock()
 
 _COMFY_NOTES = "comfy"
+_ENDED = ".ended"
+
+#: The owner of a held file made while no key existed, once one does: nobody's id,
+#: so only the owner key has it.
+OWNER_ONLY = "owner-only"
 
 _END_LIMIT_S = 12.0
+
+_runs: list[list[Callable[[], bool]]] = []
+_runs_cv = threading.Condition()
 
 
 def root_dir() -> Path:
@@ -83,19 +92,22 @@ class _Session:
         os.chmod(root, 0o700)
         self._file = open(self.lock_path, "a+b")
         try:
-            if not (_try_lock(self._file) and self._lock_file_in_place()):
+            if not (_try_lock(self._file) and self.lock_file_in_place()):
                 raise OSError(f"cannot lock {self.lock_path}")
             self.dir.mkdir(mode=0o700)
         except OSError:
             self._file.close()
             raise
 
-    def _lock_file_in_place(self) -> bool:
+    def lock_file_in_place(self) -> bool:
         """Whether the locked file is still the one at ``lock_path``; another
         process's sweep can remove it before the lock is taken."""
         if sys.platform == "win32":
             return True   # An open file cannot be removed there.
-        return os.path.samestat(os.fstat(self._file.fileno()), os.stat(self.lock_path))
+        try:
+            return os.path.samestat(os.fstat(self._file.fileno()), os.stat(self.lock_path))
+        except FileNotFoundError:
+            return False
 
     def release(self) -> None:
         self._file.close()
@@ -115,16 +127,18 @@ def _current() -> Optional[_Session]:
 
 def _open_session() -> _Session:
     """This process's session, created when there is none (which also removes what
-    earlier processes left). Caller holds ``_LOCK``; raises ``OSError``."""
+    earlier processes left), its folder made again when it vanished. Caller holds
+    ``_LOCK``; raises ``OSError``."""
     global _session, _exit_registered
     s = _current()
-    if s is None:
+    if s is None or not s.lock_file_in_place():
         discard_all()
         sweep_leftovers()
         s = _session = _Session(root_dir())
         if not _exit_registered:
             atexit.register(discard_all)
             _exit_registered = True
+    s.dir.mkdir(mode=0o700, exist_ok=True)
     return s
 
 
@@ -141,43 +155,84 @@ def folder(kind: str) -> Path:
         return d
 
 
-def note_comfy_job(token: str, api_url: str, prompt_id: str) -> None:
+def note_comfy_job(token: str, api_url: str, prompt_id: str) -> Optional[Path]:
     """Record, with no content, that a private job was sent to the ComfyUI at
-    *api_url*, until :func:`forget_comfy_job` of *token*. Never raises ``OSError``:
-    without the record a job cut off by a crash is not reported at the next start."""
+    *api_url*, in the note that is returned, until :func:`forget_comfy_job` of it.
+    Never raises ``OSError``: without the record (None) a job cut off by a crash is
+    not reported at the next start."""
     try:
         with _LOCK:
-            d = _open_session().dir / _COMFY_NOTES
-            d.mkdir(mode=0o700, exist_ok=True)
-            (d / token).write_text(json.dumps([api_url, prompt_id]), encoding="utf-8")
+            note = _open_session().dir / _COMFY_NOTES / token
+            note.parent.mkdir(mode=0o700, exist_ok=True)
+            note.write_text(json.dumps([api_url, prompt_id]), encoding="utf-8")
+            return note
     except OSError as e:
         logger.warning("held media: a private ComfyUI job could not be noted (%s); if localm "
                        "is killed now, its next start does not report it", e)
+        return None
 
 
-def forget_comfy_job(token: str) -> None:
-    """Drop the note of :func:`note_comfy_job`."""
+def forget_comfy_job(note: Path) -> None:
+    """Drop the *note* of an ended job. One that cannot be deleted now is marked as
+    ended and deleted later. Never raises ``OSError``."""
     with _LOCK:
-        s = _current()
-        if s is not None:
-            (s.dir / _COMFY_NOTES / token).unlink(missing_ok=True)
+        try:
+            note.unlink(missing_ok=True)
+        except OSError:
+            try:
+                note.with_name(note.name + _ENDED).touch()
+            except OSError as e:
+                logger.warning("held media: the note of an ended ComfyUI job stays (%s); a "
+                               "later start may report that job as cut off", e)
 
 
-def _cut_off_jobs(session_dir: Path) -> list[str]:
-    """What to tell the owner about the ComfyUI jobs noted in *session_dir*."""
+def _drop_ended_notes(session_dir: Path) -> bool:
+    """Delete the notes marked as ended in *session_dir*. Returns whether they are
+    gone."""
+    gone = True
+    for mark in list((session_dir / _COMFY_NOTES).glob("*" + _ENDED)):
+        try:
+            mark.with_name(mark.name.removesuffix(_ENDED)).unlink(missing_ok=True)
+            mark.unlink(missing_ok=True)
+        except OSError as e:
+            gone = False
+            logger.debug("held media: the note of an ended ComfyUI job stays (%s)", e)
+    return gone
+
+
+def _cut_off_jobs(session_dir: Path) -> list[tuple[str, Path]]:
+    """What to tell the owner about each ComfyUI job noted in *session_dir* that did
+    not end, with its note."""
     told = []
     d = session_dir / _COMFY_NOTES
-    for p in sorted(d.iterdir()) if d.is_dir() else ():
+    names = {p.name for p in d.iterdir()} if d.is_dir() else set()
+    for name in sorted(names):
+        if name.endswith(_ENDED) or name + _ENDED in names:
+            continue
+        p = d / name
         try:
             url, prompt_id = json.loads(p.read_text(encoding="utf-8"))
             url, prompt_id = (re.sub(r"[^\x21-\x7e]", "", str(x))[:200]
                               for x in (url, prompt_id))
         except (OSError, ValueError, TypeError, RecursionError):
             url, prompt_id = "an unknown address", "unknown"
-        told.append(f"A private ComfyUI job was cut off when localm ended. The ComfyUI at {url} "
-                    "may still run it or keep its files, the image it was given and its history "
-                    f"entry (job {prompt_id}): remove them there.")
+        told.append((f"A private ComfyUI job was cut off when localm ended. The ComfyUI at {url} "
+                     "may still run it or keep its files, the image it was given and its history "
+                     f"entry (job {prompt_id}): remove them there.", p))
     return told
+
+
+def dismiss_note(note: Path) -> None:
+    """Delete the *note* of a cut-off ComfyUI job, which the owner has seen, and what
+    is empty around it. Never raises ``OSError``."""
+    with _LOCK:
+        try:
+            note.unlink(missing_ok=True)
+            note.parent.rmdir()
+            note.parent.parent.rmdir()
+        except OSError as e:
+            logger.debug("held media: %s stays (%s)", note.parent, e)
+        _drop_empty(root_dir())
 
 
 def current_folder(kind: str) -> Optional[Path]:
@@ -229,9 +284,14 @@ def tracks(kind: str, name: str) -> bool:
 
 
 def owner_of(kind: str, name: str) -> Optional[str]:
-    """The recorded owner of the held file *name*, or None."""
+    """The recorded owner of the held file *name*, or None. A file recorded without
+    one is :data:`OWNER_ONLY` while a key exists."""
     s = _current()
-    return None if s is None else s.owners.get((kind, name))
+    owner = None if s is None else s.owners.get((kind, name))
+    if owner is None and tracks(kind, name):
+        from localm.auth import any_key_configured
+        return OWNER_ONLY if any_key_configured() else None
+    return owner
 
 
 def rename(kind: str, old: str, new: str) -> None:
@@ -250,12 +310,16 @@ def forget(kind: str, name: str) -> None:
             s.owners.pop((kind, name), None)
 
 
-def save_copy(source: Path, target: Path) -> None:
+def save_copy(source: Path, target: Path,
+              created: Optional[Callable[[], None]] = None) -> None:
     """Copy the held file *source* to the new file *target*, which gets the rights
-    of its own folder, and compare the two. Raises ``OSError``, leaving no
-    *target*, when it cannot (``FileExistsError`` when *target* exists)."""
+    of its own folder, and compare the two. *created* is called once *target*
+    exists, before its content does. Raises ``OSError``, leaving no *target*, when
+    it cannot (``FileExistsError`` when *target* exists)."""
     with open(target, "xb") as dst:
         try:
+            if created is not None:
+                created()
             with open(source, "rb") as src:
                 shutil.copyfileobj(src, dst)
             dst.close()
@@ -287,17 +351,17 @@ def _remove_tree(path: Path) -> bool:
     return False
 
 
-def _clear(session_dir: Path, keep_notes: bool) -> bool:
-    """Delete *session_dir*, or with *keep_notes* all of it but its ComfyUI notes
-    when there are any. Returns whether that is gone."""
-    if keep_notes and _cut_off_jobs(session_dir):
+def _clear(session_dir: Path) -> bool:
+    """Delete *session_dir*, or all of it but its ComfyUI notes while one must stay.
+    Returns whether that is gone."""
+    if not _drop_ended_notes(session_dir) or _cut_off_jobs(session_dir):
         return all([_remove_tree(p) for p in session_dir.iterdir() if p.name != _COMFY_NOTES])
     return _remove_tree(session_dir)
 
 
 def discard_all() -> bool:
     """Delete everything this process holds, except the notes of ComfyUI jobs that
-    did not end, which the next start reports. Returns False when a file could not
+    did not end, which a later start reports. Returns False when a file could not
     be deleted (logged as a warning); the next :func:`sweep_leftovers` tries
     again."""
     global _session
@@ -306,7 +370,7 @@ def discard_all() -> bool:
         _session = None
         if s is None or s.pid != os.getpid():
             return True
-        gone = _clear(s.dir, keep_notes=True)
+        gone = _clear(s.dir)
         s.release()
         if gone:
             _unlink_lock(s.lock_path)
@@ -328,15 +392,14 @@ def _drop_empty(root: Path) -> None:
         pass   # See test_the_root_stays_while_another_process_holds_media.
 
 
-def sweep_leftovers(tell: Optional[Callable[[str], None]] = None) -> int:
+def sweep_leftovers(tell: Optional[Callable[[str, Path], None]] = None) -> int:
     """Delete the folders of processes that are gone, and the owner index entries
     of the files in them. Returns how many folders were deleted. Each ComfyUI job
-    such a process left unfinished is logged as a warning and given to *tell*;
-    without *tell* its note stays for the next call that has one. Never raises
-    ``OSError``; a folder that could not be deleted is logged as a warning and tried
-    again at the next call."""
+    such a process left unfinished is given to *tell*, with the note that stays
+    until :func:`dismiss_note`. Never raises ``OSError``; a folder that could not be
+    deleted is logged as a warning and tried again at the next call."""
     removed = 0
-    told: list[str] = []
+    told: list[tuple[str, Path]] = []
     names: list[tuple[str, str]] = []
     root = root_dir()
     with _LOCK:
@@ -355,28 +418,30 @@ def sweep_leftovers(tell: Optional[Callable[[str], None]] = None) -> int:
             lock, left = root / f"{sid}.lock", root / sid
             if own is not None and sid == own.id:
                 continue
-            if lock.exists() and not _process_gone(lock):
-                continue
-            if _is_plain_dir(left):
-                cut_off = _cut_off_jobs(left)
-                files_left = [(p.parent.name, p.name) for p in left.glob("*/*")]
-                if not _clear(left, keep_notes=tell is None):
+            with _of_gone_process(lock) as gone:
+                if not gone:
                     continue
-                names += [n for n in files_left if n[0] in KINDS]
-                if not left.exists():
-                    removed += 1
-                    told += cut_off
-            _unlink_lock(lock)
+                if _is_plain_dir(left):
+                    files_left = [(p.parent.name, p.name) for p in left.glob("*/*")]
+                    if not _clear(left):
+                        continue
+                    names += [n for n in files_left if n[0] in KINDS]
+                    removed += not left.exists()
+                    told += _cut_off_jobs(left)
+                if sys.platform != "win32":
+                    _unlink_lock(lock)
+            if sys.platform == "win32":
+                _unlink_lock(lock)
         _drop_empty(root)
     if removed:
         logger.info("removed generated media left by %d earlier run(s)", removed)
     if names:
         from localm.media import gallery
         gallery.forget_never_kept(names)
-    for text in told:
-        logger.warning("%s", text)
-        if tell is not None:
-            tell(text)
+    if tell is not None:
+        for text, note in told:
+            logger.warning("%s", text)
+            tell(text, note)
     return removed
 
 
@@ -384,37 +449,64 @@ def _is_plain_dir(path: Path) -> bool:
     return path.is_dir() and not path.is_symlink() and not path.is_junction()
 
 
-def _process_gone(lock: Path) -> bool:
-    """True when no process holds the lock file *lock*."""
+@contextlib.contextmanager
+def _of_gone_process(lock: Path) -> Iterator[bool]:
+    """Whether no process holds the lock file *lock* (none does when there is no such
+    file). When so, the lock is taken for the ``with`` block."""
     try:
-        with open(lock, "a+b") as f:
-            return _try_lock(f)
+        f = open(lock, "r+b")
     except FileNotFoundError:
-        return False
+        yield True
+        return
     except OSError as e:
         logger.warning("held media: cannot check %s (%s); its folder is left alone", lock, e)
-        return False
+        yield False
+        return
+    with f:
+        yield _try_lock(f)
 
 
-def end_media_work() -> bool:
-    """Cancel every media job running in this process the way a user's Stop does,
-    refuse new ones, and wait (``_END_LIMIT_S`` at most) until they have ended and
-    removed what they left in ComfyUI. Returns whether they ended; a job that did
-    not is logged as a warning. :func:`discard_media_work` follows it."""
-    CLOSING.set()
-    from localm.media import comfy_client
-    deadline = time.monotonic() + _END_LIMIT_S
-    ended = vram.end_media_jobs(_END_LIMIT_S)
-    ended = comfy_client.wait_private_runs(deadline - time.monotonic()) and ended
-    if not ended:
-        logger.warning("a media job did not end within %g s of the stop; what it writes from "
-                       "now on is removed at the next start", _END_LIMIT_S)
-    return ended
+@contextlib.contextmanager
+def run(not_kept: Callable[[], bool],
+        cancel: Optional[Callable[[], None]] = None) -> Iterator[Callable[[], bool]]:
+    """Hold this while a generation runs whose result must not be kept once
+    *not_kept* says so; *not_kept* is called from other threads. Yields a function:
+    whether the generation must end because localm is stopping, which then calls
+    *cancel*."""
+    entry = [not_kept]
 
-
-def discard_media_work() -> None:
-    """The end of a stop: :func:`discard_all`, then media jobs may run again."""
+    def ending() -> bool:
+        if not (CLOSING.is_set() and not_kept()):
+            return False
+        if cancel is not None:
+            cancel()
+        return True
+    with _runs_cv:
+        _runs.append(entry)
     try:
-        discard_all()
+        yield ending
     finally:
-        CLOSING.clear()
+        with _runs_cv:
+            _runs[:] = [r for r in _runs if r is not entry]
+            _runs_cv.notify_all()
+
+
+def private_run_wait() -> float:
+    """How many seconds a stop waits at most for the generations running now whose
+    result must not be kept; 0 when there is none."""
+    with _runs_cv:
+        return _END_LIMIT_S if any(not_kept() for (not_kept,) in _runs) else 0.0
+
+
+def end_private_runs() -> bool:
+    """End every running generation whose result must not be kept, refuse new ones,
+    and wait (``_END_LIMIT_S`` at most) until they have ended and removed what they
+    left in ComfyUI. Other generations are left alone. Returns whether they ended;
+    one that did not is logged as a warning. ``CLOSING`` stays set."""
+    CLOSING.set()
+    with _runs_cv:
+        ended = _runs_cv.wait_for(lambda: not private_run_wait(), _END_LIMIT_S)
+    if not ended:
+        logger.warning("a private generation did not end within %g s of the stop; what it "
+                       "writes from now on is removed at the next start", _END_LIMIT_S)
+    return ended

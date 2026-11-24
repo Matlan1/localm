@@ -218,19 +218,25 @@ HELD_NOTE = ("Privacy mode: this is not kept. It is removed when localm stops; s
              "to keep it.")
 
 
-def settle(media_kind: str, path: Path, keeps: Optional[Callable[[], bool]]) -> Path:
+def settle(media_kind: str, path: Path, keeps: Optional[Callable[[], bool]],
+           private: Callable[[], bool]) -> Path:
     """Where the file *path* a job has just written stays: *path* itself, or, when
     it is in the gallery and *keeps* now answers False, the held folder it is moved
-    to without its sidecar. Raises ``OSError`` when it cannot be moved; it is then
-    deleted."""
-    if keeps is None or _held.is_held(path) or keeps():
+    to. Its sidecar is deleted when *private* answers True. Raises ``OSError`` when
+    it cannot be moved; it is then deleted."""
+    if keeps is None or _held.is_held(path):
         return path
+    kept = keeps()
+    target = path
     try:
-        target = _held.folder(media_kind) / path.name
-        _held.save_copy(path, target)
+        if not kept:
+            target = _held.folder(media_kind) / path.name
+            _held.save_copy(path, target)
     finally:
-        path.unlink(missing_ok=True)
-        path.with_suffix(path.suffix + ".json").unlink(missing_ok=True)
+        if not kept:
+            path.unlink(missing_ok=True)
+        if not kept or private():
+            path.with_suffix(path.suffix + ".json").unlink(missing_ok=True)
     return target
 
 
@@ -411,19 +417,32 @@ def move_out(request: Request, media_kind: str, path: Path, dest: str, show) -> 
         owner = owner_of(media_kind, path.name)
     except GalleryIndexUnreadable:
         owner = None
-    if into is not None:
-        warning = stamp_owner(into, path.name, owner)
+    stamped = None
+
+    def stamp() -> None:
+        nonlocal stamped
+        stamped = into
+        warning = stamp_owner(into, path.name, owner) if into is not None else None
         if warning:
             out["warning"] = warning
     was_held = _held.is_held(path)
     try:
         if was_held:
-            _held.save_copy(path, target)
-        else:
+            _held.save_copy(path, target, stamp)
+        elif into is None:
             shutil.move(str(path), str(target))
+        else:
+            open(target, "xb").close()
+            try:
+                stamp()
+                shutil.move(str(path), str(target))
+            except BaseException:
+                if path.exists():
+                    target.unlink(missing_ok=True)
+                raise
     except OSError as e:
-        if into is not None:
-            _forget_entry(into, path.name)
+        if stamped is not None:
+            _forget_entry(stamped, path.name)
         raise HTTPException(400, f"Cannot move: {show(e)}") from e
     if was_held:
         try:

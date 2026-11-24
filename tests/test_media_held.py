@@ -150,11 +150,78 @@ def test_a_killed_process_leaves_its_media_until_the_next_start_removes_it():
         assert (folder / "image" / "left.png").is_file()
         kill()
         assert (folder / "image" / "left.png").is_file()
+        assert held.sweep_leftovers() == 0
+        assert not (folder / "image").exists()
+        assert not folder.with_name(folder.name + ".lock").exists()
         told: list = []
-        assert held.sweep_leftovers(told.append) == 1
-        assert not folder.exists() and not folder.with_name(folder.name + ".lock").exists()
-        assert len(told) == 1 and "http://127.0.0.1:8188" in told[0] and "job-1" in told[0]
-        assert held.sweep_leftovers(told.append) == 0 and len(told) == 1
+        held.sweep_leftovers(lambda *a: told.append(a))
+        held.sweep_leftovers(lambda *a: told.append(a))
+        assert len(told) == 2 and told[0] == told[1]
+        assert "http://127.0.0.1:8188" in told[0][0] and "job-1" in told[0][0]
+        held.dismiss_note(told[0][1])
+        assert not held.root_dir().exists()
+
+
+def test_a_sweep_holds_the_lock_of_the_folder_it_removes(monkeypatch):
+    with _other_process() as (kill, folder):
+        kill()
+        lock = folder.with_name(folder.name + ".lock")
+        real, taken = held._clear, []
+
+        def clear(path):
+            with open(lock, "a+b") as f:
+                taken.append(held._try_lock(f))
+            return real(path)
+        monkeypatch.setattr(held, "_clear", clear)
+        held.sweep_leftovers()
+    assert taken == [False]
+
+
+def test_the_folder_of_this_process_is_made_again_when_it_vanished():
+    import shutil
+    d = held.folder("image")
+    shutil.rmtree(d.parent)
+    assert held.folder("image") == d and d.is_dir()
+    shutil.rmtree(d.parent)
+    note = held.note_comfy_job("t", "http://127.0.0.1:8188", "job-1")
+    assert note is not None and note.is_file()
+
+
+def _locked(monkeypatch, note):
+    real = Path.unlink
+
+    def unlink(self, missing_ok=False):
+        if self == note:
+            raise PermissionError(32, "in use")
+        return real(self, missing_ok=missing_ok)
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+
+def test_a_note_that_cannot_be_deleted_is_not_a_cut_off_job(monkeypatch):
+    note = held.note_comfy_job("t", "http://127.0.0.1:8188", "job-1")
+    other = held.note_comfy_job("u", "http://127.0.0.1:8188", "job-2")
+    with monkeypatch.context() as m:
+        _locked(m, note)
+        held.forget_comfy_job(note)
+        assert note.is_file()
+        held.discard_all()
+        assert note.is_file()
+        told: list = []
+        held.sweep_leftovers(lambda *a: told.append(a[1]))
+    assert told == [other]
+    held.sweep_leftovers()
+    assert not note.exists() and other.is_file()
+    held.dismiss_note(other)
+    assert not held.root_dir().exists()
+
+
+def test_a_note_that_could_not_be_deleted_goes_when_localm_stops(monkeypatch):
+    note = held.note_comfy_job("t", "http://127.0.0.1:8188", "job-1")
+    with monkeypatch.context() as m:
+        _locked(m, note)
+        held.forget_comfy_job(note)
+    assert held.discard_all() is True
+    assert not held.root_dir().exists()
 
 
 def test_a_live_folder_whose_lock_the_listing_missed_is_left_alone(monkeypatch):
@@ -295,15 +362,38 @@ def test_a_start_tells_the_owner_of_a_comfyui_job_that_was_cut_off(capsys):
     note = held.root_dir() / "123-abc" / "comfy" / "t"
     note.parent.mkdir(parents=True)
     note.write_text('["http://127.0.0.1:8188", "job-1"]', encoding="utf-8")
-    jobs = JobManager(reconcile=False)
-    with patch("localm.auth.any_key_configured", return_value=True):
-        http_server._remove_leftovers(SimpleNamespace(state=SimpleNamespace(jobs=jobs)))
-        http_server._remove_leftovers(SimpleNamespace(state=SimpleNamespace(jobs=jobs)))
-    rows = jobs.snapshot()
-    assert len(rows) == 1 and rows[0]["status"] == "interrupted" and "job-1" in rows[0]["label"]
-    assert rows[0]["note"] is True
-    assert jobs.snapshot(visible=lambda owner: owner in (None, "key:ka")) == []
-    assert "cut off" in capsys.readouterr().out
+    held.sweep_leftovers()
+    written: list = []
+    for _start in range(2):
+        jobs = JobManager(reconcile=False)
+        jobs._TTL_S = -1
+        jobs._store = SimpleNamespace(write=written.append, clear=lambda: None)
+        with patch("localm.auth.any_key_configured", return_value=True):
+            http_server._remove_leftovers(SimpleNamespace(state=SimpleNamespace(jobs=jobs)))
+        jobs._gc()
+        jobs._persist()
+        rows = jobs.snapshot()
+        assert len(rows) == 1 and rows[0]["status"] == "interrupted"
+        assert "job-1" in rows[0]["label"] and rows[0]["note"] is True
+        assert jobs.snapshot(visible=lambda owner: owner in (None, "key:ka")) == []
+        assert "cut off" in capsys.readouterr().out
+    assert written == []
+    job = jobs.get(rows[0]["id"])
+    assert jobs.note_shown(job) is True and jobs.note_shown(job) is False
+    assert "note" not in jobs.snapshot()[0] and not held.root_dir().exists()
+    jobs._gc()
+    assert jobs.snapshot() == []
+
+
+def test_the_app_says_that_it_showed_a_note(server):
+    app, client = server
+    shown: list = []
+    app.state.jobs.add_note("imagine", "A private job was cut off.", None,
+                            lambda: shown.append(1))
+    op = next(o for o in client.get("/api/activity").json()["operations"] if o.get("note"))
+    url = f"/api/jobs/{op['id']}/cancel"
+    assert client.post(url).json() == {"status": "shown"} and shown == [1]
+    assert client.post(url).json()["status"] == "not_running" and shown == [1]
 
 
 def test_a_damaged_note_is_still_told():
@@ -311,8 +401,8 @@ def test_a_damaged_note_is_still_told():
     note.parent.mkdir(parents=True)
     note.write_bytes(b"[" * 4000)
     told: list = []
-    held.sweep_leftovers(told.append)
-    assert len(told) == 1 and "unknown" in told[0]
+    held.sweep_leftovers(lambda *a: told.append(a))
+    assert len(told) == 1 and "unknown" in told[0][0]
 
 
 def test_starting_the_server_removes_what_a_killed_one_left():
@@ -430,20 +520,32 @@ def test_outside_privacy_mode_nothing_changes(server, kind, monkeypatch):
     assert "cache-control" not in client.get(f"{path}/file/{job.result}").headers
 
 
-@pytest.mark.parametrize("stop", ["_shutdown_teardown", "_do_restart"])
-@pytest.mark.parametrize("kind", list(KINDS))
-def test_a_stop_ends_a_running_job_and_leaves_nothing(server, kind, stop, monkeypatch):
-    """The job is cancelled and ended before held media is removed, also when its
-    writer finishes the file after the cancel."""
+def _no_exec(monkeypatch):
     from localm.inference import http_server
-    app, client = server
-    path, body, target, folder, _key = KINDS[kind]
-    monkeypatch.setattr(f"localm.plugins.builtin.{kind}.plug.principal_id", lambda r: "key:ka")
     monkeypatch.setattr(http_server, "_execv_restart", lambda *a, **k: None)
     monkeypatch.setattr(http_server, "_mark_fds_noninheritable", lambda: None)
     monkeypatch.setattr(http_server, "_set_restart_env", lambda: None)
     monkeypatch.setattr(http_server, "_finish_pending_runtime_update", lambda: False)
     monkeypatch.setattr(http_server, "_finish_comgr_temp", lambda: None)
+
+
+def _ended(job):
+    deadline = time.monotonic() + 20
+    while job.finished_at is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return job.status
+
+
+@pytest.mark.parametrize("stop", ["_shutdown_teardown", "_do_restart"])
+@pytest.mark.parametrize("kind", list(KINDS))
+def test_a_stop_ends_a_private_job_and_leaves_nothing(server, kind, stop, monkeypatch):
+    """The job is ended before held media is removed, also when its writer finishes
+    the file after the cancel."""
+    from localm.inference import http_server
+    app, client = server
+    path, body, target, folder, _key = KINDS[kind]
+    monkeypatch.setattr(f"localm.plugins.builtin.{kind}.plug.principal_id", lambda r: "key:ka")
+    _no_exec(monkeypatch)
     started = threading.Event()
     cancelled = []
 
@@ -461,14 +563,164 @@ def test_a_stop_ends_a_running_job_and_leaves_nothing(server, kind, stop, monkey
     with patch(target, fake), patch.object(http_server, "_engines", {}), \
             patch.object(http_server, "_engine", None):
         job = app.state.jobs.get(client.post(path, json=body).json()["job_id"])
-        assert started.wait(20)
+        assert started.wait(20) and held.private_run_wait() == held._END_LIMIT_S
         getattr(http_server, stop)()
-    assert cancelled == [True] and job.status == "cancelled"
+    assert cancelled == [True] and held.private_run_wait() == 0
+    assert _ended(job) == "cancelled"
     assert _media_files() == [] and not (_home() / "gallery_index").exists()
     assert not (_home() / folder).exists() and not held.CLOSING.is_set()
 
 
-def test_no_media_job_starts_and_no_chat_model_reloads_while_localm_stops(server):
+@pytest.mark.parametrize("kind,stop,mode,keep", [
+    *[(kind, stop, "log", []) for kind in KINDS for stop in ("_shutdown_teardown", "_do_restart")],
+    ("image", "_shutdown_teardown", "privacy", ["media"]),
+    ("image", "_shutdown_teardown", "full", [])])
+def test_a_stop_neither_ends_nor_awaits_a_job_whose_result_is_kept(
+        server, kind, stop, mode, keep, monkeypatch):
+    from localm.inference import http_server
+    app, client = server
+    path, body, target, _folder, _key = KINDS[kind]
+    _config(mode=mode, privacy_keep=keep)
+    _no_exec(monkeypatch)
+    monkeypatch.setattr(held, "_END_LIMIT_S", 60.0)
+    started, finish = threading.Event(), threading.Event()
+    cancelled = []
+
+    def fake(prompt, out, cancel_check=None, **kwargs):
+        started.set()
+        while not finish.wait(0.02):
+            cancelled.append(cancel_check())
+        cancelled.append(cancel_check())
+        Path(out).write_bytes(BYTES[kind]())
+        return True, "saved"
+
+    stopped = threading.Event()
+    with patch(target, fake), patch.object(http_server, "_engines", {}), \
+            patch.object(http_server, "_engine", None):
+        job = app.state.jobs.get(client.post(path, json=body).json()["job_id"])
+        assert started.wait(20) and held.private_run_wait() == 0
+        t = threading.Thread(target=lambda: (getattr(http_server, stop)(), stopped.set()))
+        t.start()
+        try:
+            assert stopped.wait(40)
+            assert job.status == "running"
+        finally:
+            finish.set()
+            t.join(30)
+        assert _ended(job) == "done"
+    assert not any(cancelled)
+
+
+def test_a_job_that_turns_private_before_the_stop_is_ended(server, monkeypatch):
+    from localm.inference import http_server
+    app, client = server
+    _config(mode="log")
+    started = threading.Event()
+
+    def fake(prompt, out, cancel_check=None, **kwargs):
+        started.set()
+        deadline = time.monotonic() + 20
+        while not cancel_check() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return not cancel_check(), "Generation cancelled."
+    with patch(KINDS["image"][2], fake), patch.object(http_server, "_engines", {}), \
+            patch.object(http_server, "_engine", None):
+        job = app.state.jobs.get(client.post("/api/imagine", json={"prompt": "x"}).json()["job_id"])
+        assert started.wait(20) and held.private_run_wait() == 0
+        _config(mode="privacy")
+        assert held.private_run_wait() == held._END_LIMIT_S
+        http_server._shutdown_teardown()
+        assert held.private_run_wait() == 0 and _ended(job) == "cancelled"
+
+
+def test_a_job_that_only_reloads_the_chat_model_is_left_alone(server, monkeypatch):
+    app, client = server
+    reloading, go_on = threading.Event(), threading.Event()
+
+    @contextlib.contextmanager
+    def restore(*a, **k):
+        yield
+        reloading.set()
+        go_on.wait(20)
+    monkeypatch.setattr("localm.plugins.builtin.image.plug.restore_chat_after_media", restore)
+
+    def fake(prompt, out, **kwargs):
+        Path(out).write_bytes(media_bytes.png_bytes())
+        return True, "saved"
+    with patch(KINDS["image"][2], fake):
+        job = app.state.jobs.get(client.post("/api/imagine", json={"prompt": "x"}).json()["job_id"])
+        assert reloading.wait(20)
+        assert held.private_run_wait() == 0 and held.end_private_runs() is True
+        assert not job.cancel_requested
+        go_on.set()
+        assert _ended(job) == "done"
+
+
+def test_a_restart_that_fails_lets_media_jobs_run_again(monkeypatch):
+    from localm.inference import http_server
+    _no_exec(monkeypatch)
+    closing = []
+
+    def refuse(*a, **k):
+        closing.append(held.CLOSING.is_set())
+        raise OSError("cannot start")
+    monkeypatch.setattr(http_server, "_execv_restart", refuse)
+    with patch.object(http_server, "_engines", {}), patch.object(http_server, "_engine", None), \
+            pytest.raises(OSError, match="cannot start"):
+        http_server._do_restart()
+    assert closing == [True] and not held.CLOSING.is_set()
+    assert held.folder("image").is_dir()
+
+
+@pytest.mark.parametrize("stop", ["_shutdown_teardown", "_do_restart"])
+def test_held_media_goes_before_the_gpu_temp_folders(stop, monkeypatch):
+    from localm.inference import http_server
+    d = held.folder("image")
+    _no_exec(monkeypatch)
+    there = []
+    monkeypatch.setattr(http_server, "_finish_comgr_temp", lambda: there.append(d.exists()))
+    with patch.object(http_server, "_engines", {}), patch.object(http_server, "_engine", None):
+        getattr(http_server, stop)()
+    assert there == [False]
+
+
+def test_the_last_gpu_temp_cleanup_does_not_wait_for_a_running_probe(monkeypatch):
+    from localm import comgr_temp
+    from localm.inference.backends.llamacpp import _loader
+    killed = []
+    monkeypatch.setattr(_loader, "_kill_and_clear_probe", lambda: killed.append(1))
+    done = threading.Event()
+    with _loader._PROBE_LOCK:
+        t = threading.Thread(target=lambda: (comgr_temp.finish(), done.set()), daemon=True)
+        t.start()
+        assert done.wait(15)
+    assert killed == []
+
+
+def test_the_stop_route_says_how_long_a_private_generation_may_take(server, monkeypatch):
+    from localm import instances
+    from localm.inference import http_server
+    _app, client = server
+    asked = []
+    monkeypatch.setattr(http_server, "_do_shutdown", lambda **k: asked.append(1))
+    with held.run(lambda: False):
+        reply = client.post("/v1/server/shutdown")
+        assert reply.json() == {"stopping": True}
+        assert instances.shutdown_wait(reply) == 10
+    with held.run(lambda: True):
+        reply = client.post("/v1/server/shutdown")
+        assert reply.json() == {"stopping": True, "wait_s": 12.0}
+        assert instances.shutdown_wait(reply) == 22
+    deadline = time.monotonic() + 10
+    while len(asked) < 2 and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert asked == [1, 1]
+    for value in ("x", None, [], -5, float("nan"), 1e9):
+        assert 10 <= instances.shutdown_wait(SimpleNamespace(
+            json=lambda v=value: {"wait_s": v})) <= 70
+
+
+def test_no_private_job_starts_and_no_chat_model_reloads_while_localm_stops(server):
     app, client = server
     from localm import vram
     held.CLOSING.set()
@@ -485,11 +737,9 @@ def test_no_media_job_starts_and_no_chat_model_reloads_while_localm_stops(server
 
 
 def test_a_job_that_does_not_end_is_reported_and_stops_nothing_else(monkeypatch, caplog):
-    from localm import vram
     monkeypatch.setattr(held, "_END_LIMIT_S", 0.1)
-    monkeypatch.setattr(vram, "_handover_inflight", [MagicMock()])
-    with caplog.at_level("WARNING", logger="localm"):
-        assert held.end_media_work() is False
+    with caplog.at_level("WARNING", logger="localm"), held.run(lambda: True):
+        assert held.end_private_runs() is False
     assert any("did not end within" in r.getMessage() for r in caplog.records)
 
 
@@ -543,6 +793,63 @@ def test_a_held_file_that_cannot_be_moved_stays(server, tmp_path, monkeypatch):
         _home() / "gallery_index" / "image.json").read_text()
 
 
+@pytest.mark.parametrize("was_held", [True, False])
+def test_a_move_never_drops_the_row_of_a_file_that_came_first(server, was_held, monkeypatch):
+    from localm.media import gallery
+    _app, client = server
+    if not was_held:
+        _config(privacy_keep=["media"])
+    job, (out, _k) = _generate(server, "image")
+    target = _home() / "gui_video" / job.result
+    target.parent.mkdir(parents=True, exist_ok=True)
+    real = Path.exists
+
+    def first(self):
+        if self == target and not real(self):
+            target.write_bytes(b"theirs")
+            gallery.stamp_owner("video", target.name, "key:kb")
+            return False
+        return real(self)
+    with monkeypatch.context() as m:
+        m.setattr(Path, "exists", first)
+        r = client.post(f"/api/imagine/file/{job.result}/move", json={"dest": str(target.parent)})
+    assert r.status_code == 400, r.text
+    assert target.read_bytes() == b"theirs" and out.is_file()
+    assert gallery.owner_of("video", target.name) == "key:kb"
+
+
+def test_a_kept_file_moved_to_another_gallery_belongs_to_its_owner_there(server, monkeypatch):
+    from localm.media import gallery
+    _app, client = server
+    _config(privacy_keep=["media"])
+    monkeypatch.setattr("localm.plugins.builtin.image.plug.principal_id", lambda r: "key:ka")
+    monkeypatch.setattr("localm.inference.http_server.job_owner_ok", lambda r, owner: True)
+    job, (out, _k) = _generate(server, "image")
+    data = out.read_bytes()
+    r = client.post(f"/api/imagine/file/{job.result}/move",
+                    json={"dest": str(_home() / "gui_video")})
+    assert r.status_code == 200, r.text
+    assert (_home() / "gui_video" / job.result).read_bytes() == data and not out.exists()
+    assert gallery.owner_of("video", job.result) == "key:ka"
+    assert gallery.owner_of("image", job.result) is None
+
+
+def test_a_result_made_before_any_key_is_the_owners_once_there_is_one(monkeypatch):
+    from localm import auth
+    from localm.media import gallery
+    d = held.folder("image")
+    (d / "a.png").write_bytes(b"x")
+    gallery.record_owner("image", d / "a.png", None)
+    monkeypatch.setattr(auth, "any_key_configured", lambda: False)
+    assert gallery.owner_of("image", "a.png") is None
+    monkeypatch.setattr(auth, "any_key_configured", lambda: True)
+    assert gallery.owner_of("image", "a.png") == held.OWNER_ONLY
+    assert held.owner_of("image", "untracked.png") is None
+    monkeypatch.setattr("localm.inference.http_server.caller_is_admin_key", lambda r: False)
+    monkeypatch.setattr("localm.inference.http_server.principal_id", lambda r: "key:kb")
+    assert gallery.held_items(None, "image", str) == []
+
+
 @pytest.mark.parametrize("kind", list(KINDS))
 def test_a_result_moved_into_the_gallery_keeps_its_owner(server, kind, monkeypatch):
     from localm.media import gallery
@@ -564,22 +871,27 @@ def test_a_result_written_after_the_mode_turned_private_is_not_kept():
     d.mkdir(parents=True)
     for name in ("a.png", "a.png.json", "b.png"):
         (d / name).write_bytes(b"x")
-    assert gallery.settle("image", d / "b.png", lambda: True) == d / "b.png"
-    moved = gallery.settle("image", d / "a.png", lambda: False)
+    (d / "b.png.json").write_bytes(b"x")
+    assert gallery.settle("image", d / "b.png", lambda: True, lambda: False) == d / "b.png"
+    assert (d / "b.png.json").is_file()
+    assert gallery.settle("image", d / "b.png", lambda: True, lambda: True) == d / "b.png"
+    moved = gallery.settle("image", d / "a.png", lambda: False, lambda: True)
     assert held.is_held(moved) and moved.read_bytes() == b"x"
     assert [p.name for p in d.iterdir()] == ["b.png"]
     held.CLOSING.set()
     with pytest.raises(OSError, match="stopping"):
-        gallery.settle("image", d / "b.png", lambda: False)
+        gallery.settle("image", d / "b.png", lambda: False, lambda: True)
     assert list(d.iterdir()) == []
 
 
 @pytest.mark.parametrize("kind", list(KINDS))
 def test_each_job_asks_again_when_its_result_is_written(server, kind, monkeypatch):
     monkeypatch.setenv("LOCALM_MODE", "log")
-    answers = iter([True, True])
+    written: list = []
     monkeypatch.setattr(f"localm.plugins.builtin.{kind}.plug.media_keep_check",
-                        lambda request: lambda: next(answers, False))
+                        lambda request: lambda: not written)
+    real = BYTES[kind]
+    monkeypatch.setitem(BYTES, kind, lambda: written.append(1) or real())
     job, (out, _k) = _generate(server, kind)
     assert not held.is_held(out) and not out.exists()
     assert [p.name for p in held.files(kind)] == [job.result]
@@ -696,15 +1008,23 @@ def test_a_private_chat_under_a_recording_server_keeps_nothing(server):
     assert out.parent == _home() / "gui_images"
 
 
+def test_once_a_job_is_not_kept_it_stays_so():
+    from localm.plugins.media_config import keep_check
+    answers = iter([True, True, False, True])
+    keeps = keep_check(lambda: next(answers))
+    assert [keeps() for _ in range(4)] == [True, False, False, False]
+    assert next(answers) is True
+    assert keep_check(lambda: False)() is False
+
+
 def test_a_job_whose_mode_turns_private_before_it_starts_keeps_nothing():
-    answers = iter([True, False])
     from localm.plugins.builtin.image.plug import ImagineRequest, _make_generate
     job = MagicMock()
     paths = []
     body = _make_generate(
         ImagineRequest(prompt="x"), input_image=None, lora_name=None, out_path=Path("a.png"),
         owner=None, self_url="http://127.0.0.1:1/v1", instance_token=None,
-        keeps=lambda: next(answers))
+        keeps=lambda: False)
     with patch("localm.media.gallery.job_output_path",
                side_effect=lambda j, kind, name, kept: paths.append((name, kept))):
         body(job)

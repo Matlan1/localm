@@ -1039,9 +1039,8 @@ def note_other_vram_holders(
 HANDOVER_POLL_SECONDS = 0.25
 _handover_cv = threading.Condition()
 _handover_jobs = 0
-_handover_inflight: list = []
 
-#: Set while this process stops or restarts (``localm.media.held.end_media_work``).
+#: Set while this process stops or restarts (``localm.media.held.end_private_runs``).
 MEDIA_CLOSING = threading.Event()
 _handover_reloading = False
 _handover_deferred: Optional[tuple] = None
@@ -1054,7 +1053,7 @@ _handover_deferred_headers: dict = {}
 def _handover_enter(job: Any) -> bool:
     """Count *job* as in flight once no chat reload is running. Waits for a running
     reload, polling ``job.cancel_requested``; returns False (job not counted) when
-    cancelled while waiting, and while localm is stopping."""
+    cancelled while waiting."""
     global _handover_jobs
     with _handover_cv:
         if _handover_reloading:
@@ -1065,25 +1064,8 @@ def _handover_enter(job: Any) -> bool:
                 if job.cancel_requested:
                     job.push({"type": "line", "outcome": True, "text": "Cancelled."})
                     return False
-        if MEDIA_CLOSING.is_set():
-            job.push({"type": "line", "outcome": True, "text": "localm is stopping."})
-            return False
         _handover_jobs += 1
-        _handover_inflight.append(job)
         return True
-
-
-def end_media_jobs(wait: float) -> bool:
-    """Cancel every media job in flight and wait at most *wait* seconds until each
-    has left its ``media_handover_job``; returns whether they have. The caller has
-    set ``MEDIA_CLOSING``, so no job starts or reloads the chat model."""
-    with _handover_cv:
-        jobs = list(_handover_inflight)
-        _handover_cv.notify_all()
-    for job in jobs:
-        job.cancel()
-    with _handover_cv:
-        return _handover_cv.wait_for(lambda: not _handover_inflight, wait)
 
 
 def _handover_exit(job: Any) -> None:
@@ -1102,7 +1084,6 @@ def _handover_exit(job: Any) -> None:
     finally:
         with _handover_cv:
             _handover_jobs -= 1
-            _handover_inflight[:] = [j for j in _handover_inflight if j is not job]
             _handover_cv.notify_all()
 
 

@@ -279,7 +279,7 @@ def _via_backend(media_backend, s: dict, prompt: str, out_path: Path, what: str,
     holding = not explicit and not _media_kept()
     if is_privacy:
         from ..media import held
-        held.sweep_leftovers(lambda text: console.print(text, style="yellow", markup=False))
+        held.sweep_leftovers()
     if holding:
         from ..media import held
         try:

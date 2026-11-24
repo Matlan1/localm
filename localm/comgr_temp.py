@@ -265,11 +265,11 @@ def finish(wait: float = _FINISH_WAIT_SECONDS) -> None:
     """The last cleanup of a localm process: stop this process's VRAM probe
     daemon, wait at most *wait* seconds for the recorded processes it started to
     end, and remove their folders. Never raises."""
+    deadline = time.monotonic() + wait
     try:
         loader = sys.modules.get("localm.inference.backends.llamacpp._loader")
         if loader is not None:
-            loader.stop_probe_daemon(wait=1.0)
-        deadline = time.monotonic() + wait
+            loader.stop_probe_daemon(wait=1.0, lock_wait=1.0)
         while str(os.getpid()) in sweep() and time.monotonic() < deadline:
             time.sleep(0.1)
     except Exception as e:   # noqa: BLE001 - never blocks an exit

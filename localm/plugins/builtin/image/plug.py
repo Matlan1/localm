@@ -56,7 +56,7 @@ from localm.media.native_models import (
     validate_upscaler,
 )
 from localm.plugins.media_config import (
-    media_keep_check, media_session_is_private, range_refusal,
+    keep_check, media_keep_check, media_session_is_private, range_refusal,
 )
 from localm.pathscrub import map_strings
 from localm.jobmanager import frame_event
@@ -175,20 +175,24 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
     ``withhold_on_trace`` is passed to the backend facade's ``generate``: the
     file is handed to the caller as it is, so a failed metadata strip or
     ComfyUI-copy removal fails the job. ``keeps`` (``media_keep_check``), when
-    given, is asked here, when the job starts and when each image is written:
+    given, is asked when the job starts and when each image is written:
     ``out_path`` is then only a name, kept in the gallery when every answer is
     True and held while localm runs otherwise."""
     extras = native_extras or {}
     saved_names: list = []
     held_names: list = []
     fixed_path = out_path
-    kept_at_start = keeps() if keeps is not None else in_gallery
+
+    def kept():
+        return in_gallery if keeps is None else keeps()
+
+    def private():
+        return not kept() or media_session_is_private()
 
     def _generate(job):
         from localm.config import load_config
-        kept = kept_at_start and (keeps is None or keeps())
         out_path = (fixed_path if keeps is None
-                    else gallery.job_output_path(job, "image", fixed_path.name, kept))
+                    else gallery.job_output_path(job, "image", fixed_path.name, kept()))
         if out_path is None:
             return False
         # Resolved here, in the job's own worker thread, not the route above.
@@ -297,12 +301,11 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             note_other_vram_holders(job, s, "image")
             if _backend.supports(s, "NEEDS_COMFY_SERVER"):
                 job.push({"type": "line", "text": "Submitting workflow to the image backend..."})
-            is_privacy = not kept or media_session_is_private()
             size_kwargs = ({"width": width, "height": height}
                            if width is not None and height is not None else {})
 
             def _on_saved(path):
-                path = gallery.settle("image", path, keeps)
+                path = gallery.settle("image", path, keeps, private)
                 saved_names.append(path.name)
                 if held.is_held(path):
                     held_names.append(path.name)
@@ -322,7 +325,7 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
                 instance_token=instance_token,
                 # privacy mode: no sidecar (the image's own metadata is stripped
                 # in every mode)
-                write_sidecar=not is_privacy,
+                write_sidecar=not private(),
                 guidance=req.guidance,
                 cfg=req.cfg,
                 negative_prompt=req.negative_prompt,
@@ -346,9 +349,10 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
                    if _backend.supports(s, "SUPPORTS_CLIP_SKIP") else {}),
                 **({"on_preview": lambda p: job.push(frame_event(p))}
                    if _backend.supports(s, "SUPPORTS_JOB_OPTIONS") else {}),
-                privacy=is_privacy,
+                cancel=lambda: job.cancel(),
+                privacy=private,
                 withhold_on_trace=withhold_on_trace,
-                leave_nothing=not kept,
+                leave_nothing=lambda: not kept(),
             )
             job.push({"type": "line", "outcome": True, "text": message})
             if ok and not saved_names:
@@ -710,6 +714,7 @@ async def create_image(req: ImageGenerationRequest, request: Request):
     owner = principal_id(request)
     gen_req = ImagineRequest(prompt=prompt, guidance=None, cfg=None, denoise=None,
                              lora_strength_model=None, lora_strength_clip=None)
+    keeps = keep_check(lambda: not _is_private_session())
     width, height = size if size else (None, None)
 
     show = path_formatter(request)
@@ -720,7 +725,7 @@ async def create_image(req: ImageGenerationRequest, request: Request):
     try:
         base_url = str(request.base_url).rstrip("/")
         for _ in range(req.n):
-            private = private or _is_private_session()
+            private = private or not keeps()
             if private and private_dir is None:
                 try:
                     private_dir = Path(tempfile.mkdtemp(prefix="api-", dir=held.folder("image")))
@@ -729,7 +734,6 @@ async def create_image(req: ImageGenerationRequest, request: Request):
                         500, f"The folder for the generated image cannot be used: {show(e)}"
                     ) from e
             out_dir = private_dir if private_dir is not None else _images_dir()
-            out_dir.mkdir(parents=True, exist_ok=True)
             out_path = out_dir / f"{time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.png"
             job = jobs.start_fn(
                 "imagine",
@@ -738,18 +742,22 @@ async def create_image(req: ImageGenerationRequest, request: Request):
                     out_path=out_path, owner=owner, self_url=self_url,
                     instance_token=instance_token, width=width,
                     height=height, in_gallery=not private,
+                    keeps=None if private else keeps,
                     withhold_on_trace=True)),
                 result_path=out_path.name, owner=owner)
             started_jobs.append(job)
             status, last_line = await _await_job(job, request)
             if status == "cancelled":
                 raise HTTPException(409, "The image generation was cancelled.")
+            if not private and status == "done":
+                out_path = next((p for d in media_paths.media_dirs("image")
+                                 if (p := d / out_path.name).is_file()), out_path)
             if status != "done" or not out_path.is_file():
                 raise HTTPException(
                     502, "Image generation failed: "
                          + (show(last_line) if last_line else "no reason was reported"))
             warnings.extend(show(line) for line in _outcome_warnings(last_line))
-            turned_private = not private and _is_private_session()
+            turned_private = not private and held.is_held(out_path)
             private = private or turned_private
             if not private:
                 held_warning = gallery.held_stamp_warning("image", out_path.name)
@@ -829,12 +837,13 @@ def _make_upscale(*, source, upscaler, name, keeps, owner, self_url, instance_to
     ``name``, in the gallery or held while localm runs (``keeps``, see
     ``_make_generate``): runtime check, VRAM handover, upscaling, and the
     chat-model reload on every exit path."""
-    kept_at_start = keeps()
+
+    def private():
+        return not keeps() or media_session_is_private()
 
     def _upscale(job):
         from localm.config import load_config
-        kept = kept_at_start and keeps()
-        out_path = gallery.job_output_path(job, "image", name, kept)
+        out_path = gallery.job_output_path(job, "image", name, keeps())
         if out_path is None:
             return False
         _cfg = load_config()
@@ -868,20 +877,21 @@ def _make_upscale(*, source, upscaler, name, keeps, owner, self_url, instance_to
             if swap and not unload_chat_for_media(job, self_url, "image", instance_token):
                 say("Could not unload the chat model - the upscaler may run low on VRAM.")
             note_other_vram_holders(job, s, "image")
-            is_privacy = not kept or media_session_is_private()
             final: list = []
 
             def _on_saved(path):
-                final.append(gallery.settle("image", path, keeps))
+                final.append(gallery.settle("image", path, keeps, private))
                 gallery.push_stamp_warning(
                     job, gallery.record_owner("image", final[0], owner))
 
-            ok, message = native.upscale(
-                s, source, upscaler, out_path, extra_meta=extra_meta,
-                write_sidecar=not is_privacy, cancel_check=lambda: job.cancel_requested,
-                on_progress=say,
-                on_saved=_on_saved,
-                on_queue_state=lambda state: job.progress(phase=state))
+            with held.run(lambda: not keeps(), lambda: job.cancel()) as ending:
+                ok, message = native.upscale(
+                    s, source, upscaler, out_path, extra_meta=extra_meta,
+                    write_sidecar=not private(),
+                    cancel_check=lambda: job.cancel_requested or ending(),
+                    on_progress=say,
+                    on_saved=_on_saved,
+                    on_queue_state=lambda state: job.progress(phase=state))
             job.push({"type": "line", "outcome": True, "text": message})
             if ok:
                 job.result = out_path.name
