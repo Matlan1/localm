@@ -611,6 +611,30 @@ def test_a_package_of_the_update_installed_anew_meanwhile_is_decided_as_a_whole(
         assert (kept / "alpha3_top.py").exists() and (kept / "alpha" / "three.py").exists()
 
 
+@pytest.mark.parametrize("lost", ["RECORD", "METADATA", "dist-info", "code", "everything"])
+def test_a_named_package_that_uv_installs_again_ends_the_restore(root, world, lost):
+    before = tree(root)
+    forward(root, world, plan(root, world))
+    copies = root / ".venv" / mover.VENV_FOLDER / ID / "old" / "01"
+    copies /= site(root).relative_to(root / ".venv")
+    for path in [p for p in copies.rglob("*") if p.is_file()]:
+        info = "dist-info" in str(path)
+        if lost == "everything" or path.name == lost or info == (lost == "dist-info") and (
+                lost in ("dist-info", "code")):
+            path.unlink()
+    result = undo(root)
+    assert result.packages == [{"step": "packages", "name": "alpha", "version": "1.0"}], result
+    world.run(root, "pip", "install", "--no-config", "--no-index", "--offline", "--reinstall",
+              "--no-deps", "--find-links", str(world.wheels), "--python", str(root / ".venv"),
+              "alpha==1.0")
+    result = undo(root)
+    assert (result.state, result.errors) == ("old", [])
+    assert versions(root) == {"alpha": "1.0", "beta": "1.0", "delta": "1.0"}
+    now = tree(root)
+    assert {k for k in {*now, *before} if now.get(k) != before.get(k)
+            and "alpha-1.0.dist-info/" not in k and "alpha-run" not in k} == set()
+
+
 def test_a_package_removed_by_the_user_meanwhile_comes_back(root, world):
     before = tree(root)
     forward(root, world, plan(root, world))

@@ -43,7 +43,7 @@ def install(where: Path, package: tuple) -> None:
                f"{info}/INSTALLER": "hand"}
     rows = []
     for rel, text in content.items():
-        path = site / rel
+        path = Path(os.path.normpath(site / rel))
         path.parent.mkdir(parents=True, exist_ok=True)
         path.unlink(missing_ok=True)
         path.write_bytes(text.encode())
@@ -60,7 +60,7 @@ def uninstall(where: Path, name: str) -> None:
             continue
         if (info / "RECORD").exists():
             for row in (info / "RECORD").read_text(encoding="utf-8").splitlines():
-                path = site / row.split(",")[0]
+                path = Path(os.path.normpath(site / row.split(",")[0]))
                 path.unlink(missing_ok=True)
                 disk.prune(path.parent, site)
         shutil.rmtree(info, ignore_errors=True)
@@ -76,7 +76,7 @@ def stage(root: Path, leaving: list, coming: list, update_id: str = ID) -> None:
     for package in coming:
         install(made, package)
     have = packages._infos(root / ".venv" / SITE, leaving)
-    packages._Staged(set(have), {p[0] for p in coming}, base).write(made.parent / "staged.json")
+    packages._Staged(set(have), {p[0] for p in coming}, base).write(packages._staged_path(made))
 
 
 def installed(root: Path) -> Path:

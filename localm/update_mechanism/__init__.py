@@ -22,11 +22,12 @@ Layout, all on the volume of the install::
     <root>/.localm-update/lock                  held for the whole update
     <root>/.localm-update/job.json              the record; present = not finished
     <root>/.localm-update/<id>/new/             the new files
-    <root>/.localm-update/<id>/old/             the files they replaced
+    <root>/.localm-update/<id>/old/NN/          the files the plan NN replaced
     <root>/.localm-update/<id>/plans/NN-step.json
     <root>/.localm-update/<id>/moved-NN         what was moved of that plan
     <root>/.localm-update/<id>/state.json       the same facts as the record
+    <root>/.localm-update/<id>/done             the update is done (``ended``: was undone)
     <root>/.localm-update/kept/<id>/            files of the user, never deleted here
-    <root>/.venv/.localm-old/<id>/              ``stage`` and ``old`` of Python packages
+    <root>/.venv/.localm-old/<id>/              ``stage/NN`` and ``old/NN`` of packages
     <root>/.venv/.localm-kept/<id>/             files of the user in the venv
 """

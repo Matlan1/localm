@@ -51,11 +51,13 @@ class Unreadable(Exception):
 
 @dataclass
 class Outcome:
-    """What a way back left. *errors*: one line per file that is not as it was
-    before the step; *notes*: lines on files of somebody else that were found;
-    *kept*: the paths moved to the *kept* folder; *held*: each :class:`.disk.Held`
-    behind an error."""
+    """What a way back left. *errors*: one line per file or package that is not as it
+    was before the step; *packages*: ``{"step", "name", "version"}`` of each such
+    package; *notes*: lines on files of somebody else that were found; *kept*: the
+    paths moved to the *kept* folder; *held*: each :class:`.disk.Held` behind an
+    error."""
     errors: list = field(default_factory=list)
+    packages: list = field(default_factory=list)
     notes: list = field(default_factory=list)
     kept: list = field(default_factory=list)
     held: list = field(default_factory=list)
@@ -70,16 +72,17 @@ class Outcome:
 class StepFailed(Exception):
     """A step failed and its files were moved back.
 
-    *reason* says why. *errors* names every file that could not be put back; the
-    install is as it was before the step only when it is empty; then the step can be
-    made again with the same plan. *notes* names the files of somebody else that were
-    found, *held* has each :class:`.disk.Held` that stopped the step or its way
-    back."""
+    *reason* says why. *errors* names everything that could not be put back, *packages*
+    the packages among it (:class:`Outcome`); the install is as it was before the step
+    only when *errors* is empty; then the step can be made again with the same plan.
+    *notes* names the files of somebody else that were found, *held* has each
+    :class:`.disk.Held` that stopped the step or its way back."""
 
     def __init__(self, cause: BaseException, outcome: Optional[Outcome] = None) -> None:
         outcome = outcome or Outcome()
         reason = str(cause) or type(cause).__name__
         self.reason, self.errors, self.notes = reason, outcome.errors, outcome.notes
+        self.packages = outcome.packages
         self.held = [*([cause] if isinstance(cause, Held) else []), *outcome.held]
         super().__init__("; ".join([reason, *self.errors]))
 
@@ -244,12 +247,13 @@ def venv_folder(root, update_id: str) -> Path:
     return plain_folder(plain_folder(venv / VENV_FOLDER) / check_id(update_id))
 
 
-def area(root, update_id: str, step: str) -> Area:
-    """The area of *step*, one of :data:`STEPS`, of the update *update_id*."""
+def area(root, update_id: str, step: str, number: int) -> Area:
+    """The area of the plan *number* of *step*, one of :data:`STEPS`, of the update
+    *update_id*."""
     work = work_folder(root, update_id)
     if step == FILES:
         kept = plain_folder(plain_folder(update_folder(root) / "kept") / update_id)
-        return Area(disk.real_folder(root), plain_folder(work / "old"),
+        return Area(disk.real_folder(root), old_folder(work, number),
                     plain_folder(work / "new"), kept, guard=True, exact=True)
     if step == PACKAGES:
         venv = disk.real_folder(Path(root) / ".venv")
@@ -257,9 +261,25 @@ def area(root, update_id: str, step: str) -> Area:
         kept = plain_folder(plain_folder(venv / VENV_KEPT) / update_id)
         site = shared.updater_components.site_packages(venv)
         stay = [venv / "Scripts", venv / "bin", *([site, *site.parents] if site else [])]
-        return Area(venv, plain_folder(mine / "old"), plain_folder(mine / "stage"), kept,
+        return Area(venv, old_folder(mine, number), stage_folder(root, update_id, number), kept,
                     closed=(VENV_FOLDER, VENV_KEPT, "pyvenv.cfg", ".lock"), stay=stay)
     raise Unreadable(f"the plan of the update names an unknown step {step[:40]!r}")
+
+
+def old_folder(mine: Path, number: int) -> Path:
+    """Where the plan *number* keeps what it replaced, in the folder *mine* of its
+    update."""
+    return plain_folder(plain_folder(mine / "old") / f"{number:02d}")
+
+
+def stage_folder(root, update_id: str, number: Optional[int] = None) -> Path:
+    """The staging venv of the package plan *number* of the update *update_id*, None
+    for the next one. The package plans are counted from 01, in their order."""
+    folder = _plans_folder(root, update_id)
+    names = os.listdir(folder) if disk.lstat(folder) is not None else ()
+    nth = 1 + sum(n.endswith(f"-{PACKAGES}.json") and (number is None or n < f"{number:02d}")
+                  for n in names)
+    return plain_folder(plain_folder(venv_folder(root, update_id) / "stage") / f"{nth:02d}")
 
 
 FILES, PACKAGES = "files", "packages"
@@ -273,36 +293,30 @@ STEPS = (FILES, PACKAGES)
 class Op:
     """One file of a plan. *old* and *new* are identities (:mod:`.disk`); a removed
     file has no *new*, an added one no *old*. *swap*: the file goes first, and one
-    that is replaced is never absent. *edited*: the old file is the user's own;
-    *release* is then the file as it was before the user, if that is known. *dist*:
-    the Python package the file belongs to."""
+    that is replaced is never absent. *edited*: the old file is the user's own.
+    *release*: what else counts as the old file, as it was before the user or as another
+    package that lists it has it. *dist*: the Python package the file belongs to."""
     path: str
     kind: str
     old: Optional[dict] = None
     new: Optional[dict] = None
     swap: bool = False
     edited: bool = False
-    release: Optional[dict] = None
+    release: list = field(default_factory=list)
     dist: str = ""
 
 
 @dataclass
 class Plan:
     """What one step changes. *folders* are the folders it creates. *dists* are the
-    canonical names of the Python packages it changes, *venv* is :func:`venv_mark` of
-    the venv they are in."""
+    canonical names of the Python packages it changes, *before* the ``[canonical name,
+    dist-info folder]`` of every package there was."""
     step: str
     number: int
     ops: list = field(default_factory=list)
     folders: list = field(default_factory=list)
     dists: list = field(default_factory=list)
-    venv: Optional[list] = None
-
-
-def venv_mark(venv: Path) -> Optional[list]:
-    """What tells the venv at *venv* from one made later in its place."""
-    st = disk.lstat(venv / "pyvenv.cfg")
-    return None if st is None else [st.st_ino, st.st_mtime_ns]
+    before: list = field(default_factory=list)
 
 
 def _identity(value) -> Optional[dict]:
@@ -326,9 +340,9 @@ def _parse_op(raw) -> Op:
     if not isinstance(raw, dict) or set(raw) != {f.name for f in fields(Op)}:
         raise ValueError("an entry is malformed")
     op = Op(disk.clean(raw["path"]), raw["kind"], _identity(raw["old"]), _identity(raw["new"]),
-            raw["swap"], raw["edited"], _identity(raw["release"]), raw["dist"])
+            raw["swap"], raw["edited"], [_identity(i) for i in raw["release"]], raw["dist"])
     if (op.kind not in _KINDS or type(op.swap) is not bool or type(op.edited) is not bool
-            or not isinstance(op.dist, str)
+            or not isinstance(op.dist, str) or None in op.release
             or (op.old is None) != (op.kind == ADD) or (op.new is None) != (op.kind == REMOVE)
             or (op.swap and op.kind == REMOVE)):
         raise ValueError(f"the entry for {op.path} is malformed")
@@ -342,15 +356,17 @@ def parse(raw) -> Plan:
         if (not isinstance(raw, dict) or raw.get("format") != FORMAT
                 or set(raw) != {"format", *(f.name for f in fields(Plan))}
                 or raw["step"] not in STEPS or type(raw["number"]) is not int
-                or not (raw["venv"] is None or isinstance(raw["venv"], list))
-                or not all(isinstance(raw[k], list) for k in ("ops", "folders", "dists"))
-                or not all(isinstance(d, str) for d in raw["dists"])):
+                or not all(isinstance(raw[k], list)
+                           for k in ("ops", "folders", "dists", "before"))
+                or not all(isinstance(d, str) for d in raw["dists"])
+                or not all(isinstance(d, list) and len(d) == 2 and all(
+                    isinstance(part, str) for part in d) for d in raw["before"])):
             raise ValueError("it is malformed")
         ops = [_parse_op(o) for o in raw["ops"]]
         if len({op.path for op in ops}) != len(ops):
             raise ValueError("it names a file twice")
         return Plan(raw["step"], raw["number"], ops, [disk.clean(f) for f in raw["folders"]],
-                    raw["dists"], raw["venv"])
+                    raw["dists"], raw["before"])
     except (ValueError, TypeError, KeyError, AttributeError, Unsafe) as e:
         raise Unreadable(f"a plan of the update cannot be used: {e}") from None
 
@@ -373,7 +389,7 @@ def read_plans(root, update_id: str) -> list:
     :class:`.disk.Blocked` when one cannot be read now."""
     folder = _plans_folder(root, update_id)
     if disk.lstat(folder) is None:
-        raise Unreadable(f"the folder of the update ({folder.parent}) is missing")
+        raise lost_track(root, [update_id], "its plans are missing")
     plans = []
     for name in sorted(os.listdir(folder)):
         if not name.endswith(".json"):
@@ -381,12 +397,21 @@ def read_plans(root, update_id: str) -> list:
         match = _PLAN_NAME.fullmatch(name)
         try:
             plan = parse(disk.read_json(folder / name, MAX_PLAN_BYTES))
-        except ValueError as e:
-            raise Unreadable(str(e)) from None
+        except (ValueError, Unreadable) as e:
+            raise lost_track(root, [update_id], f"{name}: {e}") from None
         if not match or match[1] != plan.step or int(name[:2]) != plan.number:
-            raise Unreadable(f"{name} is not a plan of the update")
+            raise lost_track(root, [update_id], f"{name} is not a plan of the update")
         plans.append(plan)
     return plans
+
+
+def lost_track(root, ids: Iterable[str], why: str) -> Unreadable:
+    """The error that says that the updates *ids* can be neither finished nor undone,
+    and what to do."""
+    record = update_folder(root) / "job.json"
+    paths = " and ".join(disk.short_path(p) for p in (*(record.parent / i for i in ids), record))
+    return Unreadable(f"{why}, so the update can be neither finished nor undone. Install localm "
+                      f"again (repair or setup), then delete {paths}")
 
 
 def has_plans(root, update_id: str) -> bool:
@@ -527,7 +552,8 @@ def plan_files(root, update_id: str, new_files: Mapping, old_files: Optional[Map
 
     Raises :class:`Refused` for an extracted file that differs from its statement,
     and what :func:`build` raises."""
-    a = area(root, update_id, FILES)
+    number = next_number(root, update_id)
+    a = area(root, update_id, FILES, number)
     protect = [disk.clean(p) for p in protect]
     package = shared.update_package
     stated = dict(new_files)
@@ -553,13 +579,13 @@ def plan_files(root, update_id: str, new_files: Mapping, old_files: Optional[Map
             return True
         return rel not in old_files or differs(old, old_files[rel])
 
-    plan = build(a, FILES, next_number(root, update_id), new,
+    plan = build(a, FILES, number, new,
                  [rel for rel in old_files or () if covered(rel)],
                  identify=lambda path: disk.content_identity(path, wait), edited=edited,
                  swap=swap, keep_equal=True)
     for op in plan.ops:
         was = (old_files or {}).get(op.path) if op.edited else None
-        op.release = was and {k: was[k] for k in ("sha256", "size")}
+        op.release = [{k: was[k] for k in ("sha256", "size")}] if was else []
     return plan
 
 
@@ -658,7 +684,7 @@ def forward(root, update_id: str, plan: Plan, *, wait_s: Optional[float] = None,
     back (by *back*, :func:`back` by default), for any exception on the way,
     KeyboardInterrupt included: a move that fails, a held file, a file that is not
     what the plan says."""
-    a = area(root, update_id, plan.step)
+    a = area(root, update_id, plan.step, plan.number)
     a.watch(op.path for op in plan.ops)
     try:
         wait = Wait(wait_s, ask)
@@ -737,24 +763,21 @@ def check(a: Area, plan: Plan, wait: Optional[Wait] = None) -> list:
     return wrong
 
 
-def unfinished(root, update_id: str, plan: Plan, *, made: bool) -> Optional[str]:
-    """The first path that says that *plan* is not *made* (its moves are made, or
-    were all taken back), or that it is, None when nothing says so. A file the user
-    changed since says nothing."""
-    a = area(root, update_id, plan.step)
+def unfinished(root, update_id: str, plan: Plan) -> Optional[str]:
+    """The first path that says that the moves of *plan* are neither made nor all
+    taken back, None when nothing says so. A file the user changed since says
+    nothing."""
+    a = area(root, update_id, plan.step, plan.number)
     a.watch(op.path for op in plan.ops)
     with Marks(root, update_id, plan) as marks:
-        if made and marks.over:
+        if marks.over:
             return None
         for n, op in enumerate(plan.ops):
-            path, st = a.find(op.path)
-            if not made:
-                left = (a.beside(a.old, op.path)[1] is not None if op.old is not None
-                        else not marks.over and n in marks.changed and disk.same(path, op.new))
-            elif op.new is not None:
+            path = a.find(op.path)[0]
+            if op.new is not None:
                 left = a.beside(a.new, op.path)[1] is not None and not disk.same(path, op.new)
             else:
-                left = n not in marks.changed and disk.same(path, op.old)
+                left = n not in marks.changed and op.old is not None and disk.same(path, op.old)
             if left:
                 return op.path
     return None
@@ -763,73 +786,82 @@ def unfinished(root, update_id: str, plan: Plan, *, made: bool) -> Optional[str]
 # --------------------------------------------------------------- the way back
 
 def back(root, update_id: str, plan: Plan, *, wait_s: Optional[float] = None,
-         ask: Optional[disk.Ask] = None, out: Optional[Outcome] = None, users: Optional[Mapping] = None,
-         heal: Optional[Callable[[str, list, Callable], Optional[str]]] = None) -> Outcome:
+         ask: Optional[disk.Ask] = None, wait: Optional[Wait] = None,
+         out: Optional[Outcome] = None, whole: Iterable[str] = (),
+         then: Optional[Callable[[], None]] = None) -> Outcome:
     """Put back what *plan* replaced and take out what it added, from what is on
-    disk now, and check every file. Safe to repeat, and to run on a plan of which
-    nothing or only a part was done.
+    disk now, check every file and call *then*. Safe to repeat, and to run on a plan of
+    which nothing or only a part was done.
 
     A file that is neither version stays; only one in the way of an old file, or in
     a folder in its way, is moved, to the area's *kept* folder, and noted. A file the
     update did not move, or that is back already, is the user's. One it moved is lost
     when its old copy is gone and no file with that content is at its place; putting
-    it there heals that. *users* are the packages that are the user's as a whole,
-    with the paths of their files; what is left of the old version goes to *kept*.
-    *heal* decides for the files of a package: it gets the name, the operations and a
-    test for "is there in its old version", and returns None when the package is,
-    else what to install. *out* is added to and returned."""
+    it there heals that. The packages *whole* have no file of the user; *then* checks
+    them. *out* is added to and returned."""
     out = out or Outcome()
     kept = ""
     try:
-        a = area(root, update_id, plan.step)
+        a = area(root, update_id, plan.step, plan.number)
         kept = str(a.kept)
         a.watch(op.path for op in plan.ops)
         with Marks(root, update_id, plan) as marks:
-            if made_anew(a, plan):
-                out.notes.append(f"{a.base} was removed or made anew by somebody and stays as it "
-                                 "is.")
-            else:
-                _Back(a, plan, Wait(wait_s, ask), out, marks, users, heal).run()
+            _Back(a, plan, wait or Wait(wait_s, ask), out, marks, whole).run()
+            if then is not None:
+                then()
             with contextlib.suppress(OSError, Held):   # a file without a mark is still looked at
                 marks.settle("." if out.errors else "=")
     except (OSError, Held, Unsafe, Unreadable) as e:
         out.fail(e)
     if out.kept:
-        out.notes.append(f"Files of neither version are in {kept}: {_some(out.kept)}.")
+        out.notes.append(f"Files of neither version are in {kept}: {some(out.kept)}.")
     return out
 
 
 _back = back
 
 
-def made_anew(a: Area, plan: Plan) -> bool:
-    """Whether the venv *plan* was made for was removed or made anew since."""
-    return (plan.venv is not None and disk.lstat(a.old.parent) is None
-            and venv_mark(a.base) != plan.venv)
-
-
-def _some(names: Iterable[str]) -> str:
+def some(names: Iterable[str]) -> str:
+    """The first of *names*, and how many more there are."""
     names = sorted(names)
     return ", ".join(names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
+
+
+def is_old(a: Area, op: Op, wait: Optional[Wait] = None) -> bool:
+    """Whether the old file of *op*, or what else counts as it, is at its place."""
+    path, st = a.find(op.path)
+    return op.old is not None and st is not None and any(
+        disk.same(path, i, wait) for i in (op.old, *op.release))
+
+
+def by_installer(rel: str) -> bool:
+    """Whether an installer writes the file *rel* of a venv itself, so that it can
+    differ from one install of a package to the next."""
+    folder, _, name = rel.rpartition("/")
+    if folder.endswith(".dist-info"):
+        return name in ("RECORD", "INSTALLER", "REQUESTED", "direct_url.json", "uv_cache.json",
+                        "uv_build.json")
+    return rel.endswith(".pth") or rel.split("/", 1)[0] in ("Scripts", "bin")
 
 
 class _Back:
     """One run of the way back of *plan* in *a*."""
 
-    def __init__(self, a: Area, plan: Plan, wait: Wait, out: Outcome, marks: Marks, users,
-                 heal) -> None:
+    def __init__(self, a: Area, plan: Plan, wait: Wait, out: Outcome, marks: Marks,
+                 whole: Iterable[str]) -> None:
         self.a, self.plan, self.wait, self.out, self.marks = a, plan, wait, out, marks
-        self.users, self.heal = dict(users or {}), heal
+        self.whole = frozenset(whole)
         self.numbers = {op.path: n for n, op in enumerate(plan.ops)}
         self.unsure = marks.last
         self.failed: set = set()
         self.left: set = set()
-        self.theirs: dict = {}
-        self.lost: dict = {}
+        self.theirs: list = []
         self.sources: dict = {}
 
     def run(self) -> None:
-        self._look()
+        for op in self.plan.ops:   # before anything moves
+            if op.old is not None:
+                self._each(op, self._find_source)
         swaps = [op for op in self.plan.ops if op.swap]
         rest = [op for op in self.plan.ops if not op.swap]
         created = frozenset(self.plan.folders)
@@ -865,54 +897,33 @@ class _Back:
 
     # -- what there is to put back
 
-    def _look(self) -> None:
-        """Find the old file of every operation, what is lost and what is the user's,
-        before anything moves."""
-        for op in self.plan.ops:
-            if op.old is not None:
-                self._each(op, self._find_source)
-        have = {op.dist for op in self.plan.ops if op.path in self.sources}
-        for op in self.plan.ops:
-            if op.dist and op.old is not None and op.dist not in have:
-                self.users.setdefault(op.dist, frozenset())
-        for dist, ops in self.lost.items():
-            whole = [op for op in self.plan.ops if op.dist == dist and op.old is not None]
-            missing = self.heal(dist, whole, self._is_old) if dist and self.heal else ""
-            for op in ops:
-                self._each(op, self._settle if missing is None else self._is_lost)
-            if missing:
-                self.out.errors.append(
-                    f"The package {dist}: what the update moved of it is lost "
-                    f"({_some(op.path for op in ops)}). Install {missing} again.")
-
-    def _is_old(self, op: Op) -> bool:
-        path, st = self.a.find(op.path)
-        return st is not None and any(
-            disk.same(path, i, self.wait) for i in (op.old, op.release) if i is not None)
-
     def _find_source(self, op: Op) -> None:
         assert op.old is not None
         path, st = self.a.beside(self.a.old, op.path)
-        if op.dist in self.users:
-            live, there = self.a.find(op.path)
-            if there is not None and op.path not in self.users[op.dist] and self._is_old(op):
-                aside(self.a, Op(op.path, REMOVE), live, self.wait, self.out)
-            self.a.prune(live.parent)
-            self._settle(op)
-            self._leave(op)
-        elif st is not None and disk.same(path, op.old, self.wait):
+        live, there = self.a.find(op.path)
+        if st is not None and disk.same(path, op.old, self.wait):
             self.sources[op.path] = path
-        elif self._is_old(op):
+        elif is_old(self.a, op, self.wait):
             self._settle(op)
-        elif st is not None or self._was_moved(op):
-            self.lost.setdefault(op.dist, []).append(op)
-        else:
+        elif op.dist in self.whole:
+            self.left.add(op.path)
+        elif op.dist or (st is None and not self._was_moved(op)):
             self._leave(op)
+        elif op.edited and not op.release and (
+                self._other(op, live, there) if there is not None
+                else self.whole and disk.lstat(self.a.old) is None):   # the venv was removed
+            self._settle(op)
+        else:
+            raise Refused(f"{op.path}: its old version is lost. Put that version of the file back "
+                          "in its place.")
 
     def _was_moved(self, op: Op) -> bool:
         n = self.numbers[op.path]
         return n in self.marks.changed and (n != self.unsure or (
             op.new is not None and disk.same(self.a.find(op.path)[0], op.new, self.wait)))
+
+    def _other(self, op: Op, live: Path, st: os.stat_result) -> bool:
+        return not _is_folder(st) and (op.new is None or not disk.same(live, op.new, self.wait))
 
     def _settle(self, op: Op) -> None:
         """Leave what is at the place of *op*; what the update still has of the old
@@ -925,20 +936,9 @@ class _Back:
         if self.numbers[op.path] in self.marks.changed:
             self._mark("-", op)
 
-    def _is_lost(self, op: Op) -> None:
-        path, st = self.a.find(op.path)
-        own = op.edited and op.release is None and st is not None and not _is_folder(st)
-        if own and (op.new is None or not disk.same(path, op.new, self.wait)):
-            self._settle(op)
-        elif op.dist and self.heal:
-            self.failed.add(op.path)
-        else:
-            self._fail(op, Refused(f"{op.path}: its old version is lost. Put that version of the "
-                                   "file back in its place."))
-
     def _leave(self, op: Op) -> None:
         self.left.add(op.path)
-        self.theirs.setdefault(op.dist, []).append(op.path)
+        self.theirs.append(op.path)
         if self.numbers[op.path] in self.marks.changed:
             self._mark("-", op)
 
@@ -962,10 +962,8 @@ class _Back:
     def _take_out_added(self, op: Op, path: Path) -> None:
         n = self.numbers[op.path]
         same = op.new is not None and disk.same(path, op.new, self.wait)
-        moved = (n in self.marks.changed and op.dist not in self.users
-                 and self.a.beside(self.a.new, op.path)[1] is None)
-        if (n in self.marks.back or op.path in self.users.get(op.dist, ())
-                or not (same or moved)):
+        moved = n in self.marks.changed and self.a.beside(self.a.new, op.path)[1] is None
+        if op.dist not in self.whole and (n in self.marks.back or not (same or moved)):
             self._leave(op)
         else:
             aside(self.a, op, path, self.wait, self.out)
@@ -1031,9 +1029,9 @@ class _Back:
             raise Refused(f"{op.path} is not the file it was before the update")
 
     def _tell(self) -> None:
-        for dist, paths in self.theirs.items():
-            what = f"The package {dist}" if dist else f"In {self.a.base}"
-            self.out.notes.append(f"{what}: changed by somebody, and stays so: {_some(paths)}.")
+        if self.theirs:
+            self.out.notes.append(f"In {self.a.base}: changed by somebody, and stays so: "
+                                  f"{some(self.theirs)}.")
         above: set = set()
         for op in self.plan.ops:
             parent = op.path.rpartition("/")[0] if op.old is not None else ""

@@ -134,7 +134,8 @@ def test_a_damaged_record_of_a_finished_update_is_rebuilt_as_finished(root, tmp_
     record = root / ".localm-update" / "job.json"
     record.unlink() if damage is None else record.write_bytes(damage)
     result = undo(root)
-    assert result.state == "new" and um.tree(root) == um.new_tree(tmp_path / "fresh")
+    assert result.state == ("new" if damage is not None else "none")
+    assert um.tree(root) == um.new_tree(tmp_path / "fresh")
     assert b"my version" in everything(root)
 
 
@@ -159,7 +160,7 @@ def test_a_damaged_record_never_restores_an_earlier_update_that_ended(root, tmp_
     mover.forward(root, ID, plan)
     to_starting(root)
     monkeypatch.setattr(disk, "HELD_WAIT_S", 0.2)
-    with held(root / ".localm-update" / ID / "old" / "localm" / "changed.py"):
+    with held(root / ".localm-update" / ID / "old" / "01" / "localm" / "changed.py"):
         assert finish(root).state == "new"
     now = um.tree(root)
     um.stage(root, {**um.NEW, "VERSION": "3"}, OTHER_ID)
@@ -176,14 +177,11 @@ def test_an_update_whose_end_cannot_be_written_ends_at_the_next_try(root, tmp_pa
     plan = planned(root)
     mover.forward(root, ID, plan)
     to_starting(root)
-    real = job._write_state
 
-    def full(lock, record):
-        if record.phase == "left":
-            raise OSError(errno.ENOSPC, "No space left on device")
-        real(lock, record)
+    def full(_path):
+        raise OSError(errno.ENOSPC, "No space left on device")
     with monkeypatch.context() as m:
-        m.setattr(job, "_write_state", full)
+        m.setattr(disk, "remove_through", full)
         result = finish(root)
         assert result.state == "new" and any("for now" in n for n in result.notes)
         assert um.phase(root) == job.DONE
@@ -212,7 +210,7 @@ def test_without_an_installed_statement_every_file_that_differs_is_kept(root):
 def test_a_lost_old_file_is_never_called_restored(root):
     plan = planned(root)
     mover.forward(root, ID, plan)
-    (root / ".localm-update" / ID / "old" / "localm" / "changed.py").unlink()
+    (root / ".localm-update" / ID / "old" / "01" / "localm" / "changed.py").unlink()
     (root / "localm" / "changed.py").write_bytes(b"damaged")
     for _ in range(3):
         result = undo(root)
@@ -225,7 +223,7 @@ def test_a_lost_old_file_is_never_called_restored(root):
 def test_a_lost_removed_file_is_never_called_restored(root):
     plan = planned(root)
     mover.forward(root, ID, plan)
-    (root / ".localm-update" / ID / "old" / "localm" / "gone.py").unlink()
+    (root / ".localm-update" / ID / "old" / "01" / "localm" / "gone.py").unlink()
     (root / "localm" / "gone.py").write_bytes(b"something else")
     for _ in range(2):
         assert undo(root).state == "failed"
@@ -234,7 +232,7 @@ def test_a_lost_removed_file_is_never_called_restored(root):
 def test_a_lost_swapped_file_is_never_called_restored(root):
     plan = planned(root)
     mover.forward(root, ID, plan)
-    (root / ".localm-update" / ID / "old" / "localm.bat").unlink()
+    (root / ".localm-update" / ID / "old" / "01" / "localm.bat").unlink()
     (root / "localm.bat").write_bytes(b"damaged")
     for _ in range(2):
         assert undo(root).state == "failed"
@@ -628,8 +626,7 @@ def mine(root: Path) -> None:
 
 
 def reached_done(log: list) -> bool:
-    return any(e[0] == "content" and e[1].endswith("state.json.tmp")
-               and b'"done"' in e[2] for e in log)
+    return any(e[0] == "content" and e[1].endswith(f"{ID}/done.tmp") for e in log)
 
 
 def test_a_power_cut_at_any_moment_leaves_the_old_or_the_new_version(tmp_path, monkeypatch):

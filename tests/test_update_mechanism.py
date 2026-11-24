@@ -165,7 +165,7 @@ def test_an_edited_file_that_cannot_be_kept_is_not_deleted(root):
     (root / "localm" / "changed.py").write_bytes(b"my version")
     plan = planned(root)
     mover.forward(root, ID, plan)
-    old = root / ".localm-update" / ID / "old" / "localm" / "changed.py"
+    old = root / ".localm-update" / ID / "old" / "01" / "localm" / "changed.py"
     with job.Lock(root) as lock, held(old):
         job.advance(lock, job.STEPS)
         job.advance(lock, job.STARTING)
@@ -274,8 +274,8 @@ def test_the_way_back_decides_from_the_files_and_not_from_a_position(root):
     plan = planned(root)
     work = root / ".localm-update" / ID
     for path in ("localm/changed.py", "localm/gone.py"):
-        (work / "old" / path).parent.mkdir(parents=True, exist_ok=True)
-        os.rename(root / path, work / "old" / path)
+        (work / "old" / "01" / path).parent.mkdir(parents=True, exist_ok=True)
+        os.rename(root / path, work / "old" / "01" / path)
     (root / "localm" / "newdir" / "deep").mkdir(parents=True)
     os.rename(work / "new" / "localm" / "newdir" / "deep" / "n.py",
               root / "localm" / "newdir" / "deep" / "n.py")
@@ -300,7 +300,7 @@ def test_a_file_that_is_neither_version_is_kept_aside_and_named(root):
 def test_a_lost_old_file_is_named_and_the_record_stays(root):
     plan = planned(root)
     mover.forward(root, ID, plan)
-    (root / ".localm-update" / ID / "old" / "localm" / "changed.py").unlink()
+    (root / ".localm-update" / ID / "old" / "01" / "localm" / "changed.py").unlink()
     result = undo(root)
     assert result.state == "failed"
     assert any("localm/changed.py" in e for e in result.errors)
@@ -310,7 +310,7 @@ def test_a_lost_old_file_is_named_and_the_record_stays(root):
 def test_a_damaged_old_file_is_not_put_back_as_the_old_version(root):
     plan = planned(root)
     mover.forward(root, ID, plan)
-    (root / ".localm-update" / ID / "old" / "localm" / "changed.py").write_bytes(b"???")
+    (root / ".localm-update" / ID / "old" / "01" / "localm" / "changed.py").write_bytes(b"???")
     result = undo(root)
     assert result.state == "failed" and um.phase(root) == job.RESTORING
     assert (root / "localm" / "changed.py").read_bytes() == b"new"
@@ -472,7 +472,7 @@ def test_a_windows_spelling_of_another_path_is_refused(root, bad):
 def test_a_folder_an_update_never_changes_is_known_under_any_name(root):
     """A short name or another spelling leads to the same folder."""
     (root / "node_modules").mkdir()
-    a = mover.area(root, ID, mover.FILES)
+    a = mover.area(root, ID, mover.FILES, 1)
     (root / "node_modules").rename(root / "NODE_M~1")
     with pytest.raises(disk.Unsafe, match="not changed by an update"):
         a.find("NODE_M~1/x.js")
@@ -640,7 +640,7 @@ def test_a_link_to_a_file_in_the_install_is_refused(root):
     assert target.read_bytes() == b"not mine"
 
 
-@pytest.mark.parametrize("rel", ["", ID, f"{ID}/old", f"{ID}/plans", f"{ID}/old/localm", "kept"])
+@pytest.mark.parametrize("rel", ["", ID, f"{ID}/old", f"{ID}/plans", f"{ID}/old/01/localm", "kept"])
 def test_a_link_in_the_folders_of_the_update_is_not_followed(root, rel):
     plan = planned(root)
     mover.forward(root, ID, plan)
@@ -666,7 +666,7 @@ def test_deleting_what_an_update_left_does_not_follow_a_link(root):
     mover.forward(root, ID, plan)
     outside = outside_folder(root)
     there = um.tree(outside)
-    link_folder(root / ".localm-update" / ID / "old" / "link", outside)
+    link_folder(root / ".localm-update" / ID / "old" / "01" / "link", outside)
     link_folder(root / ".localm-update" / ID / "linked", outside)
     with job.Lock(root) as lock:
         job.advance(lock, job.STEPS)
@@ -915,7 +915,7 @@ def test_a_path_longer_than_260_characters_is_moved_and_put_back(tmp_path):
                    old_files=um.stated({"VERSION": "1", deep: "old"}))
     live = long_root.joinpath(*deep.split("/"))
     assert len(str(root / deep)) > 260
-    assert str(mover.area(root, ID, mover.FILES).base).startswith("\\\\?\\")
+    assert str(mover.area(root, ID, mover.FILES, 1).base).startswith("\\\\?\\")
     mover.forward(root, ID, plan)
     assert live.read_bytes() == b"new"
     assert undo(root).state == "old"

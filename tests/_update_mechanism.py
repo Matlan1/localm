@@ -173,9 +173,8 @@ def phase(root: Path):
 
 def done(root: Path, update_id: str = UPDATE_ID) -> bool:
     """Whether the folder of the update says that it reached DONE or is over."""
-    path = root / ".localm-update" / update_id / "state.json"
-    return path.exists() and json.loads(path.read_text(encoding="utf-8"))["phase"] in (
-        "done", "ended", "left")
+    folder = root / ".localm-update" / update_id
+    return (folder / "done").exists() or (folder / "ended").exists()
 
 
 def left(root: Path) -> list:
