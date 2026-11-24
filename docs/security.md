@@ -1,0 +1,637 @@
+# Security model
+
+How localm decides who may do what, and what it trusts. To report a vulnerability, see
+[SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md).
+
+## Authentication model
+
+localm is a local-first, single-owner application. API access is gated by a
+**bearer key**:
+
+- When **no key is configured**, the inference API and ordinary reads (model
+  listing, health) are **fail-open by design** - the server binds to localhost
+  and serves them without auth, for frictionless local use. State-changing
+  management routes, and reads of management/metadata endpoints specifically
+  (named keys, server config, host stats, the filesystem browser), still
+  require the loopback shell token (see *State-changing endpoints* below) -
+  that stops a malicious **web page**, not another **local program**, which
+  can obtain the token the same way the GUI shell does (see below).
+- When a key **is** configured (`LOCALM_API_KEY`), every `/v1` and `/api` route
+  requires `Authorization: Bearer <key>`, gated by capability scopes: model-read
+  routes (`GET /v1/models`, `GET /v1/models/{id}`) need `models:read`, plugin
+  routes their per-plugin scope, key/config/plugin administration their privileged
+  scopes (the owner key implies every scope). The routes that take no bearer key
+  are `GET /health` (a liveness probe that returns the status, model name, and
+  load state), `GET /whoami` (the instance identity handshake), `GET /localm-ca.crt`
+  (the CA certificate, never the key), `GET /` and `HEAD /` on a `localm serve`
+  API-only instance (a redirect to the API docs, and an empty 200 for the
+  heartbeat Ollama clients send), and the three session routes
+  `GET /api/session`, `POST /api/session` and `POST /api/session/logout` -
+  login exchanges a key for a cookie, so it cannot require one. Five more
+  routes take no bearer key but carry a credential of their own:
+  `POST /v1/surfaces/gui` (this instance's attach token, or an owner key) and
+  `GET /v1/instances/status`, `POST /v1/instances/status`,
+  `POST /v1/instances/vouch` and `POST /v1/instances/cooperate-unload`
+  (multi-instance GPU coordination; see *State-changing endpoints* below).
+
+Manage the key from the CLI: `localm key show` / `generate` / `set` / `clear`, and
+mint named, scope-limited keys with `localm key create --scope <scope>` - by
+default `key create` refuses to mint a privileged scope into a named key (pass
+`--allow-privileged` to override, since a terminal on this machine is already
+owner-equivalent trust); an owner-authenticated API call (`POST /v1/keys`) can
+mint one too (see *Capability scopes* below). A named key can also carry an
+expiry (`--expires-in` / `expires_in` on `POST /v1/keys`); `verify()` rejects it
+once it has passed.
+
+The owner key itself can be rolled or set from the GUI (Settings > Security)
+as well as the CLI: `POST /api/auth/key/rotate` requires the `admin` scope
+specifically (not just `config:write`, which governs the sibling clear route -
+setting a caller-chosen key is privilege-equivalent to minting yourself owner,
+so only an existing owner may do it). It is not loopback-restricted: reaching
+it already requires the owner credential, which grants no new authority.
+Rolling or setting the key does not revoke existing browser sessions (they are
+decoupled from the key's value by design); `localm key recover`, run locally,
+is the compromise-recovery path that does.
+
+A key you chose yourself (`localm key set`, `LOCALM_API_KEY`, or writing
+`auth.key` by hand) can be short or memorable, so its fingerprint - recorded in
+`sessions.json` and `jobs.json` to check ownership - uses a slow, salted
+derivation (scrypt) rather than a fast hash, so it cannot be brute-forced
+offline from those files. A named key localm generates (`localm key create`) is random and long
+enough that this does not matter, and keeps using the cheap path.
+`localm key set` / `POST /api/auth/key/rotate` refuse a key under 8 characters
+outright; that floor is enforced only when the key is CHOSEN through localm,
+not when it arrives via the `LOCALM_API_KEY` environment variable or a
+hand-edited `auth.key`, and even a key that clears it is only "not instantly
+guessable", never "strong" - only a randomly generated key is.
+
+Because the default is fail-open for reads, a network bind without a key is unsafe,
+so **both `localm gui` and `localm serve` refuse to bind past loopback unless an API
+key of at least 8 characters is set** (printing how to set one) - a configured key
+shorter than that is treated the same as no key at all. `--insecure` overrides this
+for a trusted, isolated network - it then serves unauthenticated, the GUI's coder
+agent included. A network bind also gets built-in TLS automatically (see
+`docs/tls.md`), so the key and all traffic are encrypted. Exposing the GUI exposes
+the coder agent, which can run shell commands.
+
+**The refusal above is a hard exit only for an explicit CLI bind.** The bind
+address and the TLS toggle/cert/key are also settable from the GUI (Settings >
+Server & network; `bind_host`, `tls_enabled`, `tls_cert`, `tls_key`, each `admin_only` -
+see [docs/tls.md](tls.md)) and take effect on the next restart. `--insecure`
+has no config form, so it can only ever be supplied from a terminal; a
+Settings-driven bind that fails the key check (or whose TLS setup fails, or
+whose configured address is not bindable on this machine right now) therefore
+cannot be forced open the way a CLI bind can. It degrades LOUDLY to loopback
+instead of exiting: a browser-only user with no terminal would otherwise be
+locked out of a server that refuses to start, with no way back in.
+
+### Host header check (DNS rebinding)
+
+A running server answers only to its own names. Every request, WebSocket
+upgrades included, must carry a `Host` header naming `localhost`, a `*.localhost` name or
+a loopback address; on a network bind also any IP address, this machine's own
+host name (short and fully qualified, and `<hostname>.local`), the mDNS name,
+its Tailscale names and the names in the TLS certificate. Names listed in the
+owner-only `allowed_hosts` setting or the comma-separated `LOCALM_ALLOWED_HOSTS`
+environment variable are accepted on every bind (`*.example.com` covers one
+label, `"*"` turns the check off). Anything else, and a missing, repeated or
+malformed `Host`, gets `400` (a WebSocket upgrade `403`) before any route, CORS
+reply or static file. The port is not compared. When a request names a host the
+current list refuses and the list is at least 30 seconds old, the list is built
+again (settings, environment and `tailscale status` re-read), so a Tailscale
+name that comes up after localm started is accepted without a restart. The name
+`host.docker.internal` is never accepted unless it is listed. This stops DNS rebinding: a page on an attacker's
+domain whose DNS answer is switched to `127.0.0.1` is same-origin to the browser,
+so without this check it would also pass the same-origin checks below and, with
+no key set, the keyless inference API.
+
+### State-changing endpoints
+
+Every state-changing endpoint (`POST`/`PUT`/`PATCH`/`DELETE`) is **same-origin
+only** by default, so a web page on another `localhost` port (a dev server, an
+npm postinstall page) cannot drive it from your browser. The guard is
+allowlist-by-default: it covers plugin data routes (`/api/rag`, `/api/coder`,
+...) too, not just key/config/plugin administration, and a new route is
+protected the moment it is added. Two kinds of route are exempt from the check
+itself. Inference routes are left cross-origin callable so a local app can use
+them, and they carry the bearer key when one is configured: the OpenAI-compatible
+set (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/rerank`,
+`/v1/audio/transcriptions`, `/v1/audio/speech`, `/v1/images/generations`), the
+Ollama-compatible set (`/api/chat`, `/api/generate`, `/api/embed`,
+`/api/embeddings`, `/api/show`), the Anthropic-compatible `/v1/messages` and
+`/v1/messages/count_tokens`, and the OpenAI Responses route `/v1/responses`.
+The other kind carries its own credential instead: `/v1/surfaces/gui` (on-demand
+GUI mount), gated on its own attach token or the owner key; and
+`/v1/instances/cooperate-unload`, `/v1/instances/vouch` and
+`/v1/instances/status` (multi-instance GPU coordination between instances on one
+machine): they answer only on an instance that coordinates, refuse any request
+that carries an `Origin` header, and an unload, or the full status by `POST`,
+happens only after the asking instance, listening under the same OS account,
+confirms the request on `/vouch`. Without that, or this instance's attach token
+or a key granting `models:read`, `GET /v1/instances/status` omits the process id
+and every model's path and digest, and on a key-protected instance lists no
+models. Every one of these is matched as an
+exact route, not a prefix - a route added under one of them is not exempt, and
+exempting a new route needs its own deliberate addition. A configured
+`"cors_origins"` (or `"*"`) opts specific origins into cross-origin use for
+everything else.
+
+When **no key is configured** (open mode), those same state-changing routes also
+require a per-process **shell token**, served by `GET /` to whatever passes the
+same-origin-or-loopback-`Host` check above. The loopback GUI shell is the intended
+recipient, but that check cannot tell it apart from any other local program making
+the identical request - so a local non-browser client (curl, a script) needs one
+extra, unauthenticated `GET /` to obtain the token, and from there has the same
+reach as the shell: mint a key, change config, install a plugin, load a model,
+drive the coder agent, index files. This matches open mode's own
+frictionless-local-use design (see above); it is not a credential boundary between
+the owner and other software already running on the machine. Set a key (`localm
+key generate`) if that reach should not be available to other local programs. Reads
+and the inference API stay open. A configured `cors_origins` (including `"*"`) is
+trusted for cross-origin *reads* of ordinary API responses, but state changes still
+need a key or the shell token, so a forged `Origin` header cannot be used as a
+management credential. **The one exception is `GET /` itself**: the page that
+carries the shell token is served to same-origin requests only, regardless of
+`cors_origins` - CORS governs whether another origin may read a response, not
+whether the token was safe to put in one, so the token's own delivery is never
+covered by that trust.
+
+### Management/metadata reads (open mode)
+
+The same-origin requirement above also applies to `GET` reads of management and
+metadata endpoints (named keys, server config, host stats, uploads/conversations/
+plugins listings, and the filesystem browser used by the file picker) when no key
+is configured: the open-mode shell token those routes accept is bound to the SAME
+same-origin-or-allowlist check as a state change, not just to token possession. This
+closes a specific gap CORS's own permissive `localhost`/`127.0.0.1` origin policy
+would otherwise create: without it, any other program on the machine that can read
+the loopback GUI shell's HTML (CORS trusts every `localhost:PORT` origin to read a
+matching response) could lift the embedded token and replay it cross-origin against
+these routes. The exempt read paths (unauthenticated by design, matching
+the inference API's own cross-origin posture) are every `GET` under `/v1/models`
+(matched as a prefix, so `GET /v1/models`, `GET /v1/models/{id}`,
+`GET /v1/models/{id}/hold` and `GET /v1/models/{id}/peer-offer`), the Ollama-compatible `GET /api/tags`, `GET /api/ps` and
+`GET /api/version`, and `GET /api/session` (the "am I logged in?" check). The
+unauthenticated routes outside the `/api` and `/v1` prefixes (`GET /health`,
+`GET /whoami`, `GET /localm-ca.crt`) never enter this gate, and
+`GET /v1/instances/status` is covered by the exemptions listed above.
+
+### Content Security Policy
+
+Every response from the GUI shell carries an **enforcing** (not report-only)
+Content-Security-Policy, plus `X-Content-Type-Options: nosniff`. `script-src`
+allows `'self'`, `blob:`, `'wasm-unsafe-eval'`, and a fresh, per-request nonce
+(no `'unsafe-inline'`), so an injected `<script>` in rendered chat content
+cannot execute even though chat content is otherwise sanitised with DOMPurify
+before it is inserted into the page - the CSP is the backstop, not the
+primary defence. `form-action 'none'` additionally blocks a
+sanitiser-surviving `<form>` from submitting anywhere, same-origin included.
+`connect-src` allows `'self'`, `blob:`, and the two hosts a first-party
+plugin fetches model weights from in-browser (`huggingface.co`, `*.hf.co`) -
+no CDN origin is allowed or needed.
+
+## Capability scopes grant host access - only issue keys to trusted clients
+
+Some capabilities reach the host filesystem and process by design, bounded by the
+localm process's own permissions rather than a sandbox:
+
+- **`jobs`** schedules work of the kinds `chat`, `coder`, `memory` and `rag`; creating
+  a job needs the scope of its kind as well (`chat`, `coder`, `memory` or `rag`), and a
+  job whose creating key was revoked, expired or lost that scope is skipped when it comes due.
+- **`coder:full`** runs shell commands and reads/writes files (the `--scope` glob
+  narrows *which* files; `run_shell` is intentionally unscoped). The plain **`coder`**
+  scope is restricted - read plus confined file edits within the scope, no shell. A
+  restricted session starts none of the project's MCP servers, plugin tools or
+  skills, and cannot create or change anything inside a `.localcoder` directory
+  or a `LOCALCODER.md` file, which configure later coder sessions.
+- **`browser`** lets its holder open and drive a real, automated browser on
+  this machine - directly through the Browser page and its `/api/browser/*`
+  routes, and, for a key that also holds `coder:full`, through the coding
+  agent's browser tools (a plain `coder` session never browses) - navigate,
+  read, click, fill forms, screenshot, and read the page's console and network
+  activity. It is separate from `coder`/`coder:full`'s shell and file access,
+  so a key can be granted one without the other. Every request the driven page
+  makes, including images and scripts it pulls in on its own and every hop of a
+  redirect, is checked against the same outbound network policy as
+  `fetch_url`/`web_search`, and a WebSocket connection is refused rather than
+  relayed. See [docs/network.md](network.md).
+- **`rag`** indexing over the HTTP API is confined, by default, to your home
+  folder, the working directory, and any folders you explicitly allow (with the
+  indexing mode switched to `blacklist` it is allowed everywhere except the
+  folders you deny), and in both modes always refuses
+  credential folders (`~/.ssh`, ...) wherever they appear, so an API client
+  cannot index-and-read arbitrary system files. The localm data directory is
+  NOT specially excluded from that confinement - if it falls within an allowed
+  folder, its contents are indexable like any other file, on the reasoning that
+  the owner already has direct filesystem access to their own data; this is a
+  deliberate choice for a local, single-user tool, not an oversight.
+  The `localm rag` CLI is not bound by that folder policy (a local user can already read
+  their own files) but it refuses the same credential folders, UNC and device paths,
+  and mapped network drives when that setting is off.
+  A `rag`-scoped key can read back, through a query, every document in every
+  collection on this server (ones indexed from the terminal and ones other
+  clients uploaded included) unless the key is confined with `rag_roots`, so
+  issue one only to clients you trust. A key can also be confined to a
+  specific folder allowlist at mint time (`rag_roots`) instead of that default
+  reach - which REPLACES it rather than narrowing it, so it can point at a folder
+  outside the default reach too, and over the API only the owner key (or a key
+  holding `admin`) may grant it; `localm key create --rag-root` does the same
+  from this machine's terminal.
+- **`image` / `video` / `music`** read a source image for img2img only from the
+  uploads folder and the generated-media galleries - never the rest of the data
+  directory (which holds your owner key and sessions) and never the localm
+  install directory - and a file with no image signature is refused before it is
+  uploaded to ComfyUI (which may be another machine, over plain http). Moving a
+  generated file OUT of the data directory needs host filesystem access, the
+  same dial as the folder picker that chooses the destination. The same rule
+  covers the `generate_image` MCP tool, which reaches the same upload.
+  That tool's `output_path` writes only a new image file (`.png`, `.jpg`,
+  `.jpeg`, `.webp`) in the data directory's `mcp-images` folder or the image
+  gallery; any other path, and a file that already exists, is refused.
+  Known limit, if you issue several media keys: those source folders are
+  SHARED, so one media key can use another's generated image as an img2img
+  source. The uploads inbox has no per-key ownership at all, so this is a
+  property of the folders rather than of one route. It is narrower than it
+  looks - the folders hold generated media and files you uploaded, not your
+  keys or sessions - but if that matters to you, issue one media key.
+- **Host filesystem access** is a separate dial, and it gates the model and
+  media routes that can name a path on the server: pulling a model by naming a
+  path that already exists there, scanning for ComfyUI models, downloading a
+  curated ComfyUI model, re-pointing a registered model at a moved file by
+  naming its new server-side path, and moving a generated media file out of
+  the data directory (see above). Without it, a key holding those scopes is
+  confined to remote pulls (a HuggingFace repo, a CivitAI version id or an
+  http(s) URL, each subject to the network policy) and the folders localm
+  already manages. It is a
+  per-route gate on those routes, not a blanket property of every scope.
+- **Installing a third-party plugin** from a directory
+  (`localm plugin install <path>` / `POST /api/plugins/install-external`)
+  refuses a source tree containing any symlink or Windows junction, so a
+  malicious plugin source cannot smuggle a file's contents out through a link
+  or drive a large copy through a self-referencing cycle. Third-party plugins
+  run unsandboxed in-process, so install only code you trust. The install
+  route refuses a UNC or device path, and needs host filesystem access or a
+  server bound to loopback; a plugin's routes must sit under `/api/` or `/v1/`.
+- **`config:write` / `plugins:admin` / `keys:admin` / `coder:full` / `admin`**
+  are privileged and are never granted implicitly: a `POST /v1/keys` call made
+  with the owner key (or a key holding `admin`), or `localm key create --allow-privileged` from this
+  machine's terminal, must ask for one deliberately.
+
+These are deliberate grants to *you*: a scoped key (or an exposed GUI) grants its
+holder that capability on your machine, so only issue keys to - or expose the GUI to -
+clients you trust.
+
+**A project folder you open with the coder is untrusted until you trust it.** A
+repository's `.localcoder` folder can declare tool hooks, MCP servers,
+`auto_approve`, a `verify` command, a `model`, a `mode` that records more than
+yours, instructions (`system.md`), memory (`memory.md`) and skills. None of
+these is used until you trust the project at the prompt (or with `--trust-hooks`,
+`/hooks trust` or the GUI's hooks dialog), and the trust is for the folder as
+it was shown: changing any of those files asks again. A run nobody watches (the
+MCP `run_coder_task` tool, a scheduled job) never takes `auto_approve` from the
+project. `LOCALCODER.md` at the project root is read without that prompt, as
+project notes, and a skill whose file or folder is a link is refused.
+
+## Model trust boundaries
+
+- **A model name from the API, an MCP client, or a scheduled job must be one
+  you have already registered** - it is never treated as a filesystem path, so
+  a request cannot point the server at an arbitrary folder (which, for a
+  HuggingFace-format model with "Allow model-bundled custom code" turned on,
+  would run that folder's own bundled Python). Two owner-only settings also
+  take a path: the draft model for speculative drafting and the coder's local
+  reviewer model. Naming a model straight from a path on the command
+  line (`localm run D:\models\foo.gguf`, `localm gui <path>`, `localm mcp
+  --model <path>`) is unchanged and still allowed - you typed it yourself.
+- **A model's own bundled code does not run just because you loaded it.**
+  Custom model code (`trust_remote_code`) is off by default. A model that
+  ships it runs on the classes transformers has for it, without its code,
+  and is refused with an explanation when there are none. The owner-only "Allow
+  model-bundled custom code" setting (Settings > Model) turns it back on
+  for a model you trust. A few model types whose bundled code targets an older
+  transformers always run on transformers' own classes, whatever the setting.
+- **A downloaded model or vision-projector filename** cannot resolve to
+  something other than the plain file it appears to be: a repo-supplied name
+  is rejected if it contains a colon (which can open a hidden Windows
+  alternate-data-stream), matches an 8.3 short-name alias for an unrelated
+  file you already have, names a reserved Windows device, or ends in a dot or
+  space (which Windows silently strips). This applies to `localm pull`, the
+  same-repo vision-projector auto-attach, and `--mmproj`. A full-repository
+  pull checks every file name (each folder in it too) against the
+  repository's file list, read at the commit it then downloads, before
+  anything is downloaded, and is refused when that list cannot be read.
+- **Routing a chat request to a model loaded on another localm instance on
+  this machine** verifies the target before forwarding anything: accepting a
+  peer offer (Models page, when another running instance already has the
+  model loaded) checks that instance's own API key against it once, or no
+  key for an instance that has none, before anything is stored, and every request
+  after that is only ever forwarded to a target confirmed to resolve to
+  loopback over plain HTTP or HTTPS - a forged or LAN-facing offer cannot
+  redirect your requests off this machine. A redirect answer from the peer is
+  never followed, for a forwarded request, a check of the peer, a routed job
+  or the MCP server using a model another instance has loaded. A key holding
+  anything but printable ASCII without spaces is refused without being sent or
+  echoed. The peer's key lives in this process's memory only; it is never
+  written to disk or logged.
+
+## Outbound network policy
+
+localm is offline-first, and the paths that CAN reach the network run through
+one policy choke point (`netpolicy.check_url`). The full model, including the
+domain lists and the mode semantics, is in [docs/network.md](network.md);
+this section states the security properties and, more importantly, their edges.
+
+- **What it covers.** The coder's and chat's web access, HuggingFace model
+  discovery, model pulls and the coder's network reviewer all go through the
+  policy. A HuggingFace pull checks the hub endpoint, and a single-file pull
+  every redirect hop of its size check; the metadata requests and the transfer
+  itself run inside the `huggingface_hub` library, which follows the hub's
+  redirect without a per-hop check or the DNS-rebinding pin. It is not only a
+  model-facing guard.
+- **What it does not cover.** Several outbound paths deliberately do not use
+  it, including bug-report upload and requests to your ComfyUI instance.
+  ComfyUI has its own, narrower guards instead: a configured `comfy_api_url`
+  (or a media plugin's own `comfy.api_url`, the model scan included) that
+  targets a link-local / cloud-metadata address is refused
+  (CHK-COMFY-APIURL): 169.254.0.0/16, fe80::/10, 100.100.100.200,
+  fd00:ec2::/32, and a link-local or metadata IPv4 address in IPv4-mapped,
+  IPv4-compatible, NAT64
+  (64:ff9b::/96, 64:ff9b:1::/48) or 6to4 form, which the search backend refuses too. The
+  connection itself refuses any HTTP redirect outright, so a hostile or compromised ComfyUI cannot use a 3xx response to
+  steer the request elsewhere. Loopback and LAN are both
+  normal, unchecked ComfyUI deployments - treat the policy as governing the
+  paths named above, not as a blanket statement about every socket localm
+  opens. The embedding-model and Whisper downloads described below are
+  another: they respect `net_mode` (including `off`) and check the Hugging Face
+  endpoint against the policy (`check_url`: the domain lists and the address
+  check) before fetching. The repository is a **fixed, hardcoded** one named
+  by localm's own code rather than a caller-supplied URL, and the transfer
+  runs inside `huggingface_hub`, without the per-hop check or the
+  DNS-rebinding pin. The same holds for the compute kernel transformers
+  fetches from the Hub when a checkpoint's quantization needs one (FP8 on a
+  GPU that runs it natively, mxfp4, eetq, fbgemm_fp8, metal): the Hub endpoint
+  is checked against the policy first (`off` and the domain lists refuse it,
+  `ask` and `allow` let it through without a prompt); every other model load
+  keeps Hub kernels blocked.
+- **No redirect off HTTPS, on any of them.** Separate from the policy above and
+  narrower: every outbound client that uses localm's shared verified opener
+  (setup-llama's runtime download and its GitHub and PyPI lookups, the update
+  check and download, the issues list, the bug-report upload, the native image
+  and music runtime downloads) refuses a redirect
+  that leaves HTTPS for a weaker scheme. Verifying the first hop's certificate
+  says nothing about the hops after it, and a redirect target is chosen by the
+  server, after any check on the URL you configured has already run. This is a
+  transport guarantee only: it says the bytes stay encrypted in transit, not
+  that the host they came from was policy-checked.
+- **`off` is the meaningful setting.** At the policy layer `ask` and `allow`
+  are the same thing: the only mode branch that refuses is `off`. The prompt
+  you see for `ask` comes from the coder's own confirmation step, one layer up,
+  and an auto-approve session does not show it. Do not read `ask` as a
+  guarantee that something will stop and ask.
+- **A one-time, explicit download is consent, not a policy exception.** Two
+  GUI actions (fetching the embedding model on the Knowledge page, the Whisper
+  speech-to-text model on the mic button) let a `config:write`-or-better caller
+  authorize exactly one fetch of the currently-configured internal model even
+  under `ask`, the same way `/web` or `localm pull` are consent by definition.
+  The authorization is a single call argument, never written to config or any
+  other state, and it changes nothing about `net_mode` for any other request.
+  `net_mode = off` still refuses it unless `net_allow_model_downloads` is on
+  (next bullet) - this bypasses `ask`'s friction, never `off` by itself.
+- **`off` has two documented exceptions, and neither is the one above.** Both
+  are admin-only settings, off by default. `update_ignore_net_policy` lets the
+  update check run regardless of `off`. `net_allow_model_downloads` lets the
+  downloads you trigger yourself proceed under `off`: model pulls and
+  HuggingFace search, the vision-projector, voice, embedding-model, browser-build
+  and TTS model fetches, and the native runtime downloads (`localm setup-llama`,
+  `localm setup-sdcpp`, `localm setup-music`), and the Python package installs localm
+  starts (a plugin's dependencies, the managed ComfyUI's packages, the PyTorch step of an
+  update; an update's own dependency step also runs under `update_ignore_net_policy`).
+  It never applies to model-initiated access (the
+  coder's `fetch_url` and `web_search`, chat web access), which stays governed
+  by `net_mode` alone. Requests to your configured ComfyUI never consult
+  `net_mode` (see *What it does not cover* above). The bug-report upload is sent
+  only when you press Send, and `off` refuses it unless you choose to send that
+  one report anyway.
+  The coder's off-machine model backends do not opt out: building
+  one (`--online`, `--anthropic`, `--url`, `LOCALCODER_URL`, the GUI's backend
+  choice, the reviewer) runs the network policy, so `off` refuses it, and
+  privacy mode refuses it unless the user typed the flag (an environment
+  variable never counts). The issues list is refused under `off` too.
+- **Private-address guard.** Requests to loopback, link-local, CGNAT and
+  private ranges are refused, and the check is re-applied to the resolved
+  address rather than the name. It classifies by ADDRESS TYPE, so a service
+  reachable on a globally-routable address is not "internal" to this guard.
+  Setting `net_allow_private` true narrows both the pre-flight check and the
+  pin-time re-check, for every request, to link-local addresses (`169.254.0.0/16`,
+  which holds the common cloud metadata address `169.254.169.254`, and
+  `fe80::/10`) and the cloud metadata addresses `100.100.100.200` and
+  `fd00:ec2::/32`, in any embedded IPv6 form, which stay refused; a name that also resolves to another address is
+  dialled on that address only. The one narrower
+  exception is the search backend: when the configured `net_search_url` names
+  a local host (an IP address, `localhost`, a dotless name or a local-network
+  suffix), the SearXNG search reaches a loopback or private address on exactly
+  that origin (scheme, host and port), never a link-local or cloud-metadata
+  one, and no other request gets it.
+- **DNS-rebinding pin.** A permitted request is pinned to the address that was
+  validated, so a name cannot resolve to something else between the check and
+  the connection. The pinned session also disables environment trust, so a
+  proxy environment variable cannot route the connection somewhere the pin
+  never saw, and `.netrc` credentials are not auto-attached to a request the
+  caller never asked to authenticate. The pin applies to sessions built for
+  this purpose, not to every HTTP client in the process.
+- **Redirects.** Page fetches and model pulls re-validate each hop, so a
+  permitted URL cannot redirect its way to a refused one. That re-validation is
+  not present on every network path.
+- **Domain allow and deny lists.** `net_mode` and the `net_deny`/`net_allow`
+  lists are read from config once, together, per call to `check_url`. If that
+  read fails, the request is refused outright (fail closed) rather than
+  falling back to a permissive default - a denied host cannot slip through
+  because the config happened to be unreadable that one time.
+- **Response size.** Fetches are capped, but the cap is a default that callers
+  may raise; it is not a fixed ceiling.
+
+**What this is not.** The policy decides whether a request may be made. It says
+nothing about whether the content that comes back is trustworthy. Fetched pages
+and search snippets are untrusted input to the model, and
+[docs/network.md](network.md) is explicit about that.
+
+## Transport security on a network bind
+
+- **Automatic past loopback, not before it.** A bind beyond loopback generates a
+  local certificate authority and a leaf certificate and serves HTTPS. A default
+  loopback bind is plain HTTP and generates no certificate at all, which is why
+  a normal local install has none.
+- **What the certificate covers.** The SANs are built from this host's own
+  addresses (via the OS resolver), its primary outbound LAN address (a
+  Tailscale address only when the OS resolver returns it), and the mDNS/Tailscale MagicDNS names - all stdlib-only,
+  so this works with no optional dependency. Reaching localm over a VPN or
+  overlay network may therefore land on an address the certificate does not
+  name. A VPN's own tunnel adapter is deliberately excluded from the LAN
+  address (see [docs/tls.md](tls.md)). The optional `[monitor]` extra
+  (psutil) widens a *different*, non-security-relevant address list - the
+  addresses shown on the phone-pairing card - not the certificate's SANs.
+- **Regeneration.** The leaf is regenerated when it no longer covers a required
+  name or address, nears expiry (about 30 days before), or no longer chains to
+  the CA on disk.
+- **Key file permissions.** The CA and leaf private keys are written 0600 from
+  the moment they exist (on Windows, where a file mode sets no ACL, they are
+  created inside the already-restricted `tls` folder), then restricted to the current user: `chmod` on
+  POSIX, `icacls` on Windows (inherited entries dropped; explicit full control for the
+  user the server process runs as, named by the SID in its process token, never by the
+  `USERNAME` variable, plus SYSTEM and Administrators, which already control the machine). Both are best-effort - a failure is logged as a
+  warning rather than blocking startup, and the data directory's own access
+  control is the fallback boundary if the OS-level restriction cannot be
+  applied (a non-NTFS volume, a process token whose user cannot be read, `icacls` itself absent).
+- **Trusting the CA.** Clients need the generated CA to validate the connection.
+  `GET /localm-ca.crt` serves it, and that route is deliberately public.
+- **A self-call caveat.** When the CA file is missing, localm's own internal
+  calls fall back to not verifying rather than failing.
+
+Setup, distribution to phones and browsers, and reverse-proxy alternatives are
+in [docs/tls.md](tls.md).
+
+## Software updates
+
+localm never updates itself. An update runs only when you initiate it (`localm
+update`, or the GUI "Update now" button). The client is signature-verifying:
+
+- **Signed builds.** A downloaded build must carry an **Ed25519** signature from
+  localm's **release key**, checked before anything is extracted or executed. A
+  missing, invalid, or tampered signature, a signature from any other key, or a
+  signature in an older format is refused before any file is swapped (fail closed).
+- **Replaceable keys.** localm's own source pins two sets of keys: the release key,
+  which signs builds, and three **recovery keys**, kept offline, which never sign a
+  build. An update can carry a new set of keys (for example a new release key); it
+  is accepted only when it is numbered higher than the set in use and signed by two
+  of the three current recovery keys, and is then kept in the data directory
+  (`updates/trust.json`, with the sets accepted before it in `updates/trust-chain.json`)
+  and used from then on. Each time it is read, the saved set is checked again from the
+  built-in keys forward: every step must be signed by two recovery keys of the set
+  before it, and a saved set that does not chain to the built-in keys stops updates
+  with an error naming the file. A lower-numbered set is refused, so
+  a replaced key cannot be brought back by replaying an old one. A refused update
+  leaves the keys in use unchanged (an older version installed by choice saves a
+  correctly signed new set during its signature check, before its other checks),
+  and a damaged `updates/trust.json` stops updates
+  with an error naming it rather than falling back to the built-in keys.
+- **No downgrades.** A validly signed but older, equal, or version-less build is
+  refused: a signature proves authenticity, not freshness.
+- **Installing a version you choose.** `localm update --to <version>` (and Settings >
+  System > Updates > Choose a version) installs the exact release you name, older ones
+  included. Both points above still apply to the plain update; for a chosen version
+  they work like this. The build's VERSION must be the one you asked for, or it is
+  refused. The signature is checked the same way, and when it does not verify
+  (unsigned, signed by a retired or unknown key, or altered after signing) localm
+  tells you why and installs it only if you confirm, and only the exact build you
+  confirmed (matched by its SHA-256). A build that does not verify never changes the
+  keys in use. Over HTTP this needs the `admin` scope. Before a downgrade, localm
+  copies your settings, model registry, coder sessions, memory and plugins to
+  `updates/data-before-<version>-<date>-<time>-<8 hex>/` in the data directory. An older build
+  installed this way keeps the keys in use: a release from before 0.3.2 gets this
+  build's signature check alongside it, so it can still verify and install newer
+  releases and refuses the retired keys, and a release that would look `uv` up on PATH for a dependency update
+  uses the `uv` this install found instead.
+- **HTTPS only.** The download endpoint must be HTTPS and a redirect that would
+  downgrade to plain HTTP is blocked.
+- **Python dependencies come from the release's lock.** When an update changes
+  localm's dependencies, its dependency step installs them with `uv sync --frozen`
+  from the `uv.lock` the signed build carries: exact versions, and each downloaded file
+  is checked against the SHA-256 the lock records. A plugin's dependencies are
+  installed the same way (`--require-hashes`, at the locked versions) when the install
+  has a `uv.lock` and uv. Installs no lock covers use the package index over HTTPS
+  without hash checking: a plugin dependency install with no `uv.lock` or no uv (it
+  says so as it runs), the managed ComfyUI's packages (ComfyUI's own requirements and
+  PyTorch from the PyTorch index), and the PyTorch step setup runs and an update
+  repeats. The first install by `setup.bat`, `setup.sh` and the graphical installer
+  (`installer/gui.py`) takes localm's own dependencies from the `uv.lock` of the
+  folder, the same way an update does; with no `uv.lock` there it installs the
+  newest versions `pyproject.toml` allows, and says so.
+- **Native runtime downloads.** The llama.cpp runtime archives of the release localm
+  pins are checked against SHA-256 values compiled into localm; when the release
+  listing reports a different digest for one of them, the download is refused. For a
+  release localm does not pin (`localm setup-llama --tag ...`) the digest comes from
+  the same release listing as the file, and when the listing has none the download is
+  installed with a warning that it is unverified (pass `--sha256` to pin one). The
+  stable-diffusion.cpp, KoboldCpp and uv downloads and the embedding models are checked
+  against pinned SHA-256 values.
+- **Your data is never in the swap.** The file swap never touches the venv (an
+  update that changes dependencies reinstalls the packages there afterwards), `.git`,
+  your data directory (models, config, sessions), or `.localcoder`; provisioned
+  native binaries (the llama.cpp runtime) are preserved across the swap. It backs
+  up first and rolls back on failure rather than leaving a half-applied tree.
+
+Honest limits: until an install receives an update that replaces a key, a build
+signed with that key is still accepted. A replacement set of keys is kept in the
+data directory that applied the update, while the install is shared by every data
+directory that runs it (a different `LOCALM_HOME`, or a data directory that was
+reset). Every release that carries a replacement set of keys also pins that same set
+in its own code, so once it is installed, every data directory trusts the new keys,
+whichever one applied the update. Rolling that update back restores the previous
+build's code and the keys it pins, so a data directory other than the one that
+applied the update trusts the previous keys again until the update is reapplied.
+Builds signed for localm 0.2.0 and earlier use a single-key format that 0.3.0 and
+later refuse. 0.2.0 updates to 0.3.0 as before; an install still on 0.2.0 when a
+later release is published cannot verify that release and needs a fresh install
+(an install that went back to 0.2.0 through `localm update --to` is the exception
+described above). The GUI "Update now" button's restart (the only
+transition that happens with nobody watching) is followed by a detached watchdog
+that polls the relaunched build's `/whoami` for the expected version and
+auto-rolls-back if it does not come up healthy within 90 seconds. `localm update`
+from the CLI applies the same way but does not restart for you - you relaunch by
+hand, so a build that misbehaves after that manual restart has no automatic
+watchdog and is recovered with `localm update --rollback` (or by restoring the
+backup directory the update left behind). The GUI has the same rollback as a
+button (Settings > System > Updates), backed by `GET`/`POST /api/update/rollback`: the
+GET is a read-only check for whether a backup exists and which build it would
+restore; the POST requires the `admin` scope specifically (not merely
+`config:write`) and restores the previous build's files from the local backup
+with **no signature check and no network request** - it is not a download, so
+the signing model above does not apply to it. It restores every part the update replaced: the files,
+the virtual environment as it was before the update's dependency step, the
+native runtime and the components.
+
+**A first-time (non-updater) install can be verified too.** `scripts/verify_release.py`
+checks a downloaded release Asset (`localm-<version>.zip` plus its signature envelope,
+`.zip.envelope` for 0.3.0 and `.zip.sig` otherwise) against
+the same signing keys described above, and/or a plain SHA256 digest - useful if
+you obtained the zip some other way than the recommended `git clone` install. The
+`git clone` path itself is unchanged by this: it never downloads a zip, so it continues
+to rely on git+HTTPS+GitHub's own trust model, not this signing mechanism.
+
+## Management log
+
+`logs/management.jsonl` in the data folder is an append-only record of management events, written in log and full mode only (privacy mode writes nothing): key created or revoked (key id only), refused login (loopback or not), update applied (versions), settings saved (setting names only) and plugin installed or removed. It carries no key, setting value or conversation content. It is capped at 1 MB with one rotated file, and a failed write is logged as a warning without failing the operation recorded.
+
+## Verifying a release
+
+Every release carries build provenance that proves which workflow built a file and
+from which commit, independent of the Ed25519 update signature above. Two sets of
+files are covered:
+
+- **GitHub release files.** The release zip, the sdist (`localm-<version>.tar.gz`),
+  the wheel (`localm-<version>-py3-none-any.whl`) and the CycloneDX SBOM
+  (`localm-<version>-sbom.cdx.json`) are attested with GitHub Artifact Attestations
+  (SLSA build provenance, Sigstore). Download the file from the release page, then:
+
+  ```
+  gh attestation verify localm-<version>.zip --repo Matlan1/localm     --signer-workflow Matlan1/localm/.github/workflows/release-attest.yml
+  ```
+
+  The same command verifies the sdist, the wheel and the SBOM. A file that was
+  modified after the build, or built by any other workflow or repository, fails.
+
+  The release also carries `localm-<version>.intoto.jsonl`, the Sigstore bundle of
+  those attestations, so the provenance can be checked offline with
+  `gh attestation verify --bundle`.
+
+- **PyPI files.** The PyPI publish workflow uses Trusted Publishing, which uploads
+  PEP 740 attestations next to each file. Verify what `pip` would install with:
+
+  ```
+  pip install pypi-attestations
+  pypi-attestations verify pypi --repository https://github.com/Matlan1/localm     pypi:localm-<version>-py3-none-any.whl
+  ```
+
+The SBOM lists every package pinned in `uv.lock` for a runtime install (the base
+dependencies plus every optional extra except `dev`), one component each with its
+version, `pkg:pypi` package URL and the SHA-256 of each distribution file.

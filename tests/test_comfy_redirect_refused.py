@@ -2,7 +2,7 @@
 """sanitize_comfy_url only screens the CONFIGURED comfy_api_url, at resolution
 time. A redirect target is chosen by the remote ComfyUI AFTER that check has
 already run, and urllib's default opener follows up to 10 such redirects with no
-validation at all, so a hostile or compromised ComfyUI (SECURITY.md: it "may be
+validation at all, so a hostile or compromised ComfyUI (docs/security.md: it "may be
 another machine, over plain http") could answer any request with a 3xx straight
 past the guard, e.g. to a cloud-metadata address. ComfyUI's HTTP API has no
 legitimate reason to redirect, so the connection itself refuses every hop
