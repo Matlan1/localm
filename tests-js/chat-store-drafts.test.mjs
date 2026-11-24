@@ -414,10 +414,13 @@ test("a chat too large for the server says the browser keeps it only when it doe
     server.put("c1", { title: "One", messages: [user("a")] });
     const win = await boot(server);
     const c = await open(win, "One");
-    if (!cached) runScript(win, `
-      const older = []; for (let i = 0; i < 60; i++) older.push(
-        { id: "n" + i, title: "n", updated_at: Date.now() + 1e9 + i, messages: [{ role: "user", content: "x" }] });
-      chat.conversations = [...older, ...chat.conversations];`);
+    if (!cached) {
+      const set = win.Storage.prototype.setItem;
+      win.Storage.prototype.setItem = function (k, v) {
+        if (k === "localm.conversations") throw new Error("QuotaExceededError");
+        return set.call(this, k, v);
+      };
+    }
     server.failPut = 413;
     say(win, c, "b");
     assert.ok(await waitFor(() => win.__toasts.some((m) => /too large/.test(m))));
