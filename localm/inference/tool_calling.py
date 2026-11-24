@@ -328,7 +328,7 @@ def _wrap_calls(grammar: str, parallel: bool = True) -> str:
     body = first.removeprefix("root ::= ")
     return (
         f"root ::= tc-block{'+' if parallel else ''}\n"
-        f"tc-block ::= {literal(OPEN_TAG)} tc-ws tc-call {literal(CLOSE_TAG)} tc-ws\n"
+        f"tc-block ::= {literal(OPEN_TAG)} tc-ws tc-call tc-ws {literal(CLOSE_TAG)} tc-ws\n"
         f"tc-call ::= {body}\n"
         "tc-ws ::= [ \\t\\n\\r]? [ \\t\\n\\r]? [ \\t\\n\\r]?\n"
         + rest)

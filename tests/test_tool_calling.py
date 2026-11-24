@@ -201,6 +201,14 @@ def test_required_choice_forces_a_well_formed_call_from_the_first_token():
     assert not accepts(grammar, OPEN_TAG + "\n{}\n" + CLOSE_TAG)
 
 
+def test_the_close_tag_follows_the_call_directly_or_after_a_newline():
+    grammar, _lazy, _t = tool_grammar(validate_tools([WEATHER]), ToolChoice("required"))
+    body = json.dumps({"name": "get_weather", "arguments": {"city": "Paris"}})
+    for gap in ("", "\n", " ", "\r\n"):
+        assert accepts(grammar, f"{OPEN_TAG}\n{body}{gap}{CLOSE_TAG}"), repr(gap)
+    assert not accepts(grammar, f"{OPEN_TAG}\n{body}{' ' * 9}{CLOSE_TAG}")
+
+
 def test_auto_choice_is_lazy_and_triggered_by_the_tool_call_tag():
     grammar, lazy, triggers = tool_grammar(validate_tools([WEATHER]), ToolChoice("auto"))
     assert lazy is True and triggers == [TOOL_CALL_TRIGGER]
