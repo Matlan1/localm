@@ -463,10 +463,12 @@ def test_the_check_grammar_is_structurally_valid():
 def test_a_denied_call_that_ran_later_is_not_reported_denied_when_it_failed(tmp_path):
     from localm.plugins.coder.parser import ToolCall
     agent = _agent(tmp_path, _Backend([]))
-    args = {"path": "missing.txt", "old": "a", "new": "b"}
+    args = {"path": "there.txt", "old": "a", "new": "b"}
+    (tmp_path / "there.txt").write_text("a")
     loose = ToolCall(name="edit_file", args=dict(args), raw="", start=0, end=0, lenient=True)
     agent._execute_tool(loose, interactive=False)
     assert agent.denied_unconfirmed == [("edit_file", "lenient")]
+    (tmp_path / "there.txt").unlink()
     strict = ToolCall(name="edit_file", args=dict(args), raw="", start=0, end=0)
     assert agent._execute_tool(strict, interactive=False).ok is False
     assert agent.denied_unconfirmed == []
