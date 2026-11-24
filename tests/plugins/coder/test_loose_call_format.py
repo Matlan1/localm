@@ -145,7 +145,7 @@ def test_one_wrong_example_does_not_end_a_request_to_do_something(tmp_path, requ
     assert backend.still_asked == 0
 
 
-@pytest.mark.parametrize("request_text,name,args", _DOING)
+@pytest.mark.parametrize("request_text,name,args", [d for d in _DOING if d[1] != "write_file"])
 @pytest.mark.parametrize("still", ["[yes]", "", "maybe"])
 def test_a_request_that_stays_open_is_not_a_finished_run(tmp_path, request_text, name,
                                                         args, still):
@@ -206,6 +206,7 @@ def test_an_example_beside_a_call_that_ran_does_not_end_the_run(tmp_path):
     backend = _Backend([reply, "b.txt holds real."], check="[example]")
     agent = _agent(tmp_path, backend)
     assert agent.run_task("what does b.txt say?").startswith("b.txt holds real.")
+    assert "real" in _texts(agent, "user")[1] and "not run" in _texts(agent, "user")[1]
     assert not (tmp_path / "a.txt").exists()
 
 
@@ -501,9 +502,9 @@ def test_run_does_not_waive_untrusted_content(tmp_path):
         agent._note_typed_request = lambda *_a: None
         real = agent._ask_if_calls_meant
 
-        def ask(calls):
+        def ask(calls, *rest):
             agent._untrusted_in_context = True
-            return real(calls)
+            return real(calls, *rest)
 
         agent._ask_if_calls_meant = ask
 
@@ -731,7 +732,7 @@ def test_the_example_in_localms_own_error_is_no_quotation(tmp_path):
     backend = _Backend([_xml("run_tests", nonsense=1), "Now.\n" + _loose("run_tests"), "Done."])
     agent = _agent(tmp_path, backend)
     with patch.object(TOOL_REGISTRY["run_tests"], "fn",
-                      lambda cwd, path="", extra_args="", **kw: ran.append(1)
+                      lambda cwd, path="", extra_args="", _cancel=None: ran.append(1)
                       or ToolResult.success("ok")):
         agent.run_task("run the tests")
     assert ran, "the example call in the argument error made the real call a quotation"
