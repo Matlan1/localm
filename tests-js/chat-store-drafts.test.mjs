@@ -1319,9 +1319,9 @@ for (const [what, unsaved] of [["opened", false], ["renamed", true]]) {
     const c = await open(win, "One");
     say(win, c, "newer turn");
     assert.ok(await waitFor(() => server.files.get("c1").messages.length === 2 && !c.unsaved));
-    await settle(50);
+    const saved = () => cache(win).some((x) => x.rev === c.rev && !x.unsaved);
     win.saveConversations();
-    await drain();
+    assert.ok(await waitFor(saved));
     server.files.set("c1", { ...old, rev: "restored" });
     const kept = cache(win).map((x) => (unsaved ? { ...x, title: "Renamed", unsaved: true, updated_at: Date.now() } : x));
     const again = await boot(server, { cached: kept });
@@ -1333,6 +1333,26 @@ for (const [what, unsaved] of [["opened", false], ["renamed", true]]) {
     assert.equal(again.__toasts.filter((m) => /Both versions are kept/.test(m)).length, 1);
   });
 }
+
+test("a turn saved here and one added elsewhere afterwards make no copy at the next load", async () => {
+  const server = makeServer();
+  server.put("c1", { title: "One", updated_at: 10, messages: [user("a")] });
+  let win = await boot(server);
+  for (const turn of ["first", "second"]) {
+    // The second round starts from the cached copy of the first.
+    const c = await open(win, "One");
+    const before = server.files.get("c1").messages.length;
+    say(win, c, turn);
+    assert.ok(await waitFor(() => server.files.get("c1").messages.length === before + 1));
+    assert.ok(await waitFor(() => cache(win).some((x) => x.rev === c.rev && !x.unsaved)), turn);
+    const stored = server.files.get("c1");
+    server.put("c1", { ...plain(stored), updated_at: Date.now() + 5, messages: [...plain(stored.messages), reply("elsewhere")] });
+    win = await boot(server, { cached: cache(win) });
+    await settle(900);
+    assert.equal(server.files.size, 1);
+  }
+  assert.deepEqual(texts(server.files.get("c1")), ["a", "first", "elsewhere", "second", "elsewhere"]);
+});
 
 test("messages deleted in another browser do not make a copy", async () => {
   const server = makeServer();
@@ -1700,7 +1720,10 @@ test("text typed in privacy mode with no chat open does not land in a saved chat
 });
 
 test("a message queued in a chat stays with it when privacy mode is entered, and nowhere else", async () => {
-  const { win, server } = await twoChats();
+  const server = makeServer();
+  server.put("c1", { title: "One", updated_at: Date.now() + 9, messages: [user("first one"), reply("r1")] });
+  server.put("c2", { title: "Two", updated_at: 1, messages: [user("first two"), reply("r2")] });
+  const win = await boot(server);
   const c = await open(win, "One");
   win.chat.queue.push({ text: "q one", attachments: [], docs: [], clips: [], convId: "c1" });
   win.chat.queue.push({ text: "q closed", attachments: [], docs: [], clips: [], convId: "c2" });

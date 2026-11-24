@@ -1219,23 +1219,27 @@ const _leftIds = new Set();
 
 /** The conversations the browser cache gets: those this page holds, marked with
  *  the store they are in, and from what is cached already those of another store
- *  and the copy another tab cached with a change it has not saved yet. R40:
+ *  and the copy another tab cached with a change it has not saved yet. Each row
+ *  names the page that wrote it. R40:
  *  server index-only rows (_meta) carry no messages and are not cached. */
 function cacheableConversations() {
   const tag = cacheTag();
   const own = chat.conversations.filter((c) => !c._meta && convPersistable(c));
   const unsavedHere = new Set(own.filter((c) => c.unsaved).map((c) => c.id));
+  const readFrom = new Map(own.map((c) => [c.id, c.page]));
+  // A row this page wrote, or the one it read its copy from.
+  const mineBefore = (c) => !!c.page && (c.page === PAGE || c.page === readFrom.get(c.id));
   const stored = readStoredJSON("localm.conversations", []);
   const others = [];
   const foreign = [];
   for (const c of Array.isArray(stored) ? stored : []) {
     if (!c || typeof c !== "object") continue;
     if (!cachedHere(c)) foreign.push(c);
-    else if (c.unsaved && (c.messages || []).length && !unsavedHere.has(c.id) &&
+    else if (c.unsaved && (c.messages || []).length && !unsavedHere.has(c.id) && !mineBefore(c) &&
              !_deletedHere.has(c.id) && !_leftIds.has(c.id)) others.push(c);
   }
   const keep = new Set(others.map((c) => c.id));
-  const mine = [...others, ...own.filter((c) => !keep.has(c.id))]
+  const mine = [...others, ...own.filter((c) => !keep.has(c.id)).map((c) => ({ ...c, page: PAGE }))]
     .map((c) => {
       const row = c.prin || c._cached ? { ...c } : { ...c, ...tag };
       delete row._cached;
