@@ -2168,7 +2168,8 @@ def _user_delta(cfg: dict) -> dict:
     Two documented consequences of delta persistence:
       - A value set EQUAL to the current default is indistinguishable from
         "follow the default" and is dropped, so it tracks future default
-        changes (the usual user-settings-file semantics).
+        changes (the usual user-settings-file semantics). The keys in
+        _KEPT_WHEN_SET are the exception.
       - In a config.json written under the older full-dump scheme, a stored key
         equal to the CURRENT default is dropped on the next save, while a
         stored value that DIFFERS (for example a frozen old default such as
@@ -2179,11 +2180,80 @@ def _user_delta(cfg: dict) -> dict:
             if k not in DEFAULT_CONFIG or v != DEFAULT_CONFIG[k]}
 
 
-def _config_for_disk(cfg: dict) -> dict:
-    """The dict config.json stores for *cfg*: its user-set delta (_user_delta)
-    plus the ``model_refs`` of the model names in that delta."""
+# Kept in config.json even at their default value once somebody set them, so the
+# file tells a choice from the default (see config_key_stored). A blank value is no
+# choice and is not stored.
+_KEPT_WHEN_SET = frozenset({"embedding_model"})
+
+
+def keys_kept_when_set() -> frozenset:
+    """The config keys whose setting counts as a choice even at the default value;
+    a blank one is unset."""
+    return _KEPT_WHEN_SET
+
+
+def _unset_blank_choices(cfg: dict) -> set:
+    """Put each blank _KEPT_WHEN_SET key of *cfg* back to its default and return
+    those keys."""
+    blank = {k for k in _KEPT_WHEN_SET if k in cfg and not str(cfg[k] or "").strip()}
+    cfg.update({k: DEFAULT_CONFIG[k] for k in blank})
+    return blank
+
+
+class _NotedWrites(dict):
+    """The config an update_config mutator edits; ``written`` names the keys it set."""
+
+    def __init__(self, cfg: dict):
+        super().__init__(cfg)
+        self.written: set = set()
+
+    def __setitem__(self, key, value):
+        self.written.add(key)
+        super().__setitem__(key, value)
+
+    def update(self, *args, **kwargs):
+        new = dict(*args, **kwargs)
+        self.written.update(new)
+        super().update(new)
+
+
+def config_key_stored(key: str) -> bool:
+    """Whether somebody set *key* in config.json, as opposed to its default applying
+    (see _set_keys). On a running event loop the read follows ``_loop_safe_read``."""
+    return key in _loop_safe_read("config.json keys", _stored_config_keys_now)
+
+
+def _stored_config_keys_now() -> list:
+    """The keys somebody set in config.json, read on the calling thread."""
+    with _io_lock:
+        stored, _read_ok = _read_json_checked(CONFIG_FILE, {})
+    return sorted(_set_keys(stored))
+
+
+def _set_keys(stored) -> set:
+    """The keys of *stored* (config.json as read) that somebody set. In a file of the
+    older full-dump scheme (no version stamp, other keys at their default too) a key
+    at its default says nothing and is left out."""
+    if not isinstance(stored, dict):
+        return set()
+    stored = {k: v for k, v in stored.items()
+              if k not in _KEPT_WHEN_SET or str(v or "").strip()}
+    at_default = {k for k, v in stored.items()
+                  if k in DEFAULT_CONFIG and v == DEFAULT_CONFIG[k]}
+    if CONFIG_VERSION_KEY not in stored and at_default - _KEPT_WHEN_SET:
+        return set(stored) - at_default
+    return set(stored)
+
+
+def _config_for_disk(cfg: dict, written=()) -> dict:
+    """The dict config.json stores for *cfg*: its user-set delta (_user_delta), the
+    ``_KEPT_WHEN_SET`` keys in *written*, and the ``model_refs`` of the model names
+    in both."""
     from localm import model_ids
+    cfg = dict(cfg)
+    written = set(written) - _unset_blank_choices(cfg)
     delta = _user_delta(cfg)
+    delta.update({k: cfg[k] for k in _KEPT_WHEN_SET.intersection(written) if k in cfg})
     model_ids.attach_refs(delta, model_ids.config_names(delta), model_index())
     return delta
 
@@ -2198,8 +2268,8 @@ def save_config(cfg: dict) -> None:
     exact rules and the migration of old full-dump files."""
     ensure_dirs()
     with _io_lock:
-        delta = _config_for_disk(cfg)
         previous = _read_json(CONFIG_FILE, {})
+        delta = _config_for_disk(cfg, _set_keys(previous))
         _atomic_write_json(CONFIG_FILE, delta)
     _refill_after_write()
     _record_config_saved(previous if isinstance(previous, dict) else {}, delta)
@@ -2270,15 +2340,20 @@ def update_config(mutator: Callable[[dict], None]) -> dict:
                 f"would replace its settings with an older copy or with "
                 f"defaults; refused. Fix or remove {CONFIG_FILE.name} (the "
                 f"{CONFIG_FILE.name}.bak next to it may hold a good copy).")
+        set_before = _set_keys(stored)
         refs = stored.pop(model_ids.REFS_KEY, None) if isinstance(stored, dict) else None
         _merge_stored_config(cfg, stored)
         model_ids.config_to_current(cfg, refs, model_index())
         before = copy.deepcopy(cfg)
-        mutator(cfg)
+        noted = _NotedWrites(cfg)
+        mutator(noted)
+        cfg = dict(noted)
+        written = noted.written | set_before
         # The mutator and the return value see the full merged dict; only the
         # user-set delta hits the disk (see _user_delta / save_config).
         lock.assert_held()
-        _atomic_write_json(CONFIG_FILE, _config_for_disk(cfg))
+        _atomic_write_json(CONFIG_FILE, _config_for_disk(cfg, written))
+        _unset_blank_choices(cfg)
     _refill_after_write()
     _record_config_saved(before, cfg)
     return cfg

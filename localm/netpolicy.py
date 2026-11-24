@@ -407,6 +407,19 @@ def check_url(url: str, *, allow_when_off: bool = False,
     addresses, in any embedded form, are still refused. Every other URL, and
     every other caller, gets the full address check.
     """
+    cfg, host = _check_policy(url, allow_when_off=allow_when_off)
+    if cfg.get("net_allow_private", False):
+        if _only_link_local(host):
+            raise NetworkPolicyError(_link_local_refusal(host))
+    elif search_backend and is_search_backend_origin(url, cfg):
+        _check_search_backend_address(host)
+    else:
+        _check_public_address(host)
+
+
+def _check_policy(url: str, *, allow_when_off: bool = False) -> tuple:
+    """Every check of :func:`check_url` but the resolved-IP one, so without DNS:
+    ``(config, host)``, or NetworkPolicyError."""
     env = os.environ.get(NET_MODE_ENV_VAR, "").strip().lower()
     unreadable = NetworkPolicyError(
         "Network policy configuration could not be read; refusing this "
@@ -448,14 +461,7 @@ def check_url(url: str, *, allow_when_off: bool = False,
             f"Settings > Server & network > Allowed domains, or run: "
             f"localm config net_allow "
             f"\"{', '.join(allow + [host])}\"")
-
-    if cfg.get("net_allow_private", False):
-        if _only_link_local(host):
-            raise NetworkPolicyError(_link_local_refusal(host))
-    elif search_backend and is_search_backend_origin(url, cfg):
-        _check_search_backend_address(host)
-    else:
-        _check_public_address(host)
+    return cfg, host
 
 
 def _only_link_local(host: str) -> bool:
@@ -499,8 +505,20 @@ def download_refusal(url: str) -> Optional[str]:
     net_allow_model_downloads applied to the net_mode=off floor, so net_mode,
     net_deny, net_allow and the address check all bind. Resolves DNS, so call it
     off the event loop. Never raises: an error while checking is a refusal."""
+    return _refusal_of(lambda: check_url(url, allow_when_off=downloads_allowed_when_off()))
+
+
+def download_offer_refusal(url: str) -> Optional[str]:
+    """:func:`download_refusal` without the address check, so nothing is looked up:
+    for deciding whether to OFFER a download. Starting it goes through
+    :func:`download_refusal`."""
+    return _refusal_of(
+        lambda: _check_policy(url, allow_when_off=downloads_allowed_when_off()))
+
+
+def _refusal_of(check) -> Optional[str]:
     try:
-        check_url(url, allow_when_off=downloads_allowed_when_off())
+        check()
     except NetworkPolicyError as e:
         return str(e)
     except Exception as e:

@@ -1308,6 +1308,7 @@ pre:hover .canvas-btn { opacity: 1; }
   border-radius: 9px;
   padding: 10px 18px;
   font-size: 13.5px;
+  white-space: pre-line;
   display: none;
   z-index: 50;
   box-shadow: 0 6px 24px rgba(0,0,0,0.4);
@@ -2361,7 +2362,7 @@ div:has(> .data-table) { overflow-x: auto; }
   border-radius: 8px; font-size: 11px; padding: 2px 8px; cursor: pointer;
 }
 .msg-meta button.mem-chip:hover { color: var(--accent); border-color: var(--accent); }
-.msg-meta .mem-saved { color: var(--accent); font-size: 12px; align-self: center; }
+.msg-meta .mem-saved { color: var(--accent); font-size: 12px; align-self: center; white-space: pre-line; }
 
 /* model-autoswitch "ask": offers the better model (chat.js buildRoutedChip). */
 .msg-meta button.routed-suggest {

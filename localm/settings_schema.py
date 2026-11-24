@@ -782,9 +782,9 @@ CORE_FIELDS: list = [
     # A small on-device model, loaded separately from the chat model. The known
     # keys are bge-small-en-v1.5 and nomic-embed-text-v1.5.
     SettingField("embedding_model", Widget.TEXT, "Embedding model",
-                 "A known key, registered name or GGUF path. Fetched on first use only "
-                 "when network access is allow; else use Download on the Knowledge or "
-                 "memory page. Until then search is by keyword.",
+                 "A known key, registered name or GGUF path. A missing key is fetched on "
+                 "first use under network allow (not set: only if no embedding model is "
+                 "registered), else with Download on Knowledge or memory.",
                  # Owner-only because branch 1 of resolve_embedding_model_path()
                  # returns a CALLER-CHOSEN filesystem path with no confined_*
                  # check, and that path is then handed to llama.cpp's native GGUF
@@ -1930,8 +1930,11 @@ def schema_json(values: Optional[dict] = None, *, is_owner: bool = True) -> list
 
     A model-source credential field (``CREDENTIAL_KEYS``) also carries
     ``status_unknown``: True when its store file exists but could not be read,
-    in which case ``is_set`` and ``env_set`` are both False."""
-    from localm.config import DEFAULT_CONFIG
+    in which case ``is_set`` and ``env_set`` are both False.
+
+    A field of ``keys_kept_when_set`` also carries ``chosen``: whether somebody set
+    it, at whatever value; a null or blank value sent for it unsets it."""
+    from localm.config import DEFAULT_CONFIG, config_key_stored, keys_kept_when_set
     base = DEFAULT_CONFIG if values is None else values
     # The GUI's Media section skips group="Media" fields in the flat form and
     # shows per-plugin-mapped globals ONLY inside the per-plugin boxes, so it
@@ -1978,6 +1981,8 @@ def schema_json(values: Optional[dict] = None, *, is_owner: bool = True) -> list
             # or override alike - as solid, indistinguishable text.
             if f.key in DEFAULT_CONFIG:
                 d["shipped_default"] = DEFAULT_CONFIG[f.key]
+            if f.key in keys_kept_when_set():
+                d["chosen"] = values is not None and config_key_stored(f.key)
         if f.key == "binary_dir":
             try:
                 from localm.config import find_binary_dir
