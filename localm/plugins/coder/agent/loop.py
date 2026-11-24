@@ -1085,17 +1085,19 @@ class _LoopMixin:
                 self._add_assistant(response)
                 loose = self._loose_calls_to_check(calls)
                 meant = self._ask_if_calls_meant(loose) if loose else None
+                request = getattr(self, "_last_user_request", "") or ""
                 if meant is False:
                     st.example_replies += 1
+                change_asked = demands_action(request) and asks_for_change(request)
                 if (meant is False
-                        and (len(loose) == len(calls)
+                        and ((len(loose) == len(calls) and not change_asked)
                              or (st.example_replies > 1
                                  and all(c.lenient for c in calls)))
-                        and not self._change_still_owed(
-                            getattr(self, "_last_user_request", "") or "", st)):
-                    # Every call in the reply was an example, or the second such
-                    # reply shows reads beside it: the reply is the answer, judged
-                    # and recorded like any other final reply.
+                        and not self._change_still_owed(request, st)):
+                    # Every call in the reply was an example, or this is the
+                    # second such reply to a request for a change or with reads
+                    # beside it: the reply is the answer, judged and recorded like
+                    # any other final reply.
                     self._messages.pop()
                     self._show_examples(response, parsed_calls, interactive)
                     should_break, fr = self._handle_no_tool_calls(
@@ -1154,7 +1156,6 @@ class _LoopMixin:
                 prose = "".join(seg for seg in segments if isinstance(seg, str))
                 leftover = strip_orphan_closers(prose)
                 cut_off = unfinished_call(prose, tool_names)
-                request = getattr(self, "_last_user_request", "") or ""
                 as_command = (demands_action(request)
                               and names_a_tool_as_command(leftover, tool_names))
                 if cut_off and st.partial_notice_count < _MAX_TOOL_REPAIRS:

@@ -124,6 +124,21 @@ def test_an_example_beside_a_call_that_ran_does_not_end_the_run(tmp_path):
     assert not (tmp_path / "a.txt").exists()
 
 
+def test_one_example_does_not_end_a_task_that_changed_something(tmp_path):
+    shown = "Then the notes:\n" + _loose("write_file", path="b.txt", content="2")
+    backend = _Backend([_xml("write_file", path="a.txt", content="1"), shown,
+                        _xml("write_file", path="b.txt", content="2"), "Both written."],
+                       check="[example]")
+    agent = _agent(tmp_path, backend)
+    agent.run_task("create a.txt and b.txt")
+    assert (tmp_path / "b.txt").read_text() == "2"
+    backend = _Backend([_xml("write_file", path="c.txt", content="1"), shown, shown + "\nAgain.",
+                        "unused"], check="[example]")
+    agent = _agent(tmp_path, backend)
+    assert agent.run_task("create c.txt and d.txt").startswith(shown)
+    assert len(backend.calls) == 3
+
+
 def test_a_second_example_with_reads_beside_it_is_the_answer(tmp_path):
     reply = "Like this:\n" + _loose("write_file", path="a.txt", content="1") + "\nafter\n" \
         + _loose("read_file", path="a.txt")
