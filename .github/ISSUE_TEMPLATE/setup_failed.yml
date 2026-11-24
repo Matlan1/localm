@@ -1,0 +1,39 @@
+name: Setup failed
+description: localm did not install, or it does not start after setup.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Only the first box is required. Leave the rest empty if you do not know it.
+        This form is public, so remove anything private first.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you ran or clicked, and what you saw. One line is enough.
+    validations:
+      required: true
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: How you installed it
+      options:
+        - setup.bat
+        - setup-gui.bat
+        - setup.sh
+        - setup-gui.sh
+        - install.sh (the one-line curl install)
+        - pip install localm
+        - Docker
+        - something else or not sure
+  - type: input
+    id: os-gpu
+    attributes:
+      label: OS and GPU
+      placeholder: e.g. Windows 11, AMD RX 6800
+  - type: textarea
+    id: output
+    attributes:
+      label: The last lines you saw
+      description: Copy the text from the setup window or terminal, or drop in a screenshot.
