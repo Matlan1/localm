@@ -557,7 +557,8 @@ def _is_users(a: Area, site: Path, plan: Plan, name: str, foreign: set,
     """Whether the old version of the package *name* cannot be put back, because
     somebody installed another one over what was still of it, or removed it."""
     changed = [op.path for n, op in enumerate(plan.ops)
-               if op.dist == name and op.old is not None and not marks.moved(n)
+               if op.dist == name and op.old is not None
+               and (n not in marks.changed or n == marks.last)
                and a.beside(a.old, op.path)[1] is None
                and not disk.same(a.find(op.path)[0], op.old)]
     if any(rel.endswith(".dist-info/METADATA") and a.find(rel)[1] is None for rel in changed):

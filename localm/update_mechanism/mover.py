@@ -420,10 +420,6 @@ class Marks:
         elif line in (".", "="):
             self.last, self.over = None, line == "="
 
-    def moved(self, n: int) -> bool:
-        """Whether the file of operation *n* was changed for sure."""
-        return n in self.changed and n != self.last
-
     def note(self, line: str, wait: Optional[Wait] = None) -> None:
         """Write *line*. Raises :class:`.disk.Held` or OSError."""
         if self._fd is None:
@@ -761,10 +757,10 @@ def back(root, update_id: str, plan: Plan, *, wait_s: Optional[float] = None,
     update did not move, or that is back already, is the user's. One it moved is lost
     when its old copy is gone and no file with that content is at its place; putting
     it there heals that. *users* are the packages that are the user's as a whole,
-    with the paths of their files; what is left of the old version goes to *kept*. *heal* decides for the files of
-    a package: it gets the name, the operations and a test for "is there in its old
-    version", and returns None when the package is, else what to install. *out* is
-    added to and returned."""
+    with the paths of their files; what is left of the old version goes to *kept*.
+    *heal* decides for the files of a package: it gets the name, the operations and a
+    test for "is there in its old version", and returns None when the package is,
+    else what to install. *out* is added to and returned."""
     out = out or Outcome()
     kept = ""
     try:
@@ -902,8 +898,8 @@ class _Back:
             op.new is not None and disk.same(self.a.find(op.path)[0], op.new, self.wait)))
 
     def _settle(self, op: Op) -> None:
-        """The old version of *op*'s file is at its place; what the update has of it
-        in another form goes to *kept*."""
+        """Leave what is at the place of *op*; what the update still has of the old
+        file goes to *kept*."""
         self.left.add(op.path)
         path, st = self.a.beside(self.a.old, op.path)
         if st is not None:
