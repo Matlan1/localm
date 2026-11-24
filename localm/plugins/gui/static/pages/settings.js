@@ -278,8 +278,11 @@ export function buildSettingControl(field) {
   // shipped_default (renderMediaSubsection builds a plain object literal
   // without it), so this is always false for them - their own
   // `.media-inherited` mechanism is untouched by this.
+  // A field with `chosen` tells a choice from the default by itself: chosen at
+  // the default value it renders solid, and a cleared box unsets it.
+  const keepsChoice = typeof field.chosen === "boolean";
   const isShippedDefault = field.shipped_default !== undefined
-    && value === field.shipped_default;
+    && value === field.shipped_default && field.chosen !== true;
 
   const wrap = el("div");
   wrap.dataset.fieldKey = field.key;   // so cross-field wiring can find a control
@@ -609,17 +612,19 @@ export function buildSettingControl(field) {
         // branch below instead, whose null-on-blank explicit-clear semantics
         // are completely untouched by this branch's existence.
         input.placeholder = t("settings.field.defaultPlaceholder", { value: stored });
+        // With `chosen` the default's own text is a choice.
         read = () => {
           const v = input.value.trim();
+          if (keepsChoice) return v || null;
           if (v === "" || v === stored) return undefined;
           return v;
         };
       } else {
         input.value = stored;
         // A cleared box returns the field to its shipped default (null when
-        // that default is blank).
+        // that default is blank, or when null unsets the field).
         const cleared = typeof field.shipped_default === "string" && field.shipped_default
-          ? field.shipped_default : null;
+          && !keepsChoice ? field.shipped_default : null;
         read = () => (input.value.trim() === "" ? cleared : input.value.trim());
       }
       break;

@@ -31,8 +31,11 @@ def _namespaces(root: Path):
 
 
 def backfill_all(root: Path, embed_fn: Optional[Callable], *,
-                 on_progress: Optional[Callable] = None) -> dict:
-    """Embed every vectorless record in every namespace under *root*.
+                 on_progress: Optional[Callable] = None,
+                 allowed: Optional[Callable] = None) -> dict:
+    """Embed every vectorless record in every namespace under *root*. *allowed*,
+    when given, is asked before each embedding and each write (see
+    ``MemoryStore.backfill_vectors``); a False answer ends the run.
 
     Returns ``{"namespaces": n, "embedded": n, "remaining": n, "unreadable": n}``.
     ``remaining`` is non-zero only when a namespace hit ``_MAX_PASSES_PER_NS`` or
@@ -51,6 +54,8 @@ def backfill_all(root: Path, embed_fn: Optional[Callable], *,
     unreadable = 0
     seen = 0
     for path in _namespaces(root):
+        if allowed is not None and not allowed():
+            break
         try:
             store = MemoryStore.open_file(path)
         except Exception as e:
@@ -60,9 +65,10 @@ def backfill_all(root: Path, embed_fn: Optional[Callable], *,
                          path, e)
             continue
         seen += 1
+        failed: set = set()
         for _ in range(_MAX_PASSES_PER_NS):
             try:
-                filled = store.backfill_vectors(embed_fn)
+                filled = store.backfill_vectors(embed_fn, allowed=allowed, failed=failed)
             except Exception:
                 # One namespace failing must not abandon the rest; the shortfall
                 # shows up in "remaining" rather than as a silent success.

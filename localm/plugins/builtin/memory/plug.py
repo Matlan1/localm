@@ -226,9 +226,10 @@ def _embedder_download_status(request: Request | None) -> dict:
     one click via the SAME one-time action the Knowledge page offers (POST
     /api/rag/embedding/download - reused here, not duplicated). Mirrors
     rag.plug.rag_embedding_status's can_download gate (a known internal key,
-    not yet on disk, net_mode not off unless downloads are exempted while off,
-    caller holds config:write) so the two surfaces never disagree about
-    whether the button would work - PLUS two checks that gate is not itself
+    not yet on disk, the network policy accepts the download, caller holds
+    config:write) so the two surfaces never disagree about
+    whether the button would work - the policy is read without resolving the host
+    and only for a caller the answer is shown to - PLUS two checks that gate is not itself
     exposed to: the download route lives on the rag PLUGIN's router, which
     is (a) absent entirely (404) whenever rag is not installed/enabled, and
     (b) gated on the "rag" SCOPE at the router-mount level, checked before
@@ -244,29 +245,25 @@ def _embedder_download_status(request: Request | None) -> dict:
         from localm import scopes
         from localm.config import load_config
         from localm.inference.embedder import (
-            DEFAULT_EMBEDDING_MODEL, KNOWN_EMBEDDING_MODELS,
-            resolve_embedding_model_path)
-        from localm.netpolicy import downloads_allowed_when_off, network_mode
+            DEFAULT_EMBEDDING_MODEL, KNOWN_EMBEDDING_MODELS, configured_model_path,
+            embedding_download_refusal)
         import localm.inference.http_server as _hs
-        model = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL)
-        if (model in KNOWN_EMBEDDING_MODELS
-                and not resolve_embedding_model_path(allow_download=False)
-                and (network_mode() != "off" or downloads_allowed_when_off())):
-            rag_mounted = False
-            if request is not None:
-                from starlette.routing import NoMatchFound
-                try:
-                    request.app.router.url_path_for("rag_embedding_download")
-                    rag_mounted = True
-                except NoMatchFound:
-                    rag_mounted = False
-            if (rag_mounted and request is not None
-                    and _hs.caller_grants(request, "rag")
-                    and _hs.caller_grants(request, scopes.CONFIG_WRITE)):
-                return {"can_download_embedder": True, "embedder_model": model,
-                        "embedder_missing": model}
-            if request is not None and _hs.caller_is_operator(request):
-                return {"can_download_embedder": False, "embedder_model": None,
+        rag_mounted = False
+        if request is not None:
+            from starlette.routing import NoMatchFound
+            try:
+                request.app.router.url_path_for("rag_embedding_download")
+                rag_mounted = True
+            except NoMatchFound:
+                rag_mounted = False
+        button = (request is not None and rag_mounted and _hs.caller_grants(request, "rag")
+                  and _hs.caller_grants(request, scopes.CONFIG_WRITE))
+        if button or (request is not None and _hs.caller_is_operator(request)):
+            model = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL)
+            if (model in KNOWN_EMBEDDING_MODELS and not configured_model_path()
+                    and embedding_download_refusal() is None):
+                return {"can_download_embedder": button,
+                        "embedder_model": model if button else None,
                         "embedder_missing": model}
     except Exception as e:
         from localm.debuglog import logger
@@ -377,15 +374,18 @@ def _legacy_marker(store) -> Path:
     return store.path.with_suffix(".legacy-imported")
 
 
-def _migrate_legacy(store, before_embed=None) -> None:
+def _migrate_legacy(store, before_embed=None, *, embed: bool = True) -> bool:
     """Import the legacy flat chat-memory.md into the structured store ONCE.
-    *before_embed*, when given, is called once just before the embedder is
-    resolved; it must not block.
+    Returns True when records were imported. *before_embed*, when given, is called
+    once just before the embedder is resolved; it must not block. With *embed* False
+    the records are stored without a vector, for a caller that must not wait for the
+    embedder (it calls ``_fill_vectors_later``).
 
     Gated on the chat session mode (privacy skips - a migration materialises new
     durable records, which is a write) and on a per-namespace marker file so it
     never re-imports. Best-effort: a failure is logged, never fatal, and never
-    reported as a success it did not perform.
+    reported as a success it did not perform. A switch to privacy mode while the
+    bullets are embedded imports nothing.
 
     This batches several ``add(..., save=False)`` calls into ONE save, so it must
     hold the namespace lock across the WHOLE batch (a reload + loop + one final
@@ -393,33 +393,36 @@ def _migrate_legacy(store, before_embed=None) -> None:
     individual append, not the read-then-decide-then-write-once shape of a
     batch.
 
-    The embedder is resolved only when a bullet actually needs embedding: an
-    absent, empty or already-imported legacy file loads no model.
+    The embedder is resolved, and the bullets embedded, before the lock is taken and
+    only when a bullet actually needs embedding: an absent, empty or already-imported
+    legacy file loads no model.
 
     Only the owner's chat namespace imports the file (``_owns_legacy_file``);
     for any other namespace this does nothing and writes nothing."""
     if not _owns_legacy_file(store):
-        return
+        return False
     marker = _legacy_marker(store)
     if marker.exists() or not _persist_enabled():
-        return
+        return False
     try:
-        from localm.memory import MemoryRecord
+        from localm.memory import MAX_TEXT_LEN, MemoryRecord
         bullets = _legacy_bullets(store)
+        known = {r.text.casefold() for r in store.all()}
+        missing = [b[:MAX_TEXT_LEN] for b in bullets if b.casefold() not in known]
         ef = None
-        ef_resolved = False
+        if missing and embed:
+            if before_embed is not None:
+                before_embed()
+            ef = store.embed_ahead(_embed_fn(), missing)
         added = False
         with store.lock():
+            if not _persist_enabled():
+                return False
             store._load()
             existing = {r.text.casefold() for r in store.all()}
             for bullet in bullets:
                 if bullet.casefold() in existing:
                     continue
-                if not ef_resolved:
-                    if before_embed is not None:
-                        before_embed()
-                    ef = _embed_fn()
-                    ef_resolved = True
                 store.add(MemoryRecord(text=bullet, kind="semantic",
                                        source="import", importance=0.7),
                           embed_fn=ef, save=False)
@@ -430,7 +433,7 @@ def _migrate_legacy(store, before_embed=None) -> None:
     except Exception as e:                        # never break chat on migration
         from localm.debuglog import logger
         logger.debug("chat memory legacy migration failed: %s", e)
-        return                                    # do NOT mark done - retry next start
+        return False                              # do NOT mark done - retry next start
     # The import ran (or there was nothing new). Mark it done so it is not re-scanned
     # every start. A marker-write failure is logged rather than reported as 'skipped';
     # the casefold dedup above makes a re-run next start harmless.
@@ -443,6 +446,7 @@ def _migrate_legacy(store, before_embed=None) -> None:
             "chat memory legacy migration %s but its completion marker could not "
             "be written (%s); it will re-run harmlessly (dedup) until it persists",
             "imported records" if added else "found nothing new", e)
+    return added
 
 
 def _item(rec) -> dict:
@@ -502,20 +506,26 @@ def _rendered_text(store) -> str:
 @_router.get("/api/memory")
 async def memory_get(request: Request = None):
     from localm.inference.http_server import path_formatter as _path_formatter
-    store = _request_store(request)
     writable = _persist_enabled()
-    if writable:
-        # Off the loop: _migrate_legacy resolves the embedder, never on-loop.
-        await _off_loop(lambda: _migrate_legacy(store))
-    # Corrections are only surfaced when writes are allowed: accept/reject need a
-    # write, and store.corrections() prunes stale entries as a side effect, which must
-    # never run in privacy mode. Privacy mode returns an empty list without touching
-    # the sidecar.
-    return {"text": _rendered_text(store), "writable": writable,
-            "items": [_item(r) for r in store.all()],
-            "corrections": _corrections_payload(store) if writable else [],
-            "path": _path_formatter(request)(store.path),
-            **_embedder_download_status(request)}
+
+    # Off the loop (opening a store waits for the namespace lock) and never queued
+    # behind the embedder: nothing here embeds, so a legacy import's vectors are
+    # filled in the background.
+    def _read():
+        store = _request_store(request)
+        if writable and _migrate_legacy(store, embed=False):
+            _fill_vectors_later(store)
+        # Corrections are only surfaced when writes are allowed: accept/reject need a
+        # write, and store.corrections() prunes stale entries as a side effect, which
+        # must never run in privacy mode. Privacy mode returns an empty list without
+        # touching the sidecar.
+        return {"text": _rendered_text(store), "writable": writable,
+                "items": [_item(r) for r in store.all()],
+                "corrections": _corrections_payload(store) if writable else [],
+                "path": _path_formatter(request)(store.path),
+                **_embedder_download_status(request)}
+
+    return await _off_loop(_read, embedder_bound=False)
 
 
 @_router.put("/api/memory")
@@ -550,14 +560,15 @@ async def memory_put(req: MemoryUpdate, request: Request = None):
         raise HTTPException(
             413, f"Too many memory records ({len(facts)}); the store keeps at "
             f"most {N_MAX}. Trim the list before saving.")
-    store = _request_store(request)
 
-    # The whole snapshot-decide-write block runs off the loop: store.replace ->
-    # _embed_fn -> get_embedder must not resolve the embedder on the loop thread.
-    # Keeping migrate + lock + diff + replace in one executor call preserves the
-    # atomicity the lock provides (a concurrent append cannot land mid-diff).
+    # The whole snapshot-decide-write block runs off the loop, in one executor call:
+    # migrate + lock + diff + replace keeps the atomicity the lock provides (a
+    # concurrent append cannot land mid-diff). New and changed lines are saved
+    # without a vector, which the background fill adds, so the answer does not wait
+    # for the embedder and nothing embeds under the lock.
     def _do_put():
-        _migrate_legacy(store)
+        store = _request_store(request)
+        _migrate_legacy(store, embed=False)
         with store.lock():
             store._load()
             current = store.all()
@@ -591,11 +602,99 @@ async def memory_put(req: MemoryUpdate, request: Request = None):
                     413, f"Too many memory records ({len(records)}, with "
                     f"{len(newer)} added since this list was opened); the store "
                     f"keeps at most {N_MAX}. Trim the list before saving.")
-            store.replace(records, embed_fn=_embed_fn(), invalidate_ids=retexted)
+            store.replace(records, invalidate_ids=retexted)
+        if store.lacks_vector():
+            _fill_vectors_later(store)
         return records, len(newer)
 
-    records, kept_newer = await _off_loop(_do_put)
+    records, kept_newer = await _off_loop(_do_put, embedder_bound=False)
     return {"status": "saved", "count": len(records), "kept_newer": kept_newer}
+
+
+_fill_lock = _threading.Lock()
+_fill_pending = False
+_fill_stores: dict = {}
+
+
+# Records one store gets per turn of the fill, so the newest fact is written first
+# and several stores take turns.
+_FILL_STEP = 8
+
+
+def _fill_allowed() -> bool:
+    """Whether a background vector write may go on: the plugin is still loaded and
+    the mode still keeps memory."""
+    return not _stop.is_set() and _persist_enabled()
+
+
+def _fill_vectors_later(store) -> None:
+    """Embed the records of *store* that have no vector yet on a background thread,
+    newest first (one thread at a time; stores that asked, of any principal, take
+    turns until none of them gains a vector), so a write need not wait for the
+    embedder. It stops at an unload and at a switch to privacy mode, and one store's
+    failure does not end the others' fill. A thread that cannot be started is
+    logged; the hourly sweep then fills the records."""
+    global _fill_pending
+    with _fill_lock:
+        if _stop.is_set():
+            return
+        _fill_stores[str(store.path)] = store.path
+        if _fill_pending:
+            return
+        _fill_pending = True
+    from localm.config import home_bound
+    try:
+        _threading.Thread(target=home_bound(_fill_run, name="memory vector fill"),
+                          name="memory vector fill", daemon=True).start()
+    except RuntimeError as e:
+        from localm.debuglog import logger
+        logger.warning("memory: could not start the vector fill: %s", e)
+        with _fill_lock:
+            _fill_stores.clear()
+            _fill_pending = False
+
+
+def _fill_run() -> None:
+    global _fill_pending
+    from localm.debuglog import logger
+    failed: dict = {}
+    while True:
+        try:
+            allowed = _fill_allowed()
+        except Exception as e:
+            logger.warning("memory: the vector fill stopped: %s", e)
+            allowed = False
+        with _fill_lock:
+            if not _fill_stores or not allowed:
+                _fill_stores.clear()
+                _fill_pending = False
+                return
+            key, path = next(iter(_fill_stores.items()))
+            del _fill_stores[key]
+        try:
+            if _fill_one(path, failed.setdefault(key, set())):
+                with _fill_lock:
+                    _fill_stores.setdefault(key, path)
+        except Exception as e:
+            logger.warning("memory: could not embed the new facts of %s: %s",
+                           path.name, e)
+
+
+def _fill_one(path, failed: set) -> bool:
+    """Give up to _FILL_STEP records of the store at *path* their vector, leaving out
+    the ones in *failed*, whose embedding failed earlier in this run. True when it
+    went well and records without one are left."""
+    from localm.memory import MemoryStore
+    embed_fn = _embed_fn()
+    if embed_fn is None:
+        from localm.debuglog import logger
+        logger.debug("memory: no embedder resolved, the new facts stay without a "
+                     "vector for now")
+        return False
+    store = MemoryStore.open_file(path)
+    filled = store.backfill_vectors(embed_fn, limit=_FILL_STEP, allowed=_fill_allowed,
+                                    failed=failed)
+    return bool(filled) and store.lacks_vector()
 
 
 @_router.post("/api/memory/append")
@@ -604,17 +703,20 @@ async def memory_append(req: MemoryAppend, request: Request = None):
     fact = _strip_bullet(req.text)
     if not fact:
         raise HTTPException(400, "Nothing to remember")
-    store = _request_store(request)
 
     from localm.memory.store import N_MAX
 
-    # Off the loop: _migrate_legacy and store.add both resolve the embedder
-    # (_embed_fn -> get_embedder), which must not run on the event-loop thread.
+    # Off the loop, and never queued behind the embedder: the fact is stored without
+    # a vector and answered at once, and the background fill adds the vector.
     def _do_append():
-        _migrate_legacy(store)
-        return add_user_fact(store, fact, _embed_fn())
+        store = _request_store(request)
+        imported = _migrate_legacy(store, embed=False)
+        status, rec = add_user_fact(store, fact, None)
+        if imported or status == "saved":
+            _fill_vectors_later(store)
+        return status, rec
 
-    status, rec = await _off_loop(_do_append)
+    status, rec = await _off_loop(_do_append, embedder_bound=False)
     if status == "full":
         raise HTTPException(
             413, f"Memory is at its {N_MAX}-record cap; delete a fact before "
@@ -627,7 +729,6 @@ async def memory_append(req: MemoryAppend, request: Request = None):
 @_router.patch("/api/memory/{mem_id}")
 async def memory_patch(mem_id: str, req: MemoryPatch, request: Request = None):
     _require_writable()
-    store = _request_store(request)
 
     fields = {}
     if req.text is not None:
@@ -636,9 +737,18 @@ async def memory_patch(mem_id: str, req: MemoryPatch, request: Request = None):
         fields["importance"] = req.importance
     if isinstance(fields.get("text"), str) and not _strip_bullet(fields["text"]):
         raise HTTPException(400, "Nothing to remember")
-    # Off the loop: store.update -> _embed_fn -> get_embedder.
-    rec = (await _off_loop(lambda: store.update(mem_id, embed_fn=_embed_fn(), **fields))
-           if fields else store.get(mem_id))
+
+    # A changed text loses its vector and the background fill adds the new one.
+    def _do_patch():
+        store = _request_store(request)
+        if not fields:
+            return store.get(mem_id)
+        rec = store.update(mem_id, **fields)
+        if rec is not None and store.lacks_vector([rec]):
+            _fill_vectors_later(store)
+        return rec
+
+    rec = await _off_loop(_do_patch, embedder_bound=False)
     if rec is None:
         raise HTTPException(404, "No such memory")
     return {"status": "saved", "item": _item(rec)}
@@ -647,13 +757,13 @@ async def memory_patch(mem_id: str, req: MemoryPatch, request: Request = None):
 @_router.delete("/api/memory/{mem_id}")
 async def memory_delete(mem_id: str, request: Request = None):
     _require_writable()
-    store = _request_store(request)
 
     # Off the loop like every other mutating route here: the write waits on a
     # cross-process lock, which must not be awaited on the event-loop thread.
     # store.delete never resolves the embedder, so it is not embedder_bound -
     # it must not queue behind an unrelated embedder load.
-    deleted = await _off_loop(lambda: store.delete(mem_id), embedder_bound=False)
+    deleted = await _off_loop(lambda: _request_store(request).delete(mem_id),
+                              embedder_bound=False)
     return {"status": "deleted" if deleted else "absent", "id": mem_id}
 
 
@@ -662,8 +772,8 @@ async def memory_correction_accept(cid: str, request: Request = None):
     """Apply a proposed supersession of a trusted fact: replace its text (or delete
     it), archiving the old value to the recoverable .forgotten sidecar. Only this
     route applies one - a synth candidate never auto-overwrites a user fact."""
-    # Off the loop: resolve_correction -> _embed_fn -> get_embedder.
-    return await _off_loop(lambda: _apply_correction(cid, True, request))
+    return await _off_loop(lambda: _apply_correction(cid, True, request),
+                           embedder_bound=False)
 
 
 @_router.post("/api/memory/corrections/{cid}/reject")
@@ -671,8 +781,8 @@ async def memory_correction_reject(cid: str, request: Request = None):
     """Dismiss a proposed supersession: keep the fact as-is, reset its
     last-confirmed staleness, and remember the dismissal so consolidation does not
     re-propose the same change on the next pass."""
-    # Off the loop: resolve_correction -> _embed_fn -> get_embedder.
-    return await _off_loop(lambda: _apply_correction(cid, False, request))
+    return await _off_loop(lambda: _apply_correction(cid, False, request),
+                           embedder_bound=False)
 
 
 @_router.get("/api/memory/forgotten")
@@ -681,17 +791,24 @@ async def memory_forgotten(request: Request = None):
     from the recoverable archive ``_archive_forgotten()`` writes. Read-only (no
     side effect), so available in privacy mode too, matching how memory_get returns
     existing records regardless of mode."""
-    store = _request_store(request)
-    return {"items": [_forgotten_item(e) for e in store.forgotten()]}
+    entries = await _off_loop(lambda: _request_store(request).forgotten(),
+                              embedder_bound=False)
+    return {"items": [_forgotten_item(e) for e in entries]}
 
 
 @_router.post("/api/memory/forgotten/{mem_id}/restore")
 async def memory_forgotten_restore(mem_id: str, request: Request = None):
     """Recover one archived record back into the live store."""
     _require_writable()
-    store = _request_store(request)
-    # Off the loop: restore_forgotten -> _embed_fn -> get_embedder.
-    rec = await _off_loop(lambda: store.restore_forgotten(mem_id, embed_fn=_embed_fn()))
+
+    def _do_restore():
+        store = _request_store(request)
+        rec = store.restore_forgotten(mem_id)
+        if rec is not None:
+            _fill_vectors_later(store)
+        return rec
+
+    rec = await _off_loop(_do_restore, embedder_bound=False)
     if rec is None:
         raise HTTPException(
             404, "No such forgotten record (or it is already restored)")
@@ -701,9 +818,11 @@ async def memory_forgotten_restore(mem_id: str, request: Request = None):
 def _apply_correction(cid: str, accept: bool, request):
     _require_writable()
     store = _request_store(request)
-    out = store.resolve_correction(cid, accept, embed_fn=_embed_fn())
+    out = store.resolve_correction(cid, accept)
     if out is None:
         raise HTTPException(404, "No such correction")
+    if out.get("status") == "updated":
+        _fill_vectors_later(store)
     if out.get("status") == "archive_failed":
         # The old value could not be archived; resolve_correction left the record and
         # the correction intact. Surfaced as an error, never as an applied correction.
@@ -918,6 +1037,12 @@ def _recent_sessions_text(max_chars: int = 8000) -> str:
     return "\n".join(out)
 
 
+def synthesis_skip_reason() -> str | None:
+    """Why a synthesis pass would do nothing right now ("privacy"), or None when it
+    may run. Lets a caller decide BEFORE it loads a model for the pass."""
+    return None if _persist_enabled() else "privacy"
+
+
 def synthesize_memory(complete, *, principal: str | None = None, max_facts: int = 12,
                       max_chars: int = 8000, conversation: str = "") -> dict:
     """Distil durable user facts from the recent conversation into the structured
@@ -934,10 +1059,12 @@ def synthesize_memory(complete, *, principal: str | None = None, max_facts: int 
 
     Privacy: gated on _persist_enabled(); in privacy mode returns
     ``{"status": "skipped", "reason": "privacy", "added": 0}`` and NEVER calls the
-    model. Returns ``{status, added, updated, deleted, facts}``, the shape the jobs
-    "memory" runner consumes. When a model call raised in the fact pass or the
-    episodic pass, ``status`` is ``"error"`` with ``reason: "model_failed"`` and the
-    failure in ``error``; the counts then describe only what was written before it."""
+    model. A switch to privacy mode during the pass ends it before the next model
+    call and the next write. Returns ``{status, added, updated, deleted, facts}``, the
+    shape the jobs "memory" runner consumes. When a model call raised in the fact pass
+    or the episodic pass, ``status`` is ``"error"`` with ``reason: "model_failed"`` and
+    the failure in ``error``; the counts then describe only what was written before
+    it."""
     from localm.debuglog import logger
     if not _persist_enabled():
         logger.debug("memory synthesis skipped: privacy mode active")
@@ -961,19 +1088,23 @@ def synthesize_memory(complete, *, principal: str | None = None, max_facts: int 
     # Episodic capture is per-session and watermarked: one episode per NEW session,
     # not one blob summary over all of them.
     model_errors: list[str] = []
+    if res.get("status") == "skipped":
+        logger.debug("memory synthesis stopped: privacy mode active")
+        return {"status": "skipped", "reason": "privacy", "added": 0}
     if res.get("status") == "error":
         model_errors.append(res.get("error") or "the model call failed")
     episodic = _store_episodes(store, complete, embed_fn=embed_fn, errors=model_errors,
                                model_answered=(res.get("status") != "error"
-                                               or res.get("reason") == "unreadable_reply"))
-    pruned = _prune_trivial_episodes(store, complete)
+                                               or res.get("reason") == "unreadable_reply"),
+                               allowed=_persist_enabled)
+    pruned = _prune_trivial_episodes(store, complete, allowed=_persist_enabled)
     # Backfill vectors for records stored before an embedder was available, so
     # semantic recall turns on retroactively. Bounded per pass; a large store fills
     # over several passes. No-op when no embedder.
     if store.lacks_vector():
         try:
             embed_fn.ensure()
-            filled = store.backfill_vectors(embed_fn)
+            filled = store.backfill_vectors(embed_fn, allowed=_fill_allowed)
             if filled:
                 res["backfilled"] = filled
         except Exception as e:
@@ -1136,12 +1267,12 @@ EPISODIC_MAX_ATTEMPTS = 3
 EPISODIC_JUDGE_MAX_PER_RUN = 5
 
 
-def _prune_trivial_episodes(store, complete) -> int:
+def _prune_trivial_episodes(store, complete, allowed=lambda: True) -> int:
     """Ask the model once about each stored synth episode that was never judged,
     at most EPISODIC_JUDGE_MAX_PER_RUN per call. An episode judged DROP is archived
     to the recoverable sidecar and removed; every other one is stamped judged.
-    Returns the number removed. Best-effort; the caller confirmed writes are
-    allowed."""
+    Returns the number removed. Best-effort. *allowed* is asked before each model
+    call and each write; a False answer ends the run with nothing more written."""
     from localm.debuglog import logger
     from localm.memory.consolidate import judge_episode
     try:
@@ -1150,7 +1281,12 @@ def _prune_trivial_episodes(store, complete) -> int:
                    and not (r.meta or {}).get("judged")][:EPISODIC_JUDGE_MAX_PER_RUN]
         removed = 0
         for r in pending:
-            if not judge_episode(complete, r.text):
+            if not allowed():
+                break
+            keep = judge_episode(complete, r.text)
+            if not allowed():
+                break
+            if not keep:
                 if store.forget(r.id):
                     removed += 1
                     continue
@@ -1165,7 +1301,7 @@ def _prune_trivial_episodes(store, complete) -> int:
 
 
 def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
-                    model_answered=False) -> int:
+                    model_answered=False, allowed=lambda: True) -> int:
     """Store one EPISODIC summary PER NEW session file (past the watermark), so N
     sessions become N episodes instead of collapsing into <=1 blob summary. Each
     episode is tagged with its source session id + mtime. Deduped against existing
@@ -1197,7 +1333,9 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
     another call in the same run (*model_answered*, or an earlier summary in this
     pass), the failure is counted against the session in the watermark sidecar,
     and after EPISODIC_MAX_ATTEMPTS counted failures the session is skipped with
-    a warning and the pass continues."""
+    a warning and the pass continues. *allowed* is asked before each model call and
+    each write; a False answer ends the run with nothing more written, the watermark
+    included."""
     ef = _deferred_embed() if embed_fn is _UNSET else embed_fn
     try:
         import time as _time
@@ -1268,11 +1406,14 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
             # and the cursor for the next run.
             if gens >= EPISODIC_MAX_PER_RUN:
                 break
+            if not allowed():
+                return stored
             logger.info("memory consolidation: summarizing session %s (%d chars)...", f.stem, len(text))
             try:
                 summ = summarize_session(complete, text)
             except BackgroundYield:
-                _write_episodic_watermark(store, newest, newest_stems, failures)
+                if allowed():
+                    _write_episodic_watermark(store, newest, newest_stems, failures)
                 raise
             except ConsolidationModelError as e:
                 if errors is not None:
@@ -1291,12 +1432,15 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
                                "summarizing session %s (%s); it is retried next run",
                                f.stem, e)
                 break
+            if not allowed():
+                return stored
             answered = True
             failures.pop(f.stem, None)
             gens += 1
             _advance(mt, f.stem)                    # a real attempt was made -> advance past it
             if not summ:
                 continue
+            summ = summ.strip()
             lo = summ.lower()
             # ONE episode PER SESSION: a resumed session's later summary supersedes its
             # earlier record rather than adding a second one. _session_text reads the
@@ -1321,7 +1465,10 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
                 # update() re-embeds on a text change, so the vector cannot go stale
                 # against the superseded text.
                 _ensure_embedder(ef)
-                store.update(keep.id, text=summ, embed_fn=ef,
+                ahead = store.embed_ahead(ef, [summ])
+                if not allowed():
+                    return stored
+                store.update(keep.id, text=summ, embed_fn=ahead,
                              meta={"session": f.stem, "session_mtime": mt,
                                    "judged": True})
                 continue
@@ -1332,12 +1479,17 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
                    for r in store.all()):
                 continue                           # already have this episode
             _ensure_embedder(ef)
+            ahead = store.embed_ahead(ef, [summ])
+            if not allowed():
+                return stored
             store.add(MemoryRecord(text=summ, kind="episodic", source="synth",
                                    importance=0.4,
                                    meta={"session": f.stem, "session_mtime": mt,
                                          "judged": True}),
-                      embed_fn=ef)
+                      embed_fn=ahead)
             stored += 1
+        if not allowed():
+            return stored
         _write_episodic_watermark(store, newest, newest_stems, failures)
         if stored > 0:
             logger.info("memory consolidation: stored %d episodic summary record(s)", stored)
@@ -1566,7 +1718,7 @@ def _backfill_sweep_bg() -> None:
         if _stop.is_set():
             return
         from localm.memory.backfill import backfill_all
-        res = backfill_all(_memory_root(), _embed_fn())
+        res = backfill_all(_memory_root(), _embed_fn(), allowed=_fill_allowed)
         if res["embedded"]:
             logger.info("memory backfill sweep: embedded %d record(s) across "
                         "%d namespace(s)", res["embedded"], res["namespaces"])
@@ -1693,6 +1845,16 @@ def _memory_outlet(text, messages, ctx):
     return text
 
 
+def _degrade_reason(reason):
+    """*reason* as the client is told it: "embedder_failed" in place of
+    "no_embedder" when the configured embedding model's file is there, so it is
+    installed and could not be loaded."""
+    if reason != "no_embedder":
+        return reason
+    from localm.inference.embedder import configured_model_path
+    return "embedder_failed" if configured_model_path() else reason
+
+
 def _stash_memory_used(ctx, records, diag) -> None:
     """Record, in the per-request ``ctx.state``, WHICH memories the inlet injected
     and WHY recall degraded, so the chat route can surface a
@@ -1723,11 +1885,12 @@ def _stash_memory_used(ctx, records, diag) -> None:
             if kind:
                 item["kind"] = kind
             items.append(item)
+        reason = _degrade_reason(diag.get("degrade_reason"))
         ctx.state["memory_used"] = items
-        ctx.state["memory_degrade_reason"] = diag.get("degrade_reason")
+        ctx.state["memory_degrade_reason"] = reason
         from localm.debuglog import logger
         logger.debug("memory recall: injected %d record(s), degrade=%s",
-                     len(items), diag.get("degrade_reason"))
+                     len(items), reason)
     except Exception as e:
         from localm.debuglog import logger
         logger.debug("memory stash skipped: %s", e)
@@ -1741,12 +1904,12 @@ def _note_unsaved_request(messages, ctx) -> None:
         return
     try:
         from localm.inference.protocol import is_user_written, user_written_text
-        from localm.memory import explicit_fact
+        from localm.memory import explicit_facts
         last = next((m for m in reversed(messages) if m.get("role") == "user"), None)
         if last is not None and is_user_written(last):
-            fact = explicit_fact(user_written_text(last))
-            if fact:
-                ctx.state["memory_saved"] = {"text": fact, "status": "off"}
+            facts = explicit_facts(user_written_text(last))
+            if facts:
+                ctx.state["memory_saved"] = _saved_header(facts, ["off"] * len(facts))
     except Exception as e:
         from localm.debuglog import logger
         logger.debug("memory: could not check for a remember request: %s", e)
@@ -1758,15 +1921,15 @@ def _add_requested_facts(principal: str | None, messages) -> list[str]:
     compares what it extracts against them. Returns the facts newly stored. Nothing
     is stored in privacy mode."""
     from localm.inference.protocol import is_user_written, user_written_text
-    from localm.memory import explicit_fact
+    from localm.memory import explicit_facts
     if not _persist_enabled():
         return []
     requested: list[str] = []
     for m in messages or []:
         if isinstance(m, dict) and m.get("role") == "user" and is_user_written(m):
-            fact = explicit_fact(user_written_text(m)[:_CONVERSATION_USER_CHARS])
-            if fact and fact not in requested:
-                requested.append(fact)
+            for fact in explicit_facts(user_written_text(m)[:_CONVERSATION_USER_CHARS]):
+                if fact not in requested:
+                    requested.append(fact)
     if not requested:
         return []
     store = _chat_store(principal)
@@ -1778,8 +1941,14 @@ def _add_requested_facts(principal: str | None, messages) -> list[str]:
 
 def _add_explicit_fact(store, fact: str, embed_fn) -> str:
     """Add *fact* as a user-typed record unless the store already holds it or is at
-    its cap. Returns "saved", "exists" or "full". Blocking (embedder)."""
-    return add_user_fact(store, fact, embed_fn)[0]
+    its cap. Returns "saved", "exists", "full", or "failed" when it could not be
+    written, so one fact's failure never hides the others. Blocking (embedder)."""
+    try:
+        return add_user_fact(store, fact, embed_fn)[0]
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.warning("memory: could not store a remember request: %s", e)
+        return "failed"
 
 
 def add_user_fact(store, fact: str, embed_fn, *, kind: str = "semantic",
@@ -1795,6 +1964,8 @@ def add_user_fact(store, fact: str, embed_fn, *, kind: str = "semantic",
     from localm.memory import MemoryRecord
     from localm.memory import store as _store_mod
     key = _fact_key(fact[:_store_mod.MAX_TEXT_LEN])
+    if len(store) < _store_mod.N_MAX and not any(_fact_key(r.text) == key for r in store.all()):
+        embed_fn = store.embed_ahead(embed_fn, [fact[:_store_mod.MAX_TEXT_LEN]])
     with store.lock():
         store._load()
         same = next((r for r in store.all() if _fact_key(r.text) == key), None)
@@ -1810,12 +1981,25 @@ def add_user_fact(store, fact: str, embed_fn, *, kind: str = "semantic",
         return "saved", rec
 
 
+def _saved_header(facts: list, statuses: list) -> dict:
+    """The ``memory_saved`` outcome of the remember requests *facts* with their
+    *statuses*: ``{"text", "status"}`` for one fact, and for several
+    ``{"status", "facts": [{"text", "status"}...]}`` with every fact in order, where
+    "status" is "saved" when any of them was saved, else the first one's."""
+    if len(facts) == 1:
+        return {"text": facts[0], "status": statuses[0]}
+    return {"status": "saved" if "saved" in statuses else statuses[0],
+            "facts": [{"text": f, "status": s}
+                      for f, s in zip(facts, statuses, strict=True)]}
+
+
 def _remember_explicit(messages, ctx, before_embed=None) -> None:
     """Store the fact the latest user message asks to remember ("remember that
     ...", "merk dir ..."), without the model. The outcome goes to
     ``ctx.state["memory_saved"]`` for the response header: ``{"text", "status"}``
-    with status "saved", "exists" (the same fact is already stored) or "full" (the
-    store is at its cap); "off" and "failed" are set by the callers. Only the user's
+    with status "saved", "exists" (the same fact is already stored), "full" (the
+    store is at its cap) or "failed", or, with several facts, each one's own status
+    (see _saved_header); "off" is set by the caller. Only the user's
     own words count; a user row the client marked with an ``origin`` is not
     examined. Blocking (embedder); the caller runs it off the loop. Nothing is
     stored in privacy mode. *before_embed*, when given, is called before the
@@ -1823,19 +2007,22 @@ def _remember_explicit(messages, ctx, before_embed=None) -> None:
     if ctx is None or not _persist_enabled():
         return
     from localm.inference.protocol import is_user_written, user_written_text
-    from localm.memory import explicit_fact
+    from localm.memory import explicit_facts
     last = next((m for m in reversed(messages) if m.get("role") == "user"), None)
     if last is None or not is_user_written(last):
         return
-    fact = explicit_fact(user_written_text(last))
-    if not fact:
+    facts = explicit_facts(user_written_text(last))
+    if not facts:
         return
+    ctx.state["memory_saved"] = _saved_header(facts, ["failed"] * len(facts))
     store = _chat_store(_ctx_principal(ctx))
     if before_embed is not None:
         before_embed()
     _migrate_legacy(store)
-    status = _add_explicit_fact(store, fact, _embed_fn())
-    ctx.state["memory_saved"] = {"text": fact, "status": status}
+    embed_fn = _embed_fn()
+    statuses = [_add_explicit_fact(store, fact, embed_fn) for fact in facts]
+    ctx.state["memory_saved"] = _saved_header(facts, statuses)
+    status = ctx.state["memory_saved"]["status"]
     from localm.debuglog import logger
     logger.debug("memory: explicit remember request handled (%s)", status)
 
@@ -1889,7 +2076,7 @@ def _memory_inlet(messages, ctx, announce=None):
             from localm.debuglog import logger
             logger.warning("memory: could not store a remember request: %s", e)
             if ctx is not None:
-                ctx.state["memory_saved"] = {"text": "", "status": "failed"}
+                ctx.state.setdefault("memory_saved", {"text": "", "status": "failed"})
     try:
         from localm import memory as _mem
         query = _recall_query(messages)

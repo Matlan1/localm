@@ -1273,11 +1273,11 @@ async def rag_embedding_status(request: Request):
     `can_download` tells the GUI whether to offer the one-time "download now"
     action (POST /api/rag/embedding/download): the configured model is an
     internal key that is not on disk (only those are fetchable - a registered
-    model or a path has nothing to download), net_mode is not "off" (or
-    net_allow_model_downloads exempts it), and the caller could authorize it -
-    open mode, or a key granting config:write, the same scope that governs
-    net_mode itself. UI hint only; the download route re-checks everything
-    server-side."""
+    model or a path has nothing to download), the caller could authorize it - open
+    mode, or a key granting config:write, the same scope that governs net_mode
+    itself - and the network policy lets it be offered (net_mode, net_deny,
+    net_allow; read without looking anything up). UI hint only; the download route
+    re-checks everything server-side."""
     import localm.inference.http_server as _hs
     from localm import scopes
     from localm.config import load_config, load_registry
@@ -1307,9 +1307,10 @@ async def rag_embedding_status(request: Request):
         model = "(set by the owner)"
     can_download = False
     if installed is False and model in KNOWN_EMBEDDING_MODELS:
-        from localm.netpolicy import downloads_allowed_when_off, network_mode
-        if network_mode() != "off" or downloads_allowed_when_off():
-            can_download = _hs.caller_grants(request, scopes.CONFIG_WRITE)
+        from localm.inference.embedder import embedding_download_refusal
+        if _hs.caller_grants(request, scopes.CONFIG_WRITE):
+            can_download = await asyncio.get_running_loop().run_in_executor(
+                get_plugin_executor(), embedding_download_refusal) is None
 
     # The three embedder readers run off the event loop together: each does
     # `with _LOCK:`, and get_embedder holds that same lock across a process spawn
