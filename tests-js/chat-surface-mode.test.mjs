@@ -117,6 +117,7 @@ test("a Chat persistence override of full does not start saving non-chat keys " 
     "a non-chat key is wiped under a privacy server mode");
   runScript(window, `lsSetScoped("localm.coderCwd", "new-project");
                      lsSetScoped("localm.webAccess", "1");`);
+  await drain();
   assert.equal(window.localStorage.getItem("localm.coderCwd"), null,
     "a non-chat key is not written under a privacy server mode");
   assert.equal(window.localStorage.getItem("localm.webAccess"), "1",
@@ -139,6 +140,7 @@ test("a Chat persistence override of privacy keeps saving non-chat keys while " 
   assert.equal(window.localStorage.getItem("localm.coderCwd"), "kept-project");
   runScript(window, `lsSetScoped("localm.coderCwd", "new-project");
                      lsSetScoped("localm.webAccess", "1");`);
+  await drain();
   assert.equal(window.localStorage.getItem("localm.coderCwd"), "new-project");
   assert.equal(window.localStorage.getItem("localm.webAccess"), null,
     "a chat setting is not written under a privacy chat mode");

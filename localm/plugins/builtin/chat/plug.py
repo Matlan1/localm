@@ -32,16 +32,25 @@ the data dir and survive reloads and other devices on the LAN.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import math
+import os
 import re
+import secrets
+import threading
+import time
+from collections import Counter
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from localm import model_ids
 from localm.config import model_index
-from localm.storekit import NamespaceLockRegistry, atomic_write
+from localm.storekit import (_REPLACE_RETRIES, NamespaceLockRegistry, _is_transient_permission_error,
+                             _transient_backoff, atomic_write, replace_atomic)
 
 _router = APIRouter()
 
@@ -60,6 +69,18 @@ class ConversationUpsert(BaseModel):
     pinned_model: str | None = Field(None, max_length=256)
     branches: list = []           # parked message-branch tails (fork points)
     messages: list = []
+    # The conversation's own system prompt and sampling fields, by field name.
+    # Omitted, the stored ones are kept.
+    params: dict = Field(default_factory=dict)
+    # The stored revision this save replaces; null for a conversation the caller
+    # has never seen stored. Omitted, see conversation_upsert.
+    base_rev: str | None = Field(None, max_length=64)
+    # A value the caller made up for this save; the index row of the stored
+    # conversation names the one that wrote it.
+    save_id: str | None = Field(None, max_length=64)
+    # The install and the key the caller means to save under (see _store_owner).
+    instance: str | None = Field(None, max_length=128)
+    principal: str | None = Field(None, max_length=64)
 
 
 class AttachmentExtractRequest(BaseModel):
@@ -78,7 +99,7 @@ class PromptUpsert(BaseModel):
 #  Shared helpers (paths resolved at request time)                    #
 # ------------------------------------------------------------------ #
 
-_CONV_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_CONV_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}\Z")
 _CONV_MAX_BYTES = 96 * 1024 * 1024   # data-URI images and base64 audio clips make these large
 
 # Windows reserved device names, matched regardless of extension: a
@@ -108,11 +129,36 @@ def _conv_with_current_pin(data: dict) -> dict:
     return data
 
 
-# Serialisation scope: writers inside this process (request handlers and the
-# executor thread running relabel_pinned_model) take one lock per target file.
+# Serialisation scope: readers and writers inside this process (request handlers
+# and the executor thread running relabel_pinned_model) take one lock per target
+# file.
 # The CLI and other processes are not covered; relabel_pinned_model re-checks
 # the file's updated_at before it replaces it.
 _LOCKS = NamespaceLockRegistry()
+
+
+def _riding_out(work, *args):
+    """``work(*args)``, a file operation, retried like storekit.replace_atomic
+    while a transient Windows sharing violation refuses it."""
+    attempt = 0
+    while True:
+        try:
+            return work(*args)
+        except PermissionError as e:
+            attempt += 1
+            if attempt == _REPLACE_RETRIES or not _is_transient_permission_error(e):
+                raise
+            _transient_backoff(attempt - 1)
+
+
+def _load_json(path: Path):
+    """The JSON value of the file *path*. Raises OSError, or ValueError for a file
+    that does not parse or is nested too deeply."""
+    text = _riding_out(path.read_text, "utf-8")
+    try:
+        return json.loads(text)
+    except RecursionError as e:
+        raise ValueError("nested too deeply") from e
 
 
 def _principal_dir(request: Request) -> str | None:
@@ -157,6 +203,69 @@ def _conv_path(conv_id: str, principal: str | None = None) -> Path:
 _META_CACHE: dict = {}
 
 
+# The revision of a file saved before conversations had one.
+_NO_REV = "0"
+
+
+def _plain_text(value, default=None):
+    """*value* when it is text, with what UTF-8 cannot hold replaced, else
+    *default*."""
+    return value.encode("utf-8", "replace").decode("utf-8") if isinstance(value, str) else default
+
+
+def _rev_of(data) -> str:
+    """The stored revision of conversation *data*: an opaque string, replaced on
+    every save."""
+    rev = data.get("rev") if isinstance(data, dict) else None
+    return _plain_text(rev) or _NO_REV
+
+
+def _meta_row(conv_id: str, data: dict) -> dict:
+    """The index row of conversation *data* stored under *conv_id*."""
+    at = data.get("updated_at", 0)
+    messages = data.get("messages")
+    return {
+        "id": conv_id,
+        "title": _plain_text(data.get("title"), "Untitled"),
+        "updated_at": at if isinstance(at, int) or (isinstance(at, float) and math.isfinite(at)) else 0,
+        "pinned": bool(data.get("pinned", False)),
+        "folder": _plain_text(data.get("folder")),
+        "n_messages": len(messages) if isinstance(messages, list) else 0,
+        "rev": _rev_of(data),
+        "save_id": _plain_text(data.get("save_id")),
+    }
+
+
+_FIELD_NAME = re.compile(r"[A-Za-z_]{1,32}\Z")
+
+
+def _not_storable(value, where: str = "") -> str | None:
+    """What in *value* a conversation file cannot hold, None when nothing: a
+    number that is not finite, text UTF-8 cannot hold, or a text part of a message
+    whose text is not text. The answer names the place, never the content."""
+    todo = [(where, "", value)]
+    while todo:
+        at, key, v = todo.pop()
+        if isinstance(v, str):
+            try:
+                v.encode("utf-8")
+            except UnicodeEncodeError:
+                return f"{at} is not valid text"
+        elif isinstance(v, float):
+            if not math.isfinite(v):
+                return f"{at} is not a finite number"
+        elif isinstance(v, list):
+            todo.extend((f"{at}[{i}]", key, x) for i, x in enumerate(v))
+        elif isinstance(v, dict):
+            if key == "content" and v.get("type") == "text" and not isinstance(v.get("text") or "", str):
+                return f"{at}.text is not text"
+            for k, x in v.items():
+                name = k if _FIELD_NAME.match(k) else "?"
+                todo.append((f"{at}.{name}".lstrip("."), k, x))
+                todo.append((f"a field name in {at or 'it'}", "", k))
+    return None
+
+
 def _conv_meta(p: Path) -> dict:
     """Lightweight index row for one chat file (no message bodies / images)."""
     st = p.stat()
@@ -164,17 +273,216 @@ def _conv_meta(p: Path) -> dict:
     cached = _META_CACHE.get(str(p))
     if cached and cached[0] == key:
         return dict(cached[1])
-    data = json.loads(p.read_text(encoding="utf-8"))
-    meta = {
-        "id": p.stem,
-        "title": data.get("title", "Untitled"),
-        "updated_at": data.get("updated_at", 0),
-        "pinned": bool(data.get("pinned", False)),
-        "folder": data.get("folder"),
-        "n_messages": len(data.get("messages") or []),
-    }
+    meta = _meta_row(p.stem, json.loads(p.read_text(encoding="utf-8")))
     _META_CACHE[str(p)] = (key, meta)
     return dict(meta)
+
+
+def _remember_meta(p: Path, data: dict) -> None:
+    """Put the index row of *data*, just written to *p*, in the cache."""
+    try:
+        st = p.stat()
+    except OSError:
+        _META_CACHE.pop(str(p), None)
+        return
+    _META_CACHE[str(p)] = ((st.st_mtime, st.st_size), _meta_row(p.stem, data))
+
+
+def _stored_row(path: Path) -> dict | None:
+    """The index row of the conversation stored at *path*, None when no file is
+    there. A file that cannot be read or parsed has revision ``_NO_REV``."""
+    try:
+        return _riding_out(_conv_meta, path)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, RecursionError, AttributeError, TypeError):
+        return {"id": path.stem, "rev": _NO_REV}
+
+
+def _stored_data(path: Path) -> dict | None:
+    """The conversation stored at *path*, None when it cannot be read."""
+    try:
+        data = _load_json(path)
+    except (OSError, ValueError, RecursionError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+# Fields of a message part that only say how it is shown or was answered.
+_DISPLAY_ONLY = {"refusedBy", "notSent", "name", "seconds"}
+
+
+def _media_of(m: dict) -> str:
+    """A fingerprint of everything in message *m* beside its text: pictures,
+    audio and video; empty when it has none."""
+    content = m.get("content")
+    parts = [{k: v for k, v in p.items() if k not in _DISPLAY_ONLY}
+             for p in (content if isinstance(content, list) else ())
+             if isinstance(p, dict) and p.get("type") != "text"]
+    parts += [m[k] for k in ("audio", "video") if m.get(k)]
+    if not parts:
+        return ""
+    return hashlib.sha256(json.dumps(parts, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _turn_keys(messages, out: Counter) -> Counter:
+    """Count in *out* one key per message of *messages*, those archived by a
+    compaction included: who wrote it, its text and its media (a search or page
+    read: what it asked for, or the text of one migrated from an older format)."""
+    for m in messages if isinstance(messages, list) else ():
+        if not isinstance(m, dict):
+            continue
+        if isinstance(m.get("text"), str):
+            out[("user", m["text"], "")] += 1
+        elif m.get("kind"):
+            out[(str(m.get("kind")), str(m.get("query") or m.get("url") or ""), "")] += 1
+        else:
+            out[(str(m.get("role")), _message_text(m), _media_of(m))] += 1
+        _turn_keys(m.get("compacted"), out)
+    return out
+
+
+def _all_turn_keys(messages, branches) -> Counter:
+    """The counted keys of a conversation's timelines: the live one and every
+    parked tail. The slot of a fork that belongs to the timeline on screen
+    repeats it and is left out."""
+    out = _turn_keys(messages, Counter())
+    for rec in branches if isinstance(branches, list) else ():
+        if not isinstance(rec, dict):
+            continue
+        tails = rec.get("tails")
+        for i, tail in enumerate(tails if isinstance(tails, list) else ()):
+            if i != rec.get("current"):
+                _turn_keys(tail, out)
+    return out
+
+
+def _would_lose_turns(stored: dict | None, req: ConversationUpsert) -> bool:
+    """True when the *stored* conversation holds a message, or a repetition of
+    one, that *req* does not, or cannot be read."""
+    if stored is None:
+        return True
+    try:
+        have = _all_turn_keys(stored.get("messages"), stored.get("branches"))
+    except RecursionError:
+        return True
+    return bool(have - _all_turn_keys(req.messages, req.branches))
+
+
+_NOT_THIS_STORE = {"error": "owner",
+                   "message": "This conversation belongs to another key or install."}
+
+
+def _store_owner(principal: str | None) -> dict:
+    """Which store a caller's conversations are in: this install's id and a tag
+    for the key behind the request ("owner" for the owner)."""
+    from localm.config import instance_id
+    tag = "owner" if principal is None else hashlib.sha256(
+        b"localm-chat-store:" + principal.encode("utf-8")).hexdigest()[:16]
+    return {"instance": instance_id(), "principal": tag}
+
+
+# ---- ids of deleted conversations -------------------------------------- #
+# The one proof that a conversation that is not stored was deleted: a browser
+# that still holds it must not store it again. One id per line, appended before
+# the conversation's file is removed; a line "!<id>" takes an earlier one back,
+# because the file could not be removed.
+
+_DELETED_MAX = 5000
+
+
+class _DeletedIdsUnreadable(Exception):
+    pass
+
+
+def _deleted_path(principal: str | None) -> Path:
+    return _chats_root(principal) / "deleted-ids.txt"
+
+
+def _deleted_ids(principal: str | None) -> list[str]:
+    """The ids of conversations deleted from this store, oldest first; a line
+    that is not an id is skipped. Raises _DeletedIdsUnreadable when the list
+    exists and cannot be read."""
+    path = _deleted_path(principal)
+    try:
+        with _LOCKS.get(str(path)):
+            raw = _riding_out(path.read_bytes)
+    except FileNotFoundError:
+        return []
+    except OSError as e:
+        from localm.debuglog import logger
+        logger.warning("chat store: the list of deleted conversations could not "
+                       "be read (%s)", type(e).__name__)
+        raise _DeletedIdsUnreadable from e
+    ids: dict[str, None] = {}
+    for part in raw.splitlines():
+        line = part.decode("ascii", errors="replace")
+        if _CONV_ID.match(line[1:] if line.startswith("!") else line):
+            ids.pop(line.lstrip("!"), None)
+            if not line.startswith("!"):
+                ids[line] = None
+    return list(ids)
+
+
+def _is_deleted(conv_id: str, principal: str | None) -> bool:
+    """Whether *conv_id* was deleted from this store. Answers 503 when the list
+    of deleted conversations cannot be read."""
+    try:
+        return conv_id in _deleted_ids(principal)
+    except _DeletedIdsUnreadable as e:
+        raise HTTPException(
+            503, "The list of deleted conversations cannot be read, so this was "
+                 "not saved.") from e
+
+
+def _write_deleted(path: Path, ids: list[str]) -> None:
+    """Replace the list of deleted conversations *path* with *ids*, one per LF
+    line on every platform. Raises OSError when it cannot be written."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp.write_bytes("".join(f"{i}\n" for i in ids).encode("ascii"))
+        replace_atomic(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _remember_deleted(conv_id: str, principal: str | None, *, take_back: bool = False) -> None:
+    """Append *conv_id* to the list of deleted conversations, or with *take_back*
+    the line that takes it back. Raises OSError when it cannot be written. A list
+    that has grown past twice _DELETED_MAX is cut to its newest ids, when all of
+    it can be read."""
+    path = _deleted_path(principal)
+    line = ("!" if take_back else "") + conv_id
+    with _LOCKS.get(str(path)):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _riding_out(open, path, "ab+") as f:
+            f.seek(0, os.SEEK_END)
+            torn = False
+            if f.tell():
+                f.seek(-1, os.SEEK_END)
+                torn = f.read(1) != b"\n"
+            f.write((b"\n" if torn else b"") + line.encode("ascii") + b"\n")
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            ids = _deleted_ids(principal)
+        except _DeletedIdsUnreadable:
+            return
+        if len(ids) > 2 * _DELETED_MAX:
+            try:
+                _write_deleted(path, ids[-_DELETED_MAX:])
+            except OSError as e:
+                from localm.debuglog import logger
+                logger.warning("chat store: the list of deleted conversations could "
+                               "not be shortened (%s)", type(e).__name__)
+
+
+def _count_chat_files(principal: str | None) -> int:
+    """How many conversation files the caller's store holds."""
+    chats_dir = _chats_root(principal)
+    if not chats_dir.is_dir():
+        return 0
+    return sum(1 for _ in chats_dir.glob("*.json"))
 
 
 def _message_text(m) -> str:
@@ -182,20 +490,21 @@ def _message_text(m) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return "".join(p.get("text") or "" for p in content
-                       if isinstance(p, dict) and p.get("type") == "text")
+        return "".join(p["text"] for p in content if isinstance(p, dict)
+                       and p.get("type") == "text" and isinstance(p.get("text"), str))
     return ""
 
 
 def _content_snippet(data: dict, term: str) -> str | None:
     """Short excerpt around the first message match of *term* (lowercase), or None."""
-    for m in data.get("messages") or []:
+    messages = data.get("messages")
+    for m in messages if isinstance(messages, list) else ():
         text = _message_text(m)
         idx = text.lower().find(term)
         if idx != -1:
             start = max(0, idx - 18)
-            return (("\u2026" if start > 0 else "")
-                    + " ".join(text[start:idx + 50].split()))
+            return _plain_text(("\u2026" if start > 0 else "")
+                               + " ".join(text[start:idx + 50].split()))
     return None
 
 
@@ -219,8 +528,8 @@ def _log_unreadable(p: Path, err: Exception) -> None:
 
 
 @_router.get("/api/conversations")
-async def conversations_list(request: Request, meta: bool = False,
-                             limit: int = 0, offset: int = 0, q: str = ""):
+def conversations_list(request: Request, meta: bool = False,
+                       limit: int = 0, offset: int = 0, q: str = ""):
     """List conversations newest-first.
 
     Pass ``meta=true`` for a lightweight index (id, title, updated_at, pinned,
@@ -231,7 +540,13 @@ async def conversations_list(request: Request, meta: bool = False,
 
     A chat file that cannot be read or parsed is left out of ``conversations``
     and ``total`` and its id is listed in ``unreadable``; a warning naming the
-    id is logged once per file version.
+    id is logged once per file version. Each row carries ``rev``, the stored
+    revision. ``instance`` and ``principal`` name the store: this install and
+    the key behind the request.
+
+    In privacy mode the store is off: the answer is ``{"enabled": false,
+    "conversations": [], "stored": n}``, where ``n`` counts the conversation
+    files saved earlier that are still on disk. None of them is opened.
 
     ``q`` (with ``meta=true``) keeps only the conversations whose title or
     message text contains it, case-insensitively, and adds a ``snippet`` to the
@@ -239,26 +554,36 @@ async def conversations_list(request: Request, meta: bool = False,
     the browser has not loaded.
     """
     if not _persist_enabled():
-        return {"enabled": False, "conversations": []}
+        principal = _principal_dir(request)
+        return {"enabled": False, "conversations": [],
+                "stored": _count_chat_files(principal), **_store_owner(principal)}
     term = q.strip().lower() if meta else ""
-    chats_dir = _chats_root(_principal_dir(request))
+    principal = _principal_dir(request)
+    chats_dir = _chats_root(principal)
     rows = []
     unreadable: list[str] = []
     if chats_dir.is_dir():
         for p in chats_dir.glob("*.json"):
+            lock = _LOCKS.get(str(p))
             try:
                 if meta:
-                    row = _conv_meta(p)
+                    with lock:
+                        row = _riding_out(_conv_meta, p)
                     if term and term not in str(row["title"]).lower():
-                        data = json.loads(p.read_text(encoding="utf-8"))
+                        with lock:
+                            data = _load_json(p)
                         snippet = _content_snippet(data, term)
                         if snippet is None:
                             continue
                         row["snippet"] = snippet
                     rows.append(row)
                 else:
-                    data = json.loads(p.read_text(encoding="utf-8"))
+                    with lock:
+                        data = _load_json(p)
                     data["id"] = p.stem
+                    data["rev"] = _rev_of(data)
+                    data["updated_at"] = _meta_row(p.stem, data)["updated_at"]
+                    json.dumps(data, ensure_ascii=False, allow_nan=False).encode("utf-8")
                     rows.append(_conv_with_current_pin(data))
             except FileNotFoundError:
                 continue
@@ -275,63 +600,159 @@ async def conversations_list(request: Request, meta: bool = False,
     else:
         rows = rows[:200]   # default cap when unpaginated
     return {"enabled": True, "conversations": rows, "total": total,
-            "unreadable": unreadable}
+            "unreadable": unreadable, **_store_owner(principal)}
 
 
 @_router.get("/api/conversations/{conv_id}")
-async def conversation_get(conv_id: str, request: Request):
-    """The full body of one conversation. Answers 404 when it does not exist
-    and 403 when chat persistence is off (privacy mode)."""
+def conversation_get(conv_id: str, request: Request):
+    """The full body of one conversation. Answers 410 when it was deleted, 404
+    when it is not stored and no deletion is known, and 403 when chat persistence
+    is off (privacy mode)."""
     if not _persist_enabled():
         raise HTTPException(403, "Chat persistence is off (privacy mode)")
-    path = _conv_path(conv_id, _principal_dir(request))
-    if not path.is_file():
-        raise HTTPException(404, "No such conversation")
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, RecursionError) as e:
-        raise HTTPException(500, "Conversation file is unreadable") from e
+    principal = _principal_dir(request)
+    path = _conv_path(conv_id, principal)
+    with _LOCKS.get(str(path)):
+        if not path.is_file():
+            if _is_deleted(conv_id, principal):
+                raise HTTPException(410, "This conversation was deleted")
+            raise HTTPException(404, "No such conversation")
+        try:
+            data = _load_json(path)
+        except (OSError, ValueError, RecursionError) as e:
+            raise HTTPException(500, "Conversation file is unreadable") from e
     if not isinstance(data, dict):
         raise HTTPException(500, "Conversation file is unreadable")
     data["id"] = conv_id
-    return _conv_with_current_pin(data)
+    data["rev"] = _rev_of(data)
+    try:
+        return JSONResponse(_conv_with_current_pin(data))
+    except (ValueError, RecursionError) as e:
+        raise HTTPException(500, "Conversation file is unreadable") from e
+
+
+def _stale(row: dict | None, message: str, *, deleted: bool = False) -> HTTPException:
+    return HTTPException(409, {"error": "stale", "message": message, "row": row,
+                               "rev": row["rev"] if row else None, "deleted": deleted})
 
 
 @_router.put("/api/conversations/{conv_id}")
-async def conversation_upsert(conv_id: str, req: ConversationUpsert,
-                              request: Request):
+def conversation_upsert(conv_id: str, req: ConversationUpsert, request: Request):
+    """Store one conversation, replacing the stored copy. Answers with the new
+    revision as ``rev``; every save gets a new one.
+
+    ``base_rev`` names the stored revision this save replaces, and null says the
+    caller has never seen the conversation stored. When the store holds another
+    revision (the conversation was saved or deleted by someone else since, or one
+    is stored already), nothing is written and the answer is 409 with
+    ``{"detail": {"error": "stale", "message": ..., "rev": <stored revision or
+    null>, "row": <its index row or null>, "deleted": <bool>}}``. A null ``rev``
+    means the conversation is not stored any more; ``deleted`` is true only when
+    it was deleted.
+
+    A request without ``base_rev`` is written when no conversation is stored
+    under this id and none was deleted, or when every message of the stored one
+    is in the request; otherwise it is refused with the same 409.
+
+    A request whose ``instance`` or ``principal`` is not the store it reaches is
+    refused with 403 ``{"detail": {"error": "owner"}}`` and nothing is written.
+    503 when the list of deleted conversations has to be known and cannot be
+    read. 403 in privacy mode, 413 when the conversation is larger than the store
+    accepts, 422 naming the place when it holds a number that is not finite, text
+    UTF-8 cannot hold, or a text part whose text is not text."""
     if not _persist_enabled():
         raise HTTPException(
             403, "Chat persistence is off (privacy mode). "
                  "Set mode/chat_mode to 'log' or 'full' to enable it.")
-    path = _conv_path(conv_id, _principal_dir(request))
+    principal = _principal_dir(request)
+    path = _conv_path(conv_id, principal)
+    owner = _store_owner(principal)
+    for field in ("instance", "principal"):
+        if getattr(req, field) and getattr(req, field) != owner[field]:
+            raise HTTPException(403, _NOT_THIS_STORE)
     record = {"id": conv_id, "title": req.title,
               "updated_at": req.updated_at,
               "pinned": req.pinned, "folder": req.folder,
               "pinned_model": req.pinned_model,
+              "params": {k: v for k, v in req.params.items()
+                         if isinstance(v, (str, int, float))
+                         and not isinstance(v, bool)},
+              "rev": secrets.token_hex(8),
+              "save_id": req.save_id,
               "branches": req.branches,
               "messages": req.messages}
+    wrong = _not_storable(record)
+    if wrong:
+        raise HTTPException(422, f"This conversation was not saved: {wrong}.")
     if req.pinned_model:
         index = model_index()
         record["pinned_model"] = model_ids.stored_to_current(req.pinned_model, None, index)
         model_ids.attach_refs(record, (record["pinned_model"],), index)
-    payload = json.dumps(record, ensure_ascii=False)
-    if len(payload.encode("utf-8")) > _CONV_MAX_BYTES:
-        raise HTTPException(413, "Conversation too large to persist")
-    path.parent.mkdir(parents=True, exist_ok=True)
     with _LOCKS.get(str(path)):
+        row = _stored_row(path)
+        deleted = row is None and _is_deleted(conv_id, principal)
+        if deleted:
+            raise _stale(None, "This conversation was deleted.", deleted=True)
+        if "base_rev" in req.model_fields_set:
+            if (row["rev"] if row else None) != req.base_rev:
+                raise _stale(row, "This conversation was changed or removed elsewhere.")
+        elif row and _would_lose_turns(_stored_data(path), req):
+            raise _stale(row, "The stored conversation holds messages this save would "
+                              "remove. Send base_rev with the revision it replaces.")
+        if row and "params" not in req.model_fields_set:
+            stored = (_stored_data(path) or {}).get("params")
+            record["params"] = stored if isinstance(stored, dict) else {}
+        try:
+            payload = json.dumps(record, ensure_ascii=False)
+        except RecursionError as e:
+            raise HTTPException(422, "This conversation was not saved: it is nested too deeply.") from e
+        if len(payload.encode("utf-8")) > _CONV_MAX_BYTES:
+            raise HTTPException(413, "Conversation too large to persist")
+        path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write(path, payload)
-    return {"status": "saved", "id": conv_id}
+        _remember_meta(path, record)
+    return {"status": "saved", "id": conv_id, "rev": record["rev"]}
 
 
 @_router.delete("/api/conversations/{conv_id}")
-async def conversation_delete(conv_id: str, request: Request):
+def conversation_delete(conv_id: str, request: Request):
+    """Delete one conversation and record its id, also when none is stored under
+    it (``absent``), so a save still on its way does not store it. Answers 500
+    when the deletion cannot be recorded or the file cannot be removed; the
+    conversation then stays, and does not count as deleted. A request whose
+    ``X-LocaLM-Chat-Store`` header (``<instance> <principal>``, as the list names
+    them) is not the store it reaches is refused with 403
+    ``{"detail": {"error": "owner"}}``."""
     if not _persist_enabled():
         raise HTTPException(403, "Chat persistence is off (privacy mode)")
-    path = _conv_path(conv_id, _principal_dir(request))
+    principal = _principal_dir(request)
+    path = _conv_path(conv_id, principal)
+    meant = request.headers.get("x-localm-chat-store")
+    if meant is not None and meant != " ".join(_store_owner(principal).values()):
+        raise HTTPException(403, _NOT_THIS_STORE)
     with _LOCKS.get(str(path)):
+        try:
+            _remember_deleted(conv_id, principal)
+        except OSError as e:
+            from localm.debuglog import logger
+            logger.warning("chat store: a deletion could not be recorded (%s); "
+                           "nothing was deleted", type(e).__name__)
+            raise HTTPException(
+                500, "The deletion could not be recorded, so nothing was deleted.") from e
         if path.is_file():
-            path.unlink()
+            try:
+                _riding_out(path.unlink)
+            except OSError as e:
+                from localm.debuglog import logger
+                logger.warning("chat store: conversation %s could not be deleted (%s)",
+                               conv_id, type(e).__name__)
+                try:
+                    _remember_deleted(conv_id, principal, take_back=True)
+                except OSError as e2:
+                    logger.warning("chat store: the record that conversation %s was deleted "
+                                   "could not be taken back (%s)", conv_id, type(e2).__name__)
+                raise HTTPException(500, "The conversation could not be deleted.") from e
+            _META_CACHE.pop(str(path), None)
             return {"status": "deleted", "id": conv_id}
     return {"status": "absent", "id": conv_id}
 
@@ -358,17 +779,15 @@ def relabel_pinned_model(old_name: str, new_name: str) -> tuple[list, list]:
     """Rewrite ``pinned_model`` from *old_name* to *new_name* in every stored
     conversation (the owner's and every principal's) that carries it.
 
-    A rewritten conversation gets a fresh ``updated_at`` so that a browser
-    holding an older cached copy takes this one rather than uploading its own
-    over it. Each file is rewritten under its per-file lock, and a file whose
+    A rewritten conversation gets a fresh ``updated_at`` and keeps its ``rev``:
+    a later save naming *old_name* is stored under *new_name* anyway. Each file
+    is rewritten under its per-file lock, and a file whose
     ``updated_at`` changed since it was read is left as it is and listed in
     ``failed``. A rewritten conversation's ``model_refs`` is set for *new_name*.
     Returns ``(rewritten, failed)``: the ids rewritten, and the ids
     of files that name *old_name* but were not rewritten. A file that does not
     contain *old_name* is not parsed. Works in every session mode: it edits
     files that already exist and creates none."""
-    import time
-
     needle = json.dumps(old_name, ensure_ascii=False)[1:-1]
     index = model_index()
     rewritten: list = []

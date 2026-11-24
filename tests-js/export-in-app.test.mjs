@@ -64,6 +64,10 @@ test("with host access, export saves in the picked folder and never downloads", 
 test("the next export starts in the folder of the last one", async () => {
   const s = setup({ fsAccess: "host" });
   await s.window.exportConversation();
+  // The remembered folder is written once the page's mode read answered; the
+  // page's own start-up answers land meanwhile, so the capabilities are set again.
+  await new Promise((r) => setTimeout(r, 30));
+  runScript(s.window, `caps.fsAccess = "host"; caps.fsSave = true; caps.networkBind = false;`);
   await s.window.exportConversation();
   assert.equal(s.pickerCalls[1].startPath, "D:/exports");
 });
