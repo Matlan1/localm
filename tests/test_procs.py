@@ -634,9 +634,12 @@ def _icacls(path, *args) -> str:
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows rights")
 def test_the_record_inherits_the_rights_of_the_install(make):
     inst = make()
+    _icacls(inst.root, "/grant", "*S-1-5-32-546:(OI)(CI)RX")
+    plain = inst.root / "plain"
+    plain.mkdir()
     inst.importer()
-    rights = re.findall(r":((?:\([A-Z,]+\))+)", _icacls(inst.folder))
-    assert rights and all("(I)" in r for r in rights)
+    record, beside = (re.findall(r"\S+:(?:\([A-Z,]+\))+", _icacls(p)) for p in (inst.folder, plain))
+    assert record == beside and any(r.endswith("(RX)") for r in record)
 
 
 def _planted(inst: Install) -> subprocess.Popen:

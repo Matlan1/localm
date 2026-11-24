@@ -231,7 +231,7 @@ def _spawn_detached(cmd: list, *, cwd: str, env: dict | None = None,
     return procs.start(cmd, purpose="launcher window", **kwargs)
 
 
-def _open_terminal(cmd: list, *, cwd: str, env: dict | None = None):
+def _open_terminal(cmd: list, *, env: dict | None = None, **kwargs):
     """Start *cmd* in a terminal window. The terminal program is the user's and may hold
     other windows, so it is not recorded; the localm in it records itself."""
     wrapped = terminal_command(cmd, env)
@@ -239,7 +239,7 @@ def _open_terminal(cmd: list, *, cwd: str, env: dict | None = None):
         raise RuntimeError(
             "no terminal program was found to open it in; run "
             f"{shlex.join(cmd)} in a terminal, or set TERMINAL")
-    return subprocess.Popen(wrapped, cwd=cwd, env=env, start_new_session=True)
+    return subprocess.Popen(wrapped, env=env, start_new_session=True, **kwargs)
 
 
 def _invalid_numeric_fields(port: str, ctx: str, gpu: str):
