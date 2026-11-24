@@ -696,3 +696,23 @@ def test_a_long_shared_text_is_accepted_and_truncated(share_client):
     import base64
     payload = items[0]["data_uri"].split(",", 1)[1]
     assert len(base64.b64decode(payload)) == 20000
+
+
+def test_skipped_files_are_named_once_to_the_sharer(share_client):
+    r = share_client.post(
+        "/share-target",
+        files=[("files", ("photo.png", _PNG, "image/png")),
+               ("files", ("report.docx", b"PK", "application/msword")),
+               ("files", ("empty.png", b"", "image/png"))],
+        follow_redirects=False)
+    assert r.headers["location"] == "/?shared=1&skipped=2"
+    first = share_client.get("/api/share/pending").json()
+    assert first["skipped"] == ["report.docx", "empty.png"]
+    assert len(first["items"]) == 1
+    assert share_client.get("/api/share/pending").json()["skipped"] == []
+
+
+def test_a_share_with_nothing_skipped_names_nothing(share_client):
+    share_client.post("/share-target", files={"files": ("photo.png", _PNG, "image/png")},
+                      follow_redirects=False)
+    assert share_client.get("/api/share/pending").json()["skipped"] == []

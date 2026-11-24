@@ -149,6 +149,7 @@ test("dismissing the hint hides it immediately and persists across a reload", as
 
   dismiss.click();
   assert.equal(hint.hidden, true, "dismiss hides it immediately");
+  await settle(30);
   assert.equal(window.localStorage.getItem("localm.backendHintDismissed"), "1",
     "dismissal is remembered");
 

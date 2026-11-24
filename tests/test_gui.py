@@ -3350,7 +3350,7 @@ class TestConversationStore:
         app, chats = persist_app
         with TestClient(app) as client:
             data = client.get("/api/conversations").json()
-            assert data == {"enabled": False, "conversations": []}
+            assert data == {"enabled": False, "conversations": [], "stored": 0}
             r = client.put("/api/conversations/abc",
                            json={"title": "x", "messages": []})
             assert r.status_code == 403

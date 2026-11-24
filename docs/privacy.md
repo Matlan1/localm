@@ -68,6 +68,24 @@ Notes:
 - "Nothing written automatically" is the promise privacy mode makes; anything you
   do explicitly (saving a conversation, filing a bug report, `--debug`) is a
   deliberate action, not an automatic trace.
+- Changing the mode does not move anything across it. Switching the chat to
+  `privacy` does not delete conversations or session records saved earlier (the
+  app's chat sidebar says how many saved chats are still on disk). Switching from
+  `privacy` to `log` or `full` while the app is open does not save the
+  conversations held under privacy mode: they stay in that browser tab only, and
+  a message sent from one of them is still handled in privacy mode (with a scoped
+  key, whose requests follow the global mode, it is recorded under that mode).
+- The chat page reads the mode from the server before it writes anything to the
+  browser's storage, so a mode changed from a terminal applies to the next thing
+  the page would save. While the server cannot be reached, the last mode it
+  reported stands.
+- In `log` and `full` mode the browser's storage holds a copy of recent
+  conversations and what you have typed, attached or queued but not sent. Privacy
+  mode keeps none of it there and empties what an earlier mode left.
+- When you delete a conversation in `log` or `full` mode, its id (a short
+  code made from the time it was started, no title or text) is added to `chats/deleted-ids.txt`, so that another
+  browser that still holds the conversation does not save it again. The newest
+  5000 ids are kept.
 - In privacy mode, the interactive `localm run` chat and the coder REPL also
   suppress Python's own `readline` history, so what you type is not left
   behind in `~/.python_history` either. This is separate from and in addition

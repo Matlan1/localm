@@ -234,11 +234,13 @@ def _stored_data(path: Path) -> dict | None:
 def _turn_keys(messages, out: set) -> set:
     """Add one key per message of *messages* to *out*, those archived by a
     compaction included: who wrote it and its text (a search or page read: what
-    it asked for)."""
+    it asked for, or the text of one migrated from an older format)."""
     for m in messages if isinstance(messages, list) else ():
         if not isinstance(m, dict):
             continue
-        if m.get("kind"):
+        if isinstance(m.get("text"), str):
+            out.add(("user", m["text"]))
+        elif m.get("kind"):
             out.add((str(m.get("kind")), str(m.get("query") or m.get("url") or "")))
         else:
             out.add((str(m.get("role")), _message_text(m)))

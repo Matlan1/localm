@@ -2291,7 +2291,8 @@ function forgetDrafts(ids, gone = (id) => ids.includes(id)) {
 }
 
 /** Puts the drafts and queued messages this browser kept back: those of this
- *  tab, else the newest a closed tab left for a conversation. A queued message
+ *  tab, else the newest a closed tab left for a conversation. Those of a
+ *  conversation that is not listed any more are removed. A queued message
  *  stays queued until something is sent. Call once the mode is known. */
 export async function restoreDrafts() {
   if (_draftsRestored || !chat.modeKnown) return;
@@ -2321,7 +2322,10 @@ export async function restoreDrafts() {
         if (r.tab !== own) drop.push(r.key);
         continue;
       }
-      if (r.id && !chat.conversations.some((c) => c.id === r.id)) continue;
+      if (r.id && !chat.conversations.some((c) => c.id === r.id)) {
+        if (chat.persist) drop.push(r.key);
+        continue;
+      }
       if (!from.has(r.id)) from.set(r.id, r.tab);
       if (from.get(r.id) !== r.tab) continue;
       const d = found.get(r.id) || emptyDraft();
