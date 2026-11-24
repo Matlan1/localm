@@ -3583,6 +3583,8 @@ def comfy_submit_prompt(api_url: str, workflow: dict, *, timeout: float = 10.0):
         with _comfy_urlopen(req, timeout=timeout) as response:
             prompt_id = json.loads(response.read().decode("utf-8")).get("prompt_id")
         if not prompt_id:
+            if jobs is not None and not sent_id:
+                jobs.unconfirmed = True
             return SUBMIT_NO_ID, None
         if jobs is not None and sent_id:
             jobs.accepted(sent_id, str(prompt_id))

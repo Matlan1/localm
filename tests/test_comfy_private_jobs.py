@@ -400,8 +400,9 @@ def test_an_image_sent_before_the_switch_is_removed(comfy, tmp_path, monkeypatch
     assert list(comfy.input.iterdir()) == []
 
 
-def test_an_unanswered_job_sent_before_the_switch_is_said(comfy):
-    comfy.reply = "lost"
+@pytest.mark.parametrize("reply", ["lost", "unreadable"])
+def test_an_unanswered_job_sent_before_the_switch_is_said(comfy, reply):
+    comfy.reply = reply
     state = []
 
     def job():
