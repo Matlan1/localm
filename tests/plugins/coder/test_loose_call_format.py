@@ -94,9 +94,12 @@ def test_loose_calls_run_unattended_once_the_model_says_they_were_meant(tmp_path
     assert (tmp_path / "a.txt").read_text() == "1"
     assert (tmp_path / "b.txt").read_text() == "2"
     assert len(backend.checks) == 2
-    first, second = (c[-1]["content"] for c in backend.checks)
-    assert "a.txt" in first and "1 of 2" in first and "b.txt" in second.split("It has not run")[0]
-    assert "b.txt" not in first.split("It has not run")[0]
+    first, second = backend.checks
+    assert "a.txt" in first[-1]["content"].split("It has not run")[0]
+    assert "b.txt" in second[-1]["content"].split("It has not run")[0]
+    assert [m["role"] for m in first[-3:]] == ["user", "assistant", "user"]
+    assert "a.txt" in first[-2]["content"] and "b.txt" not in first[-2]["content"]
+    assert "b.txt" in second[-2]["content"] and "a.txt" not in second[-2]["content"]
     assert agent.denied_unconfirmed == []
     assert agent.last_run_ok is True
     assert not any("[tool-call check]" in t for t in _texts(agent, "user"))
@@ -248,6 +251,8 @@ def test_the_question_is_held_to_its_two_answers_by_a_grammar(tmp_path):
     assert backend.check_kw["grammar"] == _answer_grammar(("[run]", "[example]"))
     assert '("[run]" | "[example]")' in backend.check_kw["grammar"]
     assert "max_tokens" not in backend.check_kw
+    assert backend.check_kw["temperature"] == 0.0
+    assert backend.calls[0][1]["temperature"] > 0
     assert (tmp_path / "a.txt").exists()
 
 
@@ -838,7 +843,7 @@ def test_a_question_that_fails_counts_as_no_answer(tmp_path, which):
     assert not (tmp_path / "a.txt").exists()
     roles = [m["role"] for m in agent._messages]
     assert roles[:3] == ["user", "assistant", "user"]
-    assert all(a != b for a, b in zip(roles, roles[1:]))
+    assert all(a != b for a, b in zip(roles, roles[1:], strict=False))
 
 
 @pytest.mark.parametrize("which", range(7))

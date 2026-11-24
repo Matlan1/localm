@@ -661,7 +661,8 @@ class _LoopMixin:
 
         def _loose_calls_to_check(self, calls: list) -> list: ...
 
-        def _ask_if_calls_meant(self, calls: list) -> dict: ...
+        def _ask_if_calls_meant(self, calls: list, response: str = "",
+                                parsed=()) -> dict: ...
 
         def _build_messages(self) -> list[dict]: ...
 
@@ -1106,7 +1107,8 @@ class _LoopMixin:
                 self._loose_refused.clear()
                 self._answered_with_example.clear()
                 loose = self._loose_calls_to_check(calls)
-                self._loose_answers = self._ask_if_calls_meant(loose) if loose else {}
+                self._loose_answers = self._ask_if_calls_meant(
+                    loose, response, parsed_calls) if loose else {}
                 shown = (bool(loose) and all(
                     self._loose_answers.get(id(c)) is False for c in loose)
                     and all(c.lenient for c in calls))

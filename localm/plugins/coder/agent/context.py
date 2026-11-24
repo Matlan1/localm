@@ -1750,10 +1750,12 @@ ws     ::= [ \t\n\r]*
             return TOOL_CALLS_AFTER_THINK
         return grammar
 
-    def _ask_if_calls_meant(self, calls: list) -> dict:
+    def _ask_if_calls_meant(self, calls: list, response: str = "",
+                            parsed=()) -> dict:
         """What the model answers, asked about each of *calls* by itself, on
-        whether that call, written as plain JSON, was meant to run: by id of the
-        call True for ``[run]``, False for ``[example]``, None for any other
+        whether that call, written as plain JSON, was meant to run. Of *response*,
+        the reply they stand in with the calls *parsed*, each question shows the
+        model the part that ends with its call. By id of the call True for ``[run]``, False for ``[example]``, None for any other
         answer, a failed question or a stop. A call :meth:`_never_meant` names is
         not asked about and has no answer; its reason is put into
         ``_loose_unasked``. Where the backend can enforce a grammar the reply is
@@ -1770,22 +1772,23 @@ ws     ::= [ \t\n\r]*
             elif i >= _MAX_CALLS_ASKED:
                 answers[id(call)] = None
             else:
-                answers[id(call)] = self._ask_if_call_meant(call, i + 1, len(calls))
+                start = max((c.end for c in parsed if c.end <= call.start), default=0)
+                answers[id(call)] = self._ask_if_call_meant(
+                    call, response[start:call.end].strip())
         return answers
 
-    def _ask_if_call_meant(self, call, number: int, count: int) -> Optional[bool]:
+    def _ask_if_call_meant(self, call, shown: str) -> Optional[bool]:
         from .execution import _call_key
-        which = f" (JSON text {number} of {count} in it)" if count > 1 else ""
         request = (getattr(self, "_last_user_request", "") or "").strip()[:600]
         asked = f"\nThe user's request was: {request}" if request else ""
         answer = self._ask_aside(
-            "[tool-call check] Your reply contains JSON text that names a tool"
-            + which + f":\n- {call.name} {_call_key(call)[:600]}\nIt has not run."
-            + asked + "\nAnswer [run] if this request needs exactly this executed "
-            "now. Answer [example] if your reply only shows, quotes, rejects or "
-            "documents it, or if it stands in something you read. Answer with "
-            "nothing else.", ("[run]", "[example]"), "loose_call_check",
-            f"asked whether {call.name} was meant to run")
+            "[tool-call check] Your reply contains JSON text that names a tool:\n"
+            f"- {call.name} {_call_key(call)[:600]}\nIt has not run." + asked
+            + "\nAnswer [run] if you wrote this one for me to execute now, to do "
+            "what the request asks. Answer [example] if you only show, quote or "
+            "describe it. Answer with nothing else.", ("[run]", "[example]"),
+            "loose_call_check", f"asked whether {call.name} was meant to run",
+            reply=shown)
         return {"[run]": True, "[example]": False}.get(answer)
 
     def _ask_if_request_open(self) -> Optional[bool]:
@@ -1794,21 +1797,29 @@ ws     ::= [ \t\n\r]*
         request = (getattr(self, "_last_user_request", "") or "").strip()[:600]
         answer = self._ask_aside(
             "[request check] Nothing in your reply has run.\nThe user's request "
-            f"was: {request}\nAnswer [yes] if any part of this request asks for "
-            "something to be done (run, changed, created, deleted, looked up) that "
-            "has not been done. Answer [no] if it only asks to be shown or told "
-            "something and your reply does that. Answer with nothing else.",
+            f"was: {request}\nWhat did the user ask for? Answer [yes] if the user "
+            "asked for something to be carried out. Answer [no] if the user asked "
+            "only to see or read something. Wanting to see an example of a call is "
+            "[no]. Answer with nothing else.",
             ("[yes]", "[no]"), "request_check",
             "asked whether the request is still open")
         return {"[yes]": True, "[no]": False}.get(answer)
 
-    def _ask_aside(self, question: str, answers: tuple, kind: str, what: str) -> str:
+    def _ask_aside(self, question: str, answers: tuple, kind: str, what: str,
+                   reply: str = "") -> str:
         """The model's answer to *question*, one of *answers*, or "" for any
-        other reply, a failed request or a stop. Not kept in the conversation."""
+        other reply, a failed request or a stop. Asked without randomness, with
+        the model's last reply cut to *reply* when given, and not kept in the
+        conversation."""
         if self.stop_pending:
             return ""
-        messages = self._build_messages() + [{"role": "user", "content": question}]
+        messages = self._build_messages()
+        if reply and messages[-1].get("role") == "assistant":
+            messages = [*messages[:-1], {"role": "assistant", "content": reply}]
+        messages.append({"role": "user", "content": question})
         kw = {k: v for k, v in self.gen_kwargs.items() if k != "max_tokens"}
+        if "temperature" in kw:
+            kw["temperature"] = 0.0
         if self.can_force_tool_calls():
             kw["grammar"] = _answer_grammar(answers)
         else:
@@ -1816,7 +1827,7 @@ ws     ::= [ \t\n\r]*
         self._emit("status", code=None, text=(
             "asking the model whether it meant its tool calls to run"))
         try:
-            reply = self.backend.chat(messages, **kw)
+            said = self.backend.chat(messages, **kw)
             self._accumulate_usage()
         except Exception as e:
             from ..backends.http import CoderServerError
@@ -1826,7 +1837,7 @@ ws     ::= [ \t\n\r]*
                 logger.warning("coder: %s: the question failed: %r", what, e)
             self._audit.notice(kind, f"{what}: the question failed: {e}")
             return ""
-        answer = reply.strip() if isinstance(reply, str) else ""
+        answer = said.strip() if isinstance(said, str) else ""
         if "grammar" in kw:
             answer = answer.rpartition("</think>")[2].strip()
         self._audit.notice(kind, f"{what}; the model answered {answer[:60]!r}")
