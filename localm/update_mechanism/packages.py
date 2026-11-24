@@ -12,15 +12,15 @@ nor a package source, and a file nobody planned is somebody else's.
 from __future__ import annotations
 
 import base64
+import contextlib
 import csv
-import hashlib
 import os
 import posixpath
 import re
 import shutil
 import stat
 import subprocess
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -37,8 +37,6 @@ _OTHER_VENV = re.compile(r"Would (?:replace|create|remove)\b.*\benvironment\b")
 # What uv reads of an installed distribution to know that it is there.
 _METADATA = ("METADATA", "WHEEL", "INSTALLER", "REQUESTED", "direct_url.json", "uv_cache.json",
              "uv_build.json")
-# Largest file compared with its checksum to see whether a user edited it.
-_EDIT_BYTES = 4 * 1024 * 1024
 
 #: Runs a command: ``(argv, cwd, env) -> (exit status, output)``.
 Runner = Callable[[list, str, dict], tuple]
@@ -153,7 +151,8 @@ def _records(site: Path, base: Path, folder: str, name: str) -> dict:
                           f"{row[0][:80]!r}") from None
         if disk.PYCACHE not in rel.split("/"):
             size = row[2] if len(row) > 2 else ""
-            found[rel] = (row[1] if len(row) > 1 else "", int(size) if size.isdecimal() else None)
+            found[rel] = (row[1] if len(row) > 1 else "",
+                          int(size) if size.isdecimal() and len(size) < 19 else None)
     for entry in os.listdir(site / folder):
         st = os.lstat(site / folder / entry)
         if disk.is_link(st) or stat.S_ISREG(st.st_mode):
@@ -187,8 +186,13 @@ def stage_packages(root, update_id: str, argv: Iterable, *, env: Mapping, projec
     """Put what the uv command *argv* (:func:`command`) would install in *root* into
     the staging venv of *update_id*, and note what it would remove. With *more* it
     is added to what earlier commands staged, and uv sees that as installed; else
-    the staging venv is made anew. uv may download only with *network*. Returns False, with nothing staged, when uv has
-    nothing to do. The venv itself is not changed, so this can run while localm does.
+    the staging venv is made anew. uv may download only with *network*. Returns
+    False, with nothing staged, when uv has nothing to do. The venv itself is not
+    changed, so this can run while localm does.
+
+    What is staged stays for :func:`.job.start` with this id; :func:`.job.cleanup`
+    and the start of another update delete it. An *argv* with ``--reinstall`` makes
+    :func:`forward` fail, as uv then always has something to do.
 
     Raises :class:`Refused`, naming the package, for one without a RECORD, with a
     file outside the venv or behind a link, for localm itself without *project*, for
@@ -403,50 +407,45 @@ def plan_packages(root, update_id: str) -> Plan:
                       "prepared")
     staged_site = _site(stage)
     new: dict = {}
+    dists: dict = {}
     for name, folder in _infos(staged_site, installed):
         for rel in _records(staged_site, stage, folder, name):
             new[rel] = disk.quick_identity(stage.joinpath(*rel.split("/")))
+            dists[rel] = name
     leaving: dict = {}
-    made: dict = {}
     for name, folder in removed:
-        listed = _records(site, venv, folder, name)
-        when = os.lstat(site / folder / "RECORD").st_mtime_ns
-        for rel, stated in listed.items():
-            leaving[rel] = stated
-            made[rel] = when
-    owned = set(leaving)
+        leaving.update(_records(site, venv, folder, name))
+    owners: dict = {}
     for name, _v, folder in shared.updater_components.dist_infos(site):
-        if (name, folder) not in removed:
-            try:
-                owned.update(_records(site, venv, folder, name))
-            except Refused:
-                continue
+        with contextlib.suppress(Refused):   # a package that stays needs no list
+            owners.update(dict.fromkeys(_records(site, venv, folder, name), name))
 
     def edited(rel: str, old: dict) -> bool:
-        if rel not in owned:
-            return True
-        return rel in leaving and _was_edited(venv, rel, old, leaving[rel], made[rel])
+        stated = _stated(leaving.get(rel))
+        return rel not in owners or (stated is not None and "link" not in old
+                                     and stated != {"sha256": old["copy"], "size": old["size"]})
 
     a = mover.area(root, update_id, PACKAGES)
     plan = mover.build(a, PACKAGES, mover.next_number(root, update_id), new, leaving,
                        identify=disk.quick_identity, edited=edited)
+    for op in plan.ops:
+        op.dist = (dists if op.old is None else owners).get(op.path, "")
+        op.release = _stated(leaving.get(op.path)) if op.edited else None
     plan.dists = sorted(touched)
+    plan.venv = mover.venv_mark(a.base)
     return plan
 
 
-def _was_edited(venv: Path, rel: str, old: dict, stated: tuple, made: int) -> bool:
-    """Whether the file *rel* of an installed package is not the one its RECORD
-    states, as far as its size and its time give reason to look."""
-    digest, size = stated
-    if "link" in old or size is None or not digest.startswith("sha256="):
-        return False
-    if old["size"] != size:
-        return True
-    if old["mtime_ns"] <= made or size > _EDIT_BYTES:
-        return False
-    data = venv.joinpath(*rel.split("/")).read_bytes()
-    have = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode("ascii")
-    return have != digest[len("sha256="):]
+def _stated(row: Optional[tuple]) -> Optional[dict]:
+    """What a row of :func:`_records` states of the content, None for nothing."""
+    digest, size = row or ("", None)
+    try:
+        raw = base64.urlsafe_b64decode(digest.removeprefix("sha256=") + "=")
+    except ValueError:
+        return None
+    if size is None or not digest.startswith("sha256=") or len(raw) != 32:
+        return None
+    return {"sha256": raw.hex(), "size": size}
 
 
 def forward(root, update_id: str, plan: Plan, argv: Iterable, *, env: Mapping,
@@ -455,8 +454,11 @@ def forward(root, update_id: str, plan: Plan, argv: Iterable, *, env: Mapping,
     """Make the moves of *plan* (:func:`plan_packages`), then ask uv whether it has
     anything left to do for *argv*, the last command staged. Raises
     :class:`.mover.StepFailed`, with everything moved back, when any of it fails or
-    is interrupted."""
+    is interrupted. Other programs' uv waits during the moves."""
+    locked = contextlib.ExitStack()
+
     def nothing_left(_a: Area) -> None:
+        locked.close()
         code, output = run([*command(argv, project=project), "--dry-run"], str(root),
                            _environment(env))
         if code != 0:
@@ -465,30 +467,83 @@ def forward(root, update_id: str, plan: Plan, argv: Iterable, *, env: Mapping,
         if removed or installed:
             raise Refused("uv would still change packages: "
                           + ", ".join(sorted({e[0] for e in removed + installed})))
-    mover.forward(root, update_id, plan, wait_s=wait_s, then=nothing_left, back=back)
+
+    def undo(*args, **kwargs) -> Outcome:
+        locked.close()
+        return back(*args, **kwargs)
+    with locked:
+        try:
+            venv = mover.area(root, update_id, plan.step).base
+            locked.enter_context(_uv_waits(venv, Wait(wait_s)))
+        except (OSError, Held, Unsafe) as e:
+            raise mover.StepFailed(str(e)) from e
+        mover.forward(root, update_id, plan, wait_s=wait_s, then=nothing_left, back=undo)
+
+
+@contextlib.contextmanager
+def _uv_waits(venv: Path, wait: Wait) -> Iterator[None]:
+    """Hold uv's lock of *venv* for the block. Raises :class:`.disk.Held` when uv has
+    it for longer than *wait*, OSError otherwise."""
+    path = venv / ".lock"
+    fd = disk.open_lock(path)
+    try:
+        try:
+            disk.lock_file(fd, wait)
+        except (PermissionError, BlockingIOError) as e:
+            raise Held(path, "uv is at work in this Python environment") from e
+        yield
+    finally:
+        os.close(fd)
 
 
 def back(root, update_id: str, plan: Plan, *, wait_s: Optional[float] = None) -> Outcome:
-    """:func:`.mover.back` for a package step. A package of the plan that somebody
-    installed in another form since is first moved to the *kept* folder as a whole,
-    which is noted."""
+    """:func:`.mover.back` for a package step. A package the update has changed and
+    somebody installed in another form since is first moved to the *kept* folder as a
+    whole, which is noted."""
     out = Outcome()
     try:
-        mover.venv_of(root)
         a = mover.area(root, update_id, PACKAGES)
         a.watch(op.path for op in plan.ops)
-        _set_aside_foreign(a, plan, Wait(wait_s), out)
-    except (OSError, Held, Unsafe, Unreadable, Refused) as e:
+        site = shared.updater_components.site_packages(a.base)
+        if site is None:
+            if disk.lstat(Path(root) / ".venv") is not None and not a.base.is_dir():
+                raise Refused(f"{Path(root) / '.venv'} leads nowhere")
+            return mover.back(root, update_id, plan, wait_s=wait_s, out=out)
+        with _uv_waits(a.base, Wait(wait_s)):
+            with mover.Marks(root, update_id, plan) as marks:
+                had = {op.dist for op in plan.ops if op.old is not None}
+                changed = {op.dist for n, op in enumerate(plan.ops)
+                           if a.beside(a.old, op.path)[1] is not None
+                           or (op.dist not in had and n in marks.changed)}
+            _set_aside_foreign(a, site, plan, changed, Wait(wait_s), out)
+            return mover.back(root, update_id, plan, wait_s=wait_s, out=out,
+                              heal=lambda *args: _heal(a, *args))
+    except (OSError, Held, Unsafe, Unreadable, Refused, disk.Blocked) as e:
         out.errors.append(str(e))
         return out
-    return mover.back(root, update_id, plan, wait_s=wait_s, out=out)
 
 
-def _set_aside_foreign(a: Area, plan: Plan, wait: Wait, out: Outcome) -> None:
-    site = _site(a.base)
+def _heal(a: Area, dist: str, ops: list, is_old: Callable[[Op], bool]) -> Optional[str]:
+    """None when the package *dist* is completely there in its old version, but for
+    what an installer writes itself, else that version."""
+    version = ""
+    whole = True
+    for op in ops:
+        folder, _, name = op.path.rpartition("/")
+        if name == "METADATA" and folder.endswith(".dist-info"):
+            version = folder.rpartition("/")[2].removesuffix(".dist-info").partition("-")[2]
+        written = _may_name_a_path(op.path) and name != "METADATA"
+        needed = not folder.endswith(".dist-info") or name == "RECORD"
+        whole = whole and (is_old(op) or (
+            written and (not needed or a.find(op.path)[1] is not None)))
+    return None if whole and version else f"{dist} {version}".rstrip()
+
+
+def _set_aside_foreign(a: Area, site: Path, plan: Plan, changed: set, wait: Wait,
+                       out: Outcome) -> None:
     inner = site.relative_to(a.base).as_posix()
     ops = {op.path: op for op in plan.ops}
-    for name, folder in _infos(site, plan.dists):
+    for name, folder in _infos(site, changed & set(plan.dists)):
         record = f"{inner}/{folder}/RECORD"
         op = ops.get(record)
         path, st = a.find(record)
@@ -503,7 +558,8 @@ def _set_aside_foreign(a: Area, plan: Plan, wait: Wait, out: Outcome) -> None:
         except Refused:
             listed = {f"{inner}/{folder}/{e}" for e in os.listdir(site / folder)}
         mine = [rel for rel in listed if rel not in ops and a.find(rel)[1] is not None]
-        for rel in sorted(mine, key=lambda rel: (rel == record, rel)):
+        last = (record, f"{inner}/{folder}/METADATA")
+        for rel in sorted(mine, key=lambda rel: (rel in last, rel == last[1], rel)):
             mover.aside(a, Op(rel, REMOVE), a.find(rel)[0], wait, out)
             a.prune(a.find(rel)[0].parent)
         out.notes.append(f"The package {name} ({folder}) was installed by somebody since; it is "

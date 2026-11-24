@@ -7,8 +7,9 @@ there and its lock is free, nobody is updating: :func:`restore` then puts the ol
 version back, whatever the phase, or ends an update that reached DONE.
 
 The update's own folder holds the same facts (``state.json``), written before the
-record: a damaged record is rebuilt from it, and an update that reached DONE there
-is never undone. It says ``ended`` before the record is removed.
+record: it decides, a damaged record is rebuilt from it, and an update that reached
+DONE there is never undone. It says that the update is over before the record is
+removed. Nothing is deleted of an update whose files are not as it says.
 """
 
 from __future__ import annotations
@@ -16,7 +17,6 @@ from __future__ import annotations
 import contextlib
 import os
 import stat
-import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -36,8 +36,8 @@ ENDING, MOVING, STEPS, STARTING, DONE, RESTORING = (
 #: Every phase, in order; an update that fails goes to RESTORING from any but DONE.
 PHASES = (ENDING, MOVING, STEPS, STARTING, DONE, RESTORING)
 
-# What ``state.json`` says of an update that is over: its folders go, or they stay
-# until the user's files in them could be handed over.
+# What ``state.json`` says of an update that is over: undone, or done with files of
+# the user that may still have to be handed over.
 _ENDED, _LEFT = "ended", "left"
 _STATE = "state.json"
 #: Seconds :class:`Lock` waits, longer than another process's :func:`locked` has it.
@@ -64,21 +64,16 @@ class Lock:
     def __enter__(self) -> Lock:
         path = mover.update_folder(self.root, create=True) / "lock"
         fd = disk.open_lock(path)
-        deadline = time.monotonic() + self.wait_s
-        while True:
-            try:
-                disk.lock_file(fd)
-            except (PermissionError, BlockingIOError) as e:
-                if time.monotonic() < deadline:
-                    time.sleep(0.05)
-                    continue
-                os.close(fd)
-                raise Busy(f"another process is updating {self.root}") from e
-            except BaseException:
-                os.close(fd)
-                raise
-            self._fd = fd
-            return self
+        try:
+            disk.lock_file(fd, disk.Wait(self.wait_s))
+        except (PermissionError, BlockingIOError) as e:
+            os.close(fd)
+            raise Busy(f"another process is updating {self.root}") from e
+        except BaseException:
+            os.close(fd)
+            raise
+        self._fd = fd
+        return self
 
     def __exit__(self, *_exc) -> None:
         if self._fd is not None:
@@ -142,10 +137,16 @@ def _parse(path: Path, phases) -> Optional[Record]:
 
 def _state(root, update_id: str) -> Optional[Record]:
     """What the folder of the update *update_id* says of it, None when it says
-    nothing. Raises like :func:`read`."""
-    record = _parse(mover.work_folder(root, update_id) / _STATE, (*PHASES, _ENDED, _LEFT))
-    if record is not None and record.id != update_id:
-        raise Unreadable(f"{_STATE} of {update_id} is that of another update")
+    nothing. A damaged one without plans beside it says nothing. Raises like
+    :func:`read`."""
+    try:
+        record = _parse(mover.work_folder(root, update_id) / _STATE, (*PHASES, _ENDED, _LEFT))
+        if record is not None and record.id != update_id:
+            raise Unreadable(f"{_STATE} of {update_id} is that of another update")
+    except Unreadable:
+        if mover.has_plans(root, update_id):
+            raise
+        return None
     return record
 
 
@@ -187,11 +188,12 @@ def _free_reserve(root, update_id: str) -> bool:
 
 def start(lock: Lock, update_id: str, *, old: str, new: str) -> Record:
     """Begin the update *update_id*, whose folder already holds ``new``: write its
-    record in phase ENDING. Raises :class:`Busy` when another update is unfinished,
+    record in phase ENDING, and delete what others left (:func:`cleanup`). Raises :class:`Busy` when another update is unfinished,
     :class:`Unreadable`, :class:`Blocked`, :class:`Unsafe`, :class:`Held` or OSError."""
     going = _current(lock.root)
     if read(lock.root) is not None or (going is not None and going.phase != ENDING):
         raise Busy("an earlier update of this install is not finished")
+    cleanup(lock, keep=update_id)
     work = mover.work_folder(lock.root, update_id)
     (work / "plans").mkdir(parents=True, exist_ok=True)
     with open(work / _RESERVE, "wb") as f:
@@ -222,8 +224,10 @@ def advance(lock: Lock, phase: str) -> Record:
 
 def _ids(root) -> list:
     folder = mover.update_folder(root)
-    if disk.lstat(folder) is None:
-        return []
+    return [] if disk.lstat(folder) is None else _listed(folder)
+
+
+def _listed(folder: Path) -> list:
     return sorted(n for n in os.listdir(folder) if mover.is_id(n))
 
 
@@ -238,11 +242,8 @@ def _current(root) -> Optional[Record]:
         return _rebuilt(root, damaged=True)
     if record is None:
         return _rebuilt(root, damaged=False)
-    try:
-        state = _state(root, record.id)
-    except Unreadable:
-        return record
-    if state is not None and state.phase in (DONE, RESTORING, _ENDED, _LEFT):
+    state = _state(root, record.id)
+    if state is not None:
         record.phase = state.phase
     if record.phase == DONE and disk.lstat(mover.work_folder(root, record.id)) is None:
         record.phase = _ENDED
@@ -253,12 +254,9 @@ def _rebuilt(root, *, damaged: bool) -> Optional[Record]:
     going: list = []
     unchanged: list = []
     for update_id in _ids(root):
-        try:
-            state = _state(root, update_id)
-        except Unreadable:
-            if damaged:
-                raise
-            continue
+        state = _state(root, update_id)
+        if state is None and mover.has_plans(root, update_id):
+            raise Unreadable(f"the update {update_id} has plans and no {_STATE}")
         if state is None or state.phase in (_ENDED, _LEFT):
             continue
         (unchanged if state.phase == ENDING else going).append(state)
@@ -295,16 +293,31 @@ def finish(lock: Lock) -> Result:
     record = _current(lock.root)
     if record is None or record.phase not in (STARTING, DONE):
         raise ValueError("there is no started update to finish")
-    disk.sync_disk()
-    _set_phase(lock, record, DONE)
     return _finish(lock, record)
 
 
 def _finish(lock: Lock, record: Record) -> Result:
     result = Result("new")
-    over = _ENDED if _hand_over(lock.root, record.id, result) else _LEFT
-    _close(lock, record, over, result)
+    _check_fits(lock.root, record.id, DONE)
+    if record.phase != DONE:
+        disk.sync_disk()
+        _set_phase(lock, record, DONE)
+    _hand_over(lock.root, record.id, result)
+    _close(lock, record, _LEFT, result)
     return result
+
+
+def _check_fits(root, update_id: str, phase: str) -> None:
+    """Raise :class:`Unreadable` when the files of the plans say that the update
+    *update_id* is not in *phase*: DONE and LEFT mean that every step was made or is
+    undone, any other that nothing of one is left to put back."""
+    if not mover.has_plans(root, update_id):
+        return
+    for plan in mover.read_plans(root, update_id):
+        rel = mover.unfinished(root, update_id, plan, made=phase in (DONE, _LEFT))
+        if rel is not None:
+            raise Unreadable(f"{_STATE} says that the update is {phase}, and {rel} is not as "
+                             "that means")
 
 
 def restore(lock: Lock, *, wait_s: Optional[float] = None) -> Result:
@@ -323,14 +336,16 @@ def restore(lock: Lock, *, wait_s: Optional[float] = None) -> Result:
         cleanup(lock)
         return Result("none")
     if record.phase == DONE:
-        _set_phase(lock, record, DONE)
         return _finish(lock, record)
     if record.phase in (_ENDED, _LEFT):
         result = Result("none")
+        _check_fits(lock.root, record.id, record.phase)
         _close(lock, record, record.phase, result)
         return result
     result = Result("old")
-    if record.phase != ENDING:
+    if record.phase == ENDING:
+        _check_fits(lock.root, record.id, ENDING)
+    else:
         plans = mover.read_plans(lock.root, record.id)
         try:
             _set_phase(lock, record, RESTORING)
@@ -361,7 +376,7 @@ def _hand_over(root, update_id: str, result: Result) -> bool:
     when this returns. Safe to repeat. Returns False when one could not be moved,
     which is noted."""
     try:
-        for plan in mover.read_plans(root, update_id):
+        for plan in mover.read_plans(root, update_id) if mover.has_plans(root, update_id) else ():
             a = mover.area(root, update_id, plan.step)
             moved = 0
             for op in plan.ops:
@@ -414,46 +429,55 @@ def discard(lock: Lock, update_id: str) -> bool:
     return disk.remove_tree(mover.venv_folder(lock.root, update_id)) and disk.remove_tree(work)
 
 
-def cleanup(lock: Lock) -> list:
-    """Delete what ended updates of *lock*'s install left; nothing of an update that
-    did not end. A file a program still has loaded stays for the next call. Returns
+def cleanup(lock: Lock, *, keep: Optional[str] = None) -> list:
+    """Delete what ended updates of *lock*'s install left, nothing of an update that
+    did not end, and the staged packages of those that were never started, except the
+    update *keep*. A file a program still has loaded stays for the next call. Returns
     the folders that are left."""
     _held(lock)
     left = []
     for name in ("job.json.tmp", "job.json.gone"):
         with contextlib.suppress(OSError, Held):   # a write that never took effect
             disk.unlink(record_path(lock.root).with_name(name))
-    for update_id in _ids(lock.root):
+    venv = disk.real_folder(lock.root / ".venv") / mover.VENV_FOLDER
+    ids = set(_ids(lock.root))
+    with contextlib.suppress(OSError):   # nothing is staged
+        ids.update(_listed(venv))
+    for update_id in sorted(ids - {keep}):
         try:
             if not _delete(lock, update_id):
                 left.append(str(mover.update_folder(lock.root) / update_id))
         except (OSError, Unsafe, Unreadable, Blocked, Held) as e:
             left.append(f"{update_id}: {e}")
     with contextlib.suppress(OSError):   # not empty, or never made
-        os.rmdir(disk.real_folder(lock.root / ".venv") / mover.VENV_FOLDER)
+        os.rmdir(venv)
     return left
 
 
 def _delete(lock: Lock, update_id: str) -> bool:
-    """Delete the folders of *update_id* when it ended, what says so last. Returns
-    False when a part is left."""
+    """Delete the folders of *update_id* when it ended, its plans first and what says
+    that it ended last. Returns False when a part is left."""
     root = lock.root
     work = mover.work_folder(root, update_id)
     state = _state(root, update_id)
     if state is None:
+        mine = mover.venv_folder(root, update_id)
+        if mover.has_plans(root, update_id) or disk.lstat(mine / "old") is not None:
+            return False
         with contextlib.suppress(OSError):   # only an empty one goes
             os.rmdir(work)
+        return disk.remove_tree(mine)
+    if state.phase not in (_ENDED, _LEFT, ENDING) or (
+            state.phase == ENDING and not _is_forgotten(root, update_id)):
         return True
-    if state.phase == _LEFT:
-        if not _hand_over(root, update_id, Result("new")):
-            return False
+    _check_fits(root, update_id, state.phase)
+    if state.phase == _LEFT and not _hand_over(root, update_id, Result("new")):
+        return False
+    if state.phase == ENDING:
         state.phase = _ENDED
         _write_state(lock, state)
-    if state.phase == ENDING and _is_forgotten(root, update_id):
-        state.phase = _ENDED
-        _write_state(lock, state)
-    if state.phase != _ENDED:
-        return True
+    if not disk.remove_tree(work / "plans"):
+        return False
     gone = disk.remove_tree(mover.venv_folder(root, update_id))
     for name in sorted(os.listdir(work)):
         path = work / name

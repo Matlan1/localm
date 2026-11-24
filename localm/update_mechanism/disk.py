@@ -176,18 +176,28 @@ def quick_identity(path) -> dict:
     return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
 
 
+def with_copy(path, identity: dict, wait: Optional[Wait] = None) -> dict:
+    """*identity* (from :func:`quick_identity`) with the checksum of the file at
+    *path* as ``copy``, by which :func:`same` knows the same content under another
+    time. Raises like :func:`content_identity`."""
+    if set(identity) != {"size", "mtime_ns"}:
+        return identity
+    return {**identity, "copy": content_identity(path, wait)["sha256"]}
+
+
 def same(path, identity: dict, wait: Optional[Wait] = None) -> bool:
     """Whether the file at *path* has *identity*. The content decides where the
-    identity states a checksum, else size and time, or the target of a link. False
-    when there is no file. Raises :class:`Held` when it cannot be read within
-    *wait*."""
+    identity states a ``sha256``, else size and time or the target of a link, and
+    with a ``copy`` the content when only the time differs. False when there is no
+    file. Raises :class:`Held` when it cannot be read within *wait*."""
     try:
         have = quick_identity(path)
-        if "sha256" not in identity:
-            return have == identity
-        if have.get("size") != identity["size"]:
+        if "sha256" not in identity and have == {k: identity[k] for k in identity if k != "copy"}:
+            return True
+        checksum = identity.get("sha256") or identity.get("copy")
+        if checksum is None or have.get("size") != identity["size"]:
             return False
-        return content_identity(path, wait)["sha256"] == identity["sha256"]
+        return content_identity(path, wait)["sha256"] == checksum
     except (FileNotFoundError, NotADirectoryError, Unsafe):
         return False
 
@@ -280,9 +290,16 @@ def write_json(path: Path, obj) -> None:
     patient(wait, path, lambda: replace_through(tmp, path))
 
 
+def _writable(path: Path) -> None:
+    st = lstat(path)
+    if os.name == "nt" and st is not None and not is_link(st) and not st.st_mode & stat.S_IWRITE:
+        os.chmod(path, stat.S_IWRITE)
+
+
 def unlink(path: Path) -> None:
     """Remove the file at *path* if it is there. Raises :class:`Held` or OSError."""
     try:
+        _writable(path)
         patient(Wait(_REPLACE_WAIT_S), path, lambda: os.unlink(path))
     except FileNotFoundError:
         return
@@ -298,9 +315,9 @@ def remove_through(path: Path) -> None:
     unlink(gone)
 
 
-def read_json(path: Path, limit: int):
-    """The JSON value in the regular file *path* of at most *limit* bytes, or None
-    when there is no file. Raises ValueError when it is anything else, and
+def read_file(path: Path, limit: int) -> Optional[bytes]:
+    """What the regular file *path* of at most *limit* bytes holds, or None when
+    there is no file. Raises ValueError when it is anything else, and
     :class:`Blocked` when it cannot be read for a while."""
     st = lstat(path)
     if st is None:
@@ -310,14 +327,21 @@ def read_json(path: Path, limit: int):
     deadline = time.monotonic() + READ_WAIT_S
     while True:
         try:
-            data = path.read_bytes()
-            break
+            return path.read_bytes()
         except FileNotFoundError:
             return None
         except OSError as e:
             if time.monotonic() >= deadline:
                 raise Blocked(f"{path} cannot be read ({e}){_holders(path)}") from e
             time.sleep(_RETRY_S)
+
+
+def read_json(path: Path, limit: int):
+    """The JSON value in the file *path* (:func:`read_file`), or None when there is
+    no file. Raises like :func:`read_file`, ValueError also for anything but JSON."""
+    data = read_file(path, limit)
+    if data is None:
+        return None
     try:
         return shared.update_package._strict_json(data.decode("utf-8"))
     except ValueError as e:
@@ -335,15 +359,22 @@ def open_lock(path: Path) -> int:
     return os.open(path, os.O_RDWR | os.O_CREAT | _BINARY | getattr(os, "O_NOFOLLOW", 0), 0o666)
 
 
-def lock_file(fd: int) -> None:
+def lock_file(fd: int, wait: Optional[Wait] = None) -> None:
     """Lock *fd* until it is closed. Raises PermissionError or BlockingIOError when
-    another holder has it."""
-    if os.name == "nt":
-        msvcrt = importlib.import_module("msvcrt")
-        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-    else:
-        import fcntl
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    another holder has it until *wait* ends."""
+    while True:
+        try:
+            if os.name == "nt":
+                msvcrt = importlib.import_module("msvcrt")
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except (PermissionError, BlockingIOError):
+            if wait is None or time.monotonic() >= wait.until():
+                raise
+            time.sleep(_RETRY_S)
 
 
 # -------------------------------------------------------------------- moves
@@ -363,9 +394,7 @@ def put_over(src: Path, dst: Path, wait: Wait) -> None:
     """Rename *src* over the file at *dst*, which is never absent in between; a
     read-only *dst* is replaced too. Raises :class:`Held` or OSError."""
     dst.parent.mkdir(parents=True, exist_ok=True)
-    st = lstat(dst)
-    if os.name == "nt" and st is not None and not st.st_mode & stat.S_IWRITE:
-        os.chmod(dst, stat.S_IWRITE)
+    _writable(dst)
     _rename(os.replace, src, dst, wait)
 
 
