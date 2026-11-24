@@ -194,7 +194,7 @@ jobs:
       # pull torch / ROCm / llama-cpp wheels and are never installed in CI;
       # tests needing those extras skip themselves (importorskip).
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
       - name: Install
         shell: bash
         run: |
@@ -279,7 +279,7 @@ jobs:
       # dependency change without a matching `uv lock` cannot silently rot the lock
       # into a stale claim. `uv lock --check` fails on drift.
       - name: Install uv (for the lockfile check)
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
       - name: Verify uv.lock matches pyproject (DEP-1, no silent drift)
         run: uv lock --check
 
@@ -451,7 +451,7 @@ jobs:
       - name: Put the venv on PATH
         run: echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
       # The optional stacks are installed so basedpyright type-checks the modules
       # that use torch, transformers, av, pywebview and playwright against their
       # real types. torch comes first, from the CPU index.
@@ -549,7 +549,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install uv (for the lockfile check)
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
       - name: Verify uv.lock matches pyproject (no silent drift)
         run: uv lock --check
 
@@ -622,7 +622,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install uv (for the requirements export)
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
 
       - name: Create the project venv
         run: python -m venv .venv
@@ -699,7 +699,7 @@ jobs:
 
       # pytest for `python -m tests._shard verify`, as in the `test` job.
       - name: Install uv (for the requirements export)
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
       - name: Install the verification tooling
         run: |
           pip install --require-hashes --no-deps -r .github/requirements/editable.txt
@@ -747,7 +747,7 @@ jobs:
 
       # pytest for `python -m tests._shard verify`, as in the `test` job.
       - name: Install uv (for the requirements export)
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
       - name: Install the verification tooling
         run: |
           pip install --require-hashes --no-deps -r .github/requirements/editable.txt
@@ -803,7 +803,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
       - name: Install
         shell: bash
         run: |
@@ -1024,7 +1024,7 @@ jobs:
         run: echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
       - name: Install
         run: |
           pip install --require-hashes --no-deps -r .github/requirements/editable.txt
@@ -1244,7 +1244,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
       - name: Install
         run: |
           pip install --require-hashes --no-deps -r .github/requirements/editable.txt
@@ -1342,7 +1342,7 @@ jobs:
 
       - name: Install uv
         if: steps.scope.outputs.run == 'true'
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
       - name: Install the voice extra
         if: steps.scope.outputs.run == 'true'
         run: |
@@ -1433,7 +1433,7 @@ jobs:
 
       - name: Install uv
         if: steps.scope.outputs.run == 'true'
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
       # torch first, from the CPU index, so no later install pulls a CUDA build.
       - name: Install the optional stacks
         if: steps.scope.outputs.run == 'true'
