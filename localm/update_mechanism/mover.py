@@ -422,7 +422,8 @@ def has_plans(root, update_id: str) -> bool:
 
 def next_number(root, update_id: str) -> int:
     """The number of the next plan of the update *update_id*."""
-    return 1 + max((p.number for p in read_plans(root, update_id)), default=0)
+    plans = read_plans(root, update_id) if has_plans(root, update_id) else ()
+    return 1 + max((p.number for p in plans), default=0)
 
 
 class Marks:
