@@ -10,12 +10,14 @@ import os
 import stat
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
 
 from localm import model_manager as mm
 from localm.config import load_registry
+from localm.model_manager import pull as pull_mod
 from localm.model_manager import registry as _registry
 from localm.model_manager.gguf import TRANSFER_TEMP_PREFIX
 from tests import test_folder_import_progress as _progress
@@ -43,10 +45,10 @@ def _other_volume(monkeypatch) -> None:
     _no_links(monkeypatch)
     real = os.rename
 
-    def _rename(src, dst):
-        if not Path(src).name.startswith(TRANSFER_TEMP_PREFIX):
+    def _rename(src, dst, **kw):
+        if Path(dst).parent.name == "models" and Path(src).parent != Path(dst).parent:
             raise OSError(errno.EXDEV, "cross-device")
-        return real(src, dst)
+        return real(src, dst, **kw)
     monkeypatch.setattr(_registry.os, "rename", _rename)
 
 
@@ -268,6 +270,174 @@ class TestAFileRegisteredWhereItIs:
         assert src.is_file() and _names(home) == [] and load_registry() == before
 
 
+def _alias(path: Path, monkeypatch, models: Path) -> Path:
+    """A second path to *path*'s folder: the extended-length prefix on Windows,
+    else a bind mount played by a symlinked folder that resolve() keeps."""
+    if sys.platform == "win32":
+        return Path("\\\\?\\" + str(path.resolve()))
+    other = models.parent / "mounted"
+    other.symlink_to(models, target_is_directory=True)
+    real = Path.resolve
+
+    def _resolve(self, strict=False):
+        if self == other or other in self.parents:
+            return self
+        return real(self, strict)
+    monkeypatch.setattr(Path, "resolve", _resolve)
+    return other / path.name
+
+
+class TestASecondPathToALibraryFile:
+    @pytest.mark.parametrize("action", ["move", "copy"])
+    @pytest.mark.parametrize("registered", [True, False])
+    def test_it_is_the_library_file_and_stays(self, home, printed, monkeypatch, action,
+                                              registered):
+        f = _gguf(home / "models" / "m.gguf")
+        body = f.read_bytes()
+        if registered:
+            mm._register("m", f)
+        alias = _alias(f, monkeypatch, home / "models")
+        assert mm.add_local(str(alias), store=action) is True
+        assert f.read_bytes() == body and _names(home) == ["m.gguf"]
+        reg = load_registry()
+        assert set(reg) == {"m"} and Path(reg["m"]["path"]) == f.resolve()
+
+    def test_a_taken_name_is_refused_and_it_stays(self, home, printed, monkeypatch):
+        f = _gguf(home / "models" / "m.gguf")
+        _gguf(home / "models" / "other.gguf", payload=b"o" * 64)
+        mm._register("taken", home / "models" / "other.gguf")
+        alias = _alias(f, monkeypatch, home / "models")
+        assert mm.add_local(str(alias), "taken", store="move") is False
+        assert f.is_file() and _names(home) == ["m.gguf", "other.gguf"]
+
+    def test_no_name_is_deleted_unless_the_other_one_holds_the_file(self, home, monkeypatch):
+        f = _gguf(home / "models" / "m.gguf")
+        alias = _alias(f, monkeypatch, home / "models")
+        with pytest.raises(OSError):
+            _registry._drop_name(alias, f, lambda temp: _registry._same_inode(temp, f))
+        assert f.is_file() and _names(home) == ["m.gguf"]
+
+    def test_an_external_file_moved_by_a_second_path_takes_its_entry_along(
+            self, home, tmp_path, printed, monkeypatch):
+        src = _gguf(tmp_path / "mine" / "m.gguf")
+        mm._register("m", src)
+        alias = _alias(src, monkeypatch, tmp_path / "mine")
+        assert mm.add_local(str(alias), store="move") is True
+        reg = load_registry()
+        assert set(reg) == {"m"}
+        assert Path(reg["m"]["path"]) == (home / "models" / "m.gguf").resolve()
+        assert not src.exists()
+
+
+class TestTwoAddsOfOneFile:
+    def test_the_second_is_refused_while_the_first_runs(self, home, tmp_path, printed,
+                                                        monkeypatch):
+        src = _gguf(tmp_path / "mine" / "m.gguf")
+        _gguf(home / "models" / "other.gguf", payload=b"o" * 64)
+        mm._register("taken", home / "models" / "other.gguf")
+        real = mm._register
+        second: list = []
+
+        def _register(name, *a, **k):
+            if name == "m":
+                t = threading.Thread(target=lambda: second.append(
+                    (mm.add_local(str(src), "taken", store="move"),
+                     mm.add_local(str(src), "third", store="move"))))
+                t.start()
+                t.join(60)
+            return real(name, *a, **k)
+        monkeypatch.setattr(mm, "_register", _register)
+        assert mm.add_local(str(src), store="move") is True
+        assert second == [(False, False)]
+        dest = home / "models" / "m.gguf"
+        assert dest.is_file() and not src.exists()
+        assert set(load_registry()) == {"taken", "m"}
+
+    def test_a_pull_of_the_name_refuses_the_import(self, home, tmp_path, printed):
+        src = _gguf(tmp_path / "mine" / "m.gguf")
+        done = []
+        with pull_mod._part_lock("m.gguf"):
+            t = threading.Thread(target=lambda: done.append(mm.add_local(str(src), store="move")))
+            t.start()
+            t.join(60)
+        assert done == [False] and src.is_file() and _names(home) == []
+        assert mm.add_local(str(src), store="move") is True
+
+    def test_a_refused_add_leaves_a_name_that_was_there_before(self, home, tmp_path, printed):
+        src = _gguf(tmp_path / "mine" / "m.gguf")
+        os.link(src, home / "models" / "m.gguf")
+        _gguf(home / "models" / "other.gguf", payload=b"o" * 64)
+        mm._register("taken", home / "models" / "other.gguf")
+        assert mm.add_local(str(src), "taken", store="move") is False
+        assert src.is_file() and _names(home) == ["m.gguf", "other.gguf"]
+
+    def test_a_source_is_kept_when_the_library_lost_the_file(self, home, tmp_path, printed,
+                                                             monkeypatch):
+        src = _gguf(tmp_path / "mine" / "m.gguf")
+        dest = home / "models" / "m.gguf"
+        real = mm._register
+
+        def _register(*a, **k):
+            real(*a, **k)
+            dest.unlink()
+        monkeypatch.setattr(mm, "_register", _register)
+        mm.add_local(str(src), store="move")
+        assert src.is_file()
+        assert any("could not be fully removed" in line for line in printed), printed
+
+    def test_a_copy_that_was_replaced_meanwhile_is_not_removed_by_an_undo(
+            self, home, tmp_path, printed, monkeypatch):
+        src = _gguf(tmp_path / "mine" / "m.gguf")
+        dest = home / "models" / "m.gguf"
+
+        def _register(*a, **k):
+            os.replace(_gguf(tmp_path / "theirs.gguf", payload=b"theirs" * 9), dest)
+            raise OSError("disk full")
+        monkeypatch.setattr(mm, "_register", _register)
+        with pytest.raises(OSError):
+            mm.add_local(str(src), store="copy")
+        assert src.is_file() and b"theirs" in dest.read_bytes()
+
+
+class TestIdenticalBytesUnderTheSameName:
+    @pytest.mark.parametrize("action", [None, "move", "copy"])
+    def test_it_is_already_registered_and_stays_where_it_is(self, home, tmp_path, printed,
+                                                            action):
+        _gguf(home / "models" / "m.gguf")
+        mm._register("m", home / "models" / "m.gguf")
+        mine = _gguf(tmp_path / "mine" / "m.gguf")
+        assert mm.add_local(str(mine), store=action) is True
+        assert mine.is_file() and _names(home) == ["m.gguf"] and set(load_registry()) == {"m"}
+        assert not any("different file" in line for line in printed), printed
+        assert any("same content" in line for line in printed), printed
+
+    def test_a_different_file_still_is_one(self, home, tmp_path, printed):
+        there = _gguf(home / "models" / "m.gguf", payload=b"a" * 64)
+        mm._register("m", there)
+        mine = _gguf(tmp_path / "mine" / "m.gguf", payload=b"b" * 64)
+        assert mine.stat().st_size == there.stat().st_size
+        assert mm.add_local(str(mine)) is False
+        assert any("different file" in line for line in printed), printed
+
+
+class TestASplitImportThatWasKilled:
+    @pytest.mark.parametrize("folder", [True, False])
+    @pytest.mark.parametrize("action", ["move", "copy"])
+    def test_the_next_one_finishes_it(self, home, tmp_path, printed, action, folder):
+        src = tmp_path / "mine"
+        parts = [_gguf(src / n, payload=n.encode()) for n in PARTS]
+        body = [p.read_bytes() for p in parts]
+        first = home / "models" / PARTS[0]
+        if action == "move":
+            os.link(parts[0], first)
+        else:
+            first.write_bytes(body[0])
+        assert mm.add_local(str(src if folder else parts[0]), store=action) is True
+        assert [(home / "models" / n).read_bytes() for n in PARTS] == body
+        assert [p.exists() for p in parts] == [action == "copy"] * 2
+        assert set(load_registry()) == {"big"}
+
+
 class TestAMoveThatWasKilled:
     def test_the_next_one_finishes_it(self, home, tmp_path, printed):
         src = _gguf(tmp_path / "mine" / "m.gguf")
@@ -282,6 +452,27 @@ class TestAMoveThatWasKilled:
         _gguf(home / "models" / "m.gguf", payload=b"other")
         assert mm.add_local(str(src), "other-name", store="move") is False
         assert src.is_file()
+
+
+@pytest.mark.parametrize("links", [True, False])
+def test_undoing_a_read_only_move_leaves_one_file_where_it_was(home, tmp_path, printed,
+                                                               monkeypatch, links):
+    if not links:
+        _no_links(monkeypatch)
+    src = _gguf(tmp_path / "mine" / "m.gguf")
+    os.chmod(src, stat.S_IREAD)
+
+    def _fail(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(mm, "_register", _fail)
+    try:
+        with pytest.raises(OSError):
+            mm.add_local(str(src), store="move")
+        assert src.is_file() and _names(home) == []
+        assert not src.stat().st_mode & stat.S_IWRITE
+        assert not any("could not be put back" in line for line in printed), printed
+    finally:
+        os.chmod(src, stat.S_IREAD | stat.S_IWRITE)
 
 
 def test_a_read_only_file_is_moved_and_stays_read_only(home, tmp_path, printed):

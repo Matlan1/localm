@@ -108,6 +108,19 @@ class TestAHuggingFaceFileIsPlacedOnlyVerified:
         assert (hub.models / NAME).read_bytes() == GOOD
         assert mm.load_registry()["weights.safetensors"]["source"] == "hf:o/r"
 
+    def test_the_next_download_goes_on_from_a_file_that_was_held(self, hub, monkeypatch):
+        from tests.test_hf_pull_resume import _call, _wire_http
+        stage = hub.models / pull_mod._REPO_FOLDER_STAGING
+        stage.mkdir(parents=True)
+        (stage / NAME).write_bytes(GOOD)
+        with pull_mod._HeldDownloads(stage) as held:
+            held.hold(NAME, NAME, stage / NAME, "etag")
+        captured = _wire_http(monkeypatch, b"")
+        _call(pull_mod._hf_incomplete_path(stage, NAME, "etag"), stage / NAME,
+              expected_size=len(GOOD))
+        assert (stage / NAME).read_bytes() == GOOD and _held(hub.models) == []
+        assert captured.get("resume_size", len(GOOD)) == len(GOOD)
+
     def test_a_stopped_check_is_listed_as_an_interrupted_download(self, hub, monkeypatch):
         hub.files[NAME] = GOOD
 
@@ -296,6 +309,61 @@ class TestRedownloadOfAHuggingFaceFile:
         assert (hub.models / parts[0]).read_bytes() == OTHER
         assert (hub.models / parts[1]).read_bytes() == hub.files[parts[1]]
         assert _held(hub.models) == []
+
+    @pytest.mark.parametrize("origin, replaced", [("vendorA/A", False), ("o/r", True), (None, False)])
+    def test_another_models_projector_is_not_replaced(self, hub, capsys, origin, replaced):
+        hub.files["mmproj.gguf"] = GOOD
+        there = hub.models / "mmproj.gguf"
+        there.write_bytes(OTHER)
+        if origin:
+            pull_mod._record_mmproj_origin(there, origin, "mmproj.gguf", _sha(OTHER))
+        model = _gguf(hub.models / "a.gguf")
+        mm._register("modelA", model, "hf:vendorA/A", model_type="llm", mmproj=there)
+        before = mm.load_registry()["modelA"]
+        assert _pull("o/r:mmproj.gguf", model_type="mmproj", redownload=True) is replaced
+        assert there.read_bytes() == (GOOD if replaced else OTHER)
+        assert mm.load_registry()["modelA"] == before
+        if not replaced:
+            assert "projector of 'modelA'" in _text(capsys) and hub.calls == 0
+
+    def test_a_part_of_another_models_split_is_not_replaced(self, hub, capsys):
+        part = "w-00002-of-00002.safetensors"
+        first = _gguf(hub.models / "m-00001-of-00002.gguf")
+        second = _gguf(hub.models / "m-00002-of-00002.gguf")
+        mm._register("big", first, "hf:vendorA/A", model_type="llm")
+        assert registry_mod.model_owners(second) == ["big"]
+        assert registry_mod.model_owners(hub.models / part) == []
+        before = second.read_bytes()
+        assert pull_mod._url_redownload_refused(second, URL) is True
+        assert second.read_bytes() == before and "'big'" in _text(capsys)
+
+    def test_one_killed_while_replacing_leaves_no_digest_of_other_bytes(self, hub, monkeypatch):
+        hub.files[NAME] = GOOD
+        assert _pull() is True
+        hub.files[NAME] = OTHER
+        real = pull_mod._note_replaced_bytes
+
+        def _killed(*a, **k):
+            raise KeyboardInterrupt
+        monkeypatch.setattr(pull_mod, "_note_replaced_bytes", _killed)
+        with pytest.raises(KeyboardInterrupt):
+            _pull(redownload=True)
+        assert (hub.models / NAME).read_bytes() == OTHER
+        assert "sha256" not in mm.load_registry()["weights.safetensors"]
+        monkeypatch.setattr(pull_mod, "_note_replaced_bytes", real)
+        assert _pull() is True
+        assert mm.load_registry()["weights.safetensors"]["sha256"] == _sha(OTHER)
+
+    def test_a_replacement_that_fails_keeps_the_recorded_digest(self, hub, monkeypatch):
+        hub.files[NAME] = GOOD
+        assert _pull() is True
+        hub.files[NAME] = OTHER
+
+        def _full(held, base):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        monkeypatch.setattr(pull_mod, "_place_downloads", _full)
+        assert _pull(redownload=True) is False
+        assert mm.load_registry()["weights.safetensors"]["sha256"] == _sha(GOOD)
 
     @pytest.mark.parametrize("source", ["local", "hf:someone/else"])
     def test_a_file_registered_from_elsewhere_is_not_replaced(self, hub, capsys, source):
@@ -537,6 +605,18 @@ class TestADirectUrlIsPlacedOnlyVerified:
             "source": "url", "url_sha256": _sha(URL.encode()), "finished_sha256": _sha(url.body)}))
         assert mm._pull_url(URL, "m") is False and mm.load_registry() == {}
 
+    def test_one_killed_while_replacing_leaves_no_digest_of_other_bytes(self, url, monkeypatch):
+        _gguf(url.dest, payload=b"old")
+        mm._register("m", url.dest, URL, sha256=_sha(url.dest.read_bytes()))
+
+        def _killed(*a, **k):
+            raise KeyboardInterrupt
+        monkeypatch.setattr(pull_mod, "_note_replaced_bytes", _killed)
+        with pytest.raises(KeyboardInterrupt):
+            mm._pull_url(URL, "m", redownload=True)
+        assert url.dest.read_bytes() == url.body
+        assert "sha256" not in mm.load_registry()["m"]
+
     def test_its_type_is_read_from_the_file(self, url, tmp_path, monkeypatch):
         model = _real_text_model_gguf(tmp_path / "bert.gguf", "bert", 384).read_bytes()
         url.server.body = model
@@ -574,8 +654,8 @@ class TestADirectUrlIsPlacedOnlyVerified:
 class TestAVisionProjector:
     MM = "mmproj-f16.gguf"
 
-    def _fetch(self, hub):
-        pull_mod._download_mmproj_file("o/r", self.MM, hub.models / self.MM, hub.models)
+    def _fetch(self, hub, repo="o/r"):
+        return pull_mod._fetch_projector(repo, self.MM, hub.models, None, "Pulling projector")
 
     def test_stopping_the_check_leaves_no_projector(self, hub, monkeypatch):
         hub.files[self.MM] = GOOD
@@ -586,6 +666,78 @@ class TestAVisionProjector:
         with pytest.raises(KeyboardInterrupt):
             self._fetch(hub)
         assert _visible(hub.models) == []
+
+    def test_two_repositories_with_one_projector_name_keep_both(self, hub, monkeypatch):
+        monkeypatch.setattr(pull_mod, "_LOCK_WAIT_POLL_SECONDS", 0.02)
+        bodies = {"vendorA/A": GOOD, "vendorB/B": OTHER}
+        monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo, filename, token=None:
+                            pull_mod._PublishedDigest(_sha(bodies[repo]), None))
+        started, go = threading.Event(), threading.Event()
+
+        def _download(repo_id, filename, local_dir, **kw):
+            if repo_id == "vendorA/A":
+                started.set()
+                assert go.wait(30)
+            p = Path(local_dir) / filename
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(bodies[repo_id])
+            return str(p)
+        monkeypatch.setattr(huggingface_hub, "hf_hub_download", _download)
+        landed, errors = {}, []
+
+        def _run(repo):
+            try:
+                landed[repo] = self._fetch(hub, repo)
+            except BaseException as e:
+                errors.append(e)
+        threads = {r: threading.Thread(target=_run, args=(r,)) for r in bodies}
+        threads["vendorA/A"].start()
+        assert started.wait(30)
+        threads["vendorB/B"].start()
+        threads["vendorB/B"].join(0.3)
+        go.set()
+        for t in threads.values():
+            t.join(30)
+        assert errors == []
+        assert {r: p.read_bytes() for r, p in landed.items()} == bodies
+
+    @pytest.mark.parametrize("source, name", [
+        ("hf:vendorA/A", "mmproj-f16-2.gguf"), ("hf:o/r", "mmproj-f16.gguf")])
+    def test_a_missing_projector_another_model_records_keeps_its_name(self, hub, source, name):
+        hub.files[self.MM] = GOOD
+        model = _gguf(hub.models / "a.gguf")
+        mm._register("modelA", model, source, model_type="llm", mmproj=hub.models / self.MM)
+        assert self._fetch(hub).name == name
+
+    def test_a_backfill_does_not_wait_for_another_download(self, hub):
+        with pull_mod._part_lock(self.MM):
+            done = []
+
+            def _other_thread():
+                try:
+                    pull_mod._fetch_projector("o/r", self.MM, hub.models, None, "x", wait=False)
+                except pull_mod.PullInFlight:
+                    done.append(True)
+            t = threading.Thread(target=_other_thread)
+            t.start()
+            t.join(30)
+        assert done == [True]
+
+    def test_the_scan_fetches_projectors_without_holding_the_registry(self, hub, monkeypatch):
+        model = _gguf(hub.models / "m.gguf")
+        mm._register("m", model, "hf:o/r", model_type="llm")
+        monkeypatch.setattr(pull_mod, "mmproj_backfill_candidate", lambda e, p: True)
+        free = []
+
+        def _fetch(entry, path, *rest):
+            t = threading.Thread(target=lambda: free.append(
+                mm.update_registry(lambda r: r["m"].__setitem__("note", "x"))))
+            t.start()
+            t.join(5)
+            return None
+        monkeypatch.setattr(pull_mod, "backfill_mmproj_for_entry", _fetch)
+        mm.sync_models_dir()
+        assert len(free) == 1 and mm.load_registry()["m"]["note"] == "x"
 
     def test_a_damaged_one_stays_until_the_new_one_is_verified(self, hub, tmp_path, monkeypatch):
         right = _real_mmproj_gguf(tmp_path / "p.gguf", 64).read_bytes()
@@ -686,6 +838,46 @@ class TestAFullRepository:
         assert snap.weights.read_bytes() == DAMAGED_WEIGHTS
         assert "Nothing was replaced" in _text(capsys)
 
+    @pytest.mark.parametrize("redownload", [True, False])
+    def test_a_new_version_that_adds_a_file_replaces_nothing_until_all_of_it_is_here(
+            self, snap, capsys, monkeypatch, redownload):
+        self._lay(snap, DAMAGED_WEIGHTS)
+        new = {"config.json": b'{"new": 1}', "model.safetensors": GOOD_WEIGHTS,
+               "extra.safetensors": b"extra" * 20}
+        siblings = [SimpleNamespace(rfilename=n, size=len(b), lfs={"sha256": _sha(b)})
+                    for n, b in new.items()]
+
+        class _Api:
+            def __init__(self, *a, **kw):
+                pass
+
+            def model_info(self, repo_id, files_metadata=True):
+                return SimpleNamespace(siblings=siblings, sha="a" * 40)
+
+        offline = [True]
+
+        def _download(repo_id, local_dir, allow_patterns=None, **kw):
+            d = Path(local_dir)
+            d.mkdir(parents=True, exist_ok=True)
+            for n, b in new.items():
+                if allow_patterns is not None and n not in allow_patterns:
+                    continue
+                if n == "extra.safetensors" and offline[0]:
+                    raise OSError("offline")
+                (d / n).write_bytes(b)
+            return str(d)
+        monkeypatch.setattr(huggingface_hub, "HfApi", _Api)
+        monkeypatch.setattr(huggingface_hub, "snapshot_download", _download)
+        assert mm._pull_hf_snapshot("o/r", "snap", redownload=redownload) is False
+        assert snap.weights.read_bytes() == DAMAGED_WEIGHTS
+        assert (snap.dest / "config.json").read_bytes() == CONFIG
+        assert not (snap.dest / "extra.safetensors").exists()
+        assert "are unchanged" in _text(capsys)
+        offline[0] = False
+        assert mm._pull_hf_snapshot("o/r", "snap", redownload=redownload) is True
+        assert {n: (snap.dest / n).read_bytes() for n in new} == new
+        assert list(snap.dest.rglob(".localm-incoming-*")) == []
+
     def test_redownload_fetches_a_complete_model_again(self, snap):
         self._lay(snap, GOOD_WEIGHTS)
         assert mm._pull_hf_snapshot("o/r", "snap") is True and snap.downloaded == []
@@ -717,6 +909,9 @@ class TestAFullRepository:
 
             def model_info(self, *a, **kw):
                 raise OSError("offline")
+
+            def repo_info(self, *a, **kw):
+                return SimpleNamespace(sha="c" * 40)
 
             def list_repo_files(self, *a, **kw):
                 return ["config.json", "model.safetensors"]

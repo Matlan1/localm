@@ -78,11 +78,12 @@ def _snapshot_hub(monkeypatch, downloaded: list):
         def model_info(self, repo_id, files_metadata=True):
             return SimpleNamespace(siblings=siblings, sha="a" * 40)
 
-    def _snapshot_download(repo_id, local_dir, **kw):
+    def _snapshot_download(repo_id, local_dir, allow_patterns=None, **kw):
         d = Path(local_dir)
         d.mkdir(parents=True, exist_ok=True)
-        (d / "config.json").write_bytes(CONFIG)
-        (d / "model.safetensors").write_bytes(GOOD_WEIGHTS)
+        for name, body in (("config.json", CONFIG), ("model.safetensors", GOOD_WEIGHTS)):
+            if allow_patterns is None or name in allow_patterns:
+                (d / name).write_bytes(body)
         downloaded.append(repo_id)
         return str(d)
 

@@ -302,6 +302,7 @@ class TestSnapshotDiskSpaceAndCompleteness:
 
         def _fake_snapshot_download(repo_id, local_dir, **kw):
             d = Path(local_dir)
+            d.mkdir(parents=True, exist_ok=True)
             (d / "model.safetensors").write_bytes(b"x" * 1000)
             downloaded.append(repo_id)
             return str(d)
@@ -497,6 +498,7 @@ class TestSnapshotDestCollision:
         downloaded: list = []
 
         def _resume(repo_id, local_dir, **kw):
+            Path(local_dir).mkdir(parents=True, exist_ok=True)
             (Path(local_dir) / "model.safetensors").write_bytes(b"x" * 1000)
             downloaded.append(repo_id)
             return str(local_dir)
