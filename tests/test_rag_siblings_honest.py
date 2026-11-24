@@ -186,11 +186,13 @@ class TestStoreKeepsVectors:
     def test_the_collection_object_is_usable_after_a_refusal(self, home, docs):
         from localm.rag import EmbeddingLossRefused
         _hybrid("kb", docs)
+        (docs / "a.txt").write_text("a brand new text", encoding="utf-8")
         c = Collection("kb")
         with pytest.raises(EmbeddingLossRefused):
             c.add_paths([docs], force=True, embed_fn=_Flaky(2), model_name="fake")
-        assert c.stats()["has_vectors"] is True
-        assert c.stats()["n_chunks"] == 3
+        on_disk = Collection("kb", cache=False)
+        assert c._chunks == on_disk._chunks and c._vectors == on_disk._vectors
+        assert all("brand new" not in ch["text"] for ch in c._chunks)
 
 
 # --------------------------------------------------------------------------- #
