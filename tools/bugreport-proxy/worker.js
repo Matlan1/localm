@@ -211,22 +211,25 @@ async function fileReport(request, env) {
   const title = (String(payload.title || "").slice(0, 200).trim()) || "localm bug report";
   const full = String(payload.body || "");
   if (!full.trim()) return json({ error: "empty report body" }, 400);
+  // A request that names its type (feedback, a suggestion) is filed as that type.
+  // One without a type is a bug report, and only a body localm built is filed.
+  const type = typeof payload.type === "string" ? payload.type.slice(0, 40) : "";
   // A body localm did not build is not filed: no GitHub call, a 422 that does not
   // echo it, and one log line without its content. The whole body is checked; only
   // a body that is filed is cut to 60000 characters. The status must stay non-2xx:
   // released clients read any 2xx as sent. See the test "a held report is not 2xx".
-  if (!isLocalmBuiltReport(full)) {
+  if (!type && !isLocalmBuiltReport(full)) {
     console.log("report held: not built by localm", JSON.stringify({ chars: full.length }));
     return json({ error: "report not filed", filed: false }, 422);
   }
   const auth = await issueToken(env);
   if (auth.error) return auth.error;
   const report = full.slice(0, 60000);
-  const issue = { title, body: REPORTER_NOTE + report };
-  if (env.ISSUE_LABELS) {
-    const labels = env.ISSUE_LABELS.split(",").map((s) => s.trim()).filter(Boolean);
-    if (labels.length) issue.labels = labels;
-  }
+  const issue = { title, body: (type ? FEEDBACK_NOTE : REPORTER_NOTE) + report };
+  const labels = (env.ISSUE_LABELS || "").split(",").map((s) => s.trim()).filter(Boolean);
+  if (!type) labels.push(BUG_LABEL);
+  else if (Object.hasOwn(TYPE_LABELS, type)) labels.push(TYPE_LABELS[type]);
+  if (labels.length) issue.labels = [...new Set(labels)];
   const gh = await ghFetch(auth.token, `/repos/${env.TARGET_REPO}/issues`, {
     method: "POST", body: JSON.stringify(issue),
   });
@@ -238,9 +241,16 @@ async function fileReport(request, env) {
   return json({ ok: true, url: data.html_url, number: data.number }, 201);
 }
 
-// Prepended to the body of every issue this proxy files.
+// Prepended to the body of every issue this proxy files: a bug report's, and that of
+// a request with a type.
 const REPORTER_NOTE =
   "> Submitted by a localm user through the built-in bug reporter.\n\n";
+const FEEDBACK_NOTE = "> Sent by a localm user from the app.\n\n";
+
+// The GitHub label of a bug report (a request without a type) and of each request
+// type. A type that is not listed gets no label.
+const BUG_LABEL = "bug";
+const TYPE_LABELS = { feedback: "feedback", suggestion: "enhancement" };
 
 // The first line of every markdown report localm builds: the in-app reporter
 // (localm/bugreport/assembly.py), scripts/report_issue.py and scripts/report_issue.ps1.

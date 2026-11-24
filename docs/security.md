@@ -349,7 +349,7 @@ this section states the security properties and, more importantly, their edges.
   redirect without a per-hop check or the DNS-rebinding pin. It is not only a
   model-facing guard.
 - **What it does not cover.** Several outbound paths deliberately do not use
-  it, including bug-report upload and requests to your ComfyUI instance.
+  it, including the bug-report and feedback upload and requests to your ComfyUI instance.
   ComfyUI has its own, narrower guards instead: a configured `comfy_api_url`
   (or a media plugin's own `comfy.api_url`, the model scan included) that
   targets a link-local / cloud-metadata address is refused
@@ -376,7 +376,7 @@ this section states the security properties and, more importantly, their edges.
 - **No redirect off HTTPS, on any of them.** Separate from the policy above and
   narrower: every outbound client that uses localm's shared verified opener
   (setup-llama's runtime download and its GitHub and PyPI lookups, the update
-  check and download, the issues list, the bug-report upload, the native image
+  check and download, the issues list, the bug-report and feedback upload, the native image
   and music runtime downloads) refuses a redirect
   that leaves HTTPS for a weaker scheme. Verifying the first hop's certificate
   says nothing about the hops after it, and a redirect target is chosen by the
@@ -409,7 +409,7 @@ this section states the security properties and, more importantly, their edges.
   It never applies to model-initiated access (the
   coder's `fetch_url` and `web_search`, chat web access), which stays governed
   by `net_mode` alone. Requests to your configured ComfyUI never consult
-  `net_mode` (see *What it does not cover* above). The bug-report upload is sent
+  `net_mode` (see *What it does not cover* above). The bug-report and feedback upload is sent
   only when you press Send, and `off` refuses it unless you choose to send that
   one report anyway.
   The coder's off-machine model backends do not opt out: building

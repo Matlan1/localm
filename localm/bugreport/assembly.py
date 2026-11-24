@@ -9,7 +9,7 @@ import traceback
 from typing import Optional
 
 from localm.bugreport._common import MAINTAINER_EMAIL
-from localm.bugreport.diagnostics import _ring_activity, collect_diagnostics
+from localm.bugreport.diagnostics import _localm_version, _ring_activity, collect_diagnostics
 import localm.bugreport as _br
 
 
@@ -246,6 +246,29 @@ def build_report(summary: str, reason: str = "",
         "",
     ]
     return "\n".join(parts)
+
+
+#: What a person can send besides a bug report. Each is the word in the saved
+#: file's name and the ``type`` sent to the bug-report server.
+FEEDBACK_KINDS = ("feedback", "suggestion")
+
+
+def feedback_text(text: str) -> str:
+    """*text* without byte order marks and surrounding whitespace; "" when nothing
+    is left."""
+    return (text or "").replace("\ufeff", "").strip()
+
+
+def build_feedback(text: str) -> str:
+    """Render feedback or a suggestion as editable markdown: the person's own text
+    (scrubbed like a bug report's) under its first line as the heading, the localm
+    version and the edit note. No diagnostics, log, settings or browser context."""
+    text = _br._scrub_secrets(feedback_text(text))
+    title = text.splitlines()[0].strip()[:120].strip() if text else "feedback"
+    return "\n".join([
+        f"# {title}", "", text, "", f"localm {_localm_version()}", "",
+        "---", _report_footer(), "",
+    ])
 
 
 def _report_footer() -> str:
