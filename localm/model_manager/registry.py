@@ -5832,14 +5832,15 @@ def _register_ollama_blob(
     except _TransferRefused as e:
         console.print(f"[red]{escape(str(e))}[/red]")
         return False
-    except RuntimeError as e:
+    except (RuntimeError, OSError) as e:
         if not store:
             raise
         console.print(f"[red]{escape(str(e))}[/red]")
         return False
     finally:
         placement.settle()
-        if stored_here and stored_projectors is not None and projector.exists():
+        if (stored_here and projector is not None and stored_projectors is not None
+                and projector.exists()):
             stored_projectors[source] = projector
 
 
