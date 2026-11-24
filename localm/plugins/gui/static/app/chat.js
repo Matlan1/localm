@@ -1207,7 +1207,7 @@ async function saveIndexRowChange(conv) {
     renderConvList();
     if (conv === currentConv()) renderChat();
   } else {
-    toast(t("chat.conv.saveFailed", { name: shownTitle(conv) }), true);
+    toast(t("chat.conv.saveFailed"), true);
   }
 }
 
@@ -1419,7 +1419,7 @@ function keepAsCopy(conv, row) {
   }
   saveConversations(conv);
   renderConvList();
-  toast(t("chat.conv.keptAsCopy", { name, copy: conv.title }), true);
+  toast(t("chat.conv.keptAsCopy"), true);
 }
 
 /** Takes *conv* out of the list here: it was deleted in another tab or browser.
@@ -1428,7 +1428,7 @@ function dropDeletedElsewhere(conv, { quiet = false } = {}) {
   const name = shownTitle(conv);
   if (conv.unsaved && !conv._meta) {
     keepInTabOnly(conv);
-    toast(t("chat.conv.deletedElsewhereKept", { name }), true);
+    toast(t("chat.conv.deletedElsewhereKept"), true);
   } else {
     conv.deleted = true;
     _goneIds.add(conv.id);
@@ -1690,10 +1690,10 @@ export async function initServerConversations() {
   } catch { /* store unavailable - localStorage keeps working */ }
 }
 
-/** A fingerprint of what the conversation list shows. */
+/** A fingerprint of the listed conversations. */
 function _listPrint() {
-  return JSON.stringify([chat.activeId, chat.conversations.map(
-    (c) => [c.id, c.title, !!c.pinned, c.folder || "", c.rev || "", !!c.tabOnly])]);
+  return JSON.stringify(chat.conversations.map(
+    (c) => [c.id, c.title, !!c.pinned, c.folder || "", c.rev || "", !!c.tabOnly]));
 }
 
 let _syncing = false;
@@ -2172,7 +2172,9 @@ export const draftStore = {
   },
 };
 
-// What this tab's rows held when they were last written, by key.
+// What this tab's rows held when they were last written, by key; null for a row
+// that was read back. A row this tab's drafts do not make any more is removed by
+// the write that stores those they do.
 const _draftsWritten = new Map();
 let _draftWarned = false;
 let _draftsWiped = false;
@@ -2283,6 +2285,7 @@ function _writeDrafts() {
   }
   if (!puts.length && !dels.length) return;
   _draftsWiped = false;
+  holdTabLock();
   draftCall(() => draftStore.write(puts, dels));
 }
 
@@ -2291,6 +2294,8 @@ function wipeStoredDrafts() {
   if (_draftsWiped) return;
   _draftsWiped = true;
   _draftsWritten.clear();
+  _tabId = "";
+  _tabLocked = false;
   try { sessionStorage.removeItem(TAB_ID_KEY); } catch { /* nothing is stored there */ }
   if (draftStore.available()) draftCall(() => draftStore.clear());
 }
@@ -2339,7 +2344,7 @@ export async function restoreDrafts() {
         for (const item of r.value.items || []) {
           if (chat.conversations.some((c) => c.id === item.convId)) chat.queue.push(item);
         }
-        if (r.tab !== own) drop.push(r.key);
+        _draftsWritten.set(r.key, null);
         continue;
       }
       if (r.id && !chat.conversations.some((c) => c.id === r.id)) {
@@ -2353,7 +2358,7 @@ export async function restoreDrafts() {
       else Object.assign(d, { attachments: r.value.attachments || [], docs: r.value.docs || [],
                               clips: r.value.clips || [] });
       found.set(r.id, d);
-      if (r.tab !== own) drop.push(r.key);
+      _draftsWritten.set(r.key, null);
     }
     if (drop.length) await draftStore.write([], drop);
     for (const [id, d] of found) {
@@ -2614,6 +2619,9 @@ export function searchSnippet(conv, term) {
   return null;
 }
 
+// The title field open for a rename; the list is not rebuilt while it is.
+let _renameInput = null;
+
 export function buildConvItem(conv, snippet) {
   const item = el("div", "conv-item" + (conv.id === chat.activeId ? " active" : ""));
   if (conv.tabOnly) {
@@ -2630,8 +2638,10 @@ export function buildConvItem(conv, snippet) {
     input.value = conv.title;
     let cancelled = false;
     const commit = () => {
-      if (!cancelled) {
-        conv.title = input.value.trim() || conv.title;
+      _renameInput = null;
+      const typed = input.value.trim();
+      if (!cancelled && typed && typed !== conv.title) {
+        conv.title = typed;
         saveConversations(conv);
       }
       renderConvList();
@@ -2643,6 +2653,7 @@ export function buildConvItem(conv, snippet) {
       else if (ke.key === "Escape") { ke.preventDefault(); ke.stopPropagation(); cancelled = true; input.blur(); }
     };
     item.replaceChild(input, title);
+    _renameInput = input;
     input.focus();
     input.select();
   };
@@ -2720,6 +2731,7 @@ export function buildConvItem(conv, snippet) {
 }
 
 export function renderConvList() {
+  if (_renameInput && _renameInput.isConnected) return;
   const list = $("conv-list");
   list.replaceChildren();
   const term = convUI.search.trim().toLowerCase();
@@ -4201,7 +4213,7 @@ export async function ingestSharedFiles() {
     items = data.items || [];
     const skipped = data.skipped || [];
     if (skipped.length) {
-      toast(tn("chat.share.skipped", skipped.length, { names: skipped.join(", ") }), true);
+      toast(tn("chat.share.skipped", skipped.length, { names: skipped.join(", ") }));
     }
   } catch { return; }
   if (!items.length) return;

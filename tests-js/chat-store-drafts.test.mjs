@@ -22,7 +22,7 @@ const reply = (content) => ({ role: "assistant", content });
  *  /v1/config. `put(id, ...)` writes to the store as another browser would. */
 function makeServer() {
   const s = { files: new Map(), deleted: new Set(), puts: [], mode: "full", calls: [],
-              failPut: 0, rows: null, chatReply: null };
+              failPut: 0, gui: [], chatReply: null };
   let n = 0;
   const res = (status, body) => ({ ok: status < 400, status, statusText: String(status),
     headers: { get: () => null }, text: async () => JSON.stringify(body), json: async () => plain(body) });
@@ -63,6 +63,7 @@ function makeServer() {
       if (!stored && s.deleted.has(id)) return stale(null);
       return res(200, { status: "saved", id, rev: s.put(id, body) });
     }
+    if (u === "/api/gui-error") s.gui.push(String(opts.body));
     if (u === "/v1/chat/completions" && s.chatReply) return s.chatReply(JSON.parse(opts.body), opts);
     return res(200, { models: [], active: "", plugins: [], items: [] });
   };
@@ -135,7 +136,8 @@ test("two tabs that change one chat: both versions are kept and the loser is tol
   assert.equal(win.chat.activeId, c.id, "the tab stays on its own version");
   assert.equal(c.id, copy.id);
   assert.ok(win.chat.conversations.some((x) => x.id === "c1"), "the stored one is listed beside it");
-  assert.ok(win.__toasts.some((m) => m.includes("One (copy)")), win.__toasts.join("|"));
+  assert.ok(win.__toasts.some((m) => /changed in another tab/.test(m)), win.__toasts.join("|"));
+  assert.ok(!server.gui.some((b) => b.includes("One")), "no chat title reaches the server's log");
 });
 
 test("a queued message and a draft follow a conversation that became a copy", async () => {
@@ -660,6 +662,24 @@ test("a draft typed before the stored one is read is kept beside it", async () =
   assert.equal(input.value, "from before\ntyped early");
 });
 
+test("a draft a closed tab left is not removed before this tab's own copy is written", async () => {
+  const { win, input } = await twoChats();
+  const rows = fakeDrafts(win, new Map([
+    ["c1|old|text", { text: "left behind", at: Date.now() }],
+    ["|old|queue", { items: [{ convId: "c1", text: "q", attachments: [], docs: [], clips: [] }], at: Date.now() }]]));
+  const steps = [];
+  win.__note = (puts, dels) => steps.push([puts.length, dels.length]);
+  runScript(win, `{ const real = draftStore.write;
+    draftStore.write = async (puts, dels) => { window.__note(puts, dels); return real(puts, dels); }; }
+    _draftsRestored = false;`);
+  await open(win, "One");
+  await win.restoreDrafts();
+  assert.equal(input.value, "left behind");
+  assert.equal(win.chat.queue.length, 1);
+  assert.ok(await waitFor(() => rows.size === 2 && ![...rows.keys()].some((k) => k.includes("|old|"))));
+  assert.deepEqual(steps, [[2, 2]], "one write stores the copy and removes the old rows");
+});
+
 test("stored drafts of a chat that is deleted are removed", async () => {
   const { win } = await twoChats();
   const rows = fakeDrafts(win, new Map([
@@ -694,6 +714,15 @@ test("privacy mode keeps no draft in this browser and empties what was there", a
   input.dispatchEvent(new win.Event("input"));
   await settle(400);
   assert.equal(rows.size, 0, "what was typed under privacy mode is not written after it either");
+});
+
+test("a restored queue waits while there is no model to answer", async () => {
+  const { win } = await twoChats();
+  const c = await open(win, "One");
+  win.chat.queue.push({ text: "q", attachments: [], docs: [], clips: [], convId: c.id });
+  runScript(win, "modelCache.active = ''; modelCache.resumable = '';");
+  await win.processChatQueue();
+  assert.equal(win.chat.queue.length, 1);
 });
 
 test("sending takes the box of the chat it was sent from", async () => {
@@ -827,6 +856,15 @@ test("the first click of a double-click on a closed chat keeps its row", async (
   assert.ok(row.isConnected);
   assert.ok(row.classList.contains("active"));
   assert.equal(win.document.querySelectorAll("#conv-list .conv-item.active").length, 1);
+  await win.syncConversations();
+  assert.ok(row.isConnected, "a sync that finds nothing new leaves the list alone");
   row.querySelector(".title").dispatchEvent(new win.MouseEvent("dblclick", { bubbles: true }));
-  assert.ok(row.querySelector("input"));
+  const input = row.querySelector("input");
+  assert.ok(input);
+  win.renderConvList();
+  assert.ok(input.isConnected, "the list is not rebuilt under an open rename");
+  input.value = "Renamed";
+  input.onblur();
+  assert.ok(conv(win, "Renamed"));
+  assert.equal(win.document.querySelector("#conv-list input"), null);
 });

@@ -3720,7 +3720,7 @@ export function renderQueuedIndicator() {
 }
 
 /** Dispatches the oldest queued message of the active conversation when the
- *  chat is idle. Messages queued for another conversation stay queued until
+ *  chat is idle and a model is there to answer. Messages queued for another conversation stay queued until
  *  that conversation is active. */
 export async function processChatQueue() {
   renderQueuedIndicator();
@@ -3730,6 +3730,7 @@ export async function processChatQueue() {
   if (!conv) return;
   const idx = chat.queue.findIndex((item) => !item.convId || item.convId === conv.id);
   if (idx === -1) return;
+  if (!modelCache.active && !modelCache.resumable && !announcedLoadingModel()) return;
   const [item] = chat.queue.splice(idx, 1);
   saveDraftsSoon();
   renderQueuedIndicator();
