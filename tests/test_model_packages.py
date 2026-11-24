@@ -563,6 +563,24 @@ def test_an_addable_package_beside_a_missing_shipped_one_says_to_repair_too(tmp_
     reason = mp.folder_refusal(_model(tmp_path, "import timm\nimport einops\n"))
     assert "needs the Python package timm, which localm can add" in reason
     assert "It also needs einops, which localm normally includes" in reason
+    assert reason.index("run its setup again first") < reason.index(
+        "`localm install-packages Some-Model`")
+
+
+def test_install_packages_without_pytorch_says_what_to_do_before_running_it_again(
+        tmp_path, trusted, monkeypatch):
+    from localm.cli import main
+    monkeypatch.setenv("COLUMNS", "2000")
+    monkeypatch.setattr(mp, "is_importable", lambda m: False)
+    folder = _model(tmp_path, "import torch\nimport timm\n")
+    monkeypatch.setattr(mpk, "model_folder", lambda name: folder)
+    result = CliRunner().invoke(main, ["install-packages", "some-model"])
+    assert result.exit_code == 1
+    out = " ".join(result.output.split())
+    assert "set up without PyTorch: add PyTorch and the Hugging Face packages first" in out
+    assert "run its setup again" not in out
+    assert out.index("add PyTorch") < out.index(
+        "After that, add timm with `localm install-packages Some-Model`")
 
 
 def test_folder_state_sorts_the_missing_packages(tmp_path, trusted, monkeypatch):
