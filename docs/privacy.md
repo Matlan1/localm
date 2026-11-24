@@ -272,6 +272,12 @@ directory yet, or one it cannot parse) it asks before sending, with no as the
 default, and sends nothing without a terminal; `--send-anyway` answers that
 question with yes.
 
+**Feedback and suggestions carry no diagnostics.** Settings > System > Feedback and
+Suggestion, and `localm feedback`, save and send only the text you write, the localm
+version and which of the two it is: no log, model, configuration, environment or
+browser details. The text goes through the same redaction, the same review or prompt
+and the same Network access rule, and becomes a public GitHub issue when sent.
+
 **What is redacted from a report:**
 - Your home directory, replaced by `~`, and your account name wherever it is
   the folder under a home root (`C:\Users\<name>`, `/home/<name>`,

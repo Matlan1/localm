@@ -1076,7 +1076,7 @@ present on a headless `localm serve` with no plugins installed, not only under
 
 | Route | Scope | Purpose |
 |---|---|---|
-| `GET /api/issues` | `config:read` | List the bug reports this install filed, newest first (up to 30), each looked up by number through the bug-report proxy. Takes no parameters. Returns `{"available": true, "issues": [...], "persisted": bool, "issues_url": "..."}`, or `{"available": false, "issues": []}` when no tracker is configured. Each row is `{number, title, state, closed_at, html_url}`; a row whose lookup failed or found nothing carries an `error` string instead of `state`, and so does a row the lookups did not reach within their 30 second budget. `persisted` is false when the record of filed numbers is kept in memory only (privacy mode). |
+| `GET /api/issues` | `config:read` | List the reports this install filed, newest first (up to 30), each looked up by number through the bug-report proxy. Takes no parameters. Returns `{"available": true, "issues": [...], "persisted": bool, "issues_url": "..."}`, or `{"available": false, "issues": []}` when no tracker is configured. Each row is `{number, title, state, closed_at, html_url}`; a row whose lookup failed or found nothing carries an `error` string instead of `state`, and so does a row the lookups did not reach within their 30 second budget. `persisted` is false when the record of filed numbers is kept in memory only (privacy mode). |
 | `GET /api/update/check` | `config:read` | Ask whether a newer build is available. Does not apply anything. Returns `{"available": true, "current", "latest", "newer", "comparable", "notes", "published_at", "asset", "signature"}`; `{"available": false}` when no updater is configured; `{"available": true, "error": "..."}` when the check fails. |
 | `GET /api/changelog` | `config:read` | Return the shipped `CHANGELOG.md`. Local file read, no network call, works offline. Returns `{"available": true, "version", "markdown"}` with the released history and without the `[Unreleased]` section, or `{"available": false}` when the file is absent from this build. |
 | `GET /api/update/releases` | `config:read` | The releases that can be installed. Read-only. Returns `{"available": true, "current", "releases"}`, or `{"available": false}` when no updater is configured. |
@@ -1086,7 +1086,8 @@ present on a headless `localm serve` with no plugins installed, not only under
 | `GET /api/update/rollback` | `config:read` | Whether a rollback is possible, and which build it would restore. Read-only; never rolls anything back. Returns `{"available", "backup", "version", "current"}`, with `version` null when the backup does not record one. `backup` is the full path for the owner and open mode, and a scrubbed one for a scoped key. |
 | `POST /api/update/rollback` | `admin` | Restore the previous build from the last update's local backup and restart into it. No signature check and no network request - it restores files, not a download. Requires `admin` specifically (not merely `config:write`). It restores the previous build's files, its dependencies (the venv as it was before the update's dependency step), its native runtime and its components. Returns `{"rolled_back": true, "backup", "version", "restarting": true}`; 403 for a key without `admin`, 409 when there is no backup, the backup is incomplete, or an update or rollback is already running, 500 when the restore failed partway (the backup is kept). Only open mode or an owner key reaches it, so its `backup` path and error texts are never scrubbed. |
 | `POST /api/bug-report` | `config:write` | Generate and save a bug report for review. |
-| `POST /api/bug-report/send` | `config:write` | File a saved, reviewed bug report. |
+| `POST /api/feedback` | `config:write` | Save feedback or a suggestion for review. |
+| `POST /api/bug-report/send` | `config:write` | File a saved, reviewed report. |
 
 **A proxy failure is reported in the body, not the status.** `GET /api/update/check`
 answers `200` with an `error` string when the proxy cannot be reached, rather than
@@ -1179,19 +1180,29 @@ every machine path in it, the attached log included, keeps only its file name
 after `<data>`, `<install>`, `<env>`, `~` or `<path>` (any other folder, such as
 that of a model registered in place).
 
+### `POST /api/feedback`
+
+Scope: `config:write`.
+
+Takes `{"kind": "feedback" | "suggestion", "text": ...}`. It saves the text with
+the localm version, and nothing else, as `<kind>-<stamp>.md` and never files it
+anywhere. Another `kind` or an empty `text` is a `400`. The response, its path
+scrubbing and the `500`/`504` failures are those of `POST /api/bug-report`.
+
 ### `POST /api/bug-report/send`
 
 Scope: `config:write`.
 
 Takes `{"filename": ..., "sha256": ...}`: a report saved by `POST
-/api/bug-report`, and the `report_sha256` that route returned for it. The saved
+/api/bug-report` or `POST /api/feedback`, and the `report_sha256` that route returned
+for it. Feedback and suggestions are filed as that type. The saved
 file is filed as an issue through the configured proxy only when its current
 text still has that digest, so what is filed is the text that was shown,
 apart from its closing note about editing the report, which is left out. The
 issue title is the report's own heading.
 
 - A missing digest, or a filename that is not a bare saved-report name
-  (`bug-<stamp>.md`), returns `400`. A file that cannot be read returns `404`.
+  (`bug-<stamp>.md`, `feedback-<stamp>.md` or `suggestion-<stamp>.md`), returns `400`. A file that cannot be read returns `404`.
   A file whose text no longer matches the digest returns `409`, and nothing is
   sent.
 - Past those checks the response is a `200` carrying `filename` and `maintainer`.

@@ -2004,6 +2004,10 @@ export async function refreshPluginCommands() {
     // endpoint is configured (otherwise the report is saved-to-file + emailed).
     const bugUp = $("bug-upload");
     if (bugUp) bugUp.hidden = !data.bugreport_upload;
+    // The Feedback and Suggestion cards offer sending, or saving when there is no
+    // endpoint.
+    window.__localmFeedbackUpload = !!data.bugreport_upload;
+    if (typeof window.setFeedbackUpload === "function") window.setFeedbackUpload(window.__localmFeedbackUpload);
     // Reveal the app-update sub-block (inside the merged "Updates" card, and
     // holding the update-behavior toggles) and the Issues card only when their
     // proxy surfaces are configured. The Updates card itself is never hidden
@@ -2110,6 +2114,7 @@ export function applyCoreTabVisibility(core) {
     const show = core[view] !== false;        // default to showing if unknown
     nav.style.display = show ? "" : "none";
     if (!show && activeView === "view-" + view) activeHidden = true;
+    if (view === "settings" && $("feedback-link")) $("feedback-link").hidden = !show;
   }
   if (activeHidden) showView("chat");
 }

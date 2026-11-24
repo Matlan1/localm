@@ -298,7 +298,7 @@ coding agent's shell access, so you can grant one without the other.
   (`--yes`, an update, the GUI's runtime switch, a generation that installs its
   runtime) never offers it. Under `off` the download is refused, with the
   remedy, unless `net_allow_model_downloads` is on.
-- **Bug-report upload.** A deliberate, one-off action you trigger yourself
+- **Bug-report and feedback upload.** A deliberate, one-off action you trigger yourself
   (see [privacy.md](privacy.md)); it does not call `check_url` and is not
   subject to the domain lists. With `net_mode` set to `off` it is refused before
   any connection opens, as are the issue list (`localm issues`) and the update

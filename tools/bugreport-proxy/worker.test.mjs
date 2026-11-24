@@ -223,6 +223,44 @@ test("a body localm did not build makes no GitHub call and gets a 422 that does 
   }
 });
 
+test("a request with a type is filed as that type, whatever its text", async () => {
+  for (const [type, labels] of [["feedback", ["feedback"]], ["suggestion", ["enhancement"]],
+    ["somethingnew", undefined], ["constructor", undefined], ["__proto__", undefined]]) {
+    const { res, upstream } = await postReport({ title: "an idea", body: "an idea", type });
+    assert.equal(res.status, 201, type);
+    assert.equal(upstream.length, 1);
+    assert.equal(upstream[0].body.title, "an idea");
+    assert.equal(upstream[0].body.body, "> Sent by a localm user from the app.\n\nan idea");
+    assert.deepEqual(upstream[0].body.labels, labels, type);
+  }
+});
+
+test("a type that is not a non-empty string is a request without a type", async () => {
+  const realLog = console.log;
+  console.log = () => {};
+  try {
+    for (const type of ["", null, 5, ["feedback"], { a: 1 }, true]) {
+      const { res, upstream } = await postReport({ title: "x", body: "an idea", type });
+      assert.equal(res.status, 422, JSON.stringify(type));
+      assert.equal(upstream.length, 0);
+    }
+  } finally {
+    console.log = realLog;
+  }
+});
+
+test("a bug report without a type is filed as before: no label, the reporter note", async () => {
+  const { upstream } = await postReport({ title: "t", body: SKELETON });
+  assert.deepEqual(upstream[0].body, { title: "t",
+    body: "> Submitted by a localm user through the built-in bug reporter.\n\n" + SKELETON });
+});
+
+test("an empty body with a type is rejected", async () => {
+  const { res, upstream } = await postReport({ title: "t", body: "  ", type: "feedback" });
+  assert.equal(res.status, 400);
+  assert.equal(upstream.length, 0);
+});
+
 test("a held report is not 2xx: released clients read any 2xx as sent", async () => {
   const realLog = console.log;
   console.log = () => {};

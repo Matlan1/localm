@@ -3065,7 +3065,7 @@ export async function showChangelog() {
 }
 if ($("changelog-show")) $("changelog-show").onclick = showChangelog;
 
-// Issues: the bug reports this install filed, each looked up by number
+// Issues: the reports this install filed, each looked up by number
 // (textContent only - never raw innerHTML for proxy data).
 export async function issuesRefresh() {
   const out = $("issues-list");
@@ -3120,6 +3120,134 @@ export async function issuesRefresh() {
   } catch (e) { showInlineError(out, t("settings.issues.loadFailed", { message: e.message })); }
 }
 if ($("issues-refresh")) $("issues-refresh").onclick = issuesRefresh;
+
+// Settings > Feedback and Suggestion: one text box each. "Send to maintainer"
+// saves the text (with the localm version, nothing else) and shows it; nothing is
+// sent until "Send" is pressed, and what is sent is that saved text, named by its
+// file and digest. Without an upload endpoint the cards only save.
+const _feedbackCards = [];
+
+/** Offer sending (true) or only saving (false) on the Feedback and Suggestion cards. */
+export function setFeedbackUpload(available) {
+  for (const card of _feedbackCards) card.setUpload(available);
+}
+window.setFeedbackUpload = setFeedbackUpload;
+
+function initFeedbackCard(kind) {
+  const at = (part) => $(`${kind}-${part}`);
+  const text = at("text"), result = at("result"), save = at("save"), upload = at("upload");
+  if (!text) return;
+  // The saved text on review ({ filename, sha256, where }) and whether sending is offered.
+  let reviewed = null;
+  let canUpload = false;
+  const buttons = ["save", "upload", "confirm", "cancel", "send-anyway"].map(at);
+  const busy = (on) => { for (const b of buttons) b.disabled = on; };
+  const say = (message) => { result.hidden = false; result.textContent = message; };
+  const layout = () => {
+    at("review").hidden = !reviewed;
+    save.hidden = canUpload;
+    upload.hidden = !canUpload || !!reviewed;
+    text.readOnly = !!reviewed;
+  };
+  const close = () => {
+    reviewed = null;
+    at("preview").value = "";
+    at("anyway").hidden = true;
+    layout();
+  };
+
+  const submit = async (review) => {
+    const body = text.value.trim();
+    if (!body) { toast(t("settings.feedback.empty"), true); return; }
+    busy(true);
+    try {
+      const r = await fetch("/api/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ kind, text: body }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.detail || r.statusText);
+      const where = data.path || data.filename || t("settings.bug.unnamedReport");
+      if (review && data.report_markdown && data.report_sha256 && data.filename) {
+        reviewed = { filename: data.filename, sha256: data.report_sha256, where };
+        at("preview").value = data.report_markdown;
+        say(t("settings.feedback.reviewPrompt", { where }));
+      } else if (review) {
+        result.hidden = false;
+        showInlineError(result, t("settings.bug.reviewUnavailable", { where }));
+      } else {
+        say(t("settings.bug.saved", { where }) + (data.maintainer
+          ? t("settings.bug.maintainerSuffix", { maintainer: data.maintainer }) : ""));
+        text.value = "";
+      }
+    } catch (e) {
+      toast(t("settings.feedback.failed", { message: e.message }), true);
+    } finally {
+      busy(false);
+      layout();
+    }
+  };
+
+  const send = async (anyway) => {
+    const rep = reviewed;
+    if (!rep) return;
+    busy(true);
+    at("anyway").hidden = true;
+    try {
+      const payload = { filename: rep.filename, sha256: rep.sha256 };
+      if (anyway) payload.send_anyway = true;
+      const r = await fetch("/api/bug-report/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify(payload),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.detail || r.statusText);
+      if (data.uploaded) {
+        close();
+        text.value = "";
+        say(t("settings.bug.sent")
+          + (data.issue_url ? t("settings.bug.trackingIssue", { url: data.issue_url }) : ""));
+        toast(t("settings.feedback.sentToast"));
+        return;
+      }
+      if (data.rate_limited) {
+        say(t("settings.feedback.savedRateLimited", { where: rep.where }));
+        return;
+      }
+      at("anyway").hidden = !(data.upload_stage === "network_off" && data.can_send_anyway === true);
+      result.hidden = false;
+      showInlineError(result, t("settings.bug.couldNotSend", {
+        message: data.upload_message || data.upload_error,
+        whereSuffix: t("settings.bug.whereSuffix", { where: rep.where }),
+        maintainer: data.maintainer || t("settings.bug.defaultMaintainer") }));
+    } catch (e) {
+      toast(t("settings.bug.couldNotSendToast", { message: e.message }), true);
+    } finally {
+      busy(false);
+    }
+  };
+
+  save.onclick = () => submit(false);
+  upload.onclick = () => submit(true);
+  at("confirm").onclick = () => send(false);
+  at("send-anyway").onclick = () => send(true);
+  at("cancel").onclick = () => {
+    const where = reviewed && reviewed.where;
+    close();
+    if (where) say(t("settings.feedback.notSent", { where }));
+  };
+  _feedbackCards.push({ setUpload: (available) => { canUpload = available; layout(); } });
+  if (window.__localmFeedbackUpload) _feedbackCards.at(-1).setUpload(true);
+}
+initFeedbackCard("feedback");
+initFeedbackCard("suggestion");
+
+if ($("feedback-link")) $("feedback-link").onclick = () => {
+  if (typeof window.showView === "function") window.showView("settings");
+  if (typeof window.gotoSettingsSection === "function") window.gotoSettingsSection("sec-bugreport");
+};
 
 // Export all logs of this instance to a folder the user picks with the shared
 // directory-picker modal, then POST the chosen path to /api/logs/export.

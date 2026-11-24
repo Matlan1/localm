@@ -112,6 +112,8 @@
       <button type="button" class="btn-secondary" id="sidebar-unload-btn"
               title="Unload the active model from memory (it reloads automatically on the next chat request)"
               data-i18n-title="sidebar.unloadModelTitle" data-i18n="sidebar.unloadModel" hidden>unload model</button>
+      <button type="button" class="btn-secondary theme-btn" id="feedback-link" title="Report a bug, send feedback or suggest something"
+              data-i18n-title="sidebar.feedbackTitle" data-i18n="sidebar.feedback"><span class="btn-ic" data-icon="send"></span>feedback</button>
       <button class="btn-secondary theme-btn" id="theme-toggle" title="Toggle light/dark"
               data-i18n-title="sidebar.toggleTheme" data-i18n="sidebar.theme"><span class="btn-ic" data-icon="theme"></span>theme</button>
     </div>
@@ -1182,6 +1184,68 @@
                  RELEASED version history is fetched from /api/changelog (which
                  strips the in-progress section) and rendered in the shared modal
                  via the same DOMPurify markdown path as chat. -->
+            <section class="card settings-section" id="sec-feedback" data-group="system" data-sec-label="Feedback">
+              <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="chat"></span>
+                <div class="card-head-text"><h3 data-i18n="settings.feedback.title">Feedback</h3></div></div>
+              <div class="sub" data-i18n="settings.feedback.help">Tell us what you think, or ask a question. Only your text and the localm version are included, with no diagnostics, log, settings or chat content. Before anything is sent you see the whole text and confirm it.</div>
+              <textarea id="feedback-text" rows="4" placeholder="Your feedback" aria-label="Feedback" data-i18n-aria-label="settings.feedback.title" data-i18n-placeholder="settings.feedback.placeholder"></textarea>
+              <div class="actions">
+                <!-- Shown instead of the send button when no upload endpoint is
+                     configured (capabilities.bugreport_upload). -->
+                <button class="btn-secondary" id="feedback-save" data-i18n="settings.feedback.saveButton">Save</button>
+                <button class="btn-primary" id="feedback-upload" hidden data-i18n="settings.bug.sendButton">Send to maintainer</button>
+              </div>
+              <div id="feedback-result" class="sub" role="status" aria-live="polite" hidden></div>
+              <!-- The saved text. Nothing is sent until feedback-confirm is pressed. -->
+              <div id="feedback-review" hidden>
+                <div class="sub" data-i18n="settings.feedback.reviewHelp">This is the whole text as it will be sent; the closing note about editing it is removed when it is sent. It becomes a public GitHub issue. Nothing has been sent yet.</div>
+                <textarea id="feedback-preview" rows="10" readonly aria-label="Text to send" data-i18n-aria-label="settings.feedback.previewLabel"></textarea>
+                <div class="actions">
+                  <button class="btn-primary" id="feedback-confirm" data-i18n="settings.feedback.confirmSendButton">Send</button>
+                  <button class="btn-secondary" id="feedback-cancel" data-i18n="settings.bug.cancelSendButton">Don't send</button>
+                </div>
+                <!-- Shown when a send was refused because Network access is off
+                     and the caller is the owner. -->
+                <div id="feedback-anyway" hidden>
+                  <div class="sub" data-i18n="settings.bug.sendAnywayHelp">Network access is off. Send anyway makes one connection to the bug-report server to send this report only. Network access stays off.</div>
+                  <div class="actions">
+                    <button class="btn-secondary" id="feedback-send-anyway" data-i18n="settings.bug.sendAnywayButton">Send anyway</button>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="card settings-section" id="sec-suggestion" data-group="system" data-sec-label="Suggestion">
+              <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="send"></span>
+                <div class="card-head-text"><h3 data-i18n="settings.suggestion.title">Suggestion</h3></div></div>
+              <div class="sub" data-i18n="settings.suggestion.help">Suggest an improvement or a new feature. Only your text and the localm version are included, with no diagnostics, log, settings or chat content. Before anything is sent you see the whole text and confirm it.</div>
+              <textarea id="suggestion-text" rows="4" placeholder="Your suggestion" aria-label="Suggestion" data-i18n-aria-label="settings.suggestion.title" data-i18n-placeholder="settings.suggestion.placeholder"></textarea>
+              <div class="actions">
+                <!-- Shown instead of the send button when no upload endpoint is
+                     configured (capabilities.bugreport_upload). -->
+                <button class="btn-secondary" id="suggestion-save" data-i18n="settings.feedback.saveButton">Save</button>
+                <button class="btn-primary" id="suggestion-upload" hidden data-i18n="settings.bug.sendButton">Send to maintainer</button>
+              </div>
+              <div id="suggestion-result" class="sub" role="status" aria-live="polite" hidden></div>
+              <!-- The saved text. Nothing is sent until suggestion-confirm is pressed. -->
+              <div id="suggestion-review" hidden>
+                <div class="sub" data-i18n="settings.feedback.reviewHelp">This is the whole text as it will be sent; the closing note about editing it is removed when it is sent. It becomes a public GitHub issue. Nothing has been sent yet.</div>
+                <textarea id="suggestion-preview" rows="10" readonly aria-label="Text to send" data-i18n-aria-label="settings.feedback.previewLabel"></textarea>
+                <div class="actions">
+                  <button class="btn-primary" id="suggestion-confirm" data-i18n="settings.feedback.confirmSendButton">Send</button>
+                  <button class="btn-secondary" id="suggestion-cancel" data-i18n="settings.bug.cancelSendButton">Don't send</button>
+                </div>
+                <!-- Shown when a send was refused because Network access is off
+                     and the caller is the owner. -->
+                <div id="suggestion-anyway" hidden>
+                  <div class="sub" data-i18n="settings.bug.sendAnywayHelp">Network access is off. Send anyway makes one connection to the bug-report server to send this report only. Network access stays off.</div>
+                  <div class="actions">
+                    <button class="btn-secondary" id="suggestion-send-anyway" data-i18n="settings.bug.sendAnywayButton">Send anyway</button>
+                  </div>
+                </div>
+              </div>
+            </section>
+
             <section class="card settings-section" id="sec-changelog" data-group="system" data-sec-label="Changelog">
               <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="clock"></span>
                 <div class="card-head-text"><h3 data-i18n="settings.changelog.title">Changelog</h3></div></div>
@@ -1398,8 +1462,8 @@
             <section class="card settings-section" id="sec-issues" data-group="system" data-sec-label="Issues" hidden>
               <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="book"></span>
                 <div class="card-head-text"><h3 data-i18n="settings.issues.title">Issues</h3></div></div>
-              <div class="sub" data-i18n="settings.issues.help">The bug reports you sent from this install (read-only) - see
-              whether one has been fixed.</div>
+              <div class="sub" data-i18n="settings.issues.help">The reports you sent from this install (read-only) - see
+              whether one has been answered or fixed.</div>
               <div class="actions">
                 <button class="btn-secondary" id="issues-refresh" data-i18n="settings.issues.refreshButton">Refresh</button>
               </div>
