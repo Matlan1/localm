@@ -457,7 +457,7 @@ def _here(install: str) -> str:
     """The id of the folder *install* on this machine. A renamed folder keeps it, a
     copy has another one."""
     at, value = os.stat(install), 0xCBF29CE484222325
-    for byte in f"{_machine()} {at.st_dev} {at.st_ino}".encode("utf-8", "replace"):
+    for byte in f"{_machine()} {at.st_dev & 0xFFFFFFFF} {at.st_ino}".encode("utf-8", "replace"):
         value = ((value ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
     return f"{value:016x}"
 
@@ -773,7 +773,7 @@ def _believed(folder: str, users, name: str, said) -> "Entry | None":
     parent, opened = _key(lines[2]), [_key(k) for k in lines[3:]]
     if None in opened or (lines[2] and not parent):
         return None
-    return Entry(*said, lines[1], parent, users=opened)
+    return Entry(said[0], said[1], lines[1], parent, users=opened)
 
 
 def _sweep(install: str, here: str) -> None:
