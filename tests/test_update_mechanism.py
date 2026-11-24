@@ -157,7 +157,7 @@ def test_an_edited_file_is_kept_after_the_update(root):
     kept = root / ".localm-update" / "kept" / ID / "localm"
     assert (kept / "changed.py").read_bytes() == b"my version"
     assert (kept / "gone.py").read_bytes() == b"my version too"
-    assert [p.name for p in kept.iterdir()] == ["changed.py", "gone.py"]
+    assert sorted(p.name for p in kept.iterdir()) == ["changed.py", "gone.py"]
     assert str(ID) in result.notes[0] and um.left(root) == ["kept"]
 
 
@@ -710,11 +710,15 @@ class no_write:
 
 @posix_only
 def test_the_mode_of_a_file_survives_the_update_and_the_way_back(root):
-    plan = planned(root)
-    (root / ".localm-update" / ID / "new" / "localm.bat").chmod(0o755)
+    (root / "localm" / "same.py").chmod(0o644)
+    files = um.stage(root)
+    for rel in ("localm/same.py", "VERSION"):
+        (root / ".localm-update" / ID / "new" / rel).chmod(0o755)
     before = um.tree(root)
-    mover.forward(root, ID, plan)
-    assert stat.S_IMODE((root / "localm.bat").stat().st_mode) == 0o755
+    mover.forward(root, ID, planned(root, new_files=files))
+    modes = {rel: stat.S_IMODE((root / rel).stat().st_mode)
+             for rel in ("localm/same.py", "VERSION", "localm.bat")}
+    assert set(modes.values()) == {0o755}
     assert undo(root).state == "old" and um.tree(root) == before
 
 

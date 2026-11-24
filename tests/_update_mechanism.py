@@ -86,16 +86,21 @@ def statement(files: dict) -> str:
 def install(root: Path, old: dict = OLD) -> Path:
     """An install of the release *old* with the user's files in it."""
     write(root, {**old, **USER, shared.update_package.NAME: statement(old)})
-    if os.name != "nt":
-        (root / "localm.bat").chmod(0o755)
+    _executable(root)
     return root
+
+
+def _executable(release: Path) -> None:
+    if os.name != "nt" and (release / "localm.bat").exists():
+        (release / "localm.bat").chmod(0o755)
 
 
 def stage(root: Path, new: dict | None = None, update_id: str = UPDATE_ID) -> dict:
     """Extract the release *new* for an update of *root*; returns its file list."""
     new = {**NEW, **INTRUDING} if new is None else new
-    write(root / ".localm-update" / update_id / "new",
-          {**new, shared.update_package.NAME: statement(new)})
+    release = root / ".localm-update" / update_id / "new"
+    write(release, {**new, shared.update_package.NAME: statement(new)})
+    _executable(release)
     return stated(new)
 
 
