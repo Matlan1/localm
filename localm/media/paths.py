@@ -23,6 +23,7 @@ Both policies live here, in one place, for every media plugin.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable, Optional
 
 from fastapi import HTTPException, Request
 
@@ -50,6 +51,11 @@ _GALLERY_NAMES = {"image": IMAGE_DIR_NAME, "music": MUSIC_DIR_NAME,
                   "video": VIDEO_DIR_NAME}
 
 
+def gallery(kind: str) -> Path:
+    """The gallery folder of *kind* ("image", "music", "video")."""
+    return gallery_dir(_GALLERY_NAMES[kind])
+
+
 def output_dir(kind: str, kept: bool) -> Path:
     """The folder a new *kind* ("image", "music", "video") file is generated into:
     the gallery when it is *kept*, else this process's held folder
@@ -57,7 +63,7 @@ def output_dir(kind: str, kept: bool) -> Path:
     cannot be."""
     if not kept:
         return _held.folder(kind)
-    d = gallery_dir(_GALLERY_NAMES[kind])
+    d = gallery(kind)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -66,7 +72,7 @@ def media_dirs(kind: str) -> list[Path]:
     """The folders a *kind* file of a known name may be in: this process's held
     folder when it has one, then the gallery."""
     held = _held.current_folder(kind)
-    return ([held] if held is not None else []) + [gallery_dir(_GALLERY_NAMES[kind])]
+    return ([held] if held is not None else []) + [gallery(kind)]
 
 
 def media_file(kind: str, gallery: Path, name: str, noun: str) -> Path:
@@ -109,10 +115,23 @@ def _resolved_home() -> Path | None:
 
 def _home_input_roots(home: Path) -> list[Path]:
     """The subdirectories of the data dir an input_image may come from."""
-    roots = [home / name for name in (UPLOADS_DIR_NAME, IMAGE_DIR_NAME,
-                                      VIDEO_DIR_NAME, MUSIC_DIR_NAME)]
-    held = [_held.current_folder(kind) for kind in _held.KINDS]
-    return roots + [d.resolve() for d in held if d is not None]
+    return [home / name for name in (UPLOADS_DIR_NAME, IMAGE_DIR_NAME,
+                                     VIDEO_DIR_NAME, MUSIC_DIR_NAME)]
+
+
+#: Whether the caller may use the held file with this recorded owner.
+MayUse = Callable[[Optional[str]], bool]
+
+
+def _held_input(path: Path, may_use: Optional[MayUse]) -> bool:
+    """Whether the resolved *path* is a finished held file the caller may use (any
+    finished one when *may_use* is None)."""
+    for kind in _held.KINDS:
+        d = _held.current_folder(kind)
+        if d is not None and path.parent == d.resolve():
+            return _held.tracks(kind, path.name) and (
+                may_use is None or may_use(_held.owner_of(kind, path.name)))
+    return False
 
 
 def _under(path: Path, root: Path) -> bool:
@@ -201,11 +220,14 @@ def _is_file(path: Path) -> bool:
         return False
 
 
-def _bare_name_target(raw: str, home: Path) -> str:
+def _bare_name_target(raw: str, home: Path, may_use: Optional[MayUse]) -> str:
     """The path of the file named *raw* (a bare file name) in the uploads folder
-    or a generated-media gallery, or *raw* unchanged when no root holds it.
-    Raises InputImageRefused when more than one root holds that name."""
-    hits = [root / raw for root in _home_input_roots(home) if _is_file(root / raw)]
+    or a generated-media gallery, or of the held file of that name the caller may
+    use, or *raw* unchanged when there is none. Raises InputImageRefused when there
+    is more than one."""
+    held = [d.resolve() / raw for d in map(_held.current_folder, _held.KINDS) if d is not None]
+    hits = ([root / raw for root in _home_input_roots(home) if _is_file(root / raw)]
+            + [p for p in held if _is_file(p) and _held_input(p, may_use)])
     if len(hits) > 1:
         raise InputImageRefused(
             f"'{raw}' is in more than one of the uploads folder and the generated-media "
@@ -213,7 +235,7 @@ def _bare_name_target(raw: str, home: Path) -> str:
     return str(hits[0]) if hits else raw
 
 
-def check_input_image(raw: str) -> Path:
+def check_input_image(raw: str, may_use: Optional[MayUse] = None) -> Path:
     """Resolve and confine an ``input_image`` to an allowed root, or raise.
 
     The transport-independent policy. Raises InputImageRefused when the path
@@ -223,7 +245,8 @@ def check_input_image(raw: str) -> Path:
     caller other than the local operator is given) is read relative to the data
     dir. A bare file name (no folder) names the file of that name in the uploads
     folder or one of the generated-media galleries; a name more than one of them
-    holds is refused. Symlinks are resolved first, so a link inside an allowed
+    holds is refused. A held file (``localm.media.held``) is accepted when it is
+    finished and *may_use* accepts its owner. Symlinks are resolved first, so a link inside an allowed
     root that targets outside it is still rejected.
 
     Messages name the allowed LOCATIONS but never an absolute path: the data dir
@@ -241,7 +264,7 @@ def check_input_image(raw: str) -> Path:
             "authorised. See the server log for the cause.")
     target = _expand_data_dir_label(raw, home)
     if _is_bare_name(target):
-        target = _bare_name_target(target, home)
+        target = _bare_name_target(target, home, may_use)
     # BEFORE any syscall on the caller's string: a UNC path would be refused
     # below anyway (it cannot be under a local data dir), but only AFTER
     # .resolve() had already dialled SMB and stalled the event loop for minutes.
@@ -255,7 +278,8 @@ def check_input_image(raw: str) -> Path:
         resolved = Path(target).expanduser().resolve()
     except (OSError, ValueError, RuntimeError) as e:
         raise InputImageRefused("Invalid input image path") from e
-    if not any(_under(resolved, h) for h in _home_input_roots(home)):
+    if not (any(_under(resolved, h) for h in _home_input_roots(home))
+            or _held_input(resolved, may_use)):
         raise InputImageRefused(
             "Input image must be a file you uploaded (the Settings page's "
             "uploads folder) or one of the generated-media galleries. Other "
@@ -266,14 +290,14 @@ def check_input_image(raw: str) -> Path:
     return resolved
 
 
-def confined_input_image(raw: str) -> Path:
+def confined_input_image(raw: str, may_use: Optional[MayUse] = None) -> Path:
     """``check_input_image`` for an HTTP route: the same policy, as an
     HTTPException.
 
     A 500 for InputImageUnavailable and a 400 for everything else, so a fault
     the operator must fix is not returned as a caller mistake."""
     try:
-        return check_input_image(raw)
+        return check_input_image(raw, may_use)
     except InputImageUnavailable as e:
         raise HTTPException(500, str(e)) from e
     except InputImageRefused as e:

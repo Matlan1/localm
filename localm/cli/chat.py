@@ -495,7 +495,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
     from ..audit import MODE_ENV_VAR, SessionMode, effective_mode
     if mode:
         os.environ[MODE_ENV_VAR] = mode.lower()
-    _held.sweep_leftovers()
+    _held.sweep_leftovers(lambda text: console.print(text, style="yellow", markup=False))
     session_mode = effective_mode("chat")
     if session_mode == SessionMode.PRIVACY:
         from ..readline_privacy import suppress_readline_history
@@ -1357,8 +1357,6 @@ def _cmd_save_media(arg: str, console) -> None:
     """REPL /save-media: copy the newest file this chat generated and holds
     (privacy mode) to *arg*, or under its own name, confined to the cwd. An
     existing file is not replaced."""
-    import shutil
-
     from rich.markup import escape
 
     newest = [p for kind in _held.KINDS for p in _held.files(kind)[:1]]
@@ -1375,7 +1373,7 @@ def _cmd_save_media(arg: str, console) -> None:
         console.print(f"[red]Already exists: {escape(str(target))}[/red]", soft_wrap=True)
         return
     try:
-        shutil.copyfile(source, target)
+        _held.save_copy(source, target)
     except OSError as e:
         console.print(f"[red]Save failed: {escape(str(e))}[/red]", soft_wrap=True)
         return

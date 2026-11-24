@@ -357,7 +357,8 @@ def build(engines: EngineCache, coder_shell: bool = False,
             if not ok:
                 _release(out)
         if ok and holding:
-            message += ("\nPrivacy mode: not kept. The file is removed when this MCP server "
+            held.set_owner("image", out.name, None)
+            message += (f"\nPrivacy mode: {out} is not kept. It is removed when this MCP server "
                         "stops; copy it, or pass output_path, to keep it.")
         return _text_result(message, is_error=not ok)
 

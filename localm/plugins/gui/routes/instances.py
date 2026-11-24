@@ -121,7 +121,7 @@ def register(app: FastAPI, ctx) -> None:
         from localm.debuglog import logger
         from localm.selfclient import self_request
 
-        timeout = 10.0
+        timeout = 25.0
         home = home_dir()
         # Removes only entries whose process is gone; the code below reports
         # and removes stale ones.

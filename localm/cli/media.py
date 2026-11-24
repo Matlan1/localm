@@ -217,27 +217,31 @@ def _media_kept() -> bool:
 
 
 def _offer_save(held_path: Path, out_path: Path) -> None:
-    """Ask whether to keep the held *held_path* as *out_path*, then remove what is
-    held. Says so when a file could not be removed."""
-    import shutil
-
+    """Ask whether to keep the held *held_path* as *out_path*, and for another path
+    while it cannot be saved there; remove what is held once it is saved or
+    declined. Says so when a file could not be removed."""
     from rich.markup import escape
 
     from ..media import held
-    try:
-        ans = console.input(f"  Privacy mode: not kept. Save it as {out_path}? "
-                            "[Y/n] ", markup=False).strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        console.print("")
-        ans = "n"
-    if ans in ("", "y", "yes"):
+    question = f"  Privacy mode: not kept. Save it as {out_path}? [Y/n] "
+    while True:
+        try:
+            ans = console.input(question, markup=False).strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print("")
+            break
+        if ans.lower() in ("n", "no"):
+            break
+        if ans.lower() not in ("", "y", "yes"):
+            out_path = Path(ans)
         try:
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(held_path, out_path)
+            held.save_copy(held_path, out_path)
             console.print(f"[green]Saved to {escape(str(out_path))}[/green]")
+            break
         except OSError as e:
             console.print(f"[red]Could not save it: {escape(str(e))}[/red]")
-            sys.exit(1)
+            question = "  Another path, Enter to try again, or n to give it up: "
     if not held.discard_all():
         console.print("[yellow]The held file could not be removed yet (another program has it "
                       "open); localm removes it at its next start.[/yellow]")
@@ -271,6 +275,9 @@ def _via_backend(media_backend, s: dict, prompt: str, out_path: Path, what: str,
     localm_url = localm_v1_base(os.environ.get("LOCALM_URL"))
     asked_path = out_path
     holding = not explicit and not _media_kept()
+    if is_privacy:
+        from ..media import held
+        held.sweep_leftovers(lambda text: console.print(text, style="yellow", markup=False))
     if holding:
         from ..media import held
         try:

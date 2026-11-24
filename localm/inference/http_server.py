@@ -5548,6 +5548,26 @@ def _dbg_swallow(msg: str, *, level: str = "debug") -> None:
         pass
 
 
+def _end_media_work() -> None:
+    """End every running media job before anything it needs is stopped."""
+    try:
+        from localm.media import held
+        held.end_media_work()
+    except Exception:
+        _dbg_swallow("ending the running media jobs failed (non-fatal)", level="warning")
+
+
+def _discard_held_media() -> None:
+    """Delete the generated media held for this run. The last step that touches the
+    data folder before the process ends or re-execs."""
+    try:
+        from localm.media import held
+        held.discard_media_work()
+    except Exception:
+        _dbg_swallow("removing generated media held for this run failed; the next start "
+                     "removes it", level="warning")
+
+
 def _finish_comgr_temp() -> None:
     """Remove the empty temp folders this server's ended GPU processes left."""
     try:
@@ -5560,8 +5580,8 @@ def _finish_comgr_temp() -> None:
 def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
     """The stop sequence, WITHOUT the process exit.
 
-    Stops in-flight job children (both the GUI's and the coder plugin's own
-    background shell/agent jobs), closes every live GUI coder session
+    Ends the running media jobs, stops in-flight job children (both the GUI's
+    and the coder plugin's own background shell/agent jobs), closes every live GUI coder session
     (waiting a few seconds at most), stops any localm-launched ComfyUI instance,
     unloads the model so the native context is freed cleanly (a hard exit
     while it is loaded segfaults during teardown), releases the shared
@@ -5583,6 +5603,7 @@ def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
         _dbg_swallow("removing this instance's registry entry during shutdown "
                      "failed (non-fatal); it is reaped once the process is gone",
                      level="warning")
+    _end_media_work()
     # Stop the child processes of any in-flight background job FIRST. A start_cli
     # job runs `python -m localm <cmd>` as a real child (a model pull, a runtime
     # provision, a ComfyUI setup): os._exit below bypasses atexit, the job worker
@@ -5695,12 +5716,6 @@ def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
         _speech_mod.release_for_exit()
     except Exception:
         _dbg_swallow("speech worker release during shutdown failed (non-fatal)")
-    try:
-        from localm.media import held as _held
-        _held.discard_all()
-    except Exception:
-        _dbg_swallow("removing generated media held for this run failed during shutdown; "
-                     "the next start removes it", level="warning")
     _finish_comgr_temp()
     try:
         from localm import bugreport
@@ -5711,6 +5726,7 @@ def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
         # misattribution is discoverable instead of silent.
         _dbg_swallow("could not disarm crash guard on shutdown; next boot may "
                      "misreport this intentional stop as a crash", level="warning")
+    _discard_held_media()
 
 
 def _announce_stopping() -> None:
@@ -5892,6 +5908,7 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     before re-exec spawns a fresh worker into them. Best-effort: an
     unmeasurable or wedged probe must not block a restart the user asked for,
     and vram_capacity() is itself deadline-bounded."""
+    _end_media_work()
     # Stop the child processes of any in-flight background job FIRST. A start_cli
     # job runs `python -m localm <cmd>` as a real child (a model pull, a runtime
     # provision, a ComfyUI setup): os.execv below bypasses atexit, the job worker
@@ -6041,12 +6058,6 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         released_embedder = _speech_mod.release_for_exit() or released_embedder
     except Exception:
         _dbg_swallow("speech worker release during restart failed (non-fatal)")
-    try:
-        from localm.media import held as _held
-        _held.discard_all()
-    except Exception:
-        _dbg_swallow("removing generated media held for this run failed during restart; "
-                     "the next start removes it", level="warning")
     _finish_comgr_temp()
 
     # Wait for the frees above to actually land before re-exec. The re-exec'd
@@ -6114,6 +6125,7 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         # means the next boot has fewer diagnostics, so log rather than swallow.
         _dbg_swallow("pre-restart breadcrumb dump / log flush failed (non-fatal)")
 
+    _discard_held_media()
     _mark_fds_noninheritable()
     _set_restart_env()
 
@@ -6381,6 +6393,27 @@ def _init_session_audit():
     return AppContext(recorder=_session_recorder)
 
 
+def _remove_leftovers(app: FastAPI) -> None:
+    """Remove what earlier localm processes left: generated media that was not to be
+    kept and empty GPU temp folders. A private ComfyUI job one of them left
+    unfinished is told to the owner, on the console and in the activity list (which
+    no scoped key sees there: its owner is nobody's id)."""
+    def tell(text: str) -> None:
+        from localm.auth import any_key_configured
+        from localm.console import console
+        console.print(text, style="yellow", markup=False)
+        jobs = getattr(app.state, "jobs", None)
+        if jobs is not None:
+            jobs.add_note("imagine", text, "owner-only" if any_key_configured() else None)
+    try:
+        from localm.media import held
+        held.sweep_leftovers(tell)
+    except Exception:
+        _dbg_swallow("removing generated media left by an earlier run failed", level="warning")
+    from localm import comgr_temp
+    comgr_temp.sweep()
+
+
 def _make_lifespan():
     """The app's lifespan. Startup publishes the running loop (_server_loop),
     sweeps expired browser sessions, installs the asyncio exception handler,
@@ -6414,15 +6447,7 @@ def _make_lifespan():
         except Exception:
             from localm.debuglog import logger as _dbg
             _dbg.debug("session sweep at startup failed (non-fatal)", exc_info=True)
-        try:
-            from localm.media import held as _held
-            _held.sweep_leftovers()
-        except Exception:
-            from localm.debuglog import logger as _dbg
-            _dbg.warning("removing generated media left by an earlier run failed",
-                         exc_info=True)
-        from localm import comgr_temp
-        comgr_temp.sweep()
+        await asyncio.get_running_loop().run_in_executor(None, _remove_leftovers, app)
         # Route an uncaught asyncio task exception through the bug reporter
         # instead of a silent "Task exception was never retrieved". Skipped under
         # pytest so the test runner keeps its own loop handling.

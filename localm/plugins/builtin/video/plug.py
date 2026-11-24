@@ -20,7 +20,6 @@ by default.
 from __future__ import annotations
 
 import os
-import shutil
 import time
 from typing import Optional
 from pathlib import Path
@@ -31,7 +30,7 @@ from pydantic import BaseModel, Field
 
 from localm.inference.http_server import path_formatter, principal_id
 from localm.audit import carry_request_privacy
-from localm.media import gallery
+from localm.media import gallery, held
 from localm.media import paths as media_paths
 from localm.media.native_models import (
     MAX_LORAS, LoraChoice, check_generation_extras, check_request,
@@ -132,7 +131,8 @@ async def video(req: VideoRequest, request: Request):
     logger.info("video: %d-char prompt (seconds=%g)", len(req.prompt), req.seconds)
     input_image = None
     if req.input_image:
-        input_image = media_paths.confined_input_image(req.input_image)
+        input_image = media_paths.confined_input_image(req.input_image,
+                                                       gallery.may_use(request))
     native_choice, native_loras = check_request(req.native_models, req.loras, "video")
     native_extras = check_generation_extras(req.sample_method, req.scheduler, None)
     native_extras = {k: native_extras[k] for k in ("sample_method", "scheduler")
@@ -289,10 +289,11 @@ async def video(req: VideoRequest, request: Request):
             )
             job.push({"type": "line", "text": message})
             if ok:
+                out_path = gallery.settle("video", out_path, keeps)
                 job.result = out_path.name
                 gallery.push_stamp_warning(
                     job, gallery.record_owner("video", out_path, owner))
-                if not kept:
+                if held.is_held(out_path):
                     gallery.push_held(job)
             # Recorded before the chat model reload that runs on leaving the block.
             job.mark_outcome("done" if ok else "failed")
@@ -356,28 +357,9 @@ async def video_delete(name: str):
 @_router.post("/api/video/file/{name}/move",
               dependencies=[Depends(gallery.require_owner("video"))])
 async def video_move(name: str, req: MoveFileRequest, request: Request):
-    """Move a generated clip (and its sidecar) to a folder on this machine.
-
-    The destination is checked BEFORE the mkdir: require_owner proves artifact
-    ownership, not authority over the host filesystem."""
-    path = _video_path(name)
-    dest_dir = media_paths.confined_move_dest(request, req.dest)
-    show = path_formatter(request)
-    try:
-        dest_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        raise HTTPException(400, f"Cannot create destination: {show(e)}") from e
-    if not dest_dir.is_dir():
-        raise HTTPException(400, f"Not a directory: {show(req.dest)}")
-    target = dest_dir / path.name
-    if target.exists():
-        raise HTTPException(409, f"Already exists: {show(target)}")
-    shutil.move(str(path), str(target))
-    sidecar = path.with_suffix(path.suffix + ".json")
-    if sidecar.is_file():
-        shutil.move(str(sidecar), str(dest_dir / sidecar.name))
-    gallery.forget_owner("video", name)     # left the gallery dir
-    return {"status": "moved", "path": show(target)}
+    """Move a generated clip (and its sidecar) to a folder on this machine."""
+    return gallery.move_out(request, "video", _video_path(name), req.dest,
+                            path_formatter(request))
 
 
 @_router.post("/api/video/file/{name}/rename",

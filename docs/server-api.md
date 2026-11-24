@@ -790,7 +790,9 @@ configured, `response_format` defaults to `url`: the gallery file route
 route cannot be fetched by an API client, so `b64_json` is the default and asking for
 `url` is a `400`. In privacy mode nothing is kept: the image is generated into a
 private directory, returned as `b64_json` (the default there; asking for `url` is a
-`400`), and the directory is deleted before the response is sent.
+`400`), and the directory is deleted before the response is sent. An image written after
+the session turned private during the request is returned as `b64_json`, whatever format
+was asked for, with a warning, and not kept.
 
 The image is returned only when its embedded metadata (which can carry the prompt)
 was stripped and, when ComfyUI's own copy is to be removed, that copy is gone;

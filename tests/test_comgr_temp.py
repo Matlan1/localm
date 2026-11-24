@@ -42,7 +42,7 @@ def process(temp):
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         procs.append(proc)
         pid = int(proc.stdout.readline())
-        comgr_temp._record(pid)
+        comgr_temp._record(pid, time.time() - 5, str(os.getpid()))
 
         def end():
             import psutil
@@ -74,9 +74,9 @@ def _records():
 def test_the_folders_of_a_running_process_stay_and_go_when_it_ends(temp, process):
     pid, end = process()
     d = _folder(temp, pid)
-    assert comgr_temp.sweep() == 1 and d.is_dir()
+    assert comgr_temp.sweep() == [str(os.getpid())] and d.is_dir()
     end()
-    assert comgr_temp.sweep() == 0
+    assert comgr_temp.sweep() == []
     assert not d.exists() and _records() == []
 
 
@@ -92,9 +92,10 @@ def test_a_folder_that_holds_a_file_stays(temp, process):
     pid, end = process()
     d = _folder(temp, pid)
     (d / "output" / "kernel.o").write_bytes(b"x")
+    (d / "a_empty").mkdir()
     end()
     comgr_temp.sweep()
-    assert (d / "output" / "kernel.o").is_file()
+    assert (d / "output" / "kernel.o").is_file() and (d / "a_empty").is_dir()
 
 
 def _link(link: Path, target: Path) -> None:
@@ -130,18 +131,19 @@ def test_a_folder_older_or_younger_than_the_process_is_not_its_own(temp, process
     assert old.is_dir() and young.is_dir() and not own.exists()
 
 
-def test_a_pid_that_another_process_has_by_now_keeps_that_ones_folders(temp, monkeypatch):
+def test_a_pid_that_another_process_has_by_now_keeps_everything(temp):
     pid = os.getpid()
     mine = _folder(temp, pid)
-    comgr_temp._record(pid)
+    comgr_temp._record(pid, 1.0, "x")
     path = _records()[0]
     rec = json.loads(path.read_text())
     rec["start"] = {"created": 1.0} if "created" in (rec["start"] or {}) else {
         "boot": "another-boot", "ticks": 1}
-    rec["created"] = 1.0
     path.write_text(json.dumps(rec))
-    assert comgr_temp.sweep() == 0
-    assert mine.is_dir()
+    os.utime(path, (time.time() + 60, time.time() + 60))
+    seen = path.stat().st_mtime
+    assert comgr_temp.sweep() == []
+    assert mine.is_dir() and path.stat().st_mtime == seen
 
 
 def test_a_record_of_another_machine_is_left_alone(temp, process):
@@ -152,10 +154,14 @@ def test_a_record_of_another_machine_is_left_alone(temp, process):
     end()
     comgr_temp.sweep()
     assert d.is_dir() and path.is_file()
+    old = time.time() - 2 * comgr_temp._FOREIGN_RECORD_SECONDS
+    os.utime(path, (old, old))
+    comgr_temp.sweep()
+    assert d.is_dir() and not path.exists()
 
 
 def test_no_records_folder_is_nothing_to_do(temp):
-    assert comgr_temp.sweep() == 0 and not comgr_temp.records_dir().exists()
+    assert comgr_temp.sweep() == [] and not comgr_temp.records_dir().exists()
 
 
 @pytest.mark.parametrize("pid", ["1", 0, -5, True, 2 ** 70, 1.5, None, [1], {"a": 1},
@@ -164,10 +170,10 @@ def test_a_record_without_a_usable_pid_is_never_acted_on(temp, monkeypatch, pid)
     monkeypatch.setattr(comgr_temp, "_remove_folders",
                         lambda *a: pytest.fail("acted on a bad record"))
     rec = {"pid": pid, "start": None, "space": comgr_temp.procid.pid_space_id(),
-           "created": 1.0}
+           "since": 1.0}
     comgr_temp.records_dir().mkdir(parents=True)
     (comgr_temp.records_dir() / "5-a.json").write_text(json.dumps(rec), encoding="utf-8")
-    assert comgr_temp.sweep() == 0
+    assert comgr_temp.sweep() == []
 
 
 @pytest.mark.parametrize("raw", [
@@ -175,13 +181,16 @@ def test_a_record_without_a_usable_pid_is_never_acted_on(temp, monkeypatch, pid)
     b" " * 100_000])
 def test_a_file_that_is_no_record_is_ignored(temp, raw):
     comgr_temp.records_dir().mkdir(parents=True)
-    (comgr_temp.records_dir() / "5-a.json").write_bytes(raw)
+    path = comgr_temp.records_dir() / "5-a.json"
+    path.write_bytes(raw)
     (comgr_temp.records_dir() / "6-folder.json").mkdir()
-    assert comgr_temp.sweep() == 0
+    assert comgr_temp.sweep() == [] and path.is_file()
+    os.utime(path, (1, 1))
+    assert comgr_temp.sweep() == [] and not path.exists()
 
 
 @pytest.mark.parametrize("field,value", [
-    ("created", float("nan")), ("created", "x"), ("created", [1]), ("start", "x"),
+    ("since", float("nan")), ("since", "x"), ("since", [1]), ("since", 10 ** 400), ("start", "x"),
     ("start", {"created": float("inf")}), ("start", {"boot": 1, "ticks": "a"}), ("space", 7)])
 def test_a_wrong_optional_field_never_raises(temp, process, field, value):
     pid, end = process()
@@ -202,29 +211,14 @@ def test_a_path_in_a_record_is_not_used(temp, process, tmp_path):
     assert other.is_dir() and not own.exists()
 
 
-def test_one_bad_record_does_not_stop_the_others(temp, process, monkeypatch):
+def test_one_bad_record_does_not_stop_the_others(temp, process):
     pid, end = process()
     d = _folder(temp, pid)
-    real = comgr_temp._is_gone
-
-    def odd(rec):
-        if rec["pid"] == 1:
-            raise RuntimeError("odd record")
-        return real(rec)
-    monkeypatch.setattr(comgr_temp, "_is_gone", odd)
-    rec = {**json.loads(_records()[0].read_text()), "pid": 1}
-    (comgr_temp.records_dir() / "0-bad.json").write_text(json.dumps(rec))
+    (comgr_temp.records_dir() / "0-bad.json").write_text(
+        json.dumps({**json.loads(_records()[0].read_text()), "since": 10 ** 400}))
     end()
-    comgr_temp.sweep()
+    comgr_temp.finish(wait=0)
     assert not d.exists()
-
-
-def test_a_flood_of_records_is_cut_off(temp, monkeypatch):
-    monkeypatch.setattr(comgr_temp, "_MAX_RECORDS", 5)
-    comgr_temp.records_dir().mkdir(parents=True)
-    for i in range(20):
-        (comgr_temp.records_dir() / f"{i}-a.json").write_text("{}")
-    assert len(comgr_temp._record_paths()) == 5
 
 
 def test_the_watcher_removes_them_without_being_asked(temp, process, monkeypatch):
@@ -244,13 +238,30 @@ def test_the_watcher_removes_them_without_being_asked(temp, process, monkeypatch
     assert not thread.is_alive()
 
 
-def test_finish_waits_for_the_processes_below_this_one(temp, process):
+def test_finish_waits_for_the_processes_it_started(temp, process):
     pid, end = process()
     d = _folder(temp, pid)
     import threading
     threading.Timer(0.5, end).start()
     comgr_temp.finish(wait=10)
     assert not d.exists()
+
+
+def test_finish_does_not_wait_for_what_another_process_started(temp, process, monkeypatch):
+    pid, _end = process()
+    path = _records()[0]
+    path.write_text(json.dumps({**json.loads(path.read_text()), "starter": "1"}))
+    monkeypatch.setattr(comgr_temp.time, "sleep", lambda s: pytest.fail("waited"))
+    comgr_temp.finish(wait=30)
+
+
+def test_the_starter_is_handed_to_the_processes_started(temp, monkeypatch):
+    monkeypatch.setattr(comgr_temp, "_watch_loop", lambda: None)
+    monkeypatch.setattr(comgr_temp, "_registered_pid", None)
+    monkeypatch.setenv(comgr_temp._STARTER_VAR, "1")
+    comgr_temp.watch()
+    comgr_temp.register()
+    assert json.loads(_records()[0].read_text())["starter"] == str(os.getpid())
 
 
 def test_a_process_registers_once(temp, monkeypatch):

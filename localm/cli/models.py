@@ -2477,7 +2477,7 @@ def _restarted_as(instances, entry: dict, entries: list) -> Optional[str]:
 @click.argument("instance_id", required=False)
 @click.option("--all", "stop_all", is_flag=True,
               help="Stop every running localm instance.")
-@click.option("--timeout", default=10.0, show_default=True, type=float,
+@click.option("--timeout", default=25.0, show_default=True, type=float,
               help="Seconds to wait for a clean shutdown before forcing the "
                    "process to end.")
 def stop_cmd(instance_id, stop_all, timeout):

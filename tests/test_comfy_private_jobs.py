@@ -17,12 +17,22 @@ from localm.media import comfy_client as cc
 
 class _Comfy:
     def __init__(self, root):
-        self.output, self.temp = root / "output", root / "temp"
-        self.output.mkdir()
-        self.temp.mkdir()
+        self.output, self.temp, self.input = root / "output", root / "temp", root / "input"
+        for d in (self.output, self.temp, self.input):
+            d.mkdir()
+        self.upload_bytes = b""
         self.history: dict = {}
         self.running: list = []
         self.stops = True
+        self.ignores_stop = False
+        self.history_ok = True
+        self.takes_ids = False
+        self.reply = "ok"
+        self.sent: list = []
+
+    @staticmethod
+    def uploaded_as(body):
+        return body.split(b'filename="')[1].split(b'"')[0].decode()
 
     def job(self, pid, *files, status="success"):
         outputs = {}
@@ -65,22 +75,42 @@ def comfy(tmp_path):
                 pid = url.path.rsplit("/", 1)[1]
                 return self._json({pid: state.history[pid]} if pid in state.history else {})
             if url.path == "/queue":
-                return self._json({"queue_running": [[0, p] for p in state.running],
+                return self._json({"queue_running": [
+                    p if isinstance(p, list) else [0, p] for p in state.running],
                                    "queue_pending": []})
+            if url.path == "/history":
+                return self._json(state.history)
             return self._json({}, 404)
 
         def do_POST(self):
             body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            if self.path == "/history" and not state.history_ok:
+                return self._json({}, 500)
             if self.path == "/history":
                 for pid in json.loads(body).get("delete", []):
                     state.history.pop(pid, None)
                 return self._json({})
             if self.path == "/interrupt":
-                if state.stops:
+                if state.stops and not state.ignores_stop:
                     state.running.clear()
                 return self._json({}, 200 if state.stops else 500)
             if self.path == "/prompt":
-                return self._json({"prompt_id": "p1"})
+                sent = json.loads(body)
+                state.sent.append(sent)
+                pid = sent.get("prompt_id") if state.takes_ids else "p1"
+                if state.reply == "refuse":
+                    return self._json({"error": {"message": "bad"}}, 400)
+                if state.reply in ("drop", "unreadable"):
+                    state.running.append([0, pid, sent["prompt"], sent.get("extra_data", {})])
+                    state.job(pid, ("output", "a.png"))
+                if state.reply in ("drop", "lost"):
+                    return self.connection.close()
+                if state.reply == "unreadable":
+                    return self._json({})
+                return self._json({"prompt_id": pid})
+            if self.path == "/upload/image":
+                (state.input / state.uploaded_as(body)).write_bytes(state.upload_bytes)
+                return self.connection.close()
             return self._json({}, 404)
 
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -161,7 +191,135 @@ def test_a_job_that_cannot_be_stopped_is_said_not_to_be_clean(comfy):
         comfy.stops = False
         return False, "Generation cancelled."
     ok, message = _run(comfy, job)
-    assert ok is False and "could not be asked which files" in message
+    assert ok is False and "ComfyUI refused to stop this job" in message and "p1" in message
+
+
+def test_a_job_that_does_not_stop_in_time_is_said_so_and_its_history_is_tried(comfy, monkeypatch):
+    monkeypatch.setattr(cc, "_PRIVATE_STOP_WAIT_S", 0.3)
+
+    def job():
+        _submit(comfy)
+        comfy.running.append("p1")
+        comfy.ignores_stop = True
+        comfy.history["p1"] = {"outputs": {}}
+        return False, "Generation cancelled."
+    ok, message = _run(comfy, job)
+    assert ok is False and "asked to stop this job and had not stopped it after 0.3 s" in message
+    assert "could not be asked" not in message and comfy.history == {}
+
+
+def test_a_history_entry_that_stays_is_reported(comfy):
+    def job():
+        _submit(comfy)
+        comfy.job("p1", status="error")
+        comfy.history_ok = False
+        return False, "ComfyUI execution failed"
+    ok, message = _run(comfy, job)
+    assert ok is False and "history entry of this job, which holds the prompt, may remain" in message
+
+
+@pytest.mark.parametrize("takes_ids", [True, False])
+@pytest.mark.parametrize("reply", ["drop", "unreadable"])
+def test_a_job_whose_reply_is_lost_is_found_and_removed(comfy, takes_ids, reply):
+    comfy.takes_ids, comfy.reply = takes_ids, reply
+
+    def job():
+        kind, _value = cc.comfy_submit_prompt(comfy.url, {})
+        assert kind != cc.SUBMIT_OK
+        return False, "not queued"
+    assert _run(comfy, job) == (False, "not queued")
+    assert comfy.running == [] and _left(comfy) == [] and comfy.history == {}
+
+
+def test_a_job_that_is_found_nowhere_is_said_with_its_id(comfy, monkeypatch):
+    monkeypatch.setattr(cc, "_PRIVATE_STOP_WAIT_S", 0.3)
+    comfy.reply = "lost"
+
+    def job():
+        cc.comfy_submit_prompt(comfy.url, {})
+        return False, "not queued"
+    ok, message = _run(comfy, job)
+    assert ok is False and "did not confirm this job" in message
+    assert comfy.sent[0]["prompt_id"] in message
+
+
+def test_a_job_comfyui_refused_is_not_looked_for(comfy, monkeypatch):
+    monkeypatch.setattr(cc, "_find_unanswered", lambda *a: pytest.fail("looked for it"))
+    comfy.reply = "refuse"
+
+    def job():
+        assert cc.comfy_submit_prompt(comfy.url, {})[0] == cc.SUBMIT_HTTP_ERROR
+        return False, "rejected"
+    assert _run(comfy, job) == (False, "rejected")
+
+
+def test_outside_a_private_run_the_submitted_job_is_unchanged(comfy):
+    cc.comfy_submit_prompt(comfy.url, {"1": {}})
+    assert comfy.sent == [{"prompt": {"1": {}}}]
+
+
+def test_an_uploaded_image_whose_reply_is_lost_is_removed(comfy, tmp_path):
+    from tests.media_bytes import png_bytes
+    source = tmp_path / "in.png"
+    source.write_bytes(png_bytes())
+    comfy.upload_bytes = png_bytes()
+
+    def job():
+        with pytest.raises(OSError):
+            cc._upload_image(source, comfy.url)
+        return False, "upload failed"
+    assert _run(comfy, job) == (False, "upload failed")
+    assert list(comfy.input.iterdir()) == []
+
+
+def test_stopping_localm_ends_a_private_job_and_refuses_a_new_one(comfy, monkeypatch):
+    from localm.media import held
+
+    def job():
+        _submit(comfy)
+        comfy.running.append("p1")
+        comfy.job("p1", ("output", "a.png"))
+        comfy.history.pop("p1")
+        held.CLOSING.set()
+        status, _v = cc.comfy_poll_until_done(comfy.url, "p1", max_poll_seconds=30)
+        assert status == cc.POLL_CANCELLED
+        comfy.job("p1", ("output", "a.png"))
+        assert cc.comfy_submit_prompt(comfy.url, {})[0] == cc.SUBMIT_ERROR
+        return False, "Generation cancelled."
+    try:
+        assert _run(comfy, job) == (False, "Generation cancelled.")
+    finally:
+        held.CLOSING.clear()
+    assert _left(comfy) == [] and len(comfy.sent) == 1
+    assert cc.wait_private_runs(0)
+
+
+def test_a_job_is_noted_while_it_may_leave_something_in_comfyui(comfy):
+    from localm.media import held
+
+    def notes():
+        return [p.read_text() for p in held.root_dir().glob("*/comfy/*")]
+
+    def job():
+        _submit(comfy)
+        assert len(notes()) == 1 and "p1" in notes()[0] and comfy.url in notes()[0]
+        comfy.job("p1", ("output", "a.png"))
+        return False, "failed"
+    _run(comfy, job)
+    assert notes() == []
+
+    def broken():
+        _submit(comfy)
+        comfy.history_ok = False
+        raise KeyboardInterrupt
+    with pytest.raises(KeyboardInterrupt):
+        _run(comfy, broken)
+    assert len(notes()) == 1
+    held.discard_all()
+    assert len(notes()) == 1
+    told: list = []
+    held.sweep_leftovers(told.append)
+    assert len(told) == 1 and "p1" in told[0] and notes() == []
 
 
 def test_an_output_that_stays_withholds_the_result(comfy, tmp_path):

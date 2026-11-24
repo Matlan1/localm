@@ -6,29 +6,26 @@ in the temp folder of the process that uses it and does not remove them when
 that process is ended from outside, as localm ends its GPU workers.
 
 A process that is about to load a HIP runtime calls :func:`register`: it records
-its pid and start identity in ``<data dir>/run/comgr-temp/``. The
-localm process that starts workers (:func:`watch`) removes the folders of each
-recorded process once that process is gone, and :func:`finish` does it for the
-last ones before a localm process ends. Records a killed localm left are handled
-at the next start.
+its pid in ``<data dir>/run/comgr-temp/``. The localm process that starts workers
+(:func:`watch`) removes the folders of each recorded process once that process is
+gone, and :func:`finish` does it for the last ones before a localm process ends.
+Records a killed localm left are handled at the next start.
 
 A folder is removed only when it is in this process's temp folder, which every
-localm process of one data folder shares, its name carries a recorded pid, the recorded
-process is gone, the folder was last changed while that process was running, and
-it holds no file; nothing is followed through a link. A record's own change time
-is when its process was last seen running."""
+localm process of one data folder shares, its name carries a recorded pid, no
+process has that pid, the folder was last changed between the record's start and
+the time the process was last seen (the record's own change time), and it holds
+no file; nothing is followed through a link."""
 
 from __future__ import annotations
 
 import importlib
 import json
 import logging
-import math
 import os
 import secrets
 import stat
 import sys
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -41,13 +38,15 @@ logger = logging.getLogger("localm")
 _POLL_SECONDS = 2.0
 _IDLE_POLLS = 150
 _FINISH_WAIT_SECONDS = 3.0
-_FINISH_LIMIT_SECONDS = 8.0
 _SEEN_MARGIN_SECONDS = 30.0
+_FOREIGN_RECORD_SECONDS = 86400.0
+
+# The process that starts the GPU workers, handed to them by environment.
+_STARTER_VAR = "LOCALM_COMGR_STARTER"
 
 # A record is data from a folder anything may write to: what is larger, or not of
-# this shape, is ignored.
+# this shape, is removed unread.
 _MAX_RECORD_BYTES = 4096
-_MAX_RECORDS = 1000
 
 _lock = threading.Lock()
 _watcher: Optional[threading.Thread] = None
@@ -72,35 +71,19 @@ def records_dir() -> Path:
 
 def _temp_folder() -> str:
     """The folder native code of this process gets as its temp folder."""
-    if sys.platform == "win32":
-        import ctypes
-        buf = ctypes.create_unicode_buffer(32768)
-        if ctypes.windll.kernel32.GetTempPathW(len(buf), buf):
-            return os.path.abspath(buf.value)
-        return tempfile.gettempdir()
-    for var in ("TMPDIR", "TMP", "TEMP", "TEMPDIR"):
-        if os.environ.get(var):
-            return os.path.abspath(os.environ[var])
-    return "/tmp"
+    names = (("TMP", "TEMP", "USERPROFILE") if sys.platform == "win32"
+             else ("TMPDIR", "TMP", "TEMP", "TEMPDIR"))
+    return next((os.path.abspath(os.environ[n]) for n in names if os.environ.get(n)), "/tmp")
 
 
-def _record(pid: int) -> None:
+def _record(pid: int, since: float, starter: str) -> None:
     d = records_dir()
     d.mkdir(parents=True, exist_ok=True)
-    data = {"pid": pid, "start": procid.process_start_identity(pid),
-            "space": procid.pid_space_id(), "created": _started_at(pid)}
+    data = {"pid": pid, "since": since, "start": procid.process_start_identity(pid),
+            "space": procid.pid_space_id(), "starter": starter}
     tmp = d / f".{pid}-{secrets.token_hex(4)}.tmp"
     tmp.write_text(json.dumps(data), encoding="utf-8")
     os.replace(tmp, d / f"{pid}-{secrets.token_hex(4)}.json")
-
-
-def _started_at(pid: int) -> Optional[float]:
-    try:
-        import psutil
-        return float(psutil.Process(pid).create_time())
-    except Exception as e:
-        logger.debug("comgr temp: start time of process %s unknown (%s)", pid, e)
-        return None
 
 
 def register() -> None:
@@ -113,7 +96,7 @@ def register() -> None:
     try:
         if _home is None:
             importlib.import_module("localm.config")
-        _record(os.getpid())
+        _record(os.getpid(), time.time(), os.environ.get(_STARTER_VAR, ""))
     except Exception as e:
         logger.debug("comgr temp: could not record process %s (%s)", os.getpid(), e)
 
@@ -137,40 +120,24 @@ def adopt_tree(pid: int) -> None:
         import psutil
         root = psutil.Process(pid)
         for p in [root, *root.children(recursive=True)]:
-            _record(p.pid)
+            _record(p.pid, p.create_time(), str(os.getpid()))
     except Exception as e:
         logger.debug("comgr temp: could not record the processes of %s (%s)", pid, e)
 
 
 def _read(path: Path) -> Optional[dict]:
     """The record in *path*, or None for anything that is not one: not a plain
-    file, too large, not JSON, or a field of the wrong type or range."""
+    file, too large, not JSON, or a pid or start of the wrong type or range."""
     try:
         st = os.lstat(path)
         if not stat.S_ISREG(st.st_mode) or st.st_size > _MAX_RECORD_BYTES:
             return None
-        with open(path, "rb") as f:
-            data = json.loads(f.read(_MAX_RECORD_BYTES + 1).decode("utf-8"))
-    except (OSError, ValueError, RecursionError):
+        data = json.loads(path.read_bytes()[:_MAX_RECORD_BYTES].decode("utf-8"))
+        if not procid.is_pid(data["pid"]) or type(data["since"]) not in (int, float):
+            return None
+        return {**data, "since": float(data["since"])}
+    except (OSError, ValueError, KeyError, TypeError, OverflowError, RecursionError):
         return None
-    if not isinstance(data, dict) or not procid.is_pid(data.get("pid")):
-        return None
-    created = data.get("created")
-    if not isinstance(created, (int, float)) or not math.isfinite(created):
-        data["created"] = None
-    return data
-
-
-def _is_gone(rec: dict) -> Optional[bool]:
-    """True when the recorded process has ended, also when another process has its
-    pid by now; False while it runs; None when that cannot be told."""
-    if rec.get("space") != procid.pid_space_id():
-        return None
-    alive = procid.pid_liveness(rec["pid"])
-    if not alive:
-        return True if alive is False else None
-    return procid.start_identity_differs(rec.get("start"),
-                                         procid.process_start_identity(rec["pid"]))
 
 
 def _is_plain_dir(st: os.stat_result) -> bool:
@@ -179,92 +146,81 @@ def _is_plain_dir(st: os.stat_result) -> bool:
     return stat.S_ISDIR(st.st_mode) and not reparse
 
 
-def _remove_empty_tree(path: str) -> bool:
-    """Remove the folder *path* when it and every folder in it hold no file and no
-    link. Returns whether it is gone."""
-    try:
-        if not _is_plain_dir(os.lstat(path)):
-            return False
-        with os.scandir(path) as it:
-            names = [e.path for e in it]
-        for child in names:
-            if not _remove_empty_tree(child):
-                return False
-        os.rmdir(path)
-        return True
-    except FileNotFoundError:
-        return True
-    except OSError as e:
-        logger.debug("comgr temp: %s stays (%s)", path, e)
-        return False
-
-
-def _remove_folders(rec: dict, last_seen: float) -> int:
-    """Remove the empty comgr folders the recorded process, last seen running at
-    *last_seen*, made. Returns how many."""
-    prefix = f"comgr-{int(rec['pid'])}-"
-    created = rec["created"]
-    until = last_seen + _SEEN_MARGIN_SECONDS
-    holder = _started_at(rec["pid"]) if procid.pid_liveness(rec["pid"]) else None
-    if holder is not None:
-        until = min(until, holder)
-    removed = 0
-    try:
-        with os.scandir(_temp_folder()) as it:
-            found = [e for e in it if e.name.startswith(prefix)]
-    except OSError as e:
-        logger.debug("comgr temp: cannot list the temp folder (%s)", e)
-        return 0
-    for e in found:
-        try:
-            st = os.lstat(e.path)
-        except OSError:
-            continue
-        if not _is_plain_dir(st):
-            continue
-        if st.st_mtime > until or (created is not None and st.st_mtime < created - 2):
-            continue
-        if hasattr(os, "getuid") and st.st_uid != os.getuid():
-            continue
-        removed += _remove_empty_tree(e.path)
-    return removed
-
-
-def _record_paths() -> list[Path]:
-    """The record files, at most ``_MAX_RECORDS``; empty when there are none."""
-    found: list[Path] = []
-    try:
-        with os.scandir(records_dir()) as it:
-            for e in it:
-                if e.name.endswith(".json"):
-                    found.append(Path(e.path))
-                    if len(found) >= _MAX_RECORDS:
-                        break
-    except OSError:
-        return found   # See test_no_records_folder_is_nothing_to_do.
+def _folders_in(path: str) -> Optional[list[str]]:
+    """*path* and every folder below it, deepest last, or None when one of them is a
+    link or holds anything but folders."""
+    if not _is_plain_dir(os.lstat(path)):
+        return None
+    found = [path]
+    for child in os.listdir(path):
+        below = _folders_in(os.path.join(path, child))
+        if below is None:
+            return None
+        found += below
     return found
 
 
-def sweep() -> int:
-    """Remove the folders of every recorded process that is gone, and its record.
-    Returns how many records of running processes are left. Never raises."""
-    running = 0
+def _remove_folders(dead: dict) -> int:
+    """Remove the empty comgr folders of the *dead* processes: pid to the
+    ``(since, last seen)`` times of its records. Returns how many."""
     removed = 0
-    for path in _record_paths():
+    with os.scandir(_temp_folder()) as it:
+        found = [(e.path, e.name.split("-")[1]) for e in it
+                 if e.name.startswith("comgr-") and e.name.count("-") >= 2]
+    for path, pid in found:
         try:
-            rec = _read(path)
-            gone = None if rec is None else _is_gone(rec)
-            if gone is False:
-                running += 1
-                os.utime(path)
-            if rec is None or gone is not True:
+            st = os.lstat(path)
+            if hasattr(os, "getuid") and st.st_uid != os.getuid():
                 continue
-            removed += _remove_folders(rec, path.stat().st_mtime)
-            path.unlink()
-        except Exception as e:   # noqa: BLE001 - one record never stops the others
+            if not any(since - 2 <= st.st_mtime <= seen + _SEEN_MARGIN_SECONDS
+                       for since, seen in dead.get(pid, ())):
+                continue
+            folders = _folders_in(path)
+            for folder in reversed(folders or ()):
+                os.rmdir(folder)
+            removed += folders is not None
+        except (OSError, RecursionError) as e:
+            logger.debug("comgr temp: %s stays (%s)", path, e)
+    return removed
+
+
+def sweep() -> list:
+    """Remove the folders of every recorded process that is gone, its record, and
+    what is no record. Returns the starters of the recorded processes that still
+    run. Never raises."""
+    running: list = []
+    dead: dict = {}
+    done: list = []
+    try:
+        paths = list(records_dir().iterdir())
+    except OSError:
+        return running   # See test_no_records_folder_is_nothing_to_do.
+    for path in paths:
+        try:
+            seen = path.stat().st_mtime
+            rec = _read(path)
+            if rec is None or rec.get("space") != procid.pid_space_id():
+                limit = _SEEN_MARGIN_SECONDS if rec is None else _FOREIGN_RECORD_SECONDS
+                if time.time() - seen > limit:
+                    done.append(path)
+            elif procid.pid_liveness(rec["pid"]) is False:
+                dead.setdefault(str(rec["pid"]), []).append((rec["since"], seen))
+                done.append(path)
+            elif not procid.start_identity_differs(
+                    rec.get("start"), procid.process_start_identity(rec["pid"])):
+                running.append(rec.get("starter"))
+                os.utime(path)
+        except OSError as e:
             logger.debug("comgr temp: record %s stays (%s)", path, e)
-    if removed:
-        logger.debug("comgr temp: removed %d empty folder(s) of ended GPU processes", removed)
+    try:
+        removed = _remove_folders(dead) if dead else 0
+        for path in done:
+            if path.is_file():
+                path.unlink(missing_ok=True)
+        if removed:
+            logger.debug("comgr temp: removed %d empty folder(s) of ended GPU processes", removed)
+    except OSError as e:
+        logger.debug("comgr temp: cleanup failed (%s)", e)
     return running
 
 
@@ -276,6 +232,7 @@ def watch() -> None:
     Never raises."""
     global _watcher
     with _lock:
+        os.environ[_STARTER_VAR] = str(os.getpid())
         _hook_exit()
         if _watcher is not None and _watcher.is_alive():
             return
@@ -306,41 +263,14 @@ def _hook_exit() -> None:
 
 def finish(wait: float = _FINISH_WAIT_SECONDS) -> None:
     """The last cleanup of a localm process: stop this process's VRAM probe
-    daemon, wait at most *wait* seconds for the recorded processes below this one
-    to end, and remove their folders. Returns after ``_FINISH_LIMIT_SECONDS`` at
-    the latest. Never raises."""
-    t = threading.Thread(target=_finish, args=(wait,), name="localm-comgr-finish",
-                         daemon=True)
+    daemon, wait at most *wait* seconds for the recorded processes it started to
+    end, and remove their folders. Never raises."""
     try:
-        t.start()
-    except RuntimeError as e:
-        logger.debug("comgr temp: no final cleanup (%s)", e)
-        return
-    t.join(_FINISH_LIMIT_SECONDS)
-
-
-def _finish(wait: float) -> None:
-    try:
-        mine = _descendants()
         loader = sys.modules.get("localm.inference.backends.llamacpp._loader")
         if loader is not None:
             loader.stop_probe_daemon(wait=1.0)
         deadline = time.monotonic() + wait
-        while _recorded_running(mine) and time.monotonic() < deadline:
+        while str(os.getpid()) in sweep() and time.monotonic() < deadline:
             time.sleep(0.1)
-        sweep()
     except Exception as e:   # noqa: BLE001 - never blocks an exit
         logger.debug("comgr temp: final cleanup failed (%s)", e)
-
-
-def _descendants() -> set:
-    import psutil
-    return {p.pid for p in psutil.Process().children(recursive=True)}
-
-
-def _recorded_running(pids: set) -> bool:
-    for path in _record_paths():
-        rec = _read(path)
-        if rec is not None and rec["pid"] in pids and _is_gone(rec) is False:
-            return True
-    return False

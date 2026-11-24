@@ -122,6 +122,8 @@ class Job:
     # its work runs inside one, and the activity record keeps no finished row of
     # it unless diagnostics are kept on purpose.
     private: bool = False
+    # True for a row that only tells its reader something (JobManager.add_note).
+    note: bool = False
 
     # ---- durable record -------------------------------------------------- #
     # A row carries only what a listing and an ownership check need: no argv and
@@ -358,6 +360,7 @@ class Job:
             "created_at": self.created_at,
             "finished_at": self.finished_at,
             "cancellable": self.status == "running",
+            **({"note": True} if self.note else {}),
         }
         if progress:
             pct = progress.get("pct")
@@ -1364,6 +1367,14 @@ class JobManager:
         threading.Thread(target=home_bound(_run, name=f"job {kind}"),
                          daemon=True).start()
         return job
+
+    def add_note(self, kind: str, text: str, owner: str | None) -> None:
+        """List *text* as an interrupted operation of *owner*."""
+        job = Job(id=uuid.uuid4().hex[:12], kind=kind, argv=[], status="interrupted",
+                  label=text, owner=owner, finished_at=time.time(), note=True)
+        job.push({"type": "line", "text": text})
+        job.push({"type": "end", "status": job.status, "returncode": None, "result": None})
+        self._register(job)
 
     def snapshot(self, visible=None) -> list:
         """Every tracked job as a listing row, newest first.

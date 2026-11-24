@@ -679,8 +679,10 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
             m = agent.mode.value
             notes = {
                 "privacy": (
-                    "nothing saved; readline + shell history files scrubbed on exit. "
-                    "cmd.exe: no history anyway. "
+                    "nothing saved automatically; on exit the lines that start localm's "
+                    "coder are removed from the shell history files. An open bash or zsh "
+                    "writes its own history when it closes, so the line of this session "
+                    "goes with the next privacy session. cmd.exe keeps no history. "
                     "Online providers are explicit opt-in - warning shown if active."
                 ),
                 "log":     "JSONL audit trail → <data dir>/sessions/",

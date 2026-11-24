@@ -22,7 +22,6 @@ set up, else the native ACE-Step runtime) and reads this plugin's own config
 from __future__ import annotations
 
 import os
-import shutil
 import time
 from pathlib import Path
 
@@ -32,7 +31,7 @@ from pydantic import BaseModel, Field
 
 from localm.inference.http_server import path_formatter, principal_id
 from localm.audit import carry_request_privacy
-from localm.media import gallery
+from localm.media import gallery, held
 from localm.media import paths as media_paths
 from localm.media.native_models import check_request
 from localm.plugins.media_config import (
@@ -271,10 +270,11 @@ async def music(req: MusicRequest, request: Request):
             )
             job.push({"type": "line", "text": message})
             if ok:
+                track_path = gallery.settle("music", track_path, keeps)
                 job.result = track_path.name
                 gallery.push_stamp_warning(
                     job, gallery.record_owner("music", track_path, owner))
-                if not kept:
+                if held.is_held(track_path):
                     gallery.push_held(job)
             # Recorded before the chat model reload that runs on leaving the block.
             job.mark_outcome("done" if ok else "failed")
@@ -336,28 +336,9 @@ async def music_delete(name: str):
 @_router.post("/api/music/file/{name}/move",
               dependencies=[Depends(gallery.require_owner("music"))])
 async def music_move(name: str, req: MoveFileRequest, request: Request):
-    """Move a generated track (and its sidecar) to a folder on this machine.
-
-    The destination is checked BEFORE the mkdir: require_owner proves artifact
-    ownership, not authority over the host filesystem."""
-    path = _music_path(name)
-    dest_dir = media_paths.confined_move_dest(request, req.dest)
-    show = path_formatter(request)
-    try:
-        dest_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        raise HTTPException(400, f"Cannot create destination: {show(e)}") from e
-    if not dest_dir.is_dir():
-        raise HTTPException(400, f"Not a directory: {show(req.dest)}")
-    target = dest_dir / path.name
-    if target.exists():
-        raise HTTPException(409, f"Already exists: {show(target)}")
-    shutil.move(str(path), str(target))
-    sidecar = path.with_suffix(path.suffix + ".json")
-    if sidecar.is_file():
-        shutil.move(str(sidecar), str(dest_dir / sidecar.name))
-    gallery.forget_owner("music", name)     # left the gallery dir
-    return {"status": "moved", "path": show(target)}
+    """Move a generated track (and its sidecar) to a folder on this machine."""
+    return gallery.move_out(request, "music", _music_path(name), req.dest,
+                            path_formatter(request))
 
 
 @_router.post("/api/music/file/{name}/rename",

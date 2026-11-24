@@ -89,30 +89,47 @@ In privacy mode a generated image, track or clip is not kept unless you choose t
   an input and upscaled; the Images, Music and Video pages list such results under the
   page's result, not in History, and **Remove all now** deletes them at once. No
   sidecar, owner index or other record of them is written, and the browser is told not
-  to store them. The folder is deleted when
-  localm stops or restarts. After a crash or a killed process it is deleted at the next
-  start (`localm gui`, `serve`, `run` or `mcp`). A file another program holds open at
+  to store them. With several keys, a result can be seen, saved and used as an input only
+  by the key that made it and the owner. The folder is deleted when localm stops or
+  restarts; a generation still running then is cancelled first. After a crash, a killed
+  process or a closed console window it is deleted at the next start (`localm gui`,
+  `serve`, `run`, `mcp`, or `image`, `music` and `video` in privacy mode), and so is what a generation that does not end within 12
+  seconds of a stop writes after it. A file another program holds open at
   that moment is reported in the log and tried again at the next start. Files are
   deleted, not overwritten: recovery tools may find them on the disk.
+- Whether a result is kept is decided when it is written: what is written after a switch
+  to privacy mode is not kept, each image of one request by itself.
 - **Saving always works**: the download and move actions, `-o` of `localm image`,
   `localm music` and `localm video`, `output_path` of the MCP `generate_image` tool,
   `/save-media` in `localm run`, and the coder's `generate_image` tool, which writes the
-  project file it was asked for. Without `-o` the three commands ask whether to save the
-  result; with nobody at the terminal to ask they refuse before generating.
+  project file it was asked for. A result moved into a History folder belongs to the key
+  that made it, and its entry in the owner index is written then. Without `-o` the three
+  commands ask whether to save the result, and for another path while it cannot be saved;
+  with nobody at the terminal to ask they refuse before generating.
   `POST /v1/images/generations` returns the image in the response and keeps none.
 - Media kept earlier, or made in `log` or `full` mode, is never touched.
 
 When ComfyUI makes the media, localm removes the job's files from ComfyUI's own output
-and temp folders and its history entry, also when the job fails or is cancelled. It
+and temp folders and its history entry, also when the job fails or is cancelled, when
+localm stops or restarts, and when ComfyUI's answer to the job did not arrive (the job
+is then looked for in its queue and history). It
 deletes only files ComfyUI lists for that job whose content is what ComfyUI serves, in
 the output folder it can resolve (localm's own ComfyUI's folder, the ComfyUI output dir
 setting, or the `output` folder inside the ComfyUI folder) and the `temp` folder beside
 it. An output file that stays makes the job fail with "Output withheld" and the reason,
 and localm then keeps no file of it; a preview that stays in the temp folder is named in
-the job's output and is removed by ComfyUI when it next starts. What a ComfyUI you run
+the job's output and is removed by ComfyUI when it next starts. A cancelled job has ten
+seconds to stop, and localm is at the end of a stop after 12: what ComfyUI writes after
+that stays there, and the job's output names the job. After a crash or a kill nothing is
+left to remove what ComfyUI holds: a job queued in a ComfyUI that keeps running stays
+there, with its files, the image it was given and its history entry, until you clear it.
+While a private job is in ComfyUI, `<data dir>/run/private-media/` notes its ComfyUI
+address and job id and nothing else, and the next start says once that the job was cut
+off (on the console, and to the owner in the app). What a ComfyUI you run
 yourself or on another machine writes elsewhere (its own log, files a custom node saves
 without listing them) is outside localm's control. With `media` in `privacy_keep` the
-job's own output file is still removed from ComfyUI, its other files stay.
+output file and history entry of a finished job are still removed from ComfyUI; its other
+files stay, and so does what a failed or cancelled job left there.
 
 ### What privacy mode does not cover
 
@@ -179,7 +196,8 @@ which models:
   when it ends, unless "Keep diagnostics" is on; a server that dies leaves it, and the
   next start reports the operation as interrupted.
 - **Coordination files.** `<data dir>/run/` holds the running instance's entry, locks
-  that keep two localm processes from loading models at once (`run/gpu-lease/`), and the
+  that keep two localm processes from loading models at once (`run/gpu-lease/`), the
+  address and id of a private ComfyUI job in progress (`run/private-media/`), and the
   crash marker of the running server, removed at a normal stop.
 - **Caches.** `<data dir>/cache/` holds what the GPU driver compiles for a model
   (`cache/comgr` on AMD ROCm) and package and download caches. On AMD ROCm the driver

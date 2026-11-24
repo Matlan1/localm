@@ -18,17 +18,20 @@ import hashlib
 import json
 import os
 import re
+import socket
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
 from localm import netpolicy
 from localm.http_ssl import verified_urlopen
+from localm.media import held
 from localm.pathsafe import confined_under, is_unc_or_device_path
 
 
@@ -2767,13 +2770,31 @@ def _upload_image(image_path: Path, api_url: str) -> str:
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         method="POST",
     )
-    with _comfy_urlopen(req, timeout=30) as resp:
-        from localm.jsonreply import loads as _json_loads
-        result = _json_loads(resp.read().decode())
-    name = result.get("name")
-    if not name:
-        raise RuntimeError(f"ComfyUI upload returned no filename: {result}")
+    private = _PRIVATE_JOBS.get()
+    if private is not None:
+        private.uploading(api_url, upload_name)
+    try:
+        with _comfy_urlopen(req, timeout=30) as resp:
+            from localm.jsonreply import loads as _json_loads
+            result = _json_loads(resp.read().decode())
+        name = result.get("name")
+        if not name:
+            raise RuntimeError(f"ComfyUI upload returned no filename: {result}")
+    except Exception as e:
+        if private is not None and _certainly_refused(e):
+            private.uploaded(upload_name)
+        raise
+    if private is not None:
+        private.uploaded(upload_name)
     return name
+
+
+def _certainly_refused(error: Exception) -> bool:
+    """Whether *error* proves that ComfyUI did not take what was sent to it."""
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code < 500
+    return (isinstance(error, urllib.error.URLError)
+            and isinstance(error.reason, (ConnectionRefusedError, socket.gaierror)))
 
 
 # ---------------------------------------------------------------------------
@@ -2951,7 +2972,10 @@ class _PrivateJobs:
     is known about the files each of them left."""
 
     def __init__(self) -> None:
+        self.token = uuid.uuid4().hex
         self.api_urls: dict[str, str] = {}
+        self.unanswered: set[str] = set()
+        self.uploads: dict[str, str] = {}
         self.outputs: dict[str, dict] = {}
         self.handled: set[tuple] = set()
 
@@ -2960,8 +2984,38 @@ class _PrivateJobs:
         return (prompt_id, info.get("type") or "output", str(info.get("subfolder") or ""),
                 str(info.get("filename") or ""))
 
-    def submitted(self, api_url: str, prompt_id: str) -> None:
+    def uploading(self, api_url: str, name: str) -> None:
+        self._note(api_url, "none yet")
+        self.uploads[name] = api_url
+
+    def uploaded(self, name: str) -> None:
+        self.uploads.pop(name, None)
+
+    def submitting(self, api_url: str) -> str:
+        """The id a job about to be sent to *api_url* is to have there."""
+        if held.CLOSING.is_set():
+            raise RuntimeError("localm is stopping")
+        prompt_id = str(uuid.uuid4())
+        self._note(api_url, prompt_id)
         self.api_urls[prompt_id] = api_url
+        self.unanswered.add(prompt_id)
+        return prompt_id
+
+    def accepted(self, sent_id: str, prompt_id: str) -> None:
+        """ComfyUI has the job sent as *sent_id*, under *prompt_id*."""
+        self.unanswered.discard(sent_id)
+        self.api_urls[prompt_id] = self.api_urls.pop(sent_id)
+        if prompt_id != sent_id:
+            self._note(self.api_urls[prompt_id], prompt_id)
+
+    def refused(self, sent_id: str) -> None:
+        self.unanswered.discard(sent_id)
+        del self.api_urls[sent_id]
+
+    def _note(self, api_url: str, prompt_id: str) -> None:
+        parts = urllib.parse.urlsplit(api_url)
+        held.note_comfy_job(self.token, f"{parts.scheme}://{parts.netloc.rpartition('@')[2]}",
+                            prompt_id)
 
     def finished(self, prompt_id: str, entry: dict) -> None:
         self.outputs[prompt_id] = entry.get("outputs") or {}
@@ -2979,6 +3033,18 @@ _PRIVATE_JOBS: contextvars.ContextVar[Optional[_PrivateJobs]] = contextvars.Cont
 _PRIVATE_STOP_WAIT_S = 10.0
 _PRIVATE_ENTRY_WAIT_S = 2.0
 
+_JOB_MARKER = "localm_job"
+
+_private_runs = 0
+_private_runs_cv = threading.Condition()
+
+
+def wait_private_runs(seconds: float) -> bool:
+    """Wait at most *seconds* until no :func:`run_leaving_nothing` is running;
+    returns whether that is so."""
+    with _private_runs_cv:
+        return _private_runs_cv.wait_for(lambda: _private_runs == 0, max(0.0, seconds))
+
 
 def run_leaving_nothing(job, *, comfy_output_dir: Optional[str] = None,
                         comfy_workdir: Optional[str] = None) -> tuple[bool, str]:
@@ -2989,43 +3055,67 @@ def run_leaving_nothing(job, *, comfy_output_dir: Optional[str] = None,
     The files are the ones ComfyUI lists for the job; each is deleted only when
     it is byte for byte what ComfyUI serves under that name. A finished
     generation whose output file stays becomes ``(False, "Output withheld:
-    ...")``; any other file that stays is named in a WARNING line. An exception
-    from *job* propagates after the removal."""
+    ...")``; anything else that stays is named in a WARNING line. An exception
+    from *job* propagates after the removal. While localm is stopping, or after an
+    exception, what stays is also reported at its next start
+    (``held.note_comfy_job``)."""
+    global _private_runs
     jobs = _PrivateJobs()
-    token = _PRIVATE_JOBS.set(jobs)
+    with _private_runs_cv:
+        _private_runs += 1
     try:
-        ok, message = job()
-    except BaseException:
-        stay, temp = _remove_private_jobs(jobs, comfy_output_dir, comfy_workdir)
-        if stay or temp:
-            from localm.debuglog import logger
-            logger.warning("%s", "; ".join(stay + temp))
-        raise
+        token = _PRIVATE_JOBS.set(jobs)
+        try:
+            ok, message = job()
+        except BaseException:
+            stay, other = _remove_private_jobs(jobs, comfy_output_dir, comfy_workdir)
+            if stay or other:
+                from localm.debuglog import logger
+                logger.warning("%s", "; ".join(stay + other))
+            else:
+                held.forget_comfy_job(jobs.token)
+            raise
+        finally:
+            _PRIVATE_JOBS.reset(token)
+        stay, other = _remove_private_jobs(jobs, comfy_output_dir, comfy_workdir)
+        if not held.CLOSING.is_set() or not (stay or other):
+            held.forget_comfy_job(jobs.token)
+        if stay and ok:
+            return False, f"Output withheld: WARNING: {'; '.join(stay + other)}."
+        if stay or other:
+            message = _with_warning(message, f"WARNING: {'; '.join(stay + other)}.")
+        return ok, message
     finally:
-        _PRIVATE_JOBS.reset(token)
-    stay, temp = _remove_private_jobs(jobs, comfy_output_dir, comfy_workdir)
-    if stay and ok:
-        return False, f"Output withheld: WARNING: {'; '.join(stay + temp)}."
-    if stay or temp:
-        message = _with_warning(message, f"WARNING: {'; '.join(stay + temp)}.")
-    return ok, message
+        with _private_runs_cv:
+            _private_runs -= 1
+            _private_runs_cv.notify_all()
 
 
 def _remove_private_jobs(jobs: _PrivateJobs, comfy_output_dir: Optional[str],
                          comfy_workdir: Optional[str]) -> tuple[list, list]:
-    """Remove what *jobs* left. Returns ``(reasons, temp_reasons)`` for the output
-    and the temp files that stay. Never raises an ``Exception``."""
+    """Remove what *jobs* left. Returns ``(reasons, other_reasons)`` for the output
+    files, and for the temp files, uploaded images and history entries, that stay.
+    Never raises an ``Exception``."""
     stay: list = []
-    temp: list = []
+    other: list = []
+    for sent_id in list(jobs.unanswered):
+        try:
+            reason = _find_unanswered(jobs, sent_id)
+        except Exception as e:
+            reason = f"({e})"
+        if reason:
+            jobs.refused(sent_id)
+            other.append("ComfyUI did not confirm this job and "
+                         f"{reason}; if it runs there, its files and its history entry stay "
+                         f"(job {sent_id})")
     for prompt_id, api_url in jobs.api_urls.items():
         try:
             outputs = jobs.outputs.get(prompt_id)
             if outputs is None:
-                outputs = _unfinished_job_outputs(api_url, prompt_id)
-                if outputs is None:
-                    stay.append("ComfyUI could not be asked which files this job left, so "
-                                "some may remain in its output or temp folder")
-                    continue
+                outputs, reason = _unfinished_job_outputs(api_url, prompt_id)
+                if reason:
+                    stay.append(f"{reason}, so files of job {prompt_id} may remain in its "
+                                "output or temp folder")
             root = _comfy_output_root(comfy_output_dir, api_url=api_url,
                                       comfy_workdir=comfy_workdir)
             for info in _listed_files(outputs):
@@ -3037,30 +3127,71 @@ def _remove_private_jobs(jobs: _PrivateJobs, comfy_output_dir: Optional[str],
                     continue
                 reason = _remove_listed_file(api_url, info, root, kind)
                 if reason:
-                    (temp if kind == "temp" else stay).append(reason)
-            clear_comfy_history(api_url, prompt_id)
+                    (other if kind == "temp" else stay).append(reason)
         except Exception as e:
             stay.append(f"files of this job may remain in ComfyUI's folders ({e})")
-    return list(dict.fromkeys(stay)), list(dict.fromkeys(temp))
+        if not clear_comfy_history(api_url, prompt_id):
+            other.append("ComfyUI's history entry of this job, which holds the prompt, may "
+                         f"remain (job {prompt_id})")
+    for name, api_url in jobs.uploads.items():
+        reason = remove_uploaded_input(api_url, name, comfy_output_dir=comfy_output_dir,
+                                       comfy_workdir=comfy_workdir)
+        if reason:
+            other.append(reason)
+    return list(dict.fromkeys(stay)), list(dict.fromkeys(other))
 
 
-def _unfinished_job_outputs(api_url: str, prompt_id: str) -> Optional[dict]:
-    """The outputs ComfyUI lists for a job that did not finish, after stopping it
-    and waiting (at most ``_PRIVATE_STOP_WAIT_S``) until it has left the queue and
-    (at most ``_PRIVATE_ENTRY_WAIT_S``) until its history entry is there.
-    ``{}`` when ComfyUI lists none, None when it cannot be asked or the job does
-    not stop."""
+def _find_unanswered(jobs: _PrivateJobs, sent_id: str) -> str:
+    """Look for the job sent as *sent_id*, whose reply did not arrive, in ComfyUI's
+    queue and history (for ``_PRIVATE_STOP_WAIT_S``), and note it as accepted.
+    Returns "" when it is found, else why not."""
+    api_url = jobs.api_urls[sent_id]
+    deadline = time.monotonic() + _PRIVATE_STOP_WAIT_S
+
+    def mine(item) -> bool:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            return False
+        extra = item[3] if len(item) > 3 else None
+        return item[1] == sent_id or (isinstance(extra, dict)
+                                      and extra.get(_JOB_MARKER) == sent_id)
+
+    while True:
+        items: list = []
+        try:
+            for path in ("/queue", "/history?max_items=64"):
+                with _comfy_urlopen(f"{api_url}{path}", timeout=10) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+                for key, value in data.items():
+                    items += value if key.startswith("queue_") else [value.get("prompt")]
+        except Exception as e:
+            return f"its queue and history could not be read ({e})"
+        for item in items:
+            if mine(item):
+                jobs.accepted(sent_id, str(item[1]))
+                return ""
+        if time.monotonic() >= deadline or held.CLOSING.is_set():
+            return "it was not in its queue or history"
+        time.sleep(0.25)
+
+
+def _unfinished_job_outputs(api_url: str, prompt_id: str) -> tuple[dict, str]:
+    """``(outputs, reason)``: the outputs ComfyUI lists for a job that did not
+    finish, after stopping it and waiting (at most ``_PRIVATE_STOP_WAIT_S``) until
+    it has left the queue and (at most ``_PRIVATE_ENTRY_WAIT_S``) until its history
+    entry is there, and "" or why they may not be all."""
+    unread = "ComfyUI could not be asked which files this job left"
     if not _comfy_job_stopped(api_url, prompt_id):
-        return None
+        return {}, "ComfyUI refused to stop this job"
     deadline = time.monotonic() + _PRIVATE_STOP_WAIT_S
     while True:
         lists = _comfy_queue_lists(api_url, prompt_id)
         if lists is None:
-            return None
+            return {}, unread
         if not any(lists):
             break
         if time.monotonic() >= deadline:
-            return None
+            return {}, ("ComfyUI was asked to stop this job and had not stopped it after "
+                        f"{_PRIVATE_STOP_WAIT_S:g} s")
         time.sleep(0.25)
     deadline = time.monotonic() + _PRIVATE_ENTRY_WAIT_S
     try:
@@ -3068,12 +3199,12 @@ def _unfinished_job_outputs(api_url: str, prompt_id: str) -> Optional[dict]:
             with _comfy_urlopen(f"{api_url}/history/{prompt_id}", timeout=10) as response:
                 entry = json.loads(response.read().decode("utf-8")).get(prompt_id)
             if entry is not None or time.monotonic() >= deadline:
-                return (entry or {}).get("outputs") or {}
+                return (entry or {}).get("outputs") or {}, ""
             time.sleep(0.25)
     except Exception as e:
         from localm.debuglog import logger
         logger.debug("reading the ComfyUI history entry of %s failed: %s", prompt_id, e)
-        return None
+        return {}, unread
 
 
 def _listed_files(outputs: dict) -> list:
@@ -3311,10 +3442,11 @@ def _comfy_job_stopped(api_url: str, prompt_id: str) -> bool:
     """False only when ComfyUI still lists *prompt_id* and refuses a cancel. True
     when it is not listed, when the queue cannot be read, and when the cancel is
     accepted (the job may take a moment to leave the queue)."""
-    lists = _comfy_queue_lists(api_url, prompt_id)
-    if lists is None or not any(lists):
-        return True
-    return cancel_comfy_prompt(api_url, prompt_id)
+    for _ in range(2):
+        lists = _comfy_queue_lists(api_url, prompt_id)
+        if lists is None or not any(lists) or cancel_comfy_prompt(api_url, prompt_id):
+            return True
+    return False
 
 
 def cancel_comfy_prompt(api_url: str, prompt_id: str) -> bool:
@@ -3412,30 +3544,38 @@ def comfy_submit_prompt(api_url: str, workflow: dict, *, timeout: float = 10.0):
       - ``SUBMIT_ERROR``     -> value is the ``Exception``
 
     The caller maps each kind to its own message text. The arms are tried in
-    order: an HTTPError, a URLError, then a catch-all Exception."""
+    order: an HTTPError, a URLError, then a catch-all Exception.
+
+    Inside :func:`run_leaving_nothing` the job carries an id and a marker chosen
+    here, so it can be found when ComfyUI's reply does not arrive."""
+    private = _PRIVATE_JOBS.get()
+    body: dict = {"prompt": workflow}
+    sent_id = ""
     try:
+        if private is not None:
+            sent_id = private.submitting(api_url)
+            body.update(prompt_id=sent_id, extra_data={_JOB_MARKER: sent_id})
         req = urllib.request.Request(
             f"{api_url}/prompt",
-            data=json.dumps({"prompt": workflow}).encode("utf-8"),
+            data=json.dumps(body).encode("utf-8"),
             headers={"Content-Type": "application/json"},
         )
         with _comfy_urlopen(req, timeout=timeout) as response:
             prompt_id = json.loads(response.read().decode("utf-8")).get("prompt_id")
         if not prompt_id:
             return SUBMIT_NO_ID, None
-        private = _PRIVATE_JOBS.get()
         if private is not None:
-            private.submitted(api_url, str(prompt_id))
+            private.accepted(sent_id, str(prompt_id))
         from localm.debuglog import logger
         for name in workflow_model_names(workflow):
             logger.info("comfy: job uses model %s", name)
         return SUBMIT_OK, prompt_id
-    except urllib.error.HTTPError as e:
-        return SUBMIT_HTTP_ERROR, e
-    except urllib.error.URLError as e:
-        return SUBMIT_URL_ERROR, e
     except Exception as e:
-        return SUBMIT_ERROR, e
+        if private is not None and sent_id and _certainly_refused(e):
+            private.refused(sent_id)
+        if isinstance(e, urllib.error.HTTPError):
+            return SUBMIT_HTTP_ERROR, e
+        return (SUBMIT_URL_ERROR if isinstance(e, urllib.error.URLError) else SUBMIT_ERROR), e
 
 
 # Poll outcomes (the "status" element of comfy_poll_until_done's return).
@@ -3527,7 +3667,7 @@ def comfy_poll_until_done(
       - ``POLL_CANCELLED``  -> value None. ``cancel_check()`` returned truthy; this
         helper has already issued ``cancel_comfy_prompt`` + ``clear_comfy_history``
         (inside :func:`run_leaving_nothing` the history is cleared there, after
-        the files it lists are removed).
+        the files it lists are removed, and localm stopping cancels too).
       - ``POLL_EXEC_ERROR`` -> value is the ``history_execution_error`` detail (str).
       - ``POLL_FINISHED``   -> value is the finished ``history[prompt_id]`` entry
         (dict); the caller reads its ``"outputs"`` for the medium's artifact.
@@ -3540,10 +3680,12 @@ def comfy_poll_until_done(
     import time
     start_time = time.time()
     last_poll_err: Optional[Exception] = None
+    private = _PRIVATE_JOBS.get()
     while time.time() - start_time < max_poll_seconds:
-        if cancel_check and cancel_check():
+        if (cancel_check and cancel_check()) or (private is not None
+                                                 and held.CLOSING.is_set()):
             cancel_comfy_prompt(api_url, prompt_id)
-            if _PRIVATE_JOBS.get() is None:
+            if private is None:
                 clear_comfy_history(api_url, prompt_id)
             return POLL_CANCELLED, None
         if on_tick is not None:
@@ -3559,7 +3701,6 @@ def comfy_poll_until_done(
                     if is_comfy_device_error(err) and spawned_pid(api_url) is not None:
                         mark_comfy_device_error(api_url, err)
                     return POLL_EXEC_ERROR, err
-                private = _PRIVATE_JOBS.get()
                 if private is not None:
                     private.finished(str(prompt_id), entry)
                 return POLL_FINISHED, entry
@@ -3568,7 +3709,10 @@ def comfy_poll_until_done(
             # remember the last failure so a crashed/unreachable ComfyUI is
             # distinguishable from a merely slow one if we time out below.
             last_poll_err = e
-        time.sleep(sleep_seconds)
+        if private is not None:
+            held.CLOSING.wait(sleep_seconds)
+        else:
+            time.sleep(sleep_seconds)
     cancel_comfy_prompt(api_url, prompt_id)
     return POLL_TIMEOUT, last_poll_err
 

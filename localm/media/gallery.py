@@ -16,10 +16,11 @@ file-serve route and never appears in a directory listing / history glob.
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from fastapi import HTTPException, Request
 
@@ -217,6 +218,22 @@ HELD_NOTE = ("Privacy mode: this is not kept. It is removed when localm stops; s
              "to keep it.")
 
 
+def settle(media_kind: str, path: Path, keeps: Optional[Callable[[], bool]]) -> Path:
+    """Where the file *path* a job has just written stays: *path* itself, or, when
+    it is in the gallery and *keeps* now answers False, the held folder it is moved
+    to without its sidecar. Raises ``OSError`` when it cannot be moved; it is then
+    deleted."""
+    if keeps is None or _held.is_held(path) or keeps():
+        return path
+    try:
+        target = _held.folder(media_kind) / path.name
+        _held.save_copy(path, target)
+    finally:
+        path.unlink(missing_ok=True)
+        path.with_suffix(path.suffix + ".json").unlink(missing_ok=True)
+    return target
+
+
 def push_held(job) -> None:
     """Tell the followers of *job* that its result is not kept."""
     job.push({"type": "held"})
@@ -342,7 +359,11 @@ def forget_owner(media_kind: str, name: str) -> None:
     index read or write failure. A held file's owner is dropped from memory."""
     if _held.tracks(media_kind, name):
         _held.forget(media_kind, name)
-        return
+    else:
+        _forget_entry(media_kind, name)
+
+
+def _forget_entry(media_kind: str, name: str) -> None:
     with _LOCK:
         pending = _pending(media_kind)
         pending.pop(name, None)
@@ -354,6 +375,70 @@ def forget_owner(media_kind: str, name: str) -> None:
         except (GalleryIndexUnreadable, OSError) as e:
             pending[name] = _FORGOTTEN
             _log_held(media_kind, "removal", name, e)
+
+
+def forget_never_kept(files: list) -> None:
+    """Drop the owner entries of the held *files* (``(kind, name)`` pairs) an ended
+    process left, except one that names a file of the gallery."""
+    from localm.media import paths
+    for kind, name in files:
+        if not (paths.gallery(kind) / name).exists():
+            _forget_entry(kind, name)
+
+
+def move_out(request: Request, media_kind: str, path: Path, dest: str, show) -> dict:
+    """The reply of a ``/move`` route: the generated file *path* (and its sidecar)
+    moved to the folder *dest*; *show* formats a path for the caller. A held file is copied, compared and then deleted,
+    so it gets the rights of its new folder. A file moved into a generated-media
+    gallery keeps its owner there.
+
+    The destination is checked BEFORE the mkdir: require_owner proves artifact
+    ownership, not authority over the host filesystem."""
+    from localm.media import paths
+    dest_dir = paths.confined_move_dest(request, dest)
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise HTTPException(400, f"Cannot create destination: {show(e)}") from e
+    if not dest_dir.is_dir():
+        raise HTTPException(400, f"Not a directory: {show(dest)}")
+    target = dest_dir / path.name
+    if target.exists():
+        raise HTTPException(409, f"Already exists: {show(target)}")
+    into = next((k for k in _held.KINDS if paths.gallery(k).resolve() == dest_dir), None)
+    out = {"status": "moved", "path": show(target)}
+    try:
+        owner = owner_of(media_kind, path.name)
+    except GalleryIndexUnreadable:
+        owner = None
+    if into is not None:
+        warning = stamp_owner(into, path.name, owner)
+        if warning:
+            out["warning"] = warning
+    was_held = _held.is_held(path)
+    try:
+        if was_held:
+            _held.save_copy(path, target)
+        else:
+            shutil.move(str(path), str(target))
+    except OSError as e:
+        if into is not None:
+            _forget_entry(into, path.name)
+        raise HTTPException(400, f"Cannot move: {show(e)}") from e
+    if was_held:
+        try:
+            path.unlink()
+        except OSError as e:
+            from localm.debuglog import logger
+            logger.warning("the original of a moved %s could not be deleted (%s); it is removed "
+                           "when localm stops", media_kind, e)
+            return out
+    sidecar = path.with_suffix(path.suffix + ".json")
+    if sidecar.is_file():
+        shutil.move(str(sidecar), str(dest_dir / sidecar.name))
+    if into != media_kind or _held.tracks(media_kind, path.name):
+        forget_owner(media_kind, path.name)
+    return out
 
 
 def _privileged(request: Request) -> bool:
@@ -403,6 +488,12 @@ def owned_names(request: Request, media_kind: str, names: list[str]) -> list[str
     except GalleryIndexUnreadable:
         return list(names) if _privileged(request) else []
     return [n for n in names if _caller_may_see(request, idx.get(n))]
+
+
+def may_use(request: Request) -> Callable[[Optional[str]], bool]:
+    """Whether the caller may use a held file with a recorded owner, as a function
+    of that owner."""
+    return lambda owner: _caller_may_see(request, owner)
 
 
 def _caller_may_see(request: Request, owner: Optional[str]) -> bool:
