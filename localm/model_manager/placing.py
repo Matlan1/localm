@@ -323,7 +323,7 @@ def place_files(files: dict[str, Path], base: Path, old: dict[str, tuple | None]
                 return True
             if json.loads(text)["phase"] == _PLACING:
                 _write(_PLACING, None)
-        except OSError as e:
+        except (OSError, ValueError, KeyError, TypeError, RecursionError) as e:
             logger.warning("could not settle %s: %s", record, e)
         return False
 
