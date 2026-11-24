@@ -564,6 +564,11 @@ class MemoryStore:
                     raise ValueError("vector sidecar has an unexpected structure")
                 ids = {r.id for r in self._records}
                 self._vectors = {k: v for k, v in vecs.items() if k in ids and v}
+                fps = data.get("fp") if isinstance(data, dict) else None
+                if isinstance(fps, dict):
+                    texts = {r.id: r.text for r in self._records}
+                    self._vectors = {k: v for k, v in self._vectors.items()
+                                     if fps.get(k) in (None, _text_fp(texts[k]))}
                 self._dim = data.get("dim") or _first_dim(self._vectors)
             except (json.JSONDecodeError, OSError, ValueError, RecursionError) as exc:
                 # The sidecar EXISTS but is corrupt/unreadable: degrade to no
@@ -594,8 +599,10 @@ class MemoryStore:
                                errors="surrogateescape")
         vf = self._vec_file()
         if self._vectors:
-            self._atomic_write(
-                vf, json.dumps({"dim": self._dim, "vectors": self._vectors}))
+            texts = {r.id: r.text for r in self._records}
+            self._atomic_write(vf, json.dumps({
+                "dim": self._dim, "vectors": self._vectors,
+                "fp": {k: _text_fp(texts[k]) for k in self._vectors if k in texts}}))
         else:
             vf.unlink(missing_ok=True)
         self._bm25 = None
@@ -1670,6 +1677,14 @@ class MemoryStore:
             self._save_corrections([c for c in corrs if c.id != correction_id])
             return {"status": outcome, "id": correction_id,
                     "target_id": corr.target_id, "action": corr.action}
+
+
+def _text_fp(text: str) -> str:
+    """A short fingerprint of a record's text, stored beside its vector, so a vector
+    left over from an earlier text (a save cut between the two files) is dropped on
+    load and re-embedded instead of being used for the new text."""
+    import hashlib
+    return hashlib.sha1((text or "").encode("utf-8", "surrogatepass")).hexdigest()[:16]
 
 
 def _first_dim(vectors: dict) -> Optional[int]:

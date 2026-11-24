@@ -198,3 +198,43 @@ def test_the_download_offer_follows_the_network_policy(monkeypatch):
     assert embedder.embedding_download_refusal() == "huggingface.co is on the deny list"
     monkeypatch.setattr(np_, "download_refusal", lambda url: None)
     assert embedder.embedding_download_refusal() is None
+
+
+def test_the_download_button_state_follows_the_refusal(monkeypatch):
+    import types
+    import localm.inference.http_server as hs
+    import localm.plugins.builtin.memory.plug as plug
+    monkeypatch.setattr(embedder, "resolve_embedding_model_path", lambda **k: None)
+    monkeypatch.setattr(config, "load_config", lambda: {})
+    monkeypatch.setattr(hs, "caller_grants", lambda request, scope: True)
+    monkeypatch.setattr(hs, "caller_is_operator", lambda request: True)
+    request = types.SimpleNamespace(app=types.SimpleNamespace(
+        router=types.SimpleNamespace(url_path_for=lambda name: "/api/rag/embedding/download")))
+    monkeypatch.setattr(embedder, "embedding_download_refusal",
+                        lambda: "huggingface.co is on the deny list")
+    refused = plug._embedder_download_status(request)
+    assert refused["can_download_embedder"] is False
+    assert refused["embedder_missing"] == "bge-small-en-v1.5"
+    monkeypatch.setattr(embedder, "embedding_download_refusal", lambda: None)
+    offered = plug._embedder_download_status(request)
+    assert offered["can_download_embedder"] is True
+    assert offered["embedder_model"] == "bge-small-en-v1.5"
+
+
+def test_a_vector_left_beside_changed_text_is_dropped_on_load(tmp_path):
+    from localm.memory import MemoryRecord, MemoryStore
+    path = tmp_path / "ns.jsonl"
+    store = MemoryStore.open_file(path)
+    embed = lambda texts: [[1.0, 0.0] for _ in texts]  # noqa: E731
+    keep = store.add(MemoryRecord(text="I live in Oslo", kind="semantic", source="user"),
+                     embed_fn=embed)
+    edited = store.add(MemoryRecord(text="I like tea", kind="semantic", source="user"),
+                       embed_fn=embed)
+    lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    for rec in lines:
+        if rec["id"] == edited.id:
+            rec["text"] = "I like coffee"
+    path.write_text("\n".join(json.dumps(r) for r in lines) + "\n", encoding="utf-8")
+    reopened = MemoryStore.open_file(path)
+    assert reopened.vectorless_count() == 1
+    assert keep.id in reopened._vectors and edited.id not in reopened._vectors
