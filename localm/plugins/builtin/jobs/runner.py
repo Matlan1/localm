@@ -787,7 +787,8 @@ def _format_rag_result(name: str, result: dict, lines: list, *,
            f"{result['updated']} updated, {result['skipped']} unchanged - "
            f"{count_noun(result['chunks'], 'chunk')} over "
            f"{len(result['roots'])} folder(s)"]
-    still_gone = sorted(set(result["missing"]) | set(result["still_missing"]))
+    still_gone = sorted(set(result["missing"])
+                        | set(result.get("still_missing") or ()))
     if still_gone:
         newly = len(result["missing"])
         out.append(f"{len(still_gone)} document(s) are no longer on disk"

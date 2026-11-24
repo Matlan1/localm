@@ -463,7 +463,8 @@ def rag_resync(collection, embed, url, prune_missing):
     if result["restored"]:
         console.print(f"[green]{len(result['restored'])} previously missing "
                       f"document(s) are back.[/green]")
-    still_gone = sorted(set(result["missing"]) | set(result["still_missing"]))
+    still_gone = sorted(set(result["missing"])
+                        | set(result.get("still_missing") or ()))
     if still_gone:
         console.print(
             f"[yellow]{len(still_gone)} document(s) are no longer on "
