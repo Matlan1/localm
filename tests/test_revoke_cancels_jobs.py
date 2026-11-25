@@ -98,9 +98,9 @@ def test_a_subscriber_whose_loop_is_closed_stops_nothing(mgr, monkeypatch):
     auth._save_keystore([])
     assert _wait(lambda: jobs[2].status == "cancelled")
     assert _wait(lambda: all(j.finished_at is not None for j in jobs))
-    for job in jobs:
-        assert _wait(lambda: job.subscriber_count == 0)
-        assert _wait(lambda: any("revoked" in e.get("text", "") for e in list(job._history)))
+    assert _wait(lambda: all(j.subscriber_count == 0 for j in jobs))
+    assert _wait(lambda: all(any("revoked" in e.get("text", "") for e in list(j._history))
+                             for j in jobs))
 
 
 def test_a_job_is_cancelled_before_its_subscribers_are_told(mgr, monkeypatch):
