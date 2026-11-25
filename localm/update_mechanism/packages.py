@@ -5,8 +5,9 @@ uv installs the new packages into a staging venv inside the venv
 (:func:`stage_packages`), which holds besides them only the metadata of the packages
 that stay, so uv chooses as it would in the venv. From there their files are moved
 into place by :mod:`.mover`, like the files of a release (:func:`plan_packages`,
-:func:`forward`). Nothing else writes to the venv, so the way back needs neither uv
-nor a package source, and a file nobody planned is somebody else's.
+:func:`forward`). Nothing else of a step writes to the venv, so the way back needs
+neither uv nor a package source unless it names packages to install again, and a file
+nobody planned is somebody else's.
 """
 
 from __future__ import annotations
@@ -33,6 +34,8 @@ from .mover import (PACKAGES, REMOVE, Area, Op, Outcome, Plan, Refused, Unreadab
 _OWN = "localm"
 _LINE = re.compile(r" ([-+~]) ([A-Za-z0-9][A-Za-z0-9._-]*)(?:==(\S+)(?: \((.*)\))?| @ (.+))")
 _COUNT = re.compile(r"Would (uninstall|install) (\d+) packages?")
+# The interpreters of a venv: no package's, and never moved.
+_PYTHON = re.compile(r"(?:Scripts|bin)/pythonw?[0-9.]*(?:\.exe)?", re.I)
 _OTHER_VENV = re.compile(r"Would (?:replace|create|remove)\b.*\benvironment\b")
 # What uv reads of an installed distribution to know that it is there.
 _METADATA = ("METADATA", "WHEEL", "INSTALLER", "REQUESTED", "direct_url.json", "uv_cache.json",
@@ -125,8 +128,8 @@ def changes(output: str) -> tuple:
 
 def _records(site: Path, base: Path, folder: str, name: str) -> dict:
     """``{path in the venv: (stated hash, stated size or None)}`` of the files of the
-    distribution *folder* in *site*: its RECORD and everything in its own folder,
-    compiled Python files excepted. Raises :class:`Refused` without a usable RECORD,
+    distribution *folder* in *site*: its RECORD and everything in its own folder, None
+    for what is only there, compiled Python files and interpreters excepted. Raises :class:`Refused` without a usable RECORD,
     and for a path outside the venv."""
     inner = site.relative_to(base).as_posix()
     try:
@@ -149,14 +152,14 @@ def _records(site: Path, base: Path, folder: str, name: str) -> dict:
         except Unsafe:
             raise Refused(f"the package {name} has no usable list of its files (RECORD): "
                           f"{row[0][:80]!r}") from None
-        if disk.PYCACHE not in rel.split("/"):
+        if disk.PYCACHE not in rel.split("/") and not _PYTHON.fullmatch(rel):
             size = row[2] if len(row) > 2 else ""
             found[rel] = (row[1] if len(row) > 1 else "",
                           int(size) if size.isdecimal() and len(size) < 19 else None)
     for entry in os.listdir(site / folder):
         st = os.lstat(site / folder / entry)
         if disk.is_link(st) or stat.S_ISREG(st.st_mode):
-            found.setdefault(f"{inner}/{folder}/{entry}", ("", None))
+            found.setdefault(f"{inner}/{folder}/{entry}", None)
     return found
 
 
@@ -344,7 +347,8 @@ def _check_stage(stage: Path, site: Path, staged: _Staged) -> None:
     if added != set(stated):
         raise Refused("uv staged other files than its packages list: "
                       + ", ".join(sorted(added ^ set(stated))[:5]))
-    for rel, (_hash, size) in stated.items():
+    for rel, row in stated.items():
+        size = row and row[1]
         path = stage.joinpath(*rel.split("/"))
         st = os.lstat(path)
         if size is not None and not disk.is_link(st) and st.st_size != size:
@@ -424,8 +428,9 @@ def plan_packages(root, update_id: str) -> Plan:
     for name, folder in sorted(before, key=lambda d: d[0] in touched):
         with contextlib.suppress(Refused):   # a package that stays needs no list
             for rel, row in _records(site, venv, folder, name).items():
-                owners[rel] = name
-                said.setdefault(rel, []).append(_stated(row))
+                if row is not None or mover.by_installer(rel):
+                    owners[rel] = name
+                    said.setdefault(rel, []).append(_stated(row))
 
     def edited(rel: str, old: dict) -> bool:
         return rel not in said or (
@@ -583,48 +588,48 @@ def _listed(site: Path, venv: Path, folder: str, name: str) -> dict:
         return _records(site, venv, folder, name)
     except Refused:
         inner = site.relative_to(venv).as_posix()
-        return {f"{inner}/{folder}/{e}": ("", None) for e in os.listdir(site / folder)}
+        return {f"{inner}/{folder}/{e}": None for e in os.listdir(site / folder)}
 
 
 def _look(a: Area, plan: Plan, names: set, changed: set, wait: Wait, out: Outcome) -> None:
     """Add to *out* each package of *names* that is not whole, and each one that is not
-    *changed*, lists a file of *plan* or one moved to *kept*, and does not have it. A
-    file in the place of one that is missing goes to *kept*."""
+    *changed*, lists a file of *plan* or one moved to *kept*, and does not have it. What
+    is there of such a package and is not its own goes to *kept*."""
     site = shared.updater_components.site_packages(a.base)
     ops = {op.path: op for op in plan.ops}
     was = dict(plan.before)
     wrong: dict = {}
-    said: dict = {}
+    lists: dict = {}
     touched = {*ops, *_kept(a)}
     for name, _v, folder in shared.updater_components.dist_infos(site) if site else ():
         listed = _listed(site, a.base, folder, name)
-        if name in changed:
-            said.update(listed)
-            continue
-        for rel in sorted(touched & set(listed)):
+        lists.setdefault(name, {}).update(listed)
+        for rel in sorted(touched & set(listed)) if name not in changed else ():
             op, stated = ops.get(rel), _stated(listed[rel])
             path, st = a.find(rel)
             as_it_was = op is not None and [name, folder] in plan.before and (
                 st is None if op.old is None else mover.is_old(a, op, wait))
             if stated is not None and not as_it_was and not disk.same(path, stated, wait):
-                wrong.setdefault(name, []).append(op or Op(rel, REMOVE))
+                wrong.setdefault(name, []).append(rel)
     for op in plan.ops:
-        if op.old is not None and op.dist in names and not _is_there(a, op, said, wait):
-            wrong.setdefault(op.dist, []).append(op)
-    for name, missing in wrong.items():
-        paths = [op.path for op in missing]
+        if op.old is not None and op.dist in names and not _is_there(
+                a, op, lists.get(op.dist, {}), wait):
+            wrong.setdefault(op.dist, []).append(op.path)
+    for name, paths in wrong.items():
         if name not in was:
             out.notes.append(f"The package {name} was installed since, and lost files that are "
                              f"not its own: {mover.some(paths)}.")
             continue
-        for op in missing:
-            path, st = a.find(op.path)
-            if st is not None and not stat.S_ISDIR(st.st_mode) and not mover.is_old(a, op, wait):
-                mover.aside(a, op, path, wait, out)
         version = was[name].removesuffix(".dist-info").partition("-")[2]
         out.packages.append({"step": plan.step, "name": name, "version": version})
         out.errors.append(f"The package {name}: files of it are lost or changed "
                           f"({mover.some(paths)}). Install {name} {version} again.")
+        for rel, row in {**dict.fromkeys(paths), **lists.get(name, {})}.items():
+            op, stated = ops.get(rel, Op(rel, REMOVE)), _stated(row)
+            path, st = a.find(rel)
+            if st is not None and not stat.S_ISDIR(st.st_mode) and not mover.is_old(a, op, wait) and (
+                    rel in paths or (stated is not None and not disk.same(path, stated, wait))):
+                mover.aside(a, op, path, wait, out)
 
 
 def _is_there(a: Area, op: Op, said: Mapping, wait: Wait) -> bool:
