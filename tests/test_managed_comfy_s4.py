@@ -520,7 +520,7 @@ def test_files_that_cannot_be_put_back_are_put_back_by_the_next_update(home, tmp
     assert not (root / "gone_at_c2.py").exists()
 
     allow()
-    assert mc.settle_managed_comfy() is None
+    assert mc.why_managed_comfy_is_unsettled() is None
     assert _tree_of(root) == before
     again = upd.update_managed_comfy(
         comfyui_repo=repo, target_commit=c2, reinstall_requirements=False)
@@ -955,3 +955,95 @@ def test_remove_lock_names_a_remove_holder_to_a_contending_update(home, monkeypa
         assert ran == []
     finally:
         mc._release_update_lock()
+
+
+# =========================================================================== #
+#  4. Folders of the managed ComfyUI that are the user's own (links)           #
+# =========================================================================== #
+
+def _link(path: Path, target: Path) -> None:
+    if os.name == "nt":
+        import _winapi
+        _winapi.CreateJunction(str(target), str(path))
+    else:
+        os.symlink(target, path)
+
+
+def _linked(tmp_path, monkeypatch):
+    hub = FakeGitHub(tmp_path / "hub").install(monkeypatch)
+    extra = {"output/_put_here": "", "models/vae/put_vae_here": "", "input/example.png": "png",
+             "custom_nodes/websocket.py": "one\n", "custom_nodes/same.py": "same\n",
+             "custom_nodes/dropped.py": "old\n"}
+    repo, c1 = hub.add("fake", "ComfyUI", _tree(**extra))
+    _, c2 = hub.add("fake", "ComfyUI", _tree(VERSION="2\n", **{
+        **extra, "custom_nodes/websocket.py": "two\n", "custom_nodes/new.py": "new\n",
+        "models/vae/put_new_here": "", "custom_nodes/dropped.py": None,
+        "models/configs/c.yaml": "new config\n"}))
+    root = _install_managed_from(repo, c1)
+    theirs = tmp_path / "theirs"
+    for name in ("output", "models", "input", "custom_nodes"):
+        (theirs / name).mkdir(parents=True)
+        if name == "custom_nodes":
+            for f in (root / name).iterdir():
+                (theirs / name / f.name).write_bytes(f.read_bytes())
+        import shutil
+        shutil.rmtree(root / name)
+        _link(root / name, theirs / name)
+    (theirs / "output" / "mine.png").write_bytes(b"user data")
+    os.rmdir(theirs / "input")   # a link that leads nowhere
+    return repo, c2, root, theirs
+
+
+def _files(folder: Path) -> dict:
+    return {p.relative_to(folder).as_posix(): p.read_text() for p in sorted(folder.rglob("*"))
+            if p.is_file()}
+
+
+def test_an_update_writes_only_changed_source_through_a_folder_of_the_user(home, tmp_path,
+                                                                           monkeypatch):
+    from localm.media import managed_comfy_update as upd
+    repo, c2, root, theirs = _linked(tmp_path, monkeypatch)
+    result = upd.update_managed_comfy(comfyui_repo=repo, target_commit=c2)
+    assert result.ok, result.message
+    assert _files(theirs) == {
+        "output/mine.png": "user data", "models/configs/c.yaml": "new config\n",
+        "custom_nodes/websocket.py": "two\n", "custom_nodes/same.py": "same\n",
+        "custom_nodes/new.py": "new\n"}
+    for name in ("output", "models", "custom_nodes"):
+        assert os.path.realpath(root / name) == os.path.realpath(theirs / name)
+    assert (root / "VERSION").is_file()
+
+
+def test_an_update_that_fails_puts_the_users_folder_back(home, tmp_path, monkeypatch):
+    from localm.media import managed_comfy_update as upd
+    repo, c2, root, theirs = _linked(tmp_path, monkeypatch)
+    before = _files(theirs)
+    monkeypatch.setattr(upd, "why_unusable", lambda packages: "it does not start")
+    result = upd.update_managed_comfy(comfyui_repo=repo, target_commit=c2)
+    assert not result.ok and "it does not start" in result.message
+    assert _files(theirs) == before and not (root / "VERSION").exists()
+
+
+def test_what_cannot_be_moved_in_is_found_before_anything_changes(home, tmp_path, monkeypatch):
+    from localm.media import managed_comfy_update as upd
+    from localm.update_mechanism import steps
+    _hub, repo, c1, c2, _c3 = _build_update_remote(tmp_path, monkeypatch)
+    root = _install_managed_from(repo, c1)
+    (root / "VERSION").mkdir()
+    (root / "VERSION" / "mine.txt").write_text("the user's")
+    monkeypatch.setattr(steps, "change", lambda *a, **k: pytest.fail("it was started"))
+    result = upd.update_managed_comfy(comfyui_repo=repo, target_commit=c2)
+    assert not result.ok and "in the place of VERSION" in result.message
+
+
+def test_a_managed_comfyui_with_incomplete_files_is_not_started(home, tmp_path, monkeypatch):
+    from localm.media import comfy_client
+    from localm.update_mechanism import job
+    _hub, repo, c1, _c2, _c3 = _build_update_remote(tmp_path, monkeypatch)
+    root = _install_managed_from(repo, c1)
+    with job.Lock(root) as lock:
+        (root / ".localm-update" / ("ab" * 16) / "plans").mkdir(parents=True)
+        job.start(lock, "ab" * 16, old="", new="")
+        ok, why = comfy_client._launch_and_wait("http://127.0.0.1:9", "x", str(root), 1,
+                                                lambda _t: None)
+    assert not ok and "are being replaced" in why

@@ -399,4 +399,6 @@ class TestGpuLoadVerdict:
         def boom(*a, **k):
             raise OSError("no interpreter")
         monkeypatch.setattr(sl.subprocess, "run", boom)
-        assert sl._native_gpu_loads_ok() == (False, "no interpreter")
+        monkeypatch.setattr(sl.load_probe, "_PAUSE_S", 0)
+        with pytest.raises(sl.LoadTestNotRun, match="no interpreter"):
+            sl._native_gpu_loads_ok()

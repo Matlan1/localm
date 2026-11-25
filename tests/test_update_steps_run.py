@@ -408,3 +408,71 @@ def test_the_real_app_answers_the_probe_and_writes_no_session(tmp_path):
                                home=home, env=dict(os.environ))
     assert reason is None
     assert not (home / "sessions").exists() and not (home / "bug-reports").exists()
+
+
+def test_data_on_another_volume_is_put_back(update, monkeypatch):
+    from tests.test_update_steps import across
+    root, home, lock = update
+    um.write(home, {"registry.json": "{1}", "plugins/mine/code.py": "x"})
+    before = um.tree(home)
+    steps_data.keep(root, ID, home)
+    um.write(home, {"registry.json": "{2}", "sessions.json": "new", "plugins/added/p.toml": "new"})
+    across(monkeypatch, home)
+    assert job.restore(lock).errors == []
+    assert um.tree(home) == before
+    kept = root / ".localm-update" / "kept" / ID / "data"
+    assert (kept / "sessions.json").read_text() == "new"
+
+
+@pytest.mark.parametrize("spec", [
+    {"format": "localm-update-steps/2"}, {"parts": [{"kind": "folders", "root": "x"}]},
+    {"parts": [{"kind": "runtime", "root": "x", "label": "y", "name": "lib"}]}])
+def test_steps_of_another_schema_fail_the_update(update, spec):
+    with pytest.raises(steps.Failed, match="steps of an update"):
+        _run(update, _steps(**spec))
+
+
+def test_a_child_of_an_update_converts_nothing_in_the_data_folder(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    text = json.dumps({"gui_proxy_remote_images": True})
+    (home / "config.json").write_text(text, encoding="utf-8")
+    code = ("from localm.config import load_config; "
+            "print(load_config()['gui_proxy_remote_images'])")
+    for update_id, stays in ((ID, True), ("", False)):
+        env = steps_update.child_env(os.environ, um.REPO, home, update_id)
+        (status, last), said = None, None
+        said = []
+        status, last = steps_update.run_child([sys.executable, "-c", code], cwd=tmp_path, env=env,
+                                              say=said.append)
+        assert status == 0 and "on" in said
+        assert ((home / "config.json").read_text(encoding="utf-8") == text) is stays
+
+
+# ------------------------------------------------------- builds that do not run here
+
+@pytest.mark.parametrize("name", ["sdcpp", "koboldcpp"])
+def test_a_media_build_that_does_not_run_here_is_left_out_with_a_note(tmp_path, monkeypatch, name):
+    from localm.cli import update_prepare
+    from localm.media.koboldcpp import runtime as kobold
+    from localm.media.sdcpp import runtime as sdcpp
+    runtime = sdcpp if name == "sdcpp" else kobold
+    root, base = um.install(tmp_path / "root"), tmp_path / "data" / name
+    base.mkdir(parents=True)
+    (root / ".localm-update" / ID).mkdir(parents=True)
+    monkeypatch.setattr(runtime, "runtimes_root", lambda: base)
+
+    def install(item, *, into, on_progress):
+        if item == "good":
+            um.write(into, {"v2-good/launcher": "new"})
+            return
+        raise runtime.LoadTestError("the launcher could not be started")
+    monkeypatch.setattr(runtime, "install", install)
+    out: dict = {"notes": []}
+    plan = {"label": "native runtime", "target": "v2", "current": "v1", "items": ["bad", "good"]}
+    part = update_prepare._prepare_folders(root, ID, name, plan, out, lambda _t: None)
+    assert part["kind"] == "folders" and len(out["notes"]) == 1
+    note = out["notes"][0]
+    assert "the launcher could not be started" in note and "v1) stays" in note
+    assert "does not work until" in note and "--force" in note
+    assert (steps.Place(base, ID).new(mover.WHOLE) / "v2-good" / "launcher").is_file()

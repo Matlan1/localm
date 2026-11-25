@@ -6,9 +6,15 @@ failed load into a one-line cause.
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
+from pathlib import Path
 from typing import Optional
+
+import click
 
 _EXC_HEADER_RE = re.compile(
     r"^(?:[\w.]+\.)?\w*(?:Error|Exception|Warning|Interrupt|Exit)(?::|\s|\Z)")
@@ -193,6 +199,55 @@ sys.exit({_PROBE_NO_GPU_DEVICE})
 
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
+# Times a load test that could not be made is tried, and the seconds in between.
+_TRIES, _PAUSE_S = 3, 2.0
+
+
+class LoadTestNotRun(click.ClickException):
+    """The load test could not be made; nothing is known about the build."""
+
+
+def _run_probe(code: str, *args: str, env: Optional[dict] = None, limit_s: int = 120):
+    """Run the load test *code* in a fresh interpreter. Raises subprocess.TimeoutExpired,
+    and OSError when the interpreter could not be started."""
+    return subprocess.run([sys.executable, "-c", code, *args], capture_output=True, text=True,
+                          timeout=limit_s, env=env, creationflags=_NO_WINDOW)
+
+
+def _made(test):
+    """What *test* returns, tried again when it could not be made (OSError). Raises
+    :class:`LoadTestNotRun`."""
+    tries = _TRIES
+    while True:
+        try:
+            return test()
+        except OSError as e:
+            tries -= 1
+            if not tries:
+                raise LoadTestNotRun(f"the load test of the runtime could not be run: {e}") from e
+            time.sleep(_PAUSE_S)
+
+
+def _run_model_probe(env: Optional[dict]):
+    """:func:`_run_probe` of :data:`_LOAD_PROBE_CODE` on a tiny model, in a temporary
+    folder or, where none can be used, in the data folder."""
+    from localm.config import home_dir
+    from localm.setup_llama import tiny_model
+    tmp = None
+    try:
+        try:
+            tmp = tempfile.mkdtemp(prefix="localm-runtime-check-")
+            model = tiny_model.write(Path(tmp) / "check.gguf")
+        except OSError:
+            if tmp:
+                shutil.rmtree(tmp, ignore_errors=True)
+            tmp = tempfile.mkdtemp(prefix=".runtime-check-", dir=home_dir())
+            model = tiny_model.write(Path(tmp) / "check.gguf")
+        return _run_probe(_LOAD_PROBE_CODE, str(model), env=env, limit_s=_LOAD_PROBE_LIMIT_S)
+    finally:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 def _is_abi_rejection(detail: Optional[str]) -> bool:
     """Whether *detail* is _native_loads_ok reporting OUR OWN ABI gate refusing
@@ -215,17 +270,11 @@ def _native_loads_ok(env: Optional[dict] = None) -> tuple:
     the first model load with the real cause already lost. A subprocess keeps the
     setup process clean (the loader mutates the DLL/lib search path) and matches
     the real run environment. *env* is the child's environment (default this
-    process's). Returns (ok, last_error_line)."""
-    import tempfile
-    from pathlib import Path
-    from localm.setup_llama import tiny_model
+    process's). Returns (ok, last_error_line), False only for what the build itself did;
+    raises :class:`LoadTestNotRun` when the test could not be made."""
     try:
-        with tempfile.TemporaryDirectory(prefix="localm-runtime-check-") as tmp:
-            model = tiny_model.write(Path(tmp) / "check.gguf")
-            r = subprocess.run([sys.executable, "-c", _LOAD_PROBE_CODE, str(model)],
-                               capture_output=True, text=True, timeout=_LOAD_PROBE_LIMIT_S,
-                               env=env, creationflags=_NO_WINDOW)
-    except Exception as e:
+        r = _made(lambda: _run_model_probe(env))
+    except subprocess.TimeoutExpired as e:
         return False, str(e)
     if r.returncode == 0:
         return True, ""
@@ -251,12 +300,11 @@ def _native_gpu_loads_ok(env: Optional[dict] = None) -> tuple:
     a GPU-type compute device. A GPU build whose GPU library fails to load still
     registers the CPU device, which satisfies :func:`_native_loads_ok`. Returns
     (ok, last_error_line); the failure line names the devices that did register.
-    *env* is the child's environment (default this process's)."""
+    *env* is the child's environment (default this process's). Raises
+    :class:`LoadTestNotRun` when the test could not be made."""
     try:
-        r = subprocess.run([sys.executable, "-c", _GPU_LOAD_PROBE_CODE],
-                           capture_output=True, text=True, timeout=120, env=env,
-                           creationflags=_NO_WINDOW)
-    except Exception as e:
+        r = _made(lambda: _run_probe(_GPU_LOAD_PROBE_CODE, env=env))
+    except subprocess.TimeoutExpired as e:
         return False, str(e)
     if r.returncode == 0:
         return True, ""

@@ -2020,6 +2020,13 @@ def _warn_unknown_stored_keys(stored: dict) -> None:
             "ignored and the key is kept in the file.", CONFIG_FILE.name, key)
 
 
+def update_is_going() -> bool:
+    """Whether this process is a child of an update that has not ended
+    (``update_mechanism.steps_update.child_env``): it converts nothing in the data
+    folder, which the old version may use again."""
+    return bool(os.environ.get("LOCALM_UPDATE_ID"))
+
+
 def _persist_migrated_config() -> None:
     """Rewrite config.json in the migrated form under the store lock. A failure
     is logged and leaves the file as it was; the in-memory config is already
@@ -2086,7 +2093,7 @@ def _load_config_checked_now() -> tuple:
     needs_migration = read_ok and _config_needs_migration(stored)
     _merge_stored_config(cfg, stored)
     model_ids.config_to_current(cfg, refs, model_index())
-    if needs_migration:
+    if needs_migration and not update_is_going():
         _persist_migrated_config()
     # gui_proxy_remote_images is off/ask/on but config.json may hold a boolean.
     # There is no migration step: this normalises on every read, so a stored

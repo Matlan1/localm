@@ -148,7 +148,7 @@ def is_managed_comfy_installed() -> bool:
     pill and Generate-button routing all read this function. The marker is
     written only once every earlier step has succeeded."""
     paths = managed_comfy_paths()
-    settle_managed_comfy(wait_s=0)
+    why_managed_comfy_is_unsettled()
     try:
         if not (paths.main_py.is_file() and paths.venv_python.is_file()):
             return False
@@ -158,23 +158,12 @@ def is_managed_comfy_installed() -> bool:
         return False
 
 
-def settle_managed_comfy(wait_s: Optional[float] = None) -> Optional[str]:
-    """Put the managed ComfyUI back as it was when a process that was updating it
-    ended, or wait up to *wait_s* seconds while one replaces its files. Returns None, or
-    why it may be incomplete. Costs one file check when there is nothing to do."""
+def why_managed_comfy_is_unsettled(wait_s: float = 0.0) -> Optional[str]:
+    """``steps.unsettled`` of the managed ComfyUI."""
     from localm.update_mechanism import steps
-    root = managed_comfy_paths().root
-    try:
-        result = (steps.settle(root) if wait_s is None else steps.settle(root, wait_s=wait_s))
-    except steps.STEP_ERRORS as e:
-        logger.warning("an interrupted update of the managed ComfyUI could not be undone: %s", e)
-        return str(e)
-    if result is None or (result.state != "busy" and not result.errors):
-        return None
-    why = "; ".join(result.errors) or "its files are being replaced"
-    if result.errors:
-        logger.warning("an interrupted update of the managed ComfyUI could not be undone: %s", why)
-    return why
+    return steps.unsettled(
+        managed_comfy_paths().root, wait_s=wait_s,
+        repair="Reinstall it: 'localm comfy remove' then 'localm comfy setup'")
 
 
 def managed_comfy_remove_targets(with_models: bool = False) -> list:

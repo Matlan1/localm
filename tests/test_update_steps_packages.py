@@ -229,6 +229,68 @@ def test_the_new_code_runs_with_the_new_packages_and_every_other_one(world, tmp_
     assert _runs(future, tmp_path) == (0, ["2.0", "1.0", "2.0"])
 
 
+def test_a_command_staged_by_another_process_leaves_the_environment_usable(world, tmp_path):
+    root = _install(world, tmp_path)
+    parent = _future(world, root)
+    parent.sync([])
+    python = parent.python
+    wheel(world.wheels, "gamma", "1.0", {"gamma/__init__.py": "V = '1.0'\n"})
+    assert _future(world, root).add([world.uv, "pip", "install", "--python", str(root / ".venv"),
+                                     "gamma==1.0", "--default-index", world.index.url])
+    status, out = steps_packages.packages.run_hidden(
+        [str(python), "-c", "import alpha, beta, gamma; print(alpha.V, beta.V, gamma.V)"],
+        str(tmp_path), dict(os.environ))
+    assert (status, out.split()) == (0, ["2.0", "1.0", "1.0"])
+
+
+def _scripted(folder: Path, script: str, *, hook: bool) -> None:
+    from tests.test_update_mechanism_packages import BACKEND
+    path = folder / "pyproject.toml"
+    text = path.read_text(encoding="utf-8")
+    place = ("[tool.hatch.metadata.hooks.custom.console-scripts]" if hook else "[project.scripts]")
+    path.write_text(f'{text}\n{place}\n{script} = "m:f"\n[build-system]\nrequires = []\n'
+                    'build-backend = "backend"\nbackend-path = ["."]\n', encoding="utf-8")
+    (folder / "backend.py").write_text(BACKEND, encoding="utf-8")
+
+
+def test_a_changed_console_script_is_installed_from_the_install_itself(world, tmp_path):
+    root = _install(world, tmp_path)
+    _scripted(root, "lm-one", hook=False)
+    world.run(root, "sync", "--frozen", "--inexact", "--no-config", "--extra", "used")
+    before = um.tree(root, skip=SKIP)
+    future = _future(world, root)
+    _scripted(future.tree, "lm-two", hook=False)
+    step = future.sync(["used"])
+    assert step == {"extras": ["used"], "project": True}
+    assert um.tree(root, skip=SKIP) == before
+    world.index.stop()
+    release = ("pyproject.toml", "uv.lock", "VERSION", "backend.py")
+    installed = {name: (root / name).read_bytes() for name in release}
+    with job.Lock(root) as lock:
+        _steps(lock)
+        for name in release:
+            shutil.copyfile(future.tree / name, root / name)
+        steps_packages.run_packages(root, ID, step, [], world.uv, env=world.env)
+        scripts = {p.stem for p in (root / ".venv").glob("*/lm-*")}
+        assert scripts == {"lm-two"} and _versions(root)["alpha"] == "2.0"
+        named = [p for p in (root / ".venv" / SITE).rglob("*")
+                 if p.is_file() and (".dist-info" in str(p) or p.suffix == ".pth")
+                 and b".localm-update" in p.read_bytes()]
+        assert named == []
+        for name, data in installed.items():
+            (root / name).write_bytes(data)
+        assert job.restore(lock).errors == []
+    assert um.tree(root, skip=SKIP) == before
+
+
+def test_the_scripts_of_the_build_hook_are_scripts_too(world, tmp_path):
+    root = _install(world, tmp_path)
+    new = root / ".localm-update" / ID / "new"
+    assert steps_packages.scripts(um.REPO)["hook"]["localm"]
+    _scripted(new, "lm-two", hook=True)
+    assert steps_packages.scripts(root) != steps_packages.scripts(new)
+
+
 def test_packages_that_do_not_fit_on_the_disk_are_refused_before_they_are_fetched(
         world, tmp_path, monkeypatch):
     root = _install(world, tmp_path)
@@ -285,6 +347,14 @@ def test_a_package_the_lock_does_not_name_comes_from_the_given_index(world, tmp_
                                           world.index.url]])
     assert indexes == ["--extra-index-url", world.index.url]
     _again(world, root, [("gamma", "1.0")], indexes=indexes)
+    assert _versions(root)["gamma"] == "1.0"
+
+
+def test_the_exact_version_is_installed_again_not_a_local_build_of_it(world, tmp_path):
+    root = _install(world, tmp_path)
+    for version in ("1.0", "1.0+cu126"):
+        wheel(world.wheels, "gamma", version, {"gamma/__init__.py": f"V = {version!r}\n"})
+    _again(world, root, [("gamma", "1.0")], indexes=["--extra-index-url", world.index.url])
     assert _versions(root)["gamma"] == "1.0"
 
 

@@ -46,8 +46,9 @@ def prepare(root: Path, update_id: str, uv: str, *, say: Say) -> int:
 
 def _prepare(root: Path, update_id: str, uv: str, say: Say) -> dict:
     from localm import updater, updater_components as uc, updater_runtime as ur
+    from localm.update_mechanism import steps_update
     tree = Path(__file__).resolve().parents[2]
-    out: dict = {"torch": [], "uv": None, "parts": [], "kept": [], "notes": []}
+    out: dict = {"format": steps_update.FORMAT, "torch": [], "uv": None, "parts": [], "kept": [], "notes": []}
     plans = {p["name"]: p for p in uc.plan(tree, root, deep=True)}
     out["notes"] += [p["note"] for p in plans.values() if p["note"] and not p["update"]]
     runtime = ur.plan(tree, root)
@@ -105,13 +106,13 @@ def _prepare_runtime(root: Path, update_id: str, plan: dict, out: dict, say: Say
     from localm.update_mechanism import job, steps
     live = Path(os.path.realpath(ur.runtime_lib(root)))
     folder, backend = live.parent, plan["backend"]
-    why = sl.settle_runtime(live)
+    why = steps.unsettled(folder, wait_s=steps.SETTLE_WAIT_S)
     if why:
         raise PrepareFailed(f"the native runtime cannot be replaced now: {why}")
     steps.sweep(folder)
     job.own_part(root, update_id, folder)
     place = steps.Place(folder, update_id)
-    staged = place.beside(sl._staging_path(live).name)
+    staged = place.beside(f"{live.name}.{update_id[:8]}")
     say(f"Fetching the {backend} runtime {plan['target']}...")
     code, last = _run_localm(["setup-llama", "--backend", backend, "--into", str(staged),
                               "--yes"], say)
@@ -130,7 +131,7 @@ def _prepare_runtime(root: Path, update_id: str, plan: dict, out: dict, say: Say
             raise PrepareFailed(f"setup-llama provided the {sl._provisioned_backend(staged)} "
                                 f"runtime {built}, not {backend} {plan['target']}")
         return part
-    steps.discard(folder, update_id)
+    job.discard(folder, update_id)
     if code != sl.BUILD_UNUSABLE_EXIT:
         raise PrepareFailed(f"the {backend} runtime {plan['target']} could not be fetched: {last}")
     loads, why_not = ur._runtime_loads(live, backend, sl)
@@ -154,7 +155,7 @@ def _run_localm(args: list, say: Say) -> tuple:
 def _prepare_folders(root: Path, update_id: str, name: str, plan: dict, out: dict,
                      say: Say) -> Optional[dict]:
     """Fetch and test each build of the sd.cpp or KoboldCpp runtime the update installs.
-    One that does not work on this machine is recorded as such and left out."""
+    One that does not work on this machine is left out, with a note."""
     from localm.media.koboldcpp import runtime as kobold
     from localm.media.sdcpp import runtime as sdcpp
     from localm.update_mechanism import job, mover, steps
@@ -170,19 +171,31 @@ def _prepare_folders(root: Path, update_id: str, name: str, plan: dict, out: dic
             try:
                 runtime.install(item, into=into, on_progress=say)
             except sdcpp.VcRuntimeMissingError as e:
-                out["notes"].append(f"the {plan['label']} was not updated: {e}")
-            except sdcpp.LoadTestError as e:
-                out["notes"].append(f"the {plan['label']} {plan['target']} does not work here: {e}")
-                mark = into / f"{plan['target']}-{item}"
-                mark.mkdir(exist_ok=True)
-                (mark / sdcpp.FAILED_MARKER).write_text(json.dumps(
-                    {"tag": plan["target"], "backend": item, "reason": str(e)}), encoding="utf-8")
+                out["notes"].append(_left_out(name, plan, item, str(e)))
+            except (sdcpp.LoadTestError, kobold.LoadTestError) as e:
+                out["notes"].append(_left_out(name, plan, item, f"it does not work here: {e}"))
+                if runtime is sdcpp:
+                    mark = into / f"{plan['target']}-{item}"
+                    mark.mkdir(exist_ok=True)
+                    (mark / sdcpp.FAILED_MARKER).write_text(json.dumps(
+                        {"tag": plan["target"], "backend": item, "reason": str(e)}),
+                        encoding="utf-8")
     except (sdcpp.ProvisionError, kobold.ProvisionError) as e:
         raise PrepareFailed(f"the {plan['label']} {plan['target']} could not be fetched: {e}") from e
     if not steps.staged_files(into):
-        steps.discard(base, update_id)
+        job.discard(base, update_id)
         return None
     return {"kind": "folders", "label": plan["label"], "root": _located(root, base)}
+
+
+def _left_out(name: str, plan: dict, item: str, why: str) -> str:
+    """The note for a build of a native media runtime the update leaves out."""
+    what, retry = (("Image and video generation", f"localm setup-sdcpp --backend {item} --force")
+                   if name == "sdcpp" else
+                   ("Music generation", "localm setup-music --force"))
+    return (f"the {item} build of the {plan['label']} {plan['target']} was not installed: {why}. "
+            f"The installed one ({plan['current']}) stays, and this version cannot use it: {what} "
+            f"with the {item} build does not work until it is installed. To try again: {retry}")
 
 
 def _prepare_comfyui(root: Path, update_id: str, plan: dict, say: Say) -> dict:
@@ -190,7 +203,7 @@ def _prepare_comfyui(root: Path, update_id: str, plan: dict, say: Say) -> dict:
     from localm.media import managed_comfy_update as mcu
     from localm.update_mechanism import job, steps
     folder = mc.managed_comfy_paths().root
-    why = mc.settle_managed_comfy()
+    why = mc.why_managed_comfy_is_unsettled(steps.SETTLE_WAIT_S)
     if why:
         raise PrepareFailed(f"the managed ComfyUI cannot be updated now: {why}")
     acquired, busy = mc._acquire_update_lock("update")

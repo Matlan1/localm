@@ -33,6 +33,8 @@ SILENCE_S = 1800.0
 #: Exit status of ``localm setup-llama --prove`` for a runtime that does not work here.
 UNUSABLE_EXIT = 79
 RUNTIME, FOLDERS, COMFYUI = "runtime", "folders", "comfyui"
+_PART_KEYS = {RUNTIME: {"label", "name", "beside", "backend", "from", "to", "keep", "folders"},
+              FOLDERS: {"label"}, COMFYUI: {"label", "removed", "packages"}}
 
 
 # ----------------------------------------------------------------- children
@@ -103,17 +105,31 @@ def child_env(env: Mapping, tree, home, update_id: str) -> dict:
 
 # --------------------------------------------------------------- preparing
 
-def prepare(root, update_id: str, *, uv, home, env: Mapping, say: Say) -> dict:
-    """Fetch and test everything the steps of the update *update_id* of the install at
-    *root* need. Its new tree is ``<id>/new``; *home* is the data folder; *uv* the full
-    path of the uv to run. Writes only below ``<id>`` and the same id's folder in the
-    component folders it prepares, and the download caches. Returns the steps, also on
-    disk for :func:`run`: ``{"sync", "torch", "uv", "parts", "kept", "notes", ...}``.
+class Preparing(steps.Work):
+    """The update *update_id* of the install at *root*, whose new tree is ``<id>/new``,
+    while it is prepared; a context manager. What was prepared is deleted at the end
+    unless the update was started (``job.start``) before."""
+
+    def __init__(self, root, update_id: str) -> None:
+        super().__init__(root, update_id)
+
+    def __exit__(self, *exc) -> None:
+        if disk.lstat(self.path / job.STATE) is None:
+            discard(self.root, self.id)
+        super().__exit__(*exc)
+
+
+def prepare(update: Preparing, *, uv, home, env: Mapping, say: Say) -> dict:
+    """Fetch and test everything the steps of *update* need, inside its block. *home* is
+    the data folder; *uv* the full path of the uv to run. Writes only below ``<id>`` and
+    the same id's folder in the component folders it prepares, and the download caches;
+    an interrupted change of one of these components is put back first. Returns the
+    steps, also on disk for :func:`run`: ``{"sync", "torch", "uv", "parts", "kept",
+    "notes", ...}``.
 
     Raises :class:`.mover.Refused` (the update cannot be made; nothing changed) and
-    OSError. Call :func:`discard` when the update is not made."""
-    work = mover.work_folder(root, update_id)
-    (work / "plans").mkdir(parents=True, exist_ok=True)
+    OSError."""
+    root, update_id, work = update.root, update.id, update.path
     future = steps_packages.Future(root, update_id, uv, env=env, say=say)
     extras = steps_packages.used_extras(root, future.tree, uv, env=env)
     sync = future.sync(extras)
@@ -129,7 +145,7 @@ def prepare(root, update_id: str, *, uv, home, env: Mapping, say: Say) -> dict:
     if code != 0 or not isinstance(prepared, dict):
         reason = prepared.get("refused") if isinstance(prepared, dict) else None
         raise Refused(str(reason or last or "the new version could not prepare its parts"))
-    spec = {"format": FORMAT, "sync": sync, **prepared}
+    spec = {"sync": sync, **prepared}
     _check(spec)
     disk.write_json(work / STEPS_FILE, spec)
     return spec
@@ -143,7 +159,8 @@ def _check(spec) -> dict:
             or not isinstance(spec.get("sync"), (dict, type(None)))
             or not isinstance(spec.get("uv"), (str, type(None)))
             or not all(isinstance(p, dict) and isinstance(p.get("root"), str)
-                       and p.get("kind") in (RUNTIME, FOLDERS, COMFYUI) for p in spec["parts"])):
+                       and _PART_KEYS.get(str(p.get("kind")), {None}) <= set(p)
+                       for p in spec["parts"])):
         raise Unreadable(f"{STEPS_FILE} does not hold the steps of an update")
     return spec
 
@@ -163,9 +180,8 @@ def part_root(root, part: Mapping) -> Path:
 
 
 def discard(root, update_id: str) -> None:
-    """Delete what :func:`prepare` left outside the update's own folder; the staged
-    packages go with ``job.discard``. Safe to call when nothing was prepared; what
-    cannot be deleted is left for the next change."""
+    """Delete what :func:`prepare` left outside the update's own folder. Safe to call
+    when nothing was prepared; what cannot be deleted is left for the next change."""
     work = mover.work_folder(root, update_id)
     for name in (STEPS_FILE, PREPARED):
         try:
@@ -175,7 +191,7 @@ def discard(root, update_id: str) -> None:
         if isinstance(spec, dict):
             for part in spec.get("parts") or []:
                 with contextlib.suppress(OSError, disk.Unsafe):
-                    steps.discard(part_root(root, part), update_id)
+                    job.discard(part_root(root, part), update_id)
 
 
 # --------------------------------------------------------------- carried out
@@ -201,13 +217,9 @@ class Run:
         self.say("Replacing Python packages...")
         steps_packages.run_packages(self.root, self.id, sync, torch, self.uv, env=self.env,
                                     ask=self.ask)
-        if not torch:
-            return
-        python = steps_packages.python_in(self.root / ".venv")
-        code, last = run_child([python, "-c", "import torch"], cwd=self.root, say=lambda _t: None,
-                               env=steps_packages.packages._environment(self.env))
-        if code != 0:
-            raise Refused(f"the new PyTorch does not load: {last}")
+        why = why_torch_fails(self.root / ".venv", env=self.env) if torch else None
+        if why:
+            raise Refused(why)
 
     def own_uv(self, version: str) -> None:
         self.say(f"Replacing the uv inside localm by uv {version}...")
@@ -250,7 +262,7 @@ class Run:
                                   f"{part['to']} does not work here ({last})")
                 self.kept.append({"backend": part["backend"], "kept": part["from"],
                                   "target": part["to"], "why": last})
-                steps.discard(folder, self.id)
+                job.discard(folder, self.id)
                 return False
             last = f"{last}; the installed one does not work with this version either ({why})"
         raise Refused(f"the new {part['label']} could not be tested: {last}")
@@ -270,18 +282,24 @@ class Run:
         if not part["packages"]:
             return
         steps_packages.run_pip(folder, self.id, ask=self.ask)
-        env = {k: v for k, v in self.env.items() if k != "PYTHONPATH"}
-        venv = mover.venv_of(folder, mover.VENV)
-        if steps.shared.updater_components.dists(
-                steps.shared.updater_components.site_packages(venv)).get("torch"):
-            python = disk.short_path(steps_packages.python_in(venv))
-            code, last = run_child([python, "-I", "-c", "import torch"], cwd=folder, env=env,
-                                   say=lambda _t: None)
-            if code != 0:
-                raise Refused(f"the new PyTorch of the managed ComfyUI does not load: {last}")
+        why = why_torch_fails(mover.venv_of(folder, mover.VENV), env=self.env)
+        if why:
+            raise Refused(f"the managed ComfyUI: {why}")
 
 
 _UV = "uv.exe" if os.name == "nt" else "uv"
+
+
+def why_torch_fails(venv, *, env: Mapping) -> Optional[str]:
+    """None when the Python environment *venv* has no PyTorch or imports it in a new
+    process, else why not."""
+    venv = Path(disk.short_path(Path(venv)))
+    site = steps.shared.updater_components.site_packages(venv)
+    if site is None or "torch" not in steps.shared.updater_components.dists(site):
+        return None
+    code, last = run_child([steps_packages.python_in(venv), "-I", "-c", "import torch"], cwd=venv,
+                           env=steps_packages.packages._environment(env), say=lambda _t: None)
+    return None if code == 0 else f"the new PyTorch does not load: {last}"
 
 
 def run(lock: job.Lock, update_id: str, *, uv, home, env: Mapping, say: Say,
@@ -315,25 +333,15 @@ def put_back(lock: job.Lock, *, uv, env: Mapping, say: Say, network: bool = True
     somebody changed them since, are installed again in their old versions with *uv*
     (:func:`.steps_packages.reinstall`), in the install and in its parts. Raises like
     ``job.restore``."""
-    def reinstall(named: list) -> None:
-        record = job.read(lock.root)
-        if record is None:
-            return
-        spec: dict = {}
-        with contextlib.suppress(Unreadable):
-            spec = read(lock.root, record.id)
-        for folder, step in sorted({(p.get("part", ""), p["step"]) for p in named}):
-            wanted = [(p["name"], p["version"]) for p in named
-                      if (p.get("part", ""), p["step"]) == (folder, step)]
-            say(f"Installing {', '.join(f'{n} {v}' for n, v in wanted)} again...")
-            parts = [p for p in spec.get("parts", ()) if p["root"] == folder]
-            indexes = (parts[0].get("indexes") or () if parts else ()) if folder else (
-                steps_packages.index_args(spec.get("torch", ())))
-            extras = (spec.get("sync") or {}).get("extras") or (
-                steps.shared.apply_update.DEPS_EXTRAS)
-            steps_packages.reinstall(Path(lock.root) / folder, record.id, step, wanted, uv,
-                                     env=env, indexes=indexes, extras=extras, network=network,
-                                     wait_s=wait_s, ask=ask)
+    def options(update_id: str, part: str) -> dict:
+        spec = read(lock.root, update_id)
+        indexes = next((p.get("indexes") or () for p in spec["parts"] if p["root"] == part),
+                       ()) if part else steps_packages.index_args(spec["torch"])
+        extras = (spec["sync"] or {}).get("extras")
+        return {"indexes": indexes, **({"extras": extras} if extras else {})}
+
+    reinstall = steps_packages.reinstaller(lock.root, uv, env=env, options=options, say=say,
+                                           network=network, wait_s=wait_s, ask=ask)
     repair = "Run localm's setup again, which repairs that."
     if not network:
         repair = ("They could not be fetched, because localm may not use the network. " + repair

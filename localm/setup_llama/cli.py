@@ -273,7 +273,8 @@ def _put_in_place(target: Path, staged: Path) -> None:
 
 def _prove(folder: Path) -> None:
     """Test that the runtime in *folder* works on this machine (``--prove``). Exits
-    with ``BUILD_UNUSABLE_EXIT`` when it does not."""
+    with ``BUILD_UNUSABLE_EXIT`` when it does not, and with 1 when there is none or it
+    could not be tested."""
     import os
 
     from localm.setup_llama.provision import _chosen_backend_loads
@@ -281,7 +282,7 @@ def _prove(folder: Path) -> None:
     backend = _sl._provisioned_backend(folder) or "cpu"
     if not (folder / _sl._lib_name()).is_file():
         console.print(f"[red]There is no runtime in {escape(str(folder))}.[/red]")
-        sys.exit(BUILD_UNUSABLE_EXIT)
+        sys.exit(1)
     ok, detail = _chosen_backend_loads(backend)
     if not ok:
         console.print(f"[red]The {backend} runtime does not work here:[/red] "

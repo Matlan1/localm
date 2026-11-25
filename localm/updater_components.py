@@ -911,20 +911,6 @@ def _running_in(folder: Path) -> Optional[list]:
     return install_manifest.running_from([folder])
 
 
-def _settle(root: Path) -> None:
-    """Put back what an interrupted component update left in the install at *root*
-    (``update_mechanism.steps.settle``); a failure is logged."""
-    from localm.update_mechanism import steps
-    try:
-        result = steps.settle(root)
-    except steps.STEP_ERRORS as e:
-        _warn("update: an interrupted change of %s could not be undone: %s", root, e)
-        return
-    if result is not None and (result.errors or result.state == "busy"):
-        _warn("update: an interrupted change of %s could not be undone: %s", root,
-              "; ".join(result.errors) or "it is not finished")
-
-
 def blockers(plans, installed_root) -> list:
     """Processes that keep a component of *plans* from being updated and that
     the update does not stop: a uv running from inside the install. ``[{"pid",
@@ -1890,31 +1876,13 @@ def _short(path: Path) -> str:
     return disk.short_path(path)
 
 
-def torch_works(root: Path, env: dict) -> Optional[str]:
-    """None when the venv of the install at *root* imports PyTorch in a new process,
-    else why not."""
-    python = Path(root) / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    flags: dict = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
-    try:
-        done = subprocess.run([str(python), "-c", "import torch"], cwd=str(root), env=env,
-                              capture_output=True, text=True, encoding="utf-8",
-                              errors="replace", timeout=_ASK_TIMEOUT_S,
-                              stdin=subprocess.DEVNULL, **flags)
-    except (OSError, subprocess.SubprocessError) as e:
-        return f"the new PyTorch could not be tested: {e}"
-    if done.returncode == 0:
-        return None
-    lines = [ln.strip() for ln in (done.stderr or done.stdout).splitlines() if ln.strip()]
-    return f"the new PyTorch does not load: {lines[-1] if lines else done.returncode}"
-
-
 def _update_pytorch(p: dict, root: Path, env: dict, say: Callable) -> Optional[str]:
     """Carry out the PyTorch step *p* on the install at *root*: what it installs is
     fetched first, then the packages it replaces are moved aside and the new ones
     installed and tested (``update_mechanism.steps``). None on success, else what
     failed, with the old packages in place."""
     from localm import updater
-    from localm.update_mechanism import steps, steps_packages
+    from localm.update_mechanism import steps, steps_packages, steps_update
     uv = updater._uv_for_deps(root)
     try:
         with steps.Work(root) as work:
@@ -1924,11 +1892,11 @@ def _update_pytorch(p: dict, root: Path, env: dict, say: Callable) -> Optional[s
                 return None
             say("Replacing the PyTorch packages...")
             steps.change(work, [lambda: steps_packages.run_packages(
-                root, work.id, None, ready, uv, env=env)], prove=lambda: torch_works(root, env),
-                reinstall=lambda named: steps_packages.reinstall(
-                    root, work.id, named[0]["step"], [(n["name"], n["version"]) for n in named],
-                    uv, env=env, indexes=steps_packages.index_args(p["items"]),
-                    extras=steps_packages.shared.apply_update.DEPS_EXTRAS))
+                root, work.id, None, ready, uv, env=env)],
+                prove=lambda: steps_update.why_torch_fails(root / ".venv", env=env),
+                reinstall=steps_packages.reinstaller(
+                    root, uv, env=env, say=say,
+                    options=lambda _id, _part: {"indexes": steps_packages.index_args(p["items"])}))
     except (steps.Failed, *steps.STEP_ERRORS) as e:
         return str(e)
     return None
@@ -2067,7 +2035,10 @@ def finish_pending(*, root=None, home=None, runner: Optional[Callable] = None,
         return None
     say = say or (lambda _m: None)
     home = _home(home)
-    _settle(root)
+    from localm.update_mechanism import steps
+    why = steps.unsettled(root, wait_s=steps.SETTLE_WAIT_S)
+    if why:
+        _warn("update: %s", why)
     plans = plan(root, root, home=home)
     todo = [p for p in plans if p["update"]]
     status = {"state": None, "components": plans, "note": summary(plans), "error": None}

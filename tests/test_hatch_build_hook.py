@@ -146,6 +146,19 @@ def test_the_hook_sets_the_scripts(install):
 
 
 @windows_only
+def test_a_build_of_the_update_mechanism_touches_no_file(install, monkeypatch):
+    monkeypatch.setenv(hatch_build.UPDATE_ID, "ab" * 16)
+    for name in ("stop_own_probe_daemon", "scripts_for_this_build"):
+        monkeypatch.setattr(hatch_build, name, lambda *a: pytest.fail("the install was touched"))
+    hook = object.__new__(hatch_build.LocalmScriptsHook)
+    monkeypatch.setattr(hatch_build.LocalmScriptsHook, "root", str(install), raising=False)
+    monkeypatch.setattr(hatch_build.LocalmScriptsHook, "config", {"console-scripts": SCRIPTS},
+                        raising=False)
+    metadata: dict = {}
+    hook.update(metadata)
+    assert metadata["scripts"] == SCRIPTS
+
+
 def test_any_failure_in_the_hook_leaves_things_as_they_are(install, monkeypatch, capsys):
     def broken(*a):
         raise PermissionError("no")

@@ -117,8 +117,7 @@ from localm.setup_llama.runtime_dir import (
     installed_build, installed_runtime_identity, _repo_runtime_lib, _runtime_pkg_dir,
     _install_runtime_wheel, _PRESERVED_TARGET_FILES, RuntimeInUseError, _clearable_files, _files_in_use,
     _clear_target, _clear_target_or_refuse, _exit_runtime_in_use, _PROVISION_LOCK_OWNER,
-    _replace_target, _staging_path, put_in_place, refuse_runtime_in_use, settle_runtime,
-    staged_runtime,
+    _replace_target, _staging_path, put_in_place, refuse_runtime_in_use, staged_runtime,
     ProvisioningBusyError, _provision_lock_path, _provision_lock_holder_pid,
     _provisioning_lock, _exit_provisioning_busy,
 )
@@ -153,7 +152,7 @@ from localm.setup_llama.load_probe import (
     _name_missing_shared_lib, _PROBE_NO_BACKENDS, _PROBE_ABI_MISMATCH,
     _ABI_REJECT_PREFIX, _LOAD_PROBE_CODE, _is_abi_rejection, _native_loads_ok,
     _PROBE_NO_GPU_DEVICE, _GPU_LOAD_PROBE_CODE, _native_gpu_loads_ok,
-    _PROBE_MODEL_FAILED,
+    _PROBE_MODEL_FAILED, LoadTestNotRun,
 )
 from localm.setup_llama.rocm_cpu import (
     CPU_OVERLAY_FAILED_MARKER, CPU_OVERLAY_MARKER, cpu_overlay_failed,
@@ -188,7 +187,7 @@ __all__ = [
     "KERNEL_PACKS_MARKER", "kernel_packs_missing",
     "_clear_target", "_clear_target_or_refuse", "_clearable_files", "console",
     "_replace_target", "_staging_path", "put_in_place", "refuse_runtime_in_use",
-    "settle_runtime", "staged_runtime", "BUILD_UNUSABLE_EXIT", "_PROBE_MODEL_FAILED",
+    "staged_runtime", "LoadTestNotRun", "BUILD_UNUSABLE_EXIT", "_PROBE_MODEL_FAILED",
     "STAGED_NOTE", "IMAGE_TAG_FOR_LINE", "CUDA_CHECK_FAILED", "record_staged_cuda",
     "staged_cuda_line", "check_staged_cuda_runtime", "cuda_container_check",
     "_copy_binaries", "_copy_blas_library_dirs", "_copy_license_files", "CPU_OVERLAY_MARKER",

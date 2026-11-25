@@ -134,15 +134,16 @@ class Area:
 
     *guard*: the folders an update never touches are refused. *exact*: every part of
     a path counts only under its exact spelling, else the ones that two paths given
-    to :meth:`watch` spell differently. *closed*: top-level names of
+    to :meth:`watch` spell differently. *follow*: a folder below *base* that is a link
+    is used like the one it leads to. *closed*: top-level names of
     *base* that are never changed. *stay*: folders that are not removed when they
     become empty."""
 
     def __init__(self, base: Path, old: Path, new: Path, kept: Path, *, guard: bool = False,
-                 exact: bool = False, closed: Iterable[str] = (),
+                 exact: bool = False, follow: bool = False, closed: Iterable[str] = (),
                  stay: Iterable[Path] = ()) -> None:
         self.base, self.old, self.new, self.kept = base, old, new, kept
-        self.guard, self.exact = guard, exact
+        self.guard, self.exact, self.follow = guard, exact, follow
         self.closed = frozenset(n.casefold() for n in closed)
         self.stay = frozenset([base, *stay])
         self._plain: set = set()
@@ -203,12 +204,17 @@ class Area:
             if st is None or (exact and not disk.spelled(path)):
                 return base.joinpath(*parts), None
             if not last:
-                if disk.is_link(st):
+                if disk.is_link(st) and not (base == self.base and self.is_folder(path, st)):
                     raise Unsafe(f"{path} is a link")
-                if not stat.S_ISDIR(st.st_mode):
+                if not self.is_folder(path, st):
                     return base.joinpath(*parts), None
                 self._plain.add(path)
         return path, st
+
+    def is_folder(self, path: Path, st: os.stat_result) -> bool:
+        """Whether *path* (*st* from ``lstat``) is a folder, or a link to one that is
+        followed."""
+        return _is_folder(st) or (self.follow and disk.is_link(st) and path.is_dir())
 
     def _is_twin(self, rel: str) -> bool:
         return bool(self._twins) and rel.casefold() in self._twins
@@ -264,7 +270,7 @@ def area(root, update_id: str, step: str, number: int) -> Area:
         kept = plain_folder(plain_folder(update_folder(root) / "kept") / update_id)
         return Area(plain_folder(disk.real_folder(root) / BASES[step]),
                     old_folder(mine, number), new_folder(root, update_id, step),
-                    plain_folder(kept / step), exact=step == TREE,
+                    plain_folder(kept / step), exact=step == TREE, follow=step == TREE,
                     closed=(FOLDER, VENV_FOLDER, VENV_KEPT))
     if step in VENVS:
         venv = disk.real_folder(Path(root) / VENVS[step])
@@ -535,9 +541,8 @@ def build(a: Area, step: str, number: int, new: Mapping, leaving: Iterable[str],
 
     *identify* gives the identity of a file that is there, *edited* whether a file
     that goes is the user's own; an identity without a checksum gets that of the
-    content. *keep_equal*: a file that is already the new one stays. Raises :class:`Refused` for a path that is taken by something else or on
-    another volume, :class:`Unsafe` for one through a link, :class:`.disk.Held` or
-    OSError."""
+    content. *keep_equal*: a file that is already the new one stays. Raises :class:`Refused` for a path that is taken by something else,
+    :class:`Unsafe` for one through a link, :class:`.disk.Held` or OSError."""
     swap = list(swap)
     wait = Wait()
 
@@ -572,7 +577,6 @@ def build(a: Area, step: str, number: int, new: Mapping, leaving: Iterable[str],
     gone = {rel.casefold() for rel in removes}
     for rel in taken:
         _check_taken(a, rel, gone)
-    _check_volume(a, [*removes, *(op.path for op in changes)])
     first = sorted((op for op in changes if op.swap), key=lambda op: swap.index(op.path))
     rest = [op for op in changes if not op.swap]
     return Plan(step, number, [*first, *(removes[r] for r in sorted(removes)), *rest],
@@ -649,21 +653,6 @@ def differs(identity: Mapping, stated: Mapping) -> bool:
     return any(identity[k] != stated[k] for k in ("sha256", "size"))
 
 
-def _check_volume(a: Area, paths: Iterable[str]) -> None:
-    volume = os.lstat(a.new).st_dev
-    seen: set = set()
-    for rel in paths:
-        parent = a.base.joinpath(*rel.split("/")).parent
-        while parent not in seen:
-            seen.add(parent)
-            st = disk.lstat(parent)
-            if st is not None:
-                if st.st_dev != volume:
-                    raise Refused(f"{rel} is on another volume than {a.new}")
-                break
-            parent = parent.parent
-
-
 def _other_spelling(path: Path) -> Optional[Path]:
     """The regular file that *path* reaches under another spelling of its last part,
     None when there is none."""
@@ -686,7 +675,7 @@ def _check_taken(a: Area, rel: str, gone: set) -> None:
         st = disk.lstat(path)
         if st is None:
             return
-        if i < len(parts) and _is_folder(st) and disk.spelled(path):
+        if i < len(parts) and a.is_folder(path, st) and disk.spelled(path):
             continue
         if not _is_folder(st):
             if "/".join(parts[:i]).casefold() not in gone:
@@ -708,8 +697,8 @@ def _created(a: Area, ops: list) -> list:
             rel = "/".join(parts[:i])
             if rel in found:
                 continue
-            st = a.find(rel)[1]
-            if st is None or not stat.S_ISDIR(st.st_mode):
+            path, st = a.find(rel)
+            if st is None or not a.is_folder(path, st):
                 found.add(rel)
     return sorted(found)
 
@@ -1055,6 +1044,9 @@ class _Back:
 
     def _verify(self, op: Op) -> None:
         path, st = self.a.find(op.path)
+        part = path.with_name(path.name + disk.PART)
+        if disk.lstat(part) is not None:
+            disk.unlink(part)
         if op.old is None:
             if st is not None and not stat.S_ISDIR(st.st_mode):
                 raise Refused(f"{op.path} was added and is still there")

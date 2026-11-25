@@ -6,11 +6,15 @@ archive) leaves the working runtime in place."""
 import os
 import subprocess
 import sys
+import types
 
 import pytest
+from click.testing import CliRunner
 
 import localm.setup_llama as sl
+from localm.inference.backends.llamacpp import _loader
 from localm.setup_llama.download import ArtifactError
+from localm.update_mechanism import disk, job, mover, steps
 
 
 def _installed(target):
@@ -212,14 +216,13 @@ def test_a_setup_killed_while_it_replaces_the_runtime_is_undone_by_the_next_use(
             states.append("done")
             break
         assert done.returncode == 9, done.stderr
-        assert sl.settle_runtime(target) is None
+        assert steps.unsettled(target.parent) is None
         assert _snapshot(target) == before, at
         states.append("old")
     assert states[-1] == "done" and len(states) > 6
 
 
-def test_a_runtime_that_cannot_be_put_back_is_installed_again(tmp_path):
-    from localm.update_mechanism import disk, job, mover, steps
+def test_a_runtime_that_cannot_be_put_back_is_installed_again(tmp_path, monkeypatch):
     target = tmp_path / "lib"
     _installed(target)
     place = steps.Place(tmp_path, "ab" * 16)
@@ -231,11 +234,27 @@ def test_a_runtime_that_cannot_be_put_back_is_installed_again(tmp_path):
         job.advance(lock, job.STEPS)
         steps.move_in(tmp_path, place.id, mover.WHOLE)
     assert disk.remove_tree(mover.area(tmp_path, place.id, mover.WHOLE, 1).old)
-    assert "is lost" in (sl.settle_runtime(target) or "")
+    assert "is lost" in (steps.unsettled(tmp_path) or "")
     assert sl.cli._settle(target) is True
-    _put(target)
+
+    def loads():
+        found = _loader._settled_binary_dir(os.environ["LLAMA_CPP_LIB"])
+        return (found / sl._lib_name()).read_bytes() == b"new working build", "another runtime"
+    build = tmp_path / "build"
+    build.mkdir()
+    (build / sl._lib_name()).write_bytes(b"new working build")
+    monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: target)
+    monkeypatch.setattr(sl, "_native_loads_ok", loads)
+    monkeypatch.setattr(sl, "_install_runtime_wheel", lambda pkg: True)
+    monkeypatch.setattr(sl, "_verify", lambda: None)
+    monkeypatch.setattr(sl.cli, "_refresh_install_record", lambda target: None)
+    monkeypatch.setitem(sys.modules, "localm_llama_runtime",
+                        types.SimpleNamespace(LIB_DIR=str(target), lib_dir=lambda: str(target)))
+    done = CliRunner().invoke(sl.main, ["--from", str(build), "--yes"])
+    assert done.exit_code == 0, done.output
+    assert "is installed again" in done.output
     assert (target / sl._lib_name()).read_bytes() == b"new working build"
-    assert sl.settle_runtime(target) is None and sl.cli._settle(target) is False
+    assert steps.unsettled(tmp_path) is None and sl.cli._settle(target) is False
 
 
 def test_a_failed_provision_puts_the_pin_back(monkeypatch):
@@ -253,3 +272,31 @@ def test_a_failed_provision_puts_the_pin_back(monkeypatch):
     store.pop("llama_runtime_pin")
     sl.cli._restore_pin(None)
     assert "llama_runtime_pin" not in store
+
+
+def test_a_folder_that_is_there_is_not_taken_for_an_update(tmp_path):
+    target, into = tmp_path / "lib", tmp_path / "aside"
+    _installed(target)
+    into.mkdir()
+    (into / "mine.txt").write_text("the user's")
+    with pytest.raises(FileExistsError), sl.staged_runtime(target, into):
+        pass
+    assert (into / "mine.txt").read_text() == "the user's"
+
+
+def _prove(folder):
+    return CliRunner().invoke(sl.main, ["--prove", str(folder)], standalone_mode=True).exit_code
+
+
+def test_only_a_build_that_does_not_work_is_called_unusable(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLAMA_CPP_LIB", "")
+    folder = tmp_path / "lib"
+    assert _prove(folder) == 1
+    _installed(folder)
+    monkeypatch.setattr(sl, "_native_loads_ok", lambda: (False, "no driver"))
+    assert _prove(folder) == sl.BUILD_UNUSABLE_EXIT
+
+    def not_run():
+        raise sl.LoadTestNotRun("no temporary folder")
+    monkeypatch.setattr(sl, "_native_loads_ok", not_run)
+    assert _prove(folder) == 1

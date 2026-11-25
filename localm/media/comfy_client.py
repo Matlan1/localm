@@ -2424,6 +2424,7 @@ def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
     import sys as _sys
     import time as _t
     from localm.config import load_config
+    from localm.media.managed_comfy import managed_comfy_paths, why_managed_comfy_is_unsettled
 
     cfg = load_config()
 
@@ -2450,6 +2451,11 @@ def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
                 workdir = managed_workdir
         except Exception:
             managed_launch_cmd = None
+
+    if workdir and Path(workdir) == managed_comfy_paths().root:
+        unsettled = why_managed_comfy_is_unsettled()
+        if unsettled:
+            return False, f"The managed ComfyUI cannot be started now: {unsettled}"
 
     # Resolve the ComfyUI folder (working dir): explicit arg / managed, then
     # config. It anchors both launcher discovery and the cwd a relative

@@ -14,6 +14,8 @@ a native traceback).
 
 from __future__ import annotations
 
+import pytest
+
 from localm import setup_llama
 
 
@@ -57,15 +59,6 @@ def test_load_crash_still_reported(monkeypatch):
     assert "no compute backends" not in detail
 
 
-def test_subprocess_spawn_error_is_reported(monkeypatch):
-    def _boom(*a, **k):
-        raise OSError("cannot spawn interpreter")
-    monkeypatch.setattr(setup_llama.subprocess, "run", _boom)
-    ok, detail = setup_llama._native_loads_ok()
-    assert ok is False
-    assert "cannot spawn interpreter" in detail
-
-
 def test_multiline_load_error_reports_cause_not_hint(monkeypatch):
     # load_lib() raises a MULTI-LINE RuntimeError whose FIRST line is the real
     # dlopen cause and whose trailing lines are re-provision hints.
@@ -95,3 +88,57 @@ def test_informative_error_line_falls_back_to_last_line():
     assert setup_llama._informative_error_line(
         "noise line\nactual tail") == "actual tail"
     assert setup_llama._informative_error_line("") == "library failed to load"
+
+
+def _quick(monkeypatch):
+    from localm.setup_llama import load_probe
+    monkeypatch.setattr(load_probe, "_PAUSE_S", 0)
+    monkeypatch.setattr(setup_llama.subprocess, "run", lambda *a, **k: _FakeProc(0))
+    return load_probe
+
+
+def test_a_test_file_that_cannot_be_deleted_does_not_fail_the_build(monkeypatch):
+    probe = _quick(monkeypatch)
+
+    def held(path, ignore_errors=False, **_k):
+        if not ignore_errors:
+            raise PermissionError(13, "in use")
+    monkeypatch.setattr(probe.shutil, "rmtree", held)
+    assert setup_llama._native_loads_ok() == (True, "")
+
+
+def test_without_a_temporary_folder_the_data_folder_is_used(monkeypatch, tmp_path):
+    from localm import config
+    probe = _quick(monkeypatch)
+    real = probe.tempfile.mkdtemp
+    used = []
+
+    def mkdtemp(prefix=None, dir=None):
+        if dir is None:
+            raise FileNotFoundError("no usable temporary directory")
+        used.append(dir)
+        return real(prefix=prefix, dir=dir)
+    monkeypatch.setattr(probe.tempfile, "mkdtemp", mkdtemp)
+    monkeypatch.setattr(config, "home_dir", lambda: tmp_path)
+    assert setup_llama._native_loads_ok() == (True, "")
+    assert used == [tmp_path] and list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("fails, loads", [(2, True), (3, False)])
+def test_a_test_that_cannot_be_run_is_tried_again_and_is_no_failed_build(monkeypatch, fails, loads):
+    probe = _quick(monkeypatch)
+    left = [fails]
+
+    def run(*_a, **_k):
+        if left[0]:
+            left[0] -= 1
+            raise OSError("no interpreter")
+        return _FakeProc(0)
+    monkeypatch.setattr(setup_llama.subprocess, "run", run)
+    for test in (setup_llama._native_loads_ok, setup_llama._native_gpu_loads_ok):
+        left[0] = fails
+        if loads:
+            assert test() == (True, "")
+        else:
+            with pytest.raises(probe.LoadTestNotRun, match="no interpreter"):
+                test()

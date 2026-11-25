@@ -855,20 +855,13 @@ def catch_up(root=None, *, repair: bool = False) -> Optional[dict]:
 
 
 def _settle(root) -> Optional[str]:
-    """Put the runtime of the install at *root* back when a process that was replacing
-    it ended, or wait while one moves its files (``update_mechanism.steps.settle``).
-    Returns None, or why it may be incomplete, which is also logged."""
+    """``steps.unsettled`` of the runtime of the install at *root*, also logged."""
     from localm.update_mechanism import steps
-    try:
-        result = steps.settle(Path(os.path.realpath(runtime_lib(root))).parent)
-        if result is None or (result.state != "busy" and not result.errors):
-            return None
-        why = "; ".join(result.errors) or "its files are being replaced"
-    except steps.STEP_ERRORS as e:
-        why = str(e)
-    from localm.debuglog import logger
-    logger.warning("update: the native runtime may be incomplete after an interrupted "
-                   "replacement: %s", why)
+    why = steps.unsettled(Path(os.path.realpath(runtime_lib(root))).parent,
+                          wait_s=steps.SETTLE_WAIT_S)
+    if why:
+        from localm.debuglog import logger
+        logger.warning("update: the native runtime: %s", why)
     return why
 
 
@@ -1058,7 +1051,10 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
         status["holders"] = held_by
     restore_errors = au.restore_runtime(snapshot, lib)
     if not restore_errors:
-        loads, why_not = _runtime_loads(lib, backend, sl)
+        try:
+            loads, why_not = _runtime_loads(lib, backend, sl)
+        except sl.LoadTestNotRun as e:
+            loads, why_not, setup_finished = True, str(e), False
         if loads:
             restored = sl._provisioned_build(lib)
             previous = restored or pending.get("from") or "build"

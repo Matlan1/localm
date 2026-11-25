@@ -130,7 +130,7 @@ def prepare(place, root: Path, *, repo: str, target: str, version: Optional[str]
     (``update_mechanism.steps.Place`` of *root*), with its pinned custom nodes and its
     Python packages when *reinstall*. Changes nothing of the installed one. Raises
     :class:`PrepareError`."""
-    from localm.update_mechanism import disk, mover
+    from localm.update_mechanism import disk, mover, steps
     previous = _rev_parse_head(root)
     if previous is None:
         raise PrepareError("The managed ComfyUI has no recorded source commit")
@@ -160,9 +160,39 @@ def prepare(place, root: Path, *, repo: str, target: str, version: Optional[str]
                 place, mc._venv_python_path(root), requirements, on_progress=on_progress,
                 say=say, run=_run)
         _update_marker(staged, target, version, previous, out.outcomes, installed=installed)
-    except OSError as e:
+        out.removed = _leave_to_user(installed, staged, out.removed)
+        steps.plan_staged(root, place.id, mover.TREE, remove=out.removed)
+    except steps.STEP_ERRORS as e:
         raise PrepareError(f"Could not prepare the update: {e}") from e
     return out
+
+
+def _leave_to_user(installed: Path, staged: Path, removed: list) -> list:
+    """Take out of *staged* what is not put into a folder of the user's: a folder of
+    *installed* that is a link or a mount. That is a file without content, one the
+    current source has too and the user's folder has not, and everything when the link
+    leads nowhere. Returns *removed* without what lies behind such a link."""
+    from localm.update_mechanism import steps
+    theirs: dict = {"": None}
+
+    def behind(rel: str) -> Optional[Path]:
+        """The folder of the user *rel* lies in, None for none."""
+        parent = rel.rpartition("/")[0]
+        if parent not in theirs:
+            path = installed / parent
+            theirs[parent] = behind(parent) or (
+                path if path.is_symlink() or path.is_junction() or os.path.ismount(path) else None)
+        return theirs[parent]
+
+    known = set(source_archive.tree_files(installed) or [])
+    for rel in steps.staged_files(staged):
+        folder = behind(rel)
+        if folder is not None and (
+                not folder.is_dir() or not (staged / rel).stat().st_size
+                or (rel in known and not (installed / rel).exists())):
+            (staged / rel).unlink()
+    gone = [rel for rel in removed if (f := behind(rel)) is not None and not f.is_dir()]
+    return [rel for rel in removed if rel not in gone]
 
 
 def _stage_nodes(root: Path, installed: Path, staged: Path, out: Prepared,
@@ -203,20 +233,14 @@ def package_indexes() -> list:
     return steps_packages.index_args([comfy_torch_install_args(comfy_torch_spec())])
 
 
-def _reinstall(root: Path, update_id: str):
+def _reinstall(root: Path, say):
     """For ``update_mechanism.steps.change``: installs packages of the managed venv
     again that a way back names."""
-    def again(named: list) -> None:
-        from localm import uv_tool
-        from localm.update_mechanism import job, mover, steps_packages
-        record = job.read(root)
-        uv = uv_tool.own_uv(uv_tool.install_root())
-        if uv is None:
-            raise mover.Refused("localm has no uv to install them with")
-        steps_packages.reinstall(root, record.id if record else update_id, named[0]["step"],
-                                 [(p["name"], p["version"]) for p in named], uv,
-                                 env=dict(os.environ), indexes=package_indexes())
-    return again
+    from localm import uv_tool
+    from localm.update_mechanism import steps_packages
+    return steps_packages.reinstaller(
+        root, uv_tool.own_uv(uv_tool.install_root()), env=dict(os.environ), say=say,
+        options=lambda _id, _part: {"indexes": package_indexes()})
 
 
 def why_unusable(packages: bool) -> Optional[str]:
@@ -227,8 +251,9 @@ def why_unusable(packages: bool) -> Optional[str]:
                 "or venv missing at the new pin).")
     if not packages:
         return None
-    from localm.media import managed_comfy_packages
-    return managed_comfy_packages.why_broken(mc.managed_comfy_paths().venv_python, run=_run)
+    from localm.update_mechanism import steps_update
+    why = steps_update.why_torch_fails(mc.managed_comfy_paths().root / "venv", env=os.environ)
+    return f"The managed ComfyUI: {why}" if why else None
 
 
 def _update_marker(root: Path, target_commit: str, target_version: Optional[str],
@@ -309,11 +334,10 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
         return _result(False, "busy", busy)
     from localm.update_mechanism import steps
     try:
-        unsettled = mc.settle_managed_comfy()
+        unsettled = mc.why_managed_comfy_is_unsettled(steps.SETTLE_WAIT_S)
         if unsettled:
-            return _result(False, "error", "An interrupted update of the managed ComfyUI could "
-                           f"not be undone: {unsettled} If that cannot be mended, reinstall it: "
-                           "'localm comfy remove' then 'localm comfy setup'.")
+            return _result(False, "error",
+                           f"The managed ComfyUI cannot be updated now: {unsettled}")
         with steps.Work(root) as work:
             try:
                 prepared = prepare(work, root, repo=repo, target=target,
@@ -331,7 +355,7 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
                 steps.change(work, stages(root, work.id, prepared.removed, prepared.packages),
                              old=prev_commit, new=target,
                              prove=lambda: why_unusable(prepared.packages),
-                             reinstall=_reinstall(root, work.id))
+                             reinstall=_reinstall(root, _say))
             except (steps.Failed, *steps.STEP_ERRORS) as e:
                 note = ""
                 if getattr(e, "errors", None):

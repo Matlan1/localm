@@ -7,6 +7,7 @@ prepared runtime in place (:mod:`localm.update_mechanism.steps`).
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -45,7 +46,21 @@ def put_runtime(root: Path, name: str, staging: Path, *, record: bool, error: ty
         raise error(f"{Path(root) / name} is in use and was left as it is ({e}); {busy}") from e
 
 
-def settle_runtimes(root: Path, error: type) -> bool:
+#: Seconds before a test that failed is made once more.
+RETRY_S = 5.0
+
+
+def twice(test: Callable, error: type[Exception]):
+    """What *test* returns, made once more after :data:`RETRY_S` when it raises *error*:
+    a virus scanner may have held a file that was just written."""
+    try:
+        return test()
+    except error:
+        time.sleep(RETRY_S)
+        return test()
+
+
+def settle_runtimes(root: Path, error: type[Exception]) -> bool:
     """End what an interrupted install left in the runtimes folder *root*, or wait for
     one that moves its files. Returns whether its files are incomplete for good, so
     that the runtime has to be installed again. Raises *error* when a program has to

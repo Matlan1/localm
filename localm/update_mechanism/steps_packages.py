@@ -8,6 +8,7 @@ in while the old one is still in use.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import stat
@@ -17,8 +18,8 @@ from functools import partial
 from pathlib import Path
 from typing import Optional
 
-from . import disk, mover, packages, shared
-from .mover import Refused
+from . import disk, job, mover, packages, shared
+from .mover import Refused, Unreadable
 from .steps import require_space
 
 Say = Callable[[str], None]
@@ -27,7 +28,7 @@ TORCH_EXTRAS = frozenset({"gpu", "hf"})
 _LINK = "_localm_update.pth"
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 #: The PyTorch builds that have an index of their own.
-_TORCH_BUILD = re.compile(r"==[^+]+\+(cpu|xpu|cu[0-9]+|rocm[0-9.]+)$")
+_TORCH_BUILD = re.compile(r"===?[^+]+\+(cpu|xpu|cu[0-9]+|rocm[0-9.]+)$")
 _TORCH_INDEX = "https://download.pytorch.org/whl/"
 _VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+!-]*")
 # A wheel in the download cache, unpacked there and, in the worst case, copied twice.
@@ -43,17 +44,26 @@ def sync_argv(uv, extras: Iterable[str]) -> list:
 
 
 def _project(tree) -> dict:
+    return _toml(tree).get("project") or {}
+
+
+def _toml(tree) -> dict:
     try:
         with open(Path(tree) / "pyproject.toml", "rb") as f:
-            return tomllib.load(f).get("project") or {}
+            return tomllib.load(f)
     except (OSError, ValueError, RecursionError) as e:
         raise Refused(f"the project file of {tree} cannot be read: {e}") from None
 
 
 def scripts(tree) -> dict:
     """The console and window scripts the project in *tree* installs."""
-    project = _project(tree)
-    return {kind: project.get(kind) or {} for kind in ("scripts", "gui-scripts")}
+    data = _toml(tree)
+    project: dict = data.get("project") or {}
+    found = {kind: project.get(kind) or {} for kind in ("scripts", "gui-scripts")}
+    hook = data
+    for key in ("tool", "hatch", "metadata", "hooks", "custom", "console-scripts"):
+        hook = hook.get(key) or {}
+    return {**found, "hook": hook}
 
 
 def used_extras(root, new, uv, *, env: Mapping, run: packages.Runner = packages.run_hidden) -> list:
@@ -129,25 +139,28 @@ class Future:
 
     @property
     def python(self) -> Path:
-        """The interpreter that runs the new tree: the stage's, linked to the packages
-        of the install's venv, or the install's when nothing is staged."""
-        if not self.staged:
-            return Path(disk.short_path(python_in(self.venv)))
-        link, site = self._link(), shared.updater_components.site_packages(self.venv)
-        assert link is not None and site is not None
-        link.write_text(f"import site; site.addsitedir({disk.short_path(site)!r})\n",
-                        encoding="utf-8")
-        return Path(disk.short_path(python_in(self.stage)))
+        """The interpreter that runs the new tree: the stage's, which finds the packages
+        of the install's venv too, or the install's when nothing is staged."""
+        return Path(disk.short_path(python_in(self.stage if self.staged else self.venv)))
 
-    def add(self, argv: list, *, project: bool = False) -> bool:
+    def add(self, argv: list) -> bool:
         """Stage what the uv command *argv* (``uv sync ...``, or ``uv pip install -p
         .venv ...``) changes, with the network, besides what is staged already. Returns
         whether it changes a package. Raises :class:`.mover.Refused` and OSError."""
         link = self._link()
         if link is not None:
             link.unlink(missing_ok=True)
+        try:
+            return self._add(argv)
+        finally:
+            link, site = self._link(), shared.updater_components.site_packages(self.venv)
+            if link is not None and site is not None:
+                link.write_text(f"import site; site.addsitedir({disk.short_path(site)!r})\n",
+                                encoding="utf-8")
+
+    def _add(self, argv: list) -> bool:
         full, cwd, env = packages._into(
-            packages.command(argv, project=project, network=True), self.tree,
+            packages.command(argv, network=True), self.tree,
             packages._environment(self.env), self.stage if self.staged else self.venv)
         code, output = self._run([*full, "--dry-run"], str(cwd), env)
         if code != 0:
@@ -160,24 +173,50 @@ class Future:
             names = sorted(f"{e[0]} {e[1]}".strip() for e in installed)
             more = f" and {len(names) - 12} more" if len(names) > 12 else ""
             self.say(f"Fetching Python packages: {', '.join(names[:12])}{more} ...")
-        return packages.stage_packages(self.root, self.id, argv, env=self.env, project=project,
-                                       run=self._run, more=True, tree=self.tree, network=True)
+        return packages.stage_packages(self.root, self.id, argv, env=self.env, run=self._run,
+                                       more=True, tree=self.tree, network=True)
 
     def sync(self, extras: list) -> Optional[dict]:
         """Stage the dependencies of the new tree with *extras*. Returns the step to
         record (:func:`run_packages`), None when the install's venv already has them.
         Raises :class:`.mover.Refused` and OSError."""
         project = scripts(self.root) != scripts(self.tree)
-        changed = self.add(sync_argv(self.uv, extras), project=project)
-        return {"extras": list(extras), "project": project} if changed else None
+        changed = self.add(sync_argv(self.uv, extras))
+        if project:
+            self._fetch_build()
+        return {"extras": list(extras), "project": project} if changed or project else None
+
+    def _fetch_build(self) -> None:
+        """Build the project of the new tree once, with the network, so that uv's cache
+        has what its build needs. Raises :class:`.mover.Refused`."""
+        venv = self.work / "build"
+        env = packages._environment({**self.env, "LOCALM_UPDATE_ID": self.id})
+        for argv in (["venv", "--offline", "--no-config", "--python",
+                      disk.short_path(python_in(self.venv)), disk.short_path(venv)],
+                     ["pip", "install", "--no-config", "--no-deps", "--python",
+                      disk.short_path(venv), "-e", str(self.tree)]):
+            code, output = self._run([self.uv, *argv], str(self.work), env)
+            if code != 0:
+                raise Refused(f"the new version could not be built: {packages._last(output)}")
+        disk.remove_tree(venv)
 
 
 def run_packages(root, update_id: str, sync: Optional[Mapping], more: list, uv, *, env: Mapping,
                  run: packages.Runner = packages.run_hidden,
                  ask: Optional[disk.Ask] = None) -> None:
-    """Move the staged packages in. *ask* as in :func:`.steps.move_in`. *sync* is a step of :meth:`Future.sync` or None,
-    *more* the ``uv pip`` commands staged after it. Raises :class:`.mover.Refused` with
-    nothing changed, :class:`.mover.StepFailed`, OSError."""
+    """Move the staged packages in, and localm's own, made from *root*, when its scripts
+    change. *ask* as in :func:`.steps.move_in`. *sync* is a step of :meth:`Future.sync` or
+    None, *more* the ``uv pip`` commands staged after it. Raises :class:`.mover.Refused`
+    with nothing changed, :class:`.mover.StepFailed`, OSError."""
+    if sync and sync["project"]:
+        link = Future(root, update_id, uv, env=env, say=lambda _t: None)._link()
+        if link is not None:
+            link.unlink(missing_ok=True)
+        packages.stage_packages(
+            root, update_id, [str(uv), "pip", "install", "--no-config", "--no-deps",
+                              "--reinstall-package", packages._OWN, "-e",
+                              disk.short_path(disk.real_folder(root))],
+            env={**env, "LOCALM_UPDATE_ID": update_id}, project=True, run=run, more=True)
     plan = packages.plan_packages(root, update_id)
     mover.write_plan(root, update_id, plan)
     if more:
@@ -223,7 +262,7 @@ def _requirements(root, wanted: Iterable) -> tuple:
             if source.get("registry") and source["registry"] not in indexes:
                 indexes.append(source["registry"])
         else:
-            other.append(f"{name}=={version}")
+            other.append(f"{name}==={version}")
             places += [r for (n, _v), e in locked.items() if n == canon(name)
                        and (r := (e.get("source") or {}).get("registry")) and r not in places]
     return lines, indexes, other, places
@@ -308,6 +347,29 @@ def reinstall(root, update_id: str, step: str, wanted: Iterable, uv, *, env: Map
         if code != 0:
             named = ", ".join(f"{n} {v}" for n, v in wanted)
             raise Refused(f"{named} could not be installed again: {packages._last(output)}")
+
+
+def reinstaller(root, uv, *, env: Mapping, options: Callable[[str, str], Mapping],
+                say: Say = lambda _t: None, **kw) -> Callable[[list], None]:
+    """What installs the packages a way back of *root* named (``job.Result.packages``)
+    again, in *root* and in its parts (for :func:`.steps.put_back`). *options* gives the
+    ``indexes`` and ``extras`` for ``(update id, part)``, *kw* is for
+    :func:`reinstall` too."""
+    def again(named: list) -> None:
+        record = job.read(root)
+        if record is None:
+            return
+        if uv is None:
+            raise Refused("localm has no uv to install them with")
+        for part, step in sorted({(p.get("part", ""), p["step"]) for p in named}):
+            wanted = [(p["name"], p["version"]) for p in named
+                      if (p.get("part", ""), p["step"]) == (part, step)]
+            say(f"Installing {', '.join(f'{n} {v}' for n, v in wanted)} again...")
+            more: dict = {"extras": shared.apply_update.DEPS_EXTRAS}
+            with contextlib.suppress(Unreadable):
+                more.update(options(record.id, part))
+            reinstall(Path(root) / part, record.id, step, wanted, uv, env=env, **more, **kw)
+    return again
 
 
 def _keep_edits(root, update_id: str, step: str, names: set, wait: disk.Wait) -> None:

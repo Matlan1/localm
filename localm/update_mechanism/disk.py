@@ -4,6 +4,7 @@ when the call returns."""
 
 from __future__ import annotations
 
+import errno
 import importlib
 import json
 import os
@@ -30,6 +31,8 @@ _NAME_SURROGATE = 0x20000000
 # Without it, opening a file for reading and writing on Windows removes a Ctrl-Z at its end.
 _BINARY = getattr(os, "O_BINARY", 0)
 PYCACHE = "__pycache__"
+#: What the name of a copy that is not complete yet ends in.
+PART = ".localm-part"
 _T = TypeVar("_T")
 
 
@@ -417,8 +420,9 @@ def lock_file(fd: int, wait: Optional[Wait] = None) -> None:
 # -------------------------------------------------------------------- moves
 
 def move(src: Path, dst: Path, wait: Wait, *, through: bool = False) -> None:
-    """Rename *src* to *dst*, where nothing may be yet, creating the folders above
-    *dst*. *through*: the rename is on disk when this returns. Raises :class:`Held`
+    """Rename the file or folder *src* to *dst*, where nothing may be yet, creating the
+    folders above *dst*; to another volume it is copied, compared and then deleted.
+    *through*: the rename is on disk when this returns. Raises :class:`Held`
     for a file that cannot be moved, FileExistsError when there is something at
     *dst*, OSError otherwise."""
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -428,28 +432,70 @@ def move(src: Path, dst: Path, wait: Wait, *, through: bool = False) -> None:
 
 
 def put_over(src: Path, dst: Path, wait: Wait) -> None:
-    """Rename *src* over the file at *dst*, which is never absent in between; a
-    read-only *dst* is replaced too. Raises :class:`Held` or OSError."""
+    """Rename the file *src* over the file at *dst*, which is never absent in between,
+    also from another volume (:func:`move`); a read-only *dst* is replaced too. Raises
+    :class:`Held` or OSError."""
     dst.parent.mkdir(parents=True, exist_ok=True)
     _writable(dst)
     _rename(os.replace, src, dst, wait)
 
 
 def _rename(call, src: Path, dst: Path, wait: Wait) -> None:
-    patient(wait, dst if call is os.replace and lstat(dst) else src, lambda: call(src, dst))
+    try:
+        patient(wait, dst if call is os.replace and lstat(dst) else src, lambda: call(src, dst))
+    except OSError as e:
+        if e.errno != errno.EXDEV:
+            raise
+        _move_across(src, dst, wait)
+
+
+def _move_across(src: Path, dst: Path, wait: Wait) -> None:
+    """Move *src* to *dst* on another volume."""
+    st = os.lstat(src)
+    if not stat.S_ISDIR(st.st_mode) or is_link(st):
+        copy_whole(src, dst, wait)
+        _compare(src, dst, wait)
+        unlink(src)
+        return
+    part = dst.with_name(dst.name + PART)
+    if not remove_tree(part):
+        raise FileExistsError(f"{part} cannot be removed")
+    for folder, dirs, names in os.walk(src):
+        here = Path(folder)
+        links = [d for d in dirs if is_link(os.lstat(here / d))]
+        dirs[:] = [d for d in dirs if d not in links]
+        (part / here.relative_to(src)).mkdir(parents=True, exist_ok=True)
+        for name in [*names, *links]:
+            copy = part / here.relative_to(src) / name
+            copy_whole(here / name, copy, wait)
+            _compare(here / name, copy, wait)
+    patient(wait, part, lambda: replace_through(part, dst))
+    if not remove_tree(src):
+        raise OSError(f"{src} was copied to {dst} and cannot be deleted")
+
+
+def _compare(src: Path, copy: Path, wait: Wait) -> None:
+    link = is_link(os.lstat(src))
+    if (os.readlink(src) != os.readlink(copy) if link else
+            not same(copy, {"sha256": content_identity(src, wait)["sha256"],
+                            "size": os.lstat(src).st_size}, wait)):
+        raise OSError(f"{copy} is not the same as {src}")
 
 
 def copy_whole(src: Path, dst: Path, wait: Wait) -> None:
-    """Copy *src*, with its mode and times, to *dst*, replacing it; *dst* is
-    complete and on disk as soon as it exists. Raises :class:`Held` or OSError."""
+    """Copy the file or link *src*, with its mode and times, to *dst*, replacing it;
+    *dst* is complete and on disk as soon as it exists. Raises :class:`Held` or OSError."""
     dst.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dst.with_name(dst.name + ".tmp")
+    tmp = dst.with_name(dst.name + PART)
+    unlink(tmp)
     patient(wait, src, lambda: shutil.copyfile(src, tmp, follow_symlinks=False))
+    link = is_link(os.lstat(tmp))
     if os.name != "nt":
         shutil.copystat(src, tmp, follow_symlinks=False)
-    patient(wait, tmp, lambda: _flush(tmp))
-    if os.name == "nt":   # a read-only file cannot be flushed there
-        shutil.copystat(src, tmp, follow_symlinks=False)
+    if not link:
+        patient(wait, tmp, lambda: _flush(tmp))
+    if os.name == "nt" and not link:   # a read-only file cannot be flushed there
+        shutil.copystat(src, tmp)
     patient(wait, dst, lambda: replace_through(tmp, dst))
 
 

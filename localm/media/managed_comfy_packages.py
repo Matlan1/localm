@@ -109,10 +109,12 @@ def prepare(place, python: Path, requirements: Path, *, on_progress, say: Callab
         stage = packages.stage_folder(place.root, place.id, step=mover.VENV)
         if not disk.remove_tree(stage):
             raise PrepareError(f"{stage} cannot be emptied")
-        stage.mkdir(parents=True)
+        short = place.beside(f".pip-{place.id[:8]}")
+        short.mkdir()
         pip("Reinstalling ComfyUI requirements", "install", "--no-index", "--no-deps",
             "--ignore-installed", "--no-compile", "--no-input", "--find-links", str(wheels),
-            "--prefix", disk.short_path(stage), "-r", str(listing))
+            "--prefix", disk.short_path(short), "-r", str(listing))
+        disk.move(short, stage, disk.Wait())
         packages.note_staged(place.root, place.id, mover.VENV, wanted.found)
     except mover.Refused as e:
         raise PrepareError(str(e)) from e
@@ -136,11 +138,3 @@ def torch_args(site: Path) -> Optional[list]:
         shared.updater_components.unsatisfied(pinned, shared.updater_components.dists(site))) else None
 
 
-def why_broken(python: Path, *, run: Callable) -> Optional[str]:
-    """None when *python* imports PyTorch, or has none; else why it does not."""
-    from localm.media.managed_comfy_provision import _tail
-    site = shared.updater_components.site_packages(python.parent.parent)
-    if site is None or "torch" not in shared.updater_components.dists(site):
-        return None
-    ok, out = run([str(python), "-I", "-c", "import torch"], timeout=600)
-    return None if ok else f"The new PyTorch does not load: {_tail(out, 300)}"

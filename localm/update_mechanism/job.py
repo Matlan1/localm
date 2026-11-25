@@ -289,6 +289,9 @@ def _from_folders(root, damaged: Optional[Unreadable]) -> Optional[Record]:
 
 PARTS = "parts.json"
 OWNER = "owner.json"
+#: In the folder of an update that is prepared: the lock of the process that prepares
+#: it, and the name of a folder of it beside its own.
+BUSY, BESIDE = "busy", "beside.json"
 
 
 def part_path(root, folder) -> str:
@@ -388,7 +391,9 @@ def _end_parts(lock: Lock, update_id: str, end) -> Result:
     for folder in reversed(part_folders(lock.root, update_id)):
         try:
             if disk.lstat(folder) is None:
-                all_parts.errors.append(f"{folder} cannot be reached")
+                gone = disk.lstat(folder.parent) is not None
+                (all_parts.notes if gone else all_parts.errors).append(
+                    f"{folder} was removed and stays so" if gone else f"{folder} cannot be reached")
                 continue
             part = _lock_part(lock, folder)
             record = _current(part.root)
@@ -407,11 +412,12 @@ def _end_parts(lock: Lock, update_id: str, end) -> Result:
     return all_parts
 
 
-def settle(lock: Lock) -> Result:
+def settle(lock: Lock, *, wait_s: Optional[float] = None) -> Result:
     """End what an interrupted change left in the component folder of *lock*, or do
     nothing (state ``busy``) when it is a part of an update that has not ended. A
     part that had reached its end when its update ended as done is ended as done;
-    everything else is put back. Raises like :func:`restore`."""
+    everything else is put back, waiting *wait_s* for held files. Raises like
+    :func:`restore`."""
     record = _current(lock.root)
     if record is None:
         cleanup(lock)
@@ -423,7 +429,7 @@ def settle(lock: Lock) -> Result:
             return Result("busy")
         if record.phase in (STARTING, DONE):
             return finish(lock)
-    return restore(lock)
+    return restore(lock, wait_s=wait_s)
 
 
 def abandon(lock: Lock) -> None:
@@ -599,15 +605,51 @@ def _close(lock: Lock, record: Record, over: str, result: Result) -> None:
     cleanup(lock)
 
 
-def discard(lock: Lock, update_id: str) -> bool:
-    """Delete an update that was prepared and never started (:func:`start`). Returns
-    whether it is gone. Raises ValueError for one that was started, :class:`Unsafe`
-    or OSError."""
-    _held(lock)
-    work = mover.work_folder(lock.root, update_id)
+def discard(root, update_id: str) -> bool:
+    """Delete what was prepared for the update *update_id* of the install or component
+    *root*, and nothing of one that was started (:func:`start`). Returns whether it is
+    gone. Raises :class:`Unsafe` or OSError."""
+    work = mover.work_folder(root, update_id)
     if disk.lstat(work / STATE) is not None:
-        raise ValueError("the update was started")
-    return remove_staged(lock.root, update_id) and disk.remove_tree(work)
+        return False
+    try:
+        beside = disk.read_json(work / BESIDE, MAX_RECORD_BYTES)
+    except ValueError:
+        beside = None
+    gone = remove_staged(root, update_id)
+    if isinstance(beside, str) and "/" not in disk.clean(beside):
+        gone = disk.remove_tree(disk.real_folder(root) / beside) and gone
+    return gone and disk.remove_tree(work)
+
+
+def hold(root, update_id: str) -> int:
+    """Lock the folder of the update *update_id*, which this process prepares, until the
+    descriptor this returns is closed. Raises OSError or :class:`Unsafe`."""
+    fd = disk.open_lock(mover.work_folder(root, update_id) / BUSY)
+    try:
+        disk.lock_file(fd)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _prepared(root, update_id: str) -> Optional[bool]:
+    """Whether a running process prepares the update *update_id*, which was not started,
+    or the update it is a part of still needs it. None when nothing tells."""
+    work = mover.work_folder(root, update_id)
+    whole = owner(root, update_id)
+    if whole is not None:
+        mine = mover.work_folder(whole, update_id)
+        return disk.lstat(mine) is not None and (
+            disk.lstat(mine / STATE) is not None or _prepared(whole, update_id) is not False)
+    if disk.lstat(work / BUSY) is None:
+        return None
+    try:
+        os.close(hold(root, update_id))
+    except (PermissionError, BlockingIOError):
+        return True
+    return False
 
 
 def remove_staged(root, update_id: str) -> bool:
@@ -619,9 +661,10 @@ def remove_staged(root, update_id: str) -> bool:
 
 def cleanup(lock: Lock, *, keep: Optional[str] = None) -> list:
     """Delete what ended updates of *lock*'s install left, nothing of an update that
-    did not end, and the staged packages of those that were never started, except the
-    updates *keep* and ``lock.keep``. A file a program still has loaded stays for the next call. Returns
-    the folders that are left."""
+    did not end, and what was prepared by a process that ended (:func:`hold`) for one
+    that was never started, except the updates *keep* and ``lock.keep``. A file a
+    program still has loaded stays for the next call. Returns the folders that are
+    left."""
     _held(lock)
     left = []
     for name in ("job.json.tmp", "job.json.gone"):
@@ -652,8 +695,13 @@ def _delete(lock: Lock, update_id: str) -> bool:
     mine = mover.venv_folder(root, update_id)
     if over is None:
         if disk.lstat(work / STATE) is None:
+            used = _prepared(root, update_id)
+            if used:
+                return True
             if mover.has_plans(root, update_id) or disk.lstat(mine / "old") is not None:
                 return False
+            if used is False:
+                return discard(root, update_id)
             with contextlib.suppress(OSError):   # only an empty one goes
                 os.rmdir(work)
             return disk.remove_tree(mine)

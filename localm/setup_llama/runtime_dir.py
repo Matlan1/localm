@@ -588,10 +588,11 @@ def staged_runtime(live: Path, into: Optional[Path] = None):
     that folder, *into* or ``<live>.incoming``, and makes this process and its children
     load the runtime in it (``LLAMA_CPP_LIB``). It starts empty but for the user's
     backend choice of *live* and is removed at the end; *into* stays when the block
-    succeeds. The caller must hold the provisioning lock of *live*."""
+    succeeds, and must not exist before (FileExistsError). The caller must hold the
+    provisioning lock of *live*."""
     folder = (Path(into) if into is not None
               else _staging_path(Path(os.path.realpath(live))))
-    if folder.exists():
+    if folder.exists() and into is None:
         shutil.rmtree(folder)
     folder.mkdir(parents=True)
     choice = live / _CHOICE_MARKER
@@ -634,7 +635,7 @@ def put_in_place(live: Path, staged: Path) -> None:
     """Make the runtime provisioned in the folder *staged* the one in *live*, with the
     files moved under a record (``update_mechanism.steps``): when it fails, or this
     process ends at any moment, the runtime that was there is complete again (after
-    :func:`settle_runtime`, in the second case). *staged* is on the volume of *live*
+    ``steps.settle``, in the second case). *staged* is on the volume of *live*
     and is gone afterwards. Raises RuntimeInUseError before anything changes, and
     ``steps.Failed``."""
     from localm.update_mechanism import disk, mover, steps
@@ -646,20 +647,6 @@ def put_in_place(live: Path, staged: Path) -> None:
         disk.move(Path(staged), work.new(mover.WHOLE) / live.name, disk.Wait())
         steps.change(work, [lambda: steps.move_in(live.parent, work.id, mover.WHOLE,
                                                   remove=removed)], whole=True)
-
-
-def settle_runtime(live: Path) -> Optional[str]:
-    """Put back the runtime in *live* when a process that was replacing it ended, or
-    wait while one moves its files. Returns None, or why the runtime may be
-    incomplete. Never raises."""
-    from localm.update_mechanism import steps
-    try:
-        result = steps.settle(Path(os.path.realpath(live)).parent)
-    except Exception as e:
-        return str(e)
-    if result is None or (result.state != "busy" and not result.errors):
-        return None
-    return "; ".join(result.errors) or "its files are being replaced"
 
 
 def _exit_runtime_in_use(e: RuntimeInUseError) -> None:

@@ -29,7 +29,10 @@ from .mover import Plan, Refused, StepFailed, Unreadable
 SETTLE_WAIT_S = 120.0
 #: Bytes left free on a volume besides what a step writes there.
 SPARE_BYTES = 64 * 1024 * 1024
-_BUSY, _BESIDE = "busy", "beside.json"
+#: Seconds between two tries to put a change back that did not meet a held file.
+_RETRY_S = 0.5
+#: Seconds a user of a component waits for held files that are to be put back.
+_USE_WAIT_S = 2.0
 
 
 class Failed(Exception):
@@ -92,25 +95,24 @@ class Place:
         short path before they are moved to :meth:`new`; it is deleted with this
         place."""
         self.path.mkdir(parents=True, exist_ok=True)
-        disk.write_json(self.path / _BESIDE, disk.clean(name))
+        disk.write_json(self.path / job.BESIDE, disk.clean(name))
         return disk.real_folder(self.root) / name
 
 
 class Work(Place):
     """A :class:`Place` of its own for one change; a context manager. It is deleted at
-    the end unless a change under its id still has a record; one that a killed process
-    left is deleted by the next one."""
+    the end unless a change under its id was started; one that a killed process left is
+    deleted by the next one. *update_id*: of an update whose folder is there."""
 
-    def __init__(self, root) -> None:
-        super().__init__(root, uuid.uuid4().hex)
+    def __init__(self, root, update_id: Optional[str] = None) -> None:
+        super().__init__(root, update_id or uuid.uuid4().hex)
         self._fd: Optional[int] = None
 
     def __enter__(self) -> Work:
         sweep(self.root)
         mover.update_folder(self.root, create=True)
-        (self.path / "plans").mkdir(parents=True)
-        self._fd = disk.open_lock(self.path / _BUSY)
-        disk.lock_file(self._fd)
+        (self.path / "plans").mkdir(parents=True, exist_ok=True)
+        self._fd = job.hold(self.root, self.id)
         return self
 
     def recorded(self) -> None:
@@ -121,47 +123,7 @@ class Work(Place):
     def __exit__(self, *_exc) -> None:
         self.recorded()
         with contextlib.suppress(Unreadable, Unsafe, Held, OSError):
-            discard(self.root, self.id)
-
-def _started(root, update_id: str) -> bool:
-    return disk.lstat(mover.work_folder(root, update_id) / job.STATE) is not None
-
-
-def discard(root, update_id: str) -> None:
-    """Delete what was prepared for the update *update_id* in the component folder
-    *root*; nothing of one that was started. Raises OSError or :class:`Unsafe`."""
-    if _started(root, update_id):
-        return
-    work = mover.work_folder(root, update_id)
-    try:
-        beside = disk.read_json(work / _BESIDE, 4096)
-    except ValueError:
-        beside = None
-    if isinstance(beside, str) and "/" not in disk.clean(beside):
-        disk.remove_tree(disk.real_folder(root) / beside)
-    job.remove_staged(root, update_id)
-    disk.remove_tree(work)
-
-
-def _abandoned(root, update_id: str) -> bool:
-    """Whether the folder of *update_id* in the component folder *root* holds only
-    what was prepared by a process that ended, or for an update that is gone."""
-    work = mover.work_folder(root, update_id)
-    if _started(root, update_id):
-        return False
-    if disk.lstat(work / job.OWNER) is not None:
-        whole = job.owner(root, update_id)
-        return whole is None or disk.lstat(mover.update_folder(whole) / update_id) is None
-    if disk.lstat(work / _BUSY) is None:
-        return False
-    fd = disk.open_lock(work / _BUSY)
-    try:
-        disk.lock_file(fd)
-        return True
-    except (PermissionError, BlockingIOError):
-        return False
-    finally:
-        os.close(fd)
+            job.discard(self.root, self.id)
 
 
 def sweep(root) -> None:
@@ -174,9 +136,6 @@ def sweep(root) -> None:
             return
         with job.Lock(root, wait_s=0) as lock:
             job.cleanup(lock)
-            for update_id in job._ids(root):
-                if _abandoned(root, update_id):
-                    discard(root, update_id)
 
 
 # ------------------------------------------------------------------- moving
@@ -207,8 +166,8 @@ def plan_staged(root, update_id: str, step: str, *, remove: Iterable[str] = ()) 
     staged file equal to the installed one is left out. Files are known by size and
     time (links by target). Reads only.
 
-    Raises :class:`.mover.Refused` for a name that is taken by something else and
-    when the files are on another volume, :class:`.disk.Unsafe` and OSError."""
+    Raises :class:`.mover.Refused` for a name that is taken by something else,
+    :class:`.disk.Unsafe` and OSError."""
     number = mover.next_number(root, update_id)
     a = mover.area(root, update_id, step, number)
     a.new.mkdir(parents=True, exist_ok=True)
@@ -270,17 +229,23 @@ def change(work: Place, stages: Iterable[Callable[[], object]], *, old: str = ""
             if why:
                 raise Refused(why)
             job.advance(lock, job.STARTING)
+            return job.finish(lock, ask=ask)
         except BaseException as e:
-            back = put_back(lambda: job.restore(lock, wait_s=wait_s, ask=ask), reinstall)
+            try:
+                back = put_back(lambda: job.restore(lock, wait_s=wait_s, ask=ask), reinstall)
+            except STEP_ERRORS as again:
+                back = job.Result("failed", [str(again)])
+                back.held += [again] if isinstance(again, Held) else []
             if isinstance(e, StepFailed) and not isinstance(e.__cause__, (Exception, type(None))):
                 raise e.__cause__ from None
-            if isinstance(e, STEP_ERRORS):
-                reason = e.reason if isinstance(e, StepFailed) else str(e)
-                held = e.held if isinstance(e, StepFailed) else [e] if isinstance(e, Held) else []
-                raise Failed(reason, back.errors, [*held, *back.held]) from (
-                    e.__cause__ if isinstance(e, StepFailed) else e)
-            raise
-        return job.finish(lock, ask=ask)
+            if not isinstance(e, STEP_ERRORS):
+                raise
+            if back.state == "new":
+                return back
+            reason = e.reason if isinstance(e, StepFailed) else str(e)
+            held = e.held if isinstance(e, StepFailed) else [e] if isinstance(e, Held) else []
+            raise Failed(reason, back.errors, [*held, *back.held]) from (
+                e.__cause__ if isinstance(e, StepFailed) else e)
 
 
 #: Installs the packages a way back names (``job.Result.packages``) again. Raises one of
@@ -314,12 +279,16 @@ def _unsettled(settled: Callable[[], Optional[job.Result]]) -> list:
     """Why what an interrupted change left, as *settled* ended it, can never be put
     back: a lost file or a damaged record. Empty when it is. Raises :class:`Failed`
     while an update or a program that holds a file has to end first."""
-    try:
-        result = settled()
-    except Unreadable as e:
-        return [str(e)]
-    if result is None:
-        return []
+    for again in (True, True, False):
+        try:
+            result = settled()
+        except Unreadable as e:
+            return [str(e)]
+        if result is None:
+            return []
+        if not again or not result.errors or result.held:
+            break
+        time.sleep(_RETRY_S)   # a passing error is no lost file
     if result.state == "busy":
         raise Failed("its files are being replaced, or an update of localm is not finished")
     if result.errors and result.held:
@@ -367,7 +336,7 @@ def settle(root, wait_s: float = SETTLE_WAIT_S) -> Optional[job.Result]:
     while True:
         try:
             with job.Lock(root, wait_s=0) as lock:
-                result = job.settle(lock)
+                result = job.settle(lock, wait_s=None if wait_s else _USE_WAIT_S)
             return None if result.state == "none" else result
         except job.Busy:
             record = job.read(root)
@@ -376,3 +345,19 @@ def settle(root, wait_s: float = SETTLE_WAIT_S) -> Optional[job.Result]:
             if time.monotonic() >= deadline:
                 return job.Result("busy")
             time.sleep(0.1)
+
+
+def unsettled(root, *, wait_s: float = 0.0, repair: str = "") -> Optional[str]:
+    """:func:`settle`, by whoever uses the component folder *root*. Returns None, or why
+    its files may be incomplete, with *repair* for what cannot be put back later.
+    Costs one file check when there is nothing to do; never raises."""
+    try:
+        result = settle(root, wait_s=wait_s)
+    except STEP_ERRORS as e:
+        return f"an interrupted change of {root} could not be undone: {e}"
+    if result is None or (result.state != "busy" and not result.errors):
+        return None
+    if not result.errors:
+        return f"the files in {root} are being replaced"
+    return (f"an interrupted change of {root} could not be undone: " + "; ".join(result.errors)
+            + (f". {repair}" if repair and not result.held else ""))

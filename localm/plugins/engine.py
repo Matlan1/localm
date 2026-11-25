@@ -2181,7 +2181,8 @@ class PluginManager:
         """Convert every installed first-party plugin that is still a full copy
         of its store folder (``_migrate_installed_copy``). Best-effort; never
         raises: a failure is recorded as a provisioning error and logged."""
-        if not self._store_root:
+        from localm.config import update_is_going
+        if not self._store_root or update_is_going():
             return
         for name in sorted(self._installed_set()):
             try:

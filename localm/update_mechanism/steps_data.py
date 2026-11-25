@@ -188,8 +188,8 @@ def _write_over(source: Path, live: Path, mode: int) -> None:
     it is made with *mode*, on Windows with the permissions of *source*, when it is not
     there."""
     data, there = source.read_bytes(), disk.lstat(live) is not None
-    fd = os.open(live, os.O_WRONLY | os.O_CREAT | getattr(os, "O_BINARY", 0)
-                 | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = disk.patient(disk.Wait(), live, lambda: os.open(live, flags, 0o600))
     try:
         if not there:
             _same_access(source, live)

@@ -103,6 +103,7 @@ def _snapshot(folder: Path) -> dict:
 @pytest.fixture(autouse=True)
 def short_wait(monkeypatch):
     monkeypatch.setattr(disk, "HELD_WAIT_S", 0.2)
+    monkeypatch.setattr(runtime_files, "RETRY_S", 0.01)
 
 
 def _refuse_rename(monkeypatch, refused, error=None):
@@ -355,3 +356,43 @@ def test_a_tree_move_refused_every_time_names_the_folder(monkeypatch, tmp_path,
     assert refused_tree_moves["refused"] == storekit._REPLACE_RETRIES
     assert not dest.exists()
     assert not [p for p in dest.parent.iterdir() if p.name.startswith(".localm-src-")]
+
+
+def test_a_runtime_whose_install_was_killed_is_whole_before_it_is_used(media_runtime):
+    from localm.update_mechanism import job, mover, steps
+    install, dest, _error = media_runtime
+    module = sruntime if dest.parent.name == "sdcpp" else kruntime
+    build = "cpu" if module is sruntime else "nocuda"
+    before = _installed(install, dest)
+    place = steps.Place(dest.parent, "ab" * 16)
+    staged = place.new(mover.WHOLE) / dest.name
+    shutil.copytree(dest, staged)
+    (staged / "z-last.txt").write_text("new")
+    with job.Lock(dest.parent) as lock:
+        job.start(lock, place.id, old="1", new="2")
+        job.advance(lock, job.MOVING)
+        job.advance(lock, job.STEPS)
+        steps.move_in(dest.parent, place.id, mover.WHOLE)
+        assert module.installed(build) is None
+    assert _snapshot(dest) != before
+    assert module.installed(build) is not None
+    assert _snapshot(dest) == before
+
+
+def test_a_test_that_fails_once_is_made_again(sdcpp, koboldcpp, monkeypatch):
+    answers = [RuntimeError("held by a scanner"), {"devices": [["CPU", "cpu"]]}]
+
+    def probe(_rt):
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+    assert sruntime.install("cpu", probe=probe).devices == [["CPU", "cpu"]]
+    versions = ["", kpins.VERSION]
+
+    def unpack(binary, staging, tmp):
+        staging.mkdir(parents=True)
+        (staging / kruntime.launcher_name()).write_bytes(b"launcher")
+    assert kruntime.install("nocuda", unpack=unpack, version_of=lambda _p: versions.pop(0))
+    with pytest.raises(kruntime.LoadTestError):
+        kruntime.install("nocuda", force=True, unpack=unpack, version_of=lambda _p: "")

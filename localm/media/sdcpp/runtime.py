@@ -193,7 +193,11 @@ def _has_backend_device(backend: str, devices: list) -> bool:
 
 def installed(backend: str) -> Optional[Runtime]:
     """The installed, load-tested runtime for *backend* at the pinned tag, or
-    None. A GPU runtime whose load test found only the CPU is not installed."""
+    None, also while the files in :func:`runtimes_root` are incomplete. A GPU runtime
+    whose load test found only the CPU is not installed."""
+    from localm.update_mechanism import steps
+    if steps.unsettled(runtimes_root()):
+        return None
     d = runtime_dir(backend)
     meta = _read_json(d / MARKER)
     if not meta or meta.get("tag") != pins.TAG or meta.get("backend") != backend:
@@ -420,8 +424,10 @@ def _install(backend: str, *, force: bool, say: Progress,
         raise ProvisionError(
             f"stable-diffusion.cpp publishes no '{backend}' build for this platform "
             f"(available: {', '.join(available_backends(plat)) or 'none'}).")
+    from localm.media.runtime_files import (
+        put_runtime, refused_download_message, settle_runtimes, twice)
     if into is None:
-        force = _settle() or force
+        force = settle_runtimes(runtimes_root(), ProvisionError) or force
     if not force and into is None:
         rt = installed(backend)
         if rt is not None:
@@ -429,7 +435,6 @@ def _install(backend: str, *, force: bool, say: Progress,
     if ask is None and sys.platform == "win32" and _vc_known_missing():
         raise _vc_missing_error()
     from localm import netpolicy
-    from localm.media.runtime_files import put_runtime, refused_download_message
     root = runtimes_root()
     root.mkdir(parents=True, exist_ok=True)
     dest = runtime_dir(backend)
@@ -454,7 +459,7 @@ def _install(backend: str, *, force: bool, say: Progress,
         rt = Runtime(backend=backend, path=staging, extra_dirs=extra_dirs_for(backend))
         say(f"Testing the {RUNTIME_LABEL} ({backend})...")
         try:
-            devices = _tested_devices(rt, probe or _probe)
+            devices = twice(lambda: _tested_devices(rt, probe or _probe), LoadTestError)
         except LoadTestError as e:
             if into is None and installed(backend) is None:
                 dest.mkdir(exist_ok=True)
@@ -491,12 +496,6 @@ def _tested_devices(rt: Runtime, probe: Callable[[Runtime], dict]) -> list:
         raise LoadTestError(f"the {rt.backend} runtime loaded but found no {rt.backend} device, "
                             "only the CPU")
     return devices
-
-
-def _settle() -> bool:
-    """``runtime_files.settle_runtimes`` of :func:`runtimes_root`."""
-    from localm.media.runtime_files import settle_runtimes
-    return settle_runtimes(runtimes_root(), ProvisionError)
 
 
 def _probe(rt: Runtime) -> dict:

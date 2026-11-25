@@ -57,6 +57,10 @@ class ProvisionError(RuntimeError):
     """The runtime could not be installed or did not pass its check."""
 
 
+class LoadTestError(ProvisionError):
+    """The runtime was fetched and does not run on this machine."""
+
+
 class DownloadError(ProvisionError):
     """A download was refused, failed, or did not verify."""
 
@@ -161,10 +165,12 @@ def _read_json(path: Path) -> Optional[dict]:
 
 
 def installed(build: str) -> Optional[Runtime]:
-    """The installed runtime for *build* at the pinned tag and asset, or None."""
+    """The installed runtime for *build* at the pinned tag and asset, or None, also
+    while the files in :func:`runtimes_root` are incomplete."""
+    from localm.update_mechanism import steps
     plat = platform_key()
     pinned = pins.ASSETS.get((plat, build)) if plat else None
-    if pinned is None:
+    if pinned is None or steps.unsettled(runtimes_root()):
         return None
     d = runtime_dir(build)
     meta = _read_json(d / MARKER)
@@ -292,7 +298,7 @@ def _unpack(binary: Path, staging: Path, tmp: Path,
                         f"unpacking KoboldCpp did not finish in {UNPACK_TIMEOUT} s")
                 time.sleep(0.25)
     except OSError as e:
-        raise ProvisionError(f"could not run the KoboldCpp binary to unpack it: {e}") from e
+        raise LoadTestError(f"could not run the KoboldCpp binary to unpack it: {e}") from e
     launcher = staging / launcher_name()
     if not launcher.is_file():
         try:
@@ -300,7 +306,7 @@ def _unpack(binary: Path, staging: Path, tmp: Path,
         except OSError:
             text = ""
         tail = "\n".join(text.strip().splitlines()[-5:])
-        raise ProvisionError(
+        raise LoadTestError(
             f"unpacking KoboldCpp produced no {launcher_name()} (exit {proc.returncode}): "
             f"{tail or 'no output'}")
     _make_executable(launcher)
@@ -315,10 +321,10 @@ def launcher_version(launcher: Path, tmp: Optional[Path] = None) -> str:
             stdin=subprocess.DEVNULL, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=VERSION_TIMEOUT)
     except subprocess.TimeoutExpired as e:
-        raise ProvisionError(
+        raise LoadTestError(
             f"the KoboldCpp launcher did not answer --version in {VERSION_TIMEOUT} s") from e
     except OSError as e:
-        raise ProvisionError(f"the KoboldCpp launcher could not be started: {e}") from e
+        raise LoadTestError(f"the KoboldCpp launcher could not be started: {e}") from e
     lines = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
     return lines[-1] if lines else ""
 
@@ -437,15 +443,15 @@ def _install(build: str, *, force: bool, say: Progress,
         raise ProvisionError(
             f"KoboldCpp publishes no '{build}' build for this platform "
             f"(available: {', '.join(available_builds(plat)) or 'none'}).")
+    from localm.media.runtime_files import (
+        put_runtime, refused_download_message, settle_runtimes, twice)
     if into is None:
-        from localm.media.runtime_files import settle_runtimes
         force = settle_runtimes(runtimes_root(), ProvisionError) or force
     if not force and into is None:
         rt = installed(build)
         if rt is not None:
             return rt
     from localm import netpolicy
-    from localm.media.runtime_files import put_runtime, refused_download_message
     name, size, sha = pins.ASSETS[(plat, build)]
     root = runtimes_root()
     dest = runtime_dir(build)
@@ -468,16 +474,23 @@ def _install(build: str, *, force: bool, say: Progress,
                 raise DownloadError(refused_download_message(e)) from e
             verify_file(binary, size, sha, name)
             say("Unpacking the native music runtime...")
-            if unpack is not None:
-                unpack(binary, staging, tmp)
-            else:
-                _unpack(binary, staging, tmp, cancel_check)
-            version = (version_of or (lambda p: launcher_version(p, tmp)))(
-                staging / launcher_name())
-            if version != pins.VERSION:
-                raise ProvisionError(
-                    f"the unpacked KoboldCpp reports version {version or 'nothing'}, "
-                    f"expected {pins.VERSION}")
+
+            def check() -> None:
+                if unpack is not None:
+                    unpack(binary, staging, tmp)
+                else:
+                    _unpack(binary, staging, tmp, cancel_check)
+                version = (version_of or (lambda p: launcher_version(p, tmp)))(
+                    staging / launcher_name())
+                if version != pins.VERSION:
+                    raise LoadTestError(
+                        f"the unpacked KoboldCpp reports version {version or 'nothing'}, "
+                        f"expected {pins.VERSION}")
+
+            def once_more() -> None:
+                shutil.rmtree(staging, ignore_errors=True)
+                check()
+            twice(once_more, LoadTestError)
             (staging / MARKER).write_text(json.dumps(
                 {"tag": pins.TAG, "version": pins.VERSION, "build": build, "asset": name,
                  "sha256": sha}, indent=2), encoding="utf-8")
