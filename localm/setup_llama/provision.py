@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 import click
+from rich.markup import escape
 
 from localm.setup_llama._common import console
 from localm.setup_llama.pins import _PINNED_TAG
@@ -307,11 +308,23 @@ def _chosen_backend_loads(chosen: str) -> tuple:
     return False, f"it loaded but {gpu_detail.removeprefix('the runtime loaded but ')}"
 
 
+# Exit status of ``setup-llama --only`` for a build that was placed and does not work
+# on this machine.
+BUILD_UNUSABLE_EXIT = 79
+
+
+def _refuse_other_backend(chosen: str, why: str, code: int) -> None:
+    """Exit for ``--only``: say that *chosen* is not used here and *why*."""
+    console.print(f"[red]The {chosen} build is not used:[/red] {escape(why)}")
+    sys.exit(code)
+
+
 def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
                              with_cudart: bool, assume_yes: bool = False,
                              cuda_line: str = _CUDA_LINE,
                              failure: Optional[list] = None,
-                             explicit: bool = True) -> tuple[str, Optional[str]]:
+                             explicit: bool = True,
+                             only: bool = False) -> tuple[str, Optional[str]]:
     """Provision *chosen* and prove it loads. If it does not load, NEVER swap the
     user's pick silently (the never-override rule): inform WHY, then OFFER the
     universal Vulkan build when interactive (or fall back with a LOUD warning when
@@ -328,6 +341,10 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
 
     *cuda_line* is the CUDA asset line to fetch when *chosen* is 'cuda' (see
     NvidiaInfo.cuda_line); irrelevant otherwise.
+
+    *only*: no other build and no other backend is tried; the command exits with
+    BUILD_UNUSABLE_EXIT when *chosen* was placed and does not work here, and with 1
+    when it could not be placed.
 
     *failure*, when given, receives the reason *chosen* could not be used
     whenever another backend is returned. *explicit* False means auto picked
@@ -413,6 +430,10 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
                       "Microsoft Visual C++ Redistributable is installed. No other "
                       "backend was tried: none loads without it.[/yellow]")
         return chosen, used_tag[0]
+
+    if only:
+        _refuse_other_backend(chosen, detail or "it did not load",
+                              BUILD_UNUSABLE_EXIT if provisioned else 1)
 
     # ---- The installer must never hand the user a runtime our OWN gate rejects.
     #

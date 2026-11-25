@@ -994,7 +994,7 @@ def test_an_update_that_was_only_prepared_is_discarded(root, world):
     with job.Lock(root) as lock:
         job.cleanup(lock, keep=ID)
         assert packages.stage_folder(root, ID).exists()
-        assert job.discard(lock, ID) is True
+        assert job.discard(root, ID) is True
     assert tree(root) == before and um.left(root) == []
     assert not (root / ".venv" / mover.VENV_FOLDER / ID).exists()
 

@@ -463,6 +463,9 @@ def test_cli_surface_is_unchanged():
         ("rollback", ("--rollback",), "BoolParamType", None, True),
         ("cuda_line", ("--cuda-line",), "Choice", ("cuda-12", "cuda-13"), False),
         ("keep_choice", ("--keep-choice",), "BoolParamType", None, True),
+        ("only", ("--only",), "BoolParamType", None, True),
+        ("into", ("--into",), "Path", None, False),
+        ("prove", ("--prove",), "Path", None, False),
         ("assume_yes", ("--yes", "-y"), "BoolParamType", None, True),
     ]
     result = CliRunner().invoke(sl.main, ["--help"], terminal_width=100)
@@ -776,14 +779,13 @@ def test_amd_rocm_cpu_overlay_that_does_not_load_is_rolled_back(world):
     assert world.probe_calls == 3
 
 
-def test_amd_rocm_cpu_overlay_whose_marker_cannot_be_written_is_rolled_back(world):
+def test_amd_rocm_cpu_overlay_whose_marker_cannot_be_written_is_rolled_back(world, monkeypatch):
+    from localm.setup_llama import rocm_cpu
     _amd_rocm_release(world)
     _rocm_cpu_overlay(world)
-    world.lib.mkdir(parents=True, exist_ok=True)
-    (world.lib / ".localm-cpu-overlay").mkdir()
+    monkeypatch.setattr(rocm_cpu, "CPU_OVERLAY_MARKER", "no-such-folder/marker")
     r = world.invoke("--backend", "amd-rocm")
     _assert_kept_the_amd_rocm_cpu_backend(world, r, "")
-    assert (world.lib / ".localm-cpu-overlay").is_dir()
     assert world.probe_calls == 3
 
 

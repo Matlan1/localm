@@ -560,6 +560,25 @@ def _register_compute_backends(binary_dir, lib) -> bool:
         return False
 
 
+def _settled_binary_dir(explicit: Optional[str]) -> Optional[Path]:
+    """:func:`runtime_binary_dir`; when that is the bundled runtime, or nothing was found,
+    an unfinished replacement of the bundled runtime's files is undone first
+    (``update_mechanism.steps``). Raises RuntimeError while its files are incomplete."""
+    found = runtime_binary_dir()
+    try:
+        import localm_llama_runtime
+        bundled = Path(os.path.realpath(localm_llama_runtime.LIB_DIR))
+    except (ImportError, AttributeError, TypeError):
+        return found
+    if Path(os.path.realpath(found)) != bundled if found else explicit:
+        return found
+    from localm.update_mechanism import steps
+    why = steps.unsettled(bundled.parent, repair="Install it again: localm setup-llama")
+    if why:
+        raise RuntimeError(f"the runtime cannot be used now: {why}")
+    return runtime_binary_dir()
+
+
 def load_lib() -> ctypes.CDLL:
     """Load (and cache) the native llama shared library.
 
@@ -572,7 +591,7 @@ def load_lib() -> ctypes.CDLL:
 
     name = lib_filename()
     explicit = os.environ.get("LLAMA_CPP_LIB")
-    binary_dir = runtime_binary_dir()
+    binary_dir = _settled_binary_dir(explicit)
     if explicit and not binary_dir:
         # An explicit path straight at the file whose parent lacks the usual
         # layout - still honour it.

@@ -304,6 +304,8 @@ _NOT_TREE_SCANNERS: dict[str, str] = {
     "tests/test_installer_gui.py": "loads scripts.report_issue to read one constant; it calls nothing that lists a folder",
     "tests/test_docker_image_files.py": "puts the checkout path into an environment mapping",
     "tests/test_update_components.py": "reads named pin and archive files",
+    "tests/test_update_steps_packages.py": "reads the checkout's pyproject.toml only",
+    "tests/test_update_steps_run.py": "starts the app of the checkout and asks it for its version",
     "tests/test_updater.py": "asks whether the checkout is a site-packages install",
     "tests/test_uv_tool.py": "reads the uv pin file",
     "tests/test_shell_entrypoints_executable.py": "reads the index mode of a fixed list of files",

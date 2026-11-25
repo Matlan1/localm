@@ -134,18 +134,20 @@ class Area:
 
     *guard*: the folders an update never touches are refused. *exact*: every part of
     a path counts only under its exact spelling, else the ones that two paths given
-    to :meth:`watch` spell differently. *closed*: top-level names of
+    to :meth:`watch` spell differently. *follow*: a folder below *base* that is a link
+    is used like the one it leads to. *closed*: top-level names of
     *base* that are never changed. *stay*: folders that are not removed when they
     become empty."""
 
     def __init__(self, base: Path, old: Path, new: Path, kept: Path, *, guard: bool = False,
-                 exact: bool = False, closed: Iterable[str] = (),
+                 exact: bool = False, follow: bool = False, closed: Iterable[str] = (),
                  stay: Iterable[Path] = ()) -> None:
         self.base, self.old, self.new, self.kept = base, old, new, kept
-        self.guard, self.exact = guard, exact
+        self.guard, self.exact, self.follow = guard, exact, follow
         self.closed = frozenset(n.casefold() for n in closed)
         self.stay = frozenset([base, *stay])
         self._plain: set = set()
+        self._links: dict = {}
         self._twins: set = set()
         self._guarded = self._guards() if guard else set()
 
@@ -203,12 +205,30 @@ class Area:
             if st is None or (exact and not disk.spelled(path)):
                 return base.joinpath(*parts), None
             if not last:
-                if disk.is_link(st):
+                if disk.is_link(st) and not (base == self.base and self.is_folder(path, st)):
                     raise Unsafe(f"{path} is a link")
-                if not stat.S_ISDIR(st.st_mode):
+                if not self.is_folder(path, st):
                     return base.joinpath(*parts), None
                 self._plain.add(path)
         return path, st
+
+    def is_folder(self, path: Path, st: os.stat_result) -> bool:
+        """Whether *path* (*st* from ``lstat``) is a folder, or a link to one that is
+        followed."""
+        return _is_folder(st) or (self.follow and disk.is_link(st) and path.is_dir())
+
+    def linked(self, rel: str) -> Optional[Path]:
+        """The folder below *base* that *rel* lies in and that is a link that is followed
+        or a mount, None for none."""
+        path = self.base
+        for part in rel.split("/")[:-1] if self.follow else ():
+            path = path / part
+            if path not in self._links:
+                st = disk.lstat(path)
+                self._links[path] = st is not None and (disk.is_link(st) or os.path.ismount(path))
+            if self._links[path]:
+                return path
+        return None
 
     def _is_twin(self, rel: str) -> bool:
         return bool(self._twins) and rel.casefold() in self._twins
@@ -235,18 +255,19 @@ class Area:
         disk.prune(folder, stop)
 
 
-def venv_of(root) -> Path:
-    """The venv of the install at *root*, with a link to it followed. Raises
-    :class:`Refused` when there is none."""
-    venv = disk.real_folder(Path(root) / ".venv")
+def venv_of(root, step: str = "packages") -> Path:
+    """The venv the package step *step* of *root* changes, with a link to it followed.
+    Raises :class:`Refused` when there is none."""
+    path = Path(root) / VENVS[step]
+    venv = disk.real_folder(path)
     if not (venv / "pyvenv.cfg").is_file():
-        raise Refused(f"{Path(root) / '.venv'} is not a Python environment")
+        raise Refused(f"{path} is not a Python environment")
     return venv
 
 
-def venv_folder(root, update_id: str) -> Path:
-    """The folder in the venv that belongs to the update *update_id*."""
-    venv = disk.real_folder(Path(root) / ".venv")
+def venv_folder(root, update_id: str, step: str = "packages") -> Path:
+    """The folder in the venv of *step* that belongs to the update *update_id*."""
+    venv = disk.real_folder(Path(root) / VENVS[step])
     return plain_folder(plain_folder(venv / VENV_FOLDER) / check_id(update_id))
 
 
@@ -258,13 +279,21 @@ def area(root, update_id: str, step: str, number: int) -> Area:
         kept = plain_folder(plain_folder(update_folder(root) / "kept") / update_id)
         return Area(disk.real_folder(root), old_folder(work, number),
                     plain_folder(work / "new"), kept, guard=True, exact=True)
-    if step == PACKAGES:
-        venv = disk.real_folder(Path(root) / ".venv")
-        mine = venv_folder(root, update_id)
+    if step in BASES:
+        mine = plain_folder(work / step)
+        kept = plain_folder(plain_folder(update_folder(root) / "kept") / update_id)
+        return Area(plain_folder(disk.real_folder(root) / BASES[step]),
+                    old_folder(mine, number), new_folder(root, update_id, step),
+                    plain_folder(kept / step), exact=step == TREE, follow=step == TREE,
+                    closed=(FOLDER, VENV_FOLDER, VENV_KEPT))
+    if step in VENVS:
+        venv = disk.real_folder(Path(root) / VENVS[step])
+        mine = venv_folder(root, update_id, step)
         kept = plain_folder(plain_folder(venv / VENV_KEPT) / update_id)
         site = shared.updater_components.site_packages(venv)
         stay = [venv / "Scripts", venv / "bin", *([site, *site.parents] if site else [])]
-        return Area(venv, old_folder(mine, number), stage_folder(root, update_id, number), kept,
+        return Area(venv, old_folder(mine, number), stage_folder(root, update_id, number, step),
+                    kept,
                     closed=(VENV_FOLDER, VENV_KEPT, "pyvenv.cfg", ".lock"), stay=stay)
     raise Unreadable(f"the plan of the update names an unknown step {step[:40]!r}")
 
@@ -275,19 +304,33 @@ def old_folder(mine: Path, number: int) -> Path:
     return plain_folder(plain_folder(mine / "old") / f"{number:02d}")
 
 
-def stage_folder(root, update_id: str, number: Optional[int] = None) -> Path:
-    """The staging venv of the package plan *number* of the update *update_id*, None
-    for the next one. The package plans are counted from 01, in their order."""
+def new_folder(root, update_id: str, step: str) -> Path:
+    """Where the new files of *step*, one of :data:`BASES`, are prepared."""
+    return plain_folder(plain_folder(work_folder(root, update_id) / step) / "new")
+
+
+def stage_folder(root, update_id: str, number: Optional[int] = None,
+                 step: str = "packages") -> Path:
+    """The staging venv of the plan *number* of the package step *step* of the update
+    *update_id*, None for the next one. The plans of a step are counted from 01, in
+    their order."""
     folder = _plans_folder(root, update_id)
     names = os.listdir(folder) if disk.lstat(folder) is not None else ()
-    nth = 1 + sum(n.endswith(f"-{PACKAGES}.json") and (number is None or n < f"{number:02d}")
+    nth = 1 + sum(n.endswith(f"-{step}.json") and (number is None or n < f"{number:02d}")
                   for n in names)
-    return plain_folder(plain_folder(venv_folder(root, update_id) / "stage") / f"{nth:02d}")
+    return plain_folder(plain_folder(venv_folder(root, update_id, step) / "stage") / f"{nth:02d}")
 
 
 FILES, PACKAGES = "files", "packages"
+#: A step on the uv inside the install, on the whole folder of a job (file names
+#: compared exactly), on the whole folder of a job, and on the venv inside the folder
+#: of a job.
+TREE, WHOLE, VENV, UV = "tree", "whole", "venv", "uv"
+#: The venv of each package step, and the folder of each other step, below the root.
+VENVS = {PACKAGES: ".venv", VENV: "venv"}
+BASES = {UV: ".uv", TREE: "", WHOLE: ""}
 #: The steps a plan can be of.
-STEPS = (FILES, PACKAGES)
+STEPS = (FILES, *VENVS, *BASES)
 
 
 # -------------------------------------------------------------------- plans
@@ -415,7 +458,8 @@ def _moved(root, update_id: str) -> set:
     """The numbers of the plans of which something was moved."""
     work = work_folder(root, update_id)
     found = {int(m[1]) for m in map(_MOVED.fullmatch, os.listdir(work)) if m}
-    for mine in (work, venv_folder(root, update_id)):
+    for mine in (work, *(plain_folder(work / step) for step in BASES),
+                 *(venv_folder(root, update_id, step) for step in VENVS)):
         old = plain_folder(mine / "old")
         if disk.lstat(old) is not None:
             found |= {int(n) for n in os.listdir(old) if n.isdecimal()}
@@ -511,9 +555,8 @@ def build(a: Area, step: str, number: int, new: Mapping, leaving: Iterable[str],
 
     *identify* gives the identity of a file that is there, *edited* whether a file
     that goes is the user's own; an identity without a checksum gets that of the
-    content. *keep_equal*: a file that is already the new one stays. Raises :class:`Refused` for a path that is taken by something else or on
-    another volume, :class:`Unsafe` for one through a link, :class:`.disk.Held` or
-    OSError."""
+    content. *keep_equal*: a file that is already the new one stays. Raises :class:`Refused` for a path that is taken by something else,
+    :class:`Unsafe` for one through a link, :class:`.disk.Held` or OSError."""
     swap = list(swap)
     wait = Wait()
 
@@ -548,7 +591,6 @@ def build(a: Area, step: str, number: int, new: Mapping, leaving: Iterable[str],
     gone = {rel.casefold() for rel in removes}
     for rel in taken:
         _check_taken(a, rel, gone)
-    _check_volume(a, [*removes, *(op.path for op in changes)])
     first = sorted((op for op in changes if op.swap), key=lambda op: swap.index(op.path))
     rest = [op for op in changes if not op.swap]
     return Plan(step, number, [*first, *(removes[r] for r in sorted(removes)), *rest],
@@ -625,21 +667,6 @@ def differs(identity: Mapping, stated: Mapping) -> bool:
     return any(identity[k] != stated[k] for k in ("sha256", "size"))
 
 
-def _check_volume(a: Area, paths: Iterable[str]) -> None:
-    volume = os.lstat(a.new).st_dev
-    seen: set = set()
-    for rel in paths:
-        parent = a.base.joinpath(*rel.split("/")).parent
-        while parent not in seen:
-            seen.add(parent)
-            st = disk.lstat(parent)
-            if st is not None:
-                if st.st_dev != volume:
-                    raise Refused(f"{rel} is on another volume than {a.new}")
-                break
-            parent = parent.parent
-
-
 def _other_spelling(path: Path) -> Optional[Path]:
     """The regular file that *path* reaches under another spelling of its last part,
     None when there is none."""
@@ -662,7 +689,7 @@ def _check_taken(a: Area, rel: str, gone: set) -> None:
         st = disk.lstat(path)
         if st is None:
             return
-        if i < len(parts) and _is_folder(st) and disk.spelled(path):
+        if i < len(parts) and a.is_folder(path, st) and disk.spelled(path):
             continue
         if not _is_folder(st):
             if "/".join(parts[:i]).casefold() not in gone:
@@ -684,8 +711,8 @@ def _created(a: Area, ops: list) -> list:
             rel = "/".join(parts[:i])
             if rel in found:
                 continue
-            st = a.find(rel)[1]
-            if st is None or not stat.S_ISDIR(st.st_mode):
+            path, st = a.find(rel)
+            if st is None or not a.is_folder(path, st):
                 found.add(rel)
     return sorted(found)
 
@@ -1031,6 +1058,9 @@ class _Back:
 
     def _verify(self, op: Op) -> None:
         path, st = self.a.find(op.path)
+        part = path.with_name(path.name + disk.PART)
+        if disk.lstat(part) is not None:
+            disk.unlink(part)
         if op.old is None:
             if st is not None and not stat.S_ISDIR(st.st_mode):
                 raise Refused(f"{op.path} was added and is still there")

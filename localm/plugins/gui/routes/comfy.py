@@ -235,8 +235,7 @@ def register(app: FastAPI, ctx) -> None:
         /api/jobs/{id}/events.
 
         ``reinstall_requirements`` forwards `--reinstall-requirements`. Off by
-        default, matching the CLI: a partial pip upgrade is not reliably
-        rollback-able, so only the source rollback is guaranteed. It is
+        default, matching the CLI, because it can download several GB. It is
         reachable from here because a pin that advances across a dependency change
         otherwise leaves a checkout that moved without its new deps.
 

@@ -148,6 +148,7 @@ def is_managed_comfy_installed() -> bool:
     pill and Generate-button routing all read this function. The marker is
     written only once every earlier step has succeeded."""
     paths = managed_comfy_paths()
+    why_managed_comfy_is_unsettled()
     try:
         if not (paths.main_py.is_file() and paths.venv_python.is_file()):
             return False
@@ -155,6 +156,14 @@ def is_managed_comfy_installed() -> bool:
         return (paths.root / MARKER_FILENAME).is_file()
     except OSError:
         return False
+
+
+def why_managed_comfy_is_unsettled(wait_s: float = 0.0) -> Optional[str]:
+    """``steps.unsettled`` of the managed ComfyUI."""
+    from localm.update_mechanism import steps
+    return steps.unsettled(
+        managed_comfy_paths().root, wait_s=wait_s,
+        repair="Reinstall it: 'localm comfy remove' then 'localm comfy setup'")
 
 
 def managed_comfy_remove_targets(with_models: bool = False) -> list:

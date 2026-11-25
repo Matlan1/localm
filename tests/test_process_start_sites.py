@@ -41,6 +41,7 @@ LOCALM = frozenset({
     "localm/media/sdcpp/runner.py:SdRunner._spawn:Process",
     "localm/plugins/coder/cli/_main.py:_build_backend_gated:Popen",
     "localm/plugins/coder/server.py:ManagedServer.start:Popen",
+    "localm/update_mechanism/steps_probe.py:probe:Popen",
     "localm/voice.py:_spawn_worker:Process",
 })
 #: The child imports localm, by a command line that is built elsewhere.
@@ -48,6 +49,8 @@ LOCALM_ELSEWHERE = {
     "installer/gui.py:Wizard._launch:Popen": "LocaLM.exe gui",
     "localm/diagnostics.py:run_report_isolated:Popen": "python -c, imports localm.diagnostics",
     "localm/inference/http_server.py:_execv_restart:execv": "python -m localm gui, same process",
+    "localm/update_mechanism/steps_update.py:run_child:Popen":
+        "python -m localm, waited for; or python -c import torch, waited for",
     "scripts/crash_recovery_watchdog.py:relaunch:Popen": "python -m localm gui",
 }
 #: A short tool the starter waits for: a running child of a recorded process.

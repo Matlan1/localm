@@ -515,11 +515,11 @@ def comfy_setup(copy_custom_nodes) -> None:
 @comfy_group.command("update")
 @click.option("--reinstall-requirements", "reinstall_requirements", is_flag=True,
               default=False,
-              help="Also reinstall ComfyUI's requirements into the managed venv "
-                   "(use when the new pin changed ComfyUI's dependencies). Off by "
-                   "default: a partial dependency upgrade cannot be rolled back "
-                   "exactly, so update stays within the safe source rollback unless "
-                   "you ask.")
+              help="Also update ComfyUI's Python packages in the managed venv (use "
+                   "when the new pin changed ComfyUI's dependencies). Off by default "
+                   "because it can download several GB. They are fetched before "
+                   "anything changes, and the replaced ones are put back when the "
+                   "update fails.")
 @click.option("--commit", "commit", default=None,
               help="Advanced: update to a specific ComfyUI commit instead of the "
                    "shipped pin (for testing a candidate before it is pinned).")

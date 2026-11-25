@@ -661,7 +661,10 @@ def check_staged_cuda_runtime(target: Path, allow_no_gpu: bool = False) -> tuple
             f"the host driver {info.driver_version or 'version unknown'} supports CUDA "
             f"{info.cuda_capability}, and the {line} runtime needs {need[0]}.{need[1]} "
             "or newer. Update the host NVIDIA driver."]
-    ok, detail = _sl._native_gpu_loads_ok()
+    try:
+        ok, detail = _sl._native_gpu_loads_ok()
+    except _sl.LoadTestNotRun as e:
+        return False, [str(e)]
     if not ok:
         return False, [f"the {line} runtime did not load for {gpu}: {detail}"]
     return True, [f"CUDA runtime ({line}) loaded for {gpu}"]

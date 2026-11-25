@@ -1833,17 +1833,73 @@ def _commands(p: dict, root: Path):
         yield cmd
 
 
-def _write_torch_pins(root: Path) -> None:
-    """Write ``hwdetect.TORCH_PINS_FILE`` in the install at *root*: the exact
-    versions of the torch packages its venv has now (``hwdetect.torch_pins``),
-    one per line, empty when it has none. Raises OSError when it cannot be
-    written."""
+def _write_torch_pins(root: Path, venv: Optional[Path] = None,
+                      path: Optional[Path] = None) -> Path:
+    """Write the exact versions of the torch packages the venv at *venv* (default the
+    one of the install at *root*) has now (``hwdetect.torch_pins``), one per line,
+    empty when it has none, to *path* (default ``hwdetect.TORCH_PINS_FILE`` there).
+    Returns the path. Raises OSError when it cannot be written."""
     from localm.hwdetect import TORCH_PINS_FILE, torch_pins
-    site = site_packages(Path(root) / ".venv")
+    site = site_packages(Path(root) / ".venv" if venv is None else venv)
     installed = {name: (info or {}).get("version")
                  for name, info in (dists(site) if site is not None else {}).items()}
-    path = Path(root) / TORCH_PINS_FILE
+    path = Path(root) / TORCH_PINS_FILE if path is None else path
     path.write_text("".join(f"{line}\n" for line in torch_pins(installed)), encoding="utf-8")
+    return path
+
+
+def fetch_pytorch(future, commands, say: Callable) -> list:
+    """Fetch what the PyTorch step *commands* (:func:`torch_step`) install, into
+    *future* (``update_mechanism.steps_packages.Future``). Returns the commands for
+    the install's venv, with the torch versions they were fetched with pinned. Raises
+    ``mover.Refused``, also for an install the network policy refuses, and OSError."""
+    from localm import pyinstall
+    from localm.hwdetect import TORCH_PINS_FILE
+    from localm.update_mechanism import mover
+    say("Fetching the PyTorch packages...")
+    ready = []
+    for command in commands:
+        if TORCH_PINS_FILE in command:
+            pins = _write_torch_pins(future.root, future.stage, future.work / "torch-pins.txt")
+            command = [str(_short(pins)) if a == TORCH_PINS_FILE else a for a in command]
+        try:
+            pyinstall.check_command([future.uv, *command], future.tree)
+        except pyinstall.InstallRefused as e:
+            raise mover.Refused(str(e)) from e
+        future.add([future.uv, *command])
+        ready.append(command)
+    return ready
+
+
+def _short(path: Path) -> str:
+    from localm.update_mechanism import disk
+    return disk.short_path(path)
+
+
+def _update_pytorch(p: dict, root: Path, env: dict, say: Callable) -> Optional[str]:
+    """Carry out the PyTorch step *p* on the install at *root*: what it installs is
+    fetched first, then the packages it replaces are moved aside and the new ones
+    installed and tested (``update_mechanism.steps``). None on success, else what
+    failed, with the old packages in place."""
+    from localm import updater
+    from localm.update_mechanism import steps, steps_packages, steps_update
+    uv = updater._uv_for_deps(root)
+    try:
+        with steps.Work(root) as work:
+            future = steps_packages.Future(root, work.id, uv, env=env, say=say, tree=root)
+            ready = fetch_pytorch(future, p["items"], say)
+            if not future.staged:
+                return None
+            say("Replacing the PyTorch packages...")
+            steps.change(work, [lambda: steps_packages.run_packages(
+                root, work.id, None, ready, uv, env=env)],
+                prove=lambda: steps_update.why_torch_fails(root / ".venv", env=env),
+                reinstall=steps_packages.reinstaller(
+                    root, uv, env=env, say=say,
+                    options=lambda _id, _part: {"indexes": steps_packages.index_args(p["items"])}))
+    except (steps.Failed, *steps.STEP_ERRORS) as e:
+        return str(e)
+    return None
 
 
 def _verify(p: dict, root: Path, home: Path) -> Optional[str]:
@@ -1874,28 +1930,46 @@ def _verify(p: dict, root: Path, home: Path) -> Optional[str]:
 
 
 def _update_uv(p: dict, root: Path, say: Callable, bootstrap: Optional[Callable]) -> Optional[str]:
-    """Install the pinned uv into a staging folder beside ``<root>/.uv``, then
-    swap it in. None on success, else what failed (``.uv`` unchanged)."""
-    from localm import uv_tool
-    staging = root / ".uv-update"
-    shutil.rmtree(staging, ignore_errors=True)
+    """Install the pinned uv into a folder of its own, then move its files in
+    (``update_mechanism.steps``). None on success, else what failed, with the old uv
+    in place."""
+    from localm.update_mechanism import mover, steps
     try:
-        (bootstrap or uv_tool.bootstrap_uv)(root, emit=say, dest=staging)
-    except uv_tool.UvBootstrapError as e:
-        shutil.rmtree(staging, ignore_errors=True)
-        return str(e)
-    found = uv_tool._uv_in(staging)
-    got = uv_tool.uv_version(found) if found else None
-    if got != p["target"]:
-        shutil.rmtree(staging, ignore_errors=True)
-        return f"the installed uv reports {got or 'no version'}, not {p['target']}"
-    from localm.folder_swap import replace_dir
-    try:
-        replace_dir(staging, root / ".uv")
-    except OSError as e:
-        shutil.rmtree(staging, ignore_errors=True)
+        with steps.Work(root) as work:
+            problem = stage_uv(p["target"], root, work.new(mover.UV), say, bootstrap)
+            if problem:
+                return problem
+            old = steps.staged_files(root / ".uv")
+            steps.change(work, [lambda: steps.move_in(root, work.id, mover.UV, remove=old)],
+                         prove=lambda: uv_reports(root, p["target"]))
+    except (steps.Failed, *steps.STEP_ERRORS) as e:
         return f"could not swap in the new uv: {e}"
     return None
+
+
+def stage_uv(target: str, root: Path, folder: Path, say: Callable,
+             bootstrap: Optional[Callable] = None) -> Optional[str]:
+    """Install the uv pinned by the tree at *root* into the empty folder *folder* and
+    check that it reports the version *target*. None on success, else what failed."""
+    from localm import uv_tool
+    folder.rmdir()
+    try:
+        (bootstrap or uv_tool.bootstrap_uv)(root, emit=say, dest=Path(_short(folder)))
+    except uv_tool.UvBootstrapError as e:
+        return str(e)
+    found = uv_tool._uv_in(folder)
+    got = uv_tool.uv_version(found) if found else None
+    return None if got == target else (
+        f"the installed uv reports {got or 'no version'}, not {target}")
+
+
+def uv_reports(root: Path, target: str) -> Optional[str]:
+    """None when the uv inside the install at *root* reports *target*, else what it
+    reports."""
+    from localm import uv_tool
+    found = uv_tool.contained_uv(root)
+    got = uv_tool.uv_version(found) if found else None
+    return None if got == target else f"the new uv reports {got or 'no version'}, not {target}"
 
 
 def _remove_created(p: dict, home: Path, existed: set) -> None:
@@ -1961,6 +2035,10 @@ def finish_pending(*, root=None, home=None, runner: Optional[Callable] = None,
         return None
     say = say or (lambda _m: None)
     home = _home(home)
+    from localm.update_mechanism import steps
+    why = steps.unsettled(root, wait_s=steps.SETTLE_WAIT_S)
+    if why:
+        _warn("update: %s", why)
     plans = plan(root, root, home=home)
     todo = [p for p in plans if p["update"]]
     status = {"state": None, "components": plans, "note": summary(plans), "error": None}
@@ -2016,6 +2094,8 @@ def finish_pending(*, root=None, home=None, runner: Optional[Callable] = None,
         try:
             if p["name"] == "uv":
                 problem = _update_uv(p, root, say, bootstrap)
+            elif p["name"] == "pytorch" and runner is None:
+                problem = _update_pytorch(p, root, env, say)
             else:
                 for cmd in _commands(p, root):
                     if pyinstall.is_install_command(cmd):

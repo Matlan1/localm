@@ -11,9 +11,10 @@ right after the swap for ``localm update``, during the server's restart (after
 its models and workers are stopped) for an update applied from the GUI, else on
 the next start of a command that loads models.
 
-A re-provision keeps a snapshot of the runtime it replaces beside the update
-backup (``_apply_update.runtime_snapshot_dir``); a failed one restores it, and a
-later rollback of the update restores it too.
+setup-llama provisions and tests the new build in a folder of its own and moves its
+files in under a record (``setup_llama.put_in_place``), so a failed or interrupted
+re-provision leaves the previous runtime. A snapshot of it is kept beside the update
+backup (``_apply_update.runtime_snapshot_dir``) for a later rollback of the update.
 """
 
 from __future__ import annotations
@@ -293,14 +294,15 @@ def _record_kept(lib: Path, backend: str, kept: str, target: str, why: str) -> N
 
 def _runtime_loads(lib: Path, backend: str, sl) -> tuple:
     """(ok, why) for the runtime at *lib*: it holds the llama library and that
-    library loads through this localm's loader and ABI gate in a child process,
-    registering a GPU device unless *backend* is cpu (the load test setup-llama
-    runs). *sl* is the ``localm.setup_llama`` module."""
+    library loads through this localm's loader and ABI gate in a child process and
+    runs a tiny model, registering a GPU device unless *backend* is cpu (the load
+    test setup-llama runs). *sl* is the ``localm.setup_llama`` module."""
     library = Path(lib) / sl._lib_name()
     if not library.is_file():
         return False, f"{library.name} is missing from {lib}"
     env = dict(os.environ, LLAMA_CPP_LIB=str(library))
-    return (sl._native_loads_ok if backend == "cpu" else sl._native_gpu_loads_ok)(env=env)
+    loads = sl._native_loads_ok(env=env)
+    return loads if backend == "cpu" or not loads[0] else sl._native_gpu_loads_ok(env=env)
 
 
 def failed(status: Optional[dict]) -> TypeGuard[dict]:
@@ -844,11 +846,23 @@ def catch_up(root=None, *, repair: bool = False) -> Optional[dict]:
     root = Path(root) if root else updater.repo_root()
     if read_pending() is not None:
         return None
+    _settle(root)
     p = plan(root, root)
     if not p["reprovision"]:
         return None
     write_pending(p, root=root, version=_version.read_version(), repair=repair)
     return p
+
+
+def _settle(root) -> Optional[str]:
+    """``steps.unsettled`` of the runtime of the install at *root*, also logged."""
+    from localm.update_mechanism import steps
+    why = steps.unsettled(Path(os.path.realpath(runtime_lib(root))).parent,
+                          wait_s=steps.SETTLE_WAIT_S)
+    if why:
+        from localm.debuglog import logger
+        logger.warning("update: the native runtime: %s", why)
+    return why
 
 
 def clear_pending() -> None:
@@ -884,15 +898,16 @@ def last_status() -> Optional[dict]:
 
 def _command(root: Path, backend: str) -> list:
     cmd = [sys.executable, "-m", "localm", "setup-llama", "--backend", backend,
-           "--force", "--yes", "--keep-choice"]
+           "--force", "--yes", "--keep-choice", "--only"]
     text = ""
     for rel in ("localm/setup_llama/cli.py", "localm/setup_llama.py"):
         try:
             text += (root / rel).read_text(encoding="utf-8")
         except OSError:
             continue
-    if '"--keep-choice"' not in text:
-        cmd.remove("--keep-choice")
+    for option in ("--keep-choice", "--only"):
+        if f'"{option}"' not in text:
+            cmd.remove(option)
     return cmd
 
 
@@ -919,9 +934,9 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
       holds the runtime files; nothing was changed and the re-provision stays
       pending for the next start;
     - ``"kept"``: the re-provision did not produce the release's build for the
-      same backend; the previous runtime was put back, it loads, and it stays in
-      use. When setup-llama finished and installed another backend or build (the
-      release's build does not work here), that is recorded for
+      same backend; the previous runtime is in place, it loads, and it stays in
+      use. When the release's build does not work here (setup-llama says so, or
+      installed another backend or build), that is recorded for
       :func:`kept_runtime` and later checks treat the kept build as current for
       this release, like a build the user pinned; otherwise (setup-llama failed
       or could not run) the re-provision is tried again on the next start;
@@ -953,6 +968,7 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
         clear_pending()
         return None
     lib = runtime_lib(root)
+    _settle(root)
     backend, target, pins = pending["backend"], pending["target"], pending.get("pins") or {}
     status = {"state": None, "backend": backend, "from": pending.get("from"), "to": target,
               "holders": [], "error": None, "note": None, "version": installed_version}
@@ -999,14 +1015,20 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
         env = updater._deps_env(root)
     run = runner or (lambda c: subprocess.run(c, cwd=str(root), env=env).returncode)
     from localm.setup_spec import VC_RUNTIME_ABSENT_EXIT
-    vc_absent = False
+    vc_absent = unusable = False
     try:
         rc = int(run(cmd))
         vc_absent = rc == VC_RUNTIME_ABSENT_EXIT
-        problem = None if rc == 0 or vc_absent else f"setup-llama exited {rc}"
+        unusable = rc == sl.BUILD_UNUSABLE_EXIT
+        problem = None if rc == 0 or vc_absent else (
+            f"the {target} build does not work on this machine" if unusable
+            else f"setup-llama exited {rc}")
     except Exception as e:
         problem = f"could not run setup-llama: {e}"
-    setup_finished = problem is None
+    setup_finished = problem is None or unusable
+    unsettled = _settle(root)
+    if unsettled:
+        problem = f"{problem or 'the replacement was interrupted'}; {unsettled}"
     now_backend, now_build = sl._provisioned_backend(lib), sl._provisioned_build(lib)
     if problem is None and now_backend != backend:
         problem = f"setup-llama installed the {now_backend} runtime instead of {backend}"
@@ -1029,7 +1051,10 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
         status["holders"] = held_by
     restore_errors = au.restore_runtime(snapshot, lib)
     if not restore_errors:
-        loads, why_not = _runtime_loads(lib, backend, sl)
+        try:
+            loads, why_not = _runtime_loads(lib, backend, sl)
+        except sl.LoadTestNotRun as e:
+            loads, why_not, setup_finished = True, str(e), False
         if loads:
             restored = sl._provisioned_build(lib)
             previous = restored or pending.get("from") or "build"

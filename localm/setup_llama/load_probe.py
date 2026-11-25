@@ -6,9 +6,17 @@ failed load into a one-line cause.
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
+from pathlib import Path
 from typing import Optional
+
+import click
+
+import localm.setup_llama as _sl
 
 _EXC_HEADER_RE = re.compile(
     r"^(?:[\w.]+\.)?\w*(?:Error|Exception|Warning|Interrupt|Exit)(?::|\s|\Z)")
@@ -111,6 +119,9 @@ _PROBE_NO_BACKENDS = 88
 _PROBE_ABI_MISMATCH = 89
 
 
+_PROBE_MODEL_FAILED = 91
+
+
 # The prefix _native_loads_ok puts on an ABI rejection. A string WE own on both
 # ends - written here, matched by _is_abi_rejection - so it cannot drift with
 # anyone else's message. Not a substring search over a traceback.
@@ -120,6 +131,8 @@ _ABI_REJECT_PREFIX = "the runtime does not match this build's struct layout"
 # load_lib() runs verify_abi and RE-RAISES (see _loader.py: `except Exception:
 # _loaded_lib = None; raise`), so AbiMismatch propagates out uncaught and can be
 # caught here. Verified by reading that call site, not assumed.
+# argv: a model file (``tiny_model``) to load, on the GPU where there is one, and to
+# decode two tokens with.
 _LOAD_PROBE_CODE = f"""\
 import sys
 from localm.inference.backends.llamacpp import _loader
@@ -129,8 +142,21 @@ try:
 except AbiMismatch as e:
     sys.stderr.write(str(e))
     sys.exit({_PROBE_ABI_MISMATCH})
-sys.exit(0 if _loader.compute_backends_available() else {_PROBE_NO_BACKENDS})
+if not _loader.compute_backends_available():
+    sys.exit({_PROBE_NO_BACKENDS})
+try:
+    from localm.inference.backends.llamacpp.llama import LlamaCpp
+    model = LlamaCpp(sys.argv[1], n_ctx=64, n_gpu_layers=99)
+    for _ in model._generate([1, 10, 11], 2, 0.0, 1, 1.0, 1.0):
+        pass
+    model.close()
+except Exception as e:
+    sys.stderr.write(type(e).__name__ + ": " + str(e).split(chr(10))[0])
+    sys.exit({_PROBE_MODEL_FAILED})
 """
+
+# Seconds the load test may take (a GPU backend may compile its shaders in it).
+_LOAD_PROBE_LIMIT_S = 300
 
 
 _PROBE_NO_GPU_DEVICE = 90
@@ -175,6 +201,55 @@ sys.exit({_PROBE_NO_GPU_DEVICE})
 
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
+# Times a load test that could not be made is tried, and the seconds in between.
+_TRIES, _PAUSE_S = 3, 2.0
+
+
+class LoadTestNotRun(click.ClickException):
+    """The load test could not be made; nothing is known about the build."""
+
+
+def _run_probe(code: str, *args: str, env: Optional[dict] = None, limit_s: int = 120):
+    """Run the load test *code* in a fresh interpreter. Raises subprocess.TimeoutExpired,
+    and OSError when the interpreter could not be started."""
+    return subprocess.run([sys.executable, "-c", code, *args], capture_output=True, text=True,
+                          timeout=limit_s, env=env, creationflags=_NO_WINDOW)
+
+
+def _made(test):
+    """What *test* returns, tried again when it could not be made (OSError). Raises
+    :class:`LoadTestNotRun`."""
+    tries = _TRIES
+    while True:
+        try:
+            return test()
+        except OSError as e:
+            tries -= 1
+            if not tries:
+                raise _sl.LoadTestNotRun(f"the load test of the runtime could not be run: {e}") from e
+            time.sleep(_PAUSE_S)
+
+
+def _run_model_probe(env: Optional[dict]):
+    """:func:`_run_probe` of :data:`_LOAD_PROBE_CODE` on a tiny model, in a temporary
+    folder or, where none can be used, in the data folder."""
+    from localm.config import home_dir
+    from localm.setup_llama import tiny_model
+    tmp = None
+    try:
+        try:
+            tmp = tempfile.mkdtemp(prefix="localm-runtime-check-")
+            model = tiny_model.write(Path(tmp) / "check.gguf")
+        except OSError:
+            if tmp:
+                shutil.rmtree(tmp, ignore_errors=True)
+            tmp = tempfile.mkdtemp(prefix=".runtime-check-", dir=home_dir())
+            model = tiny_model.write(Path(tmp) / "check.gguf")
+        return _run_probe(_LOAD_PROBE_CODE, str(model), env=env, limit_s=_LOAD_PROBE_LIMIT_S)
+    finally:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 def _is_abi_rejection(detail: Optional[str]) -> bool:
     """Whether *detail* is _native_loads_ok reporting OUR OWN ABI gate refusing
@@ -188,7 +263,8 @@ def _is_abi_rejection(detail: Optional[str]) -> bool:
 
 def _native_loads_ok(env: Optional[dict] = None) -> tuple:
     """Load-test the provisioned native library in a FRESH interpreter, exactly
-    as ``localm run`` will, AND confirm it registered a compute backend. A build
+    as ``localm run`` will, AND confirm it registered a compute backend and loads and
+    runs a tiny model. A build
     can load cleanly yet register ZERO backends ("no backends are loaded"), which
     must count as a FAILED provision, not a silent success - otherwise
     _provision_with_fallback's "prove it loads" guarantee holds only for
@@ -196,24 +272,28 @@ def _native_loads_ok(env: Optional[dict] = None) -> tuple:
     the first model load with the real cause already lost. A subprocess keeps the
     setup process clean (the loader mutates the DLL/lib search path) and matches
     the real run environment. *env* is the child's environment (default this
-    process's). Returns (ok, last_error_line)."""
+    process's). Returns (ok, last_error_line), False only for what the build itself did;
+    raises :class:`LoadTestNotRun` when the test could not be made."""
     try:
-        r = subprocess.run([sys.executable, "-c", _LOAD_PROBE_CODE],
-                           capture_output=True, text=True, timeout=120, env=env,
-                           creationflags=_NO_WINDOW)
-    except Exception as e:
+        r = _made(lambda: _run_model_probe(env))
+    except subprocess.TimeoutExpired as e:
         return False, str(e)
     if r.returncode == 0:
         return True, ""
     if r.returncode == _PROBE_NO_BACKENDS:
         return False, ('runtime loaded but registered no compute backends '
                        '("no backends are loaded") - this build does not fit this machine')
+    if r.returncode == _PROBE_MODEL_FAILED:
+        why = _informative_error_line((r.stderr or "").strip())
+        return False, f"the runtime loaded but could not run a model: {why}"
     if r.returncode == _PROBE_ABI_MISMATCH:
         # Kept behind its own prefix so callers can recognise this specific
         # outcome without re-parsing upstream's wording - see _is_abi_rejection.
         why = _informative_error_line((r.stderr or "").strip()) or "layout drift"
         return False, f"{_ABI_REJECT_PREFIX}: {why}"
     detail = (r.stderr or r.stdout or "").strip()
+    if not detail and r.returncode:
+        return False, f"the load test ended with exit code {r.returncode:#x}"
     return False, _informative_error_line(detail)
 
 
@@ -222,12 +302,11 @@ def _native_gpu_loads_ok(env: Optional[dict] = None) -> tuple:
     a GPU-type compute device. A GPU build whose GPU library fails to load still
     registers the CPU device, which satisfies :func:`_native_loads_ok`. Returns
     (ok, last_error_line); the failure line names the devices that did register.
-    *env* is the child's environment (default this process's)."""
+    *env* is the child's environment (default this process's). Raises
+    :class:`LoadTestNotRun` when the test could not be made."""
     try:
-        r = subprocess.run([sys.executable, "-c", _GPU_LOAD_PROBE_CODE],
-                           capture_output=True, text=True, timeout=120, env=env,
-                           creationflags=_NO_WINDOW)
-    except Exception as e:
+        r = _made(lambda: _run_probe(_GPU_LOAD_PROBE_CODE, env=env))
+    except subprocess.TimeoutExpired as e:
         return False, str(e)
     if r.returncode == 0:
         return True, ""

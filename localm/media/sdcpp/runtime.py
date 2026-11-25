@@ -45,6 +45,10 @@ class DownloadError(ProvisionError):
 VC_MISSING_MARKER = ".vc-runtime-missing"
 
 
+class LoadTestError(ProvisionError):
+    """The runtime was fetched and does not work on this machine."""
+
+
 class VcRuntimeMissingError(ProvisionError):
     """Windows lacks the Microsoft Visual C++ Redistributable the runtime needs,
     so no backend of it loads; nothing was installed."""
@@ -189,7 +193,11 @@ def _has_backend_device(backend: str, devices: list) -> bool:
 
 def installed(backend: str) -> Optional[Runtime]:
     """The installed, load-tested runtime for *backend* at the pinned tag, or
-    None. A GPU runtime whose load test found only the CPU is not installed."""
+    None, also while the files in :func:`runtimes_root` are incomplete. A GPU runtime
+    whose load test found only the CPU is not installed."""
+    from localm.update_mechanism import steps
+    if steps.unsettled(runtimes_root()):
+        return None
     d = runtime_dir(backend)
     meta = _read_json(d / MARKER)
     if not meta or meta.get("tag") != pins.TAG or meta.get("backend") != backend:
@@ -380,13 +388,17 @@ RUNTIME_LABEL = "native image and video runtime"
 def install(backend: str, *, force: bool = False,
             on_progress: Optional[Progress] = None,
             probe: Optional[Callable[[Runtime], dict]] = None,
-            ask: Optional[Ask] = None) -> Runtime:
+            ask: Optional[Ask] = None, into: Optional[Path] = None) -> Runtime:
     """Download, verify, extract and load-test the runtime for *backend*.
 
-    Network access goes through ``netpolicy`` as an explicit download. An
-    installed runtime of the same build stays in place until the new one is
-    fully downloaded and can be moved in. On a failed load-test the directory
-    is kept with ``FAILED_MARKER`` and :class:`ProvisionError` is raised. On
+    Network access goes through ``netpolicy`` as an explicit download. The runtime
+    is tested in a folder of its own and then moved in under a record
+    (``update_mechanism.steps``); an installed one of the same build stays, also
+    when the new one fails or this process ends. On a failed load-test
+    ``FAILED_MARKER`` is written, unless the same build is installed and works, and
+    :class:`LoadTestError` is raised. With *into* (a folder on the volume of
+    :func:`runtimes_root`) the tested runtime is left there as ``<tag>-<backend>``
+    and nothing of the installed ones changes. On
     Windows without the Microsoft Visual C++ Redistributable it is offered
     through *ask* (None: not offered), and :class:`VcRuntimeMissingError` is
     raised, with nothing installed, when it stays missing; with *ask* None it
@@ -398,7 +410,7 @@ def install(backend: str, *, force: bool = False,
     from localm.media.runtime_files import logged
     say = logged(on_progress, "sdcpp runtime")
     try:
-        return _install(backend, force=force, say=say, probe=probe, ask=ask)
+        return _install(backend, force=force, say=say, probe=probe, ask=ask, into=into)
     except ProvisionError as e:
         logger.warning("sdcpp runtime: installing the %s runtime failed: %s", backend, e)
         raise
@@ -406,21 +418,23 @@ def install(backend: str, *, force: bool = False,
 
 def _install(backend: str, *, force: bool, say: Progress,
              probe: Optional[Callable[[Runtime], dict]],
-             ask: Optional[Ask] = None) -> Runtime:
+             ask: Optional[Ask] = None, into: Optional[Path] = None) -> Runtime:
     plat = platform_key()
     if plat is None or (plat, backend) not in pins.ASSETS:
         raise ProvisionError(
             f"stable-diffusion.cpp publishes no '{backend}' build for this platform "
             f"(available: {', '.join(available_backends(plat)) or 'none'}).")
-    if not force:
+    from localm.media.runtime_files import (
+        put_runtime, refused_download_message, settle_runtimes, twice)
+    if into is None:
+        force = settle_runtimes(runtimes_root(), ProvisionError) or force
+    if not force and into is None:
         rt = installed(backend)
         if rt is not None:
             return rt
     if ask is None and sys.platform == "win32" and _vc_known_missing():
         raise _vc_missing_error()
     from localm import netpolicy
-    from localm.folder_swap import ReplaceError, replace_dir
-    from localm.media.runtime_files import refused_download_message
     root = runtimes_root()
     root.mkdir(parents=True, exist_ok=True)
     dest = runtime_dir(backend)
@@ -442,42 +456,46 @@ def _install(backend: str, *, force: bool, say: Progress,
                for name, _sha in pins.EXTRA_ASSETS.get((plat, backend), [])):
             (staging / NVIDIA_CUDA_LICENSE).write_text(NVIDIA_CUDA_LICENSE_NOTICE,
                                                        encoding="utf-8")
+        new = Runtime(backend=backend, path=staging, extra_dirs=extra_dirs_for(backend))
+        say(f"Testing the {RUNTIME_LABEL} ({backend})...")
         try:
-            replace_dir(staging, dest)
-        except ReplaceError as e:
-            raise ProvisionError(f"{e}; stop any image or video generation that is using "
-                                 "it and retry") from e
-    rt = Runtime(backend=backend, path=dest, extra_dirs=extra_dirs_for(backend))
-    say(f"Testing the {RUNTIME_LABEL} ({backend})...")
-    try:
-        info = (probe or _probe)(rt)
-    except Exception as e:  # noqa: BLE001
-        (dest / FAILED_MARKER).write_text(json.dumps(
-            {"tag": pins.TAG, "backend": backend, "reason": str(e)}), encoding="utf-8")
-        raise ProvisionError(f"the {backend} runtime did not load: {e}") from e
-    devices = [list(d) for d in info.get("devices") or []]
-    if not devices:
-        (dest / FAILED_MARKER).write_text(json.dumps(
-            {"tag": pins.TAG, "backend": backend, "reason": "no compute device"}),
-            encoding="utf-8")
-        raise ProvisionError(f"the {backend} runtime loaded but found no compute device")
-    if not _has_backend_device(backend, devices):
-        (dest / FAILED_MARKER).write_text(json.dumps(
-            {"tag": pins.TAG, "backend": backend, "reason": f"no {backend} device"}),
-            encoding="utf-8")
-        raise ProvisionError(f"the {backend} runtime loaded but found no {backend} device, "
-                             "only the CPU")
-    try:
-        (dest / FAILED_MARKER).unlink()
-    except OSError:
-        pass
-    (dest / MARKER).write_text(json.dumps(
-        {"tag": pins.TAG, "commit": pins.COMMIT, "backend": backend,
-         "devices": devices}, indent=2), encoding="utf-8")
-    rt.devices = devices
+            devices = twice(lambda: _tested_devices(new, probe or _probe), LoadTestError)
+        except LoadTestError as e:
+            if into is None and installed(backend) is None:
+                dest.mkdir(exist_ok=True)
+                (dest / FAILED_MARKER).write_text(json.dumps(
+                    {"tag": pins.TAG, "backend": backend, "reason": str(e.__cause__ or e)}),
+                    encoding="utf-8")
+            raise
+        (staging / MARKER).write_text(json.dumps(
+            {"tag": pins.TAG, "commit": pins.COMMIT, "backend": backend,
+             "devices": devices}, indent=2), encoding="utf-8")
+        put_runtime(into if into is not None else root, dest.name, staging,
+                    record=into is None, error=ProvisionError,
+                    busy="stop any image or video generation that is using it and retry")
+    if into is not None:
+        dest = Path(into) / dest.name
+    rt = Runtime(backend=backend, path=dest, extra_dirs=extra_dirs_for(backend),
+                 devices=devices)
     names = ", ".join(f"{n} ({desc})" for n, desc in devices)
     say(f"The {RUNTIME_LABEL} is ready ({backend}): {names}")
     return rt
+
+
+def _tested_devices(rt: Runtime, probe: Callable[[Runtime], dict]) -> list:
+    """The compute devices the runtime *rt* registers in a worker. Raises
+    :class:`LoadTestError` when it does not load or has none of its backend's."""
+    try:
+        info = probe(rt)
+    except Exception as e:  # noqa: BLE001
+        raise LoadTestError(f"the {rt.backend} runtime did not load: {e}") from e
+    devices = [list(d) for d in info.get("devices") or []]
+    if not devices:
+        raise LoadTestError(f"the {rt.backend} runtime loaded but found no compute device")
+    if not _has_backend_device(rt.backend, devices):
+        raise LoadTestError(f"the {rt.backend} runtime loaded but found no {rt.backend} device, "
+                            "only the CPU")
+    return devices
 
 
 def _probe(rt: Runtime) -> dict:

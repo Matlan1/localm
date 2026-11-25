@@ -37,7 +37,6 @@
     "media -> model_manager": 30,
     "media -> plugins": 3,
     "media -> setup_llama": 1,
-    "media -> updater_components": 1,
     "media_workflows -> inference": 1,
     "model_manager -> discover": 8,
     "model_manager -> inference": 11,

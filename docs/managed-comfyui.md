@@ -217,12 +217,18 @@ localm comfy update --reinstall-requirements # also refresh ComfyUI's Python dep
 localm comfy update --commit <sha>           # advanced: test a specific commit first
 ```
 
-Update is safe: it downloads the new ComfyUI source from GitHub (no git needed),
-and on any failure it puts every source file it changed back, returning the managed
-ComfyUI to its previous version. It only touches the managed instance. By default it
-stays within that source rollback and does not reinstall ComfyUI's Python requirements (a partial
-dependency upgrade cannot be rolled back exactly); pass `--reinstall-requirements`
-when a new pin changed them.
+Update is safe: it downloads the new ComfyUI source from GitHub (no git needed)
+before it changes anything, and on any failure it puts every file it changed back,
+returning the managed ComfyUI to its previous version. An update that is interrupted
+(a crash, a power cut) is undone the next time the managed ComfyUI is used or updated;
+when a file it kept for that is lost, localm says so and the managed ComfyUI has to be
+set up again. A folder in it that is a link or a mount (a models or output folder on
+another drive) stays one: localm replaces only source files in it that changed between
+the two versions and moves each file it replaces or removes there to
+`.localm-update/kept` in the managed ComfyUI, which the update says.
+It only touches the managed instance. By default it does not update ComfyUI's Python
+packages, which can be several GB; pass `--reinstall-requirements` when a new pin
+changed them. They are fetched first too, and put back when the update fails.
 
 The same update is available from **Settings -> Media**: the managed-ComfyUI panel
 shows the installed version next to the version localm ships, an **Update**

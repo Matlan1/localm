@@ -164,8 +164,10 @@ def _install_overlay(target: Path) -> Optional[str]:
             if winner is None:
                 _warn("no CPU backend variant reports support for this CPU")
                 return None
-            os.replace(original, backup)
-            shutil.copy2(winner, original)
+            shutil.copy2(original, backup)
+            incoming = original.with_name(_CPU_DLL + ".incoming")
+            shutil.copy2(winner, incoming)
+            os.replace(incoming, original)
             for name in _OPENMP_DLLS:
                 src, dst = winner.parent / name, target / name
                 if src.is_file() and not dst.exists():

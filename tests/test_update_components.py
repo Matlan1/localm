@@ -489,28 +489,26 @@ def test_a_uv_that_cannot_be_installed_leaves_the_old_one_and_the_code(tmp_path,
 
 def test_a_uv_swap_that_is_refused_keeps_the_installed_uv(tmp_path, home,
                                                           fake_uv_version, monkeypatch):
-    from localm import folder_swap
     inst = _write_tree(tmp_path / "inst", _files("0.3.1", uv="0.13.4"))
     _contained_uv(inst, "0.13.4")
     monkeypatch.setattr(uv_tool, "bootstrap_uv", _bootstrap())
-    real_move = folder_swap.move_dir
-    moves = []
+    real = os.rename
+    refused = []
 
-    def refuse_new_uv(src, dst):
-        moves.append((Path(src).name, Path(dst).name))
-        if Path(src).name == ".uv-update":
-            raise PermissionError(32, "in use by another process")
-        real_move(src, dst)
-    monkeypatch.setattr(folder_swap, "move_dir", refuse_new_uv)
+    def rename(src, dst):
+        if f"{os.sep}uv{os.sep}new{os.sep}" in str(src):
+            refused.append(str(dst))
+            raise OSError(28, "No space left on device")
+        real(src, dst)
+    monkeypatch.setattr(os, "rename", rename)
     data, sig = _release(_files("0.3.2", uv="0.13.6"))
     with pytest.raises(LocalmError) as ei:
         updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
                       runner=lambda c: 0)
-    assert any(src == ".uv-update" for src, _dst in moves)
+    assert refused
     assert "could not swap in the new uv" in ei.value.reason
     assert (inst / ".uv" / uv_tool.UV_NAME).read_text(encoding="utf-8") == "0.13.4"
-    assert not (inst / ".uv-update").exists()
-    assert not [d.name for d in inst.iterdir() if ".previous-" in d.name]
+    assert [d.name for d in (inst / ".localm-update").iterdir()] == ["lock"]
 
 
 def test_a_running_uv_refuses_the_update_with_nothing_changed(tmp_path, home,
@@ -907,9 +905,9 @@ def test_comfy_at_the_pin_still_updates_a_changed_torch_or_custom_node(tmp_path,
     assert any(i.startswith("custom node ComfyUI-GGUF") for i in p["items"])
 
 
-def test_comfy_update_moves_installed_custom_nodes_to_their_pin(tmp_path, home, monkeypatch):
-    """A custom node an older localm cloned with git is moved to its pin from a
-    source archive, with no git program; the move can be put back."""
+def test_comfy_update_stages_installed_custom_nodes_at_their_pin(tmp_path, home, monkeypatch):
+    """A custom node an older localm cloned with git is staged at its pin from a
+    source archive, with no git program; the installed one is not touched."""
     from localm.media import managed_comfy_fresh as f
     from localm.media import managed_comfy_update as upd
     hub = FakeGitHub(tmp_path / "hub").install(monkeypatch)
@@ -928,36 +926,29 @@ def test_comfy_update_moves_installed_custom_nodes_to_their_pin(tmp_path, home, 
     pin = f.CustomNodePin(name="N", repo=repo, commit=pinned)
     monkeypatch.setattr(f, "required_custom_nodes", lambda: f.RequiredNodes((pin,), ()))
     monkeypatch.setattr(upd, "_run", lambda *a, **k: pytest.fail("a program was started"))
+    out = upd.Prepared("t", "p")
+    staged = tmp_path / "staged"
+    upd._stage_nodes(root, root, staged, out, None, lambda m: None)
+    new = staged / "custom_nodes" / "N"
+    assert source_archive.tree_commit(new) == pinned
+    assert source_archive.read_record(new)["git_head"] == first
+    assert (new / "n.py").read_text(encoding="utf-8") == "2"
+    assert out.removed == ["custom_nodes/N/old.py"]
     assert source_archive.tree_commit(node) == first
-    changes = []
-    ok, detail = upd._sync_custom_nodes(root, None, lambda m: None, changes)
-    assert ok, detail
-    assert source_archive.tree_commit(node) == pinned
-    assert (node / "n.py").read_text(encoding="utf-8") == "2"
-    assert not (node / "old.py").exists()
-    assert changes[0].rollback() == []
-    assert (node / "n.py").read_text(encoding="utf-8") == "1"
     assert (node / "old.py").is_file()
 
 
 def test_comfy_update_installs_the_pinned_torch_only_when_it_differs(tmp_path, monkeypatch):
     from localm.media import managed_comfy_fresh as f
-    from localm.media import managed_comfy_update as upd
-    venv = tmp_path / "venv"
-    site = venv / "Lib" / "site-packages"
+    from localm.media import managed_comfy_packages as packages
+    site = tmp_path / "venv" / "Lib" / "site-packages"
     site.mkdir(parents=True)
     _dist(site, "torch", "2.9.1+rocm7.13.0", {"torch/__init__.py": b"x"})
-    py = venv / "Scripts" / "python.exe"
     spec = f.ComfyTorchSpec("rocm", ("torch==2.9.1+rocm7.13.0",), index_url="https://x/")
     monkeypatch.setattr(f, "comfy_torch_spec", lambda det=None: spec)
-    ran = []
-    monkeypatch.setattr(upd, "_run", lambda argv, **kw: ran.append(argv) or (True, ""))
-    assert upd._sync_pinned_torch(py, None, lambda m: None) == (True, "")
-    assert ran == []
+    assert packages.torch_args(site) is None
     spec = f.ComfyTorchSpec("rocm", ("torch==2.11.0+rocm7.13.0",), index_url="https://x/")
-    assert upd._sync_pinned_torch(py, None, lambda m: None) == (True, "")
-    assert ran == [[str(py), "-m", "pip", "install", "--disable-pip-version-check",
-                    "torch==2.11.0+rocm7.13.0", "--index-url", "https://x/"]]
+    assert packages.torch_args(site) == ["torch==2.11.0+rocm7.13.0", "--index-url", "https://x/"]
 
 
 # ------------------------------ the Linux CUDA libraries ----------------------
