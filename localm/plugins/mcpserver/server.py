@@ -1399,6 +1399,8 @@ def serve_stdio(model: Optional[str] = None, enable_images: bool = True,
                  coder_root: Optional[Path] = None) -> None:
     """Entry point used by the CLI: build everything and block on stdio."""
     _redirect_consoles_to_stderr()
+    from localm.media import held
+    held.sweep_leftovers()
     engines = EngineCache(default_model=model, share_loaded=share_loaded)
     server = MCPStdioServer(build_tools(
         engines, enable_images=enable_images, enable_coder=enable_coder,
@@ -1420,3 +1422,4 @@ def serve_stdio(model: Optional[str] = None, enable_images: bool = True,
         # Every resident engine, not just the most recent one: freeing one of N
         # would leave the rest holding VRAM past exit.
         engines.unload_all()
+        held.discard_all()

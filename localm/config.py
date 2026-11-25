@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Callable, Optional, TypeVar, cast
 
-from localm import _home_cfg, mgmt_events
+from localm import _home_cfg, comgr_temp, mgmt_events
 from localm.storekit import (  # noqa: F401  (re-exported: callers use config.<name>)
     READ_ABSENT,
     READ_CURRENT,
@@ -638,6 +638,7 @@ CONFIG_FILE = HOME_DIR / "config.json"
 contain_hf_cache()
 contain_gpu_caches()
 contain_temp_dir()
+comgr_temp.set_home(home_dir)
 
 
 # Only the keys the user actually changed are persisted to config.json; a key
@@ -1020,6 +1021,7 @@ DEFAULT_CONFIG: dict = {
     "memory_recall_in_privacy": False,
     "memory_recall_in_privacy_chat": True,      # applies only when the master is on
     "memory_recall_in_privacy_coder": True,     # applies only when the master is on
+    "privacy_keep": [],    # what privacy mode keeps (audit.PRIVACY_KEEP_KINDS)
     # Keep diagnostics for bug reports even in privacy mode. Off by default:
     # privacy mode writes NO automatic trace (the hang watchdog trace, the
     # crash-restart breadcrumbs, and the debug log are all suppressed). On =

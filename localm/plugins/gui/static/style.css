@@ -2138,6 +2138,9 @@ div:has(> .data-table) { overflow-x: auto; }
    original class - other stylesheets, a user script, an old cached shell -
    keeps rendering. The three Studio pages all emit .media-grid. */
 
+.media-held { margin-top: 14px; }
+.media-held .sub { margin-bottom: 8px; }
+.media-held .actions { margin-top: 8px; }
 .media-grid, .img-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
@@ -2976,6 +2979,7 @@ div:has(> .data-table) { overflow-x: auto; }
   cursor: pointer;
 }
 .inline-check input { width: auto; }
+.option-list .inline-check { margin-left: 0; }
 
 /* privacy-mode hint in the conversations sidebar */
 .privacy-hint {

@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 from tests.plugins.coder.launch_stub import patch_launch
 from localm.plugins.coder.audit import SessionMode
 from localm.plugins.coder.privacy import (
+    _unix_history_paths as _REAL_UNIX_HISTORY_PATHS,
     subprocess_privacy_env,
     suppress_readline_history,
     warn_external_provider,
@@ -343,12 +344,6 @@ class TestHistoryPaths:
             paths = _psreadline_history_paths()
         assert paths == []
 
-    def test_unix_paths_empty_on_windows(self):
-        with patch("localm.plugins.coder.privacy.sys") as mock_sys:
-            mock_sys.platform = "win32"
-            paths = _unix_history_paths()
-        assert paths == []
-
     def test_unix_uses_histfile_env(self, tmp_path):
         fake_hist = tmp_path / "custom_hist"
         fake_hist.write_text("")
@@ -442,3 +437,56 @@ class TestSpawnAgentModeInheritance:
         assert MockAgent.call_count == 1
         _, kwargs = MockAgent.call_args
         assert kwargs.get("mode") == mode
+
+
+class TestGitBashHistory:
+    """Git Bash on Windows keeps its history where bash keeps it elsewhere."""
+
+    @pytest.fixture
+    def finder(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "profile"))
+        monkeypatch.delenv("HISTFILE", raising=False)
+        monkeypatch.delenv("HOME", raising=False)
+        return _REAL_UNIX_HISTORY_PATHS
+
+    def test_the_profile_folder_is_searched(self, finder, tmp_path):
+        assert (tmp_path / "profile" / ".bash_history").resolve() in finder()
+
+    def test_home_and_histfile_are_searched(self, finder, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path / "msys"))
+        monkeypatch.setenv("HISTFILE", str(tmp_path / "hist"))
+        found = finder()
+        assert (tmp_path / "msys" / ".bash_history").resolve() in found
+        assert (tmp_path / "hist").resolve() in found
+
+    def test_a_history_switched_off_is_not_a_file(self, finder, monkeypatch):
+        monkeypatch.setenv("HISTFILE", "NUL")
+        assert all(p.name != "NUL" for p in finder())
+
+    def test_the_coder_lines_are_removed(self, finder, tmp_path, monkeypatch):
+        from localm.plugins.coder import privacy
+        hist = tmp_path / "profile" / ".bash_history"
+        hist.parent.mkdir()
+        hist.write_bytes(b"ls\nsudo localm coder --mode privacy\nlocalm gui\n")
+        monkeypatch.setitem(privacy.__dict__, "_unix_history_paths", finder)
+        monkeypatch.setitem(privacy.__dict__, "_psreadline_history_paths", lambda: [])
+        assert privacy.clear_shell_history_traces() == 1
+        assert hist.read_bytes() == b"ls\nlocalm gui\n"
+
+
+@pytest.mark.parametrize("configured,flag,expected", [
+    ("privacy", None, "privacy"), ("log", None, "log"), (None, None, "privacy"),
+    ("privacy", "full", "full")])
+def test_ci_follows_the_configured_mode(configured, flag, expected, tmp_path, monkeypatch):
+    from localm.config import update_config
+    from localm.plugins.coder.cli import _main
+    monkeypatch.delenv("LOCALM_MODE", raising=False)
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("TERM", "dumb")
+    monkeypatch.setattr(_main, "suppress_readline_history", lambda: None)
+    if configured:
+        update_config(lambda c: c.update(mode=configured))
+    mode = _main._resolve_session_config(tmp_path, "m", 40, None, None, None, False, False,
+                                         flag, True, None)[4]
+    assert mode.value == expected

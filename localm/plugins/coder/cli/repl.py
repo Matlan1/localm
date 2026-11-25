@@ -679,8 +679,10 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
             m = agent.mode.value
             notes = {
                 "privacy": (
-                    "nothing saved; readline + shell history scrubbed on exit. "
-                    "cmd.exe: no history anyway. "
+                    "nothing saved automatically; on exit the lines that start localm's "
+                    "coder are removed from the shell history files. An open bash or zsh "
+                    "writes its own history when it closes, so the line of this session "
+                    "goes with the next privacy session. cmd.exe keeps no history. "
                     "Online providers are explicit opt-in - warning shown if active."
                 ),
                 "log":     "JSONL audit trail → <data dir>/sessions/",
@@ -717,7 +719,7 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
             out_path = _project_path(agent, arg)
         else:
             ts_label = _time.strftime("%Y-%m-%d_%H%M%S")
-            out_path = agent.cwd / ".localcoder" / "sessions" / f"{ts_label}.md"
+            out_path = agent.session_markdown_path(ts_label)
 
         if agent.mode == SessionMode.PRIVACY:
             console.print(
@@ -729,13 +731,7 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
                 return False
 
         try:
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            md_path = agent._write_session_markdown()
-            if arg:
-                # Move to the requested path
-                import shutil as _shutil
-                _shutil.move(str(md_path), str(out_path))
-                md_path = out_path
+            md_path = agent._write_session_markdown(out_path)
             print_success(f"Session exported → {md_path}")
         except Exception as e:
             print_error(f"Export failed: {e}")

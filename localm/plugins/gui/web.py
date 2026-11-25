@@ -709,11 +709,12 @@ def _name_is_safe(safe: str) -> bool:
     return bool(safe) and safe not in (".", "..") and not (set(safe) & _BAD_NAME_CHARS)
 
 
-def _uploads_dir() -> Path:
-    """<home>/uploads/, created on demand."""
+def _uploads_dir(create: bool = True) -> Path:
+    """<home>/uploads/, created when missing unless *create* is False."""
     from localm.config import home_dir
     d = home_dir() / "uploads"
-    d.mkdir(parents=True, exist_ok=True)
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
     return d
 
 
@@ -733,7 +734,7 @@ def _confined_upload_path(name: str) -> Path:
     file), which would otherwise pass confinement while acting on the wrong
     target. It carries the same reserved-character rejection _name_is_safe
     applies here, and adds the confinement plus alias guarantee."""
-    base = _uploads_dir()
+    base = _uploads_dir(create=False)
     safe = Path(name or "").name            # basename only, drops any dir parts
     if not _name_is_safe(safe):
         raise HTTPException(400, "Invalid file name.")

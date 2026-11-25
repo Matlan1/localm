@@ -484,7 +484,8 @@ def _generate(monkeypatch, tmp_path, *, outcome, needs_comfy=True):
     printed = []
     monkeypatch.setattr(media_cli.console, "print",
                         lambda *a, **k: printed.append(" ".join(str(x) for x in a)))
-    media_cli._via_backend(_Backend(needs_comfy), {"api_url": URL}, "a fox", out, "image")
+    media_cli._via_backend(_Backend(needs_comfy), {"api_url": URL}, "a fox", out, "image",
+                           explicit=True)
     return " ".join(" ".join(printed).split())
 
 

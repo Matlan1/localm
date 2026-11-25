@@ -39,7 +39,7 @@ def _post(c, app, body, path="/api/feedback"):
 
 def _expected(title, text):
     return (f"# {title}\n\n{text}\n\nlocalm {read_version()}\n\n---\n"
-            f"Sent to the localm maintainer ({bugreport.MAINTAINER_EMAIL}). "
+            f"For the localm maintainer ({bugreport.MAINTAINER_EMAIL}). "
             "You can edit anything above before sending.\n")
 
 

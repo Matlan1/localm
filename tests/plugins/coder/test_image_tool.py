@@ -330,7 +330,10 @@ def test_agent_hands_generate_image_its_cancel_check(tmp_path):
 
 
 def test_the_tool_passes_its_cancel_check_to_comfyui(tmp_path):
+    asked = []
+
     def stop():
+        asked.append(1)
         return True
 
     with patch("localm.media.backend_choice.comfy_is_set_up", return_value=True), \
@@ -339,7 +342,7 @@ def test_the_tool_passes_its_cancel_check_to_comfyui(tmp_path):
          patch("localm.image_gen.comfy.generate_image",
                return_value=(True, "Image saved to x")) as gen:
         tool_generate_image(tmp_path, "p", "out.png", _cancel=stop)
-    assert gen.call_args.kwargs.get("cancel_check") is stop
+    assert gen.call_args.kwargs["cancel_check"]() is True and asked == [1]
 
 
 def _gate_agent(tmp_path, **attrs):

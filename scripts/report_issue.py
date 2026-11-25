@@ -706,7 +706,7 @@ def build_body(summary: str, description: str, diag: dict,
     elif log_note:
         lines += ["", "## Log", log_note]
     lines += ["", "---",
-              f"Sent to the localm maintainer ({MAINTAINER_EMAIL}). "
+              f"For the localm maintainer ({MAINTAINER_EMAIL}). "
               "You can edit anything above before sending."]
     return "\n".join(lines)
 

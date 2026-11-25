@@ -295,6 +295,8 @@ def prepare_worker_process() -> None:
     suppress_native_error_dialogs()   # a native DLL failure here (torch/CUDA/
                                        # ROCm init) must degrade to a catchable
                                        # exception, never a blocking modal dialog.
+    from localm import comgr_temp
+    comgr_temp.register()
     # Before anything can import torch: this worker runs as the BASE
     # interpreter, so torch would look for the venv's Library/bin, where an Intel
     # XPU torch's oneAPI runtime DLLs live, under the base install (#1989).

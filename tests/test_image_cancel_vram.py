@@ -41,8 +41,12 @@ def _run_generate(monkeypatch, *, gen_result, cancelled):
     monkeypatch.setattr(plug._backend, "settings", lambda cfg: s)
     monkeypatch.setattr(plug._backend, "ensure_available",
                         lambda s, on_progress=None: (True, "ComfyUI is up."))
-    monkeypatch.setattr(plug._backend, "generate",
-                        lambda *a, **k: gen_result)
+
+    def generate(*a, settle, **k):
+        if gen_result[0]:
+            settle(True, False)
+        return gen_result
+    monkeypatch.setattr(plug._backend, "generate", generate)
     # A swap IS needed -> chat model gets unloaded, so the reload is mandatory.
     monkeypatch.setattr("localm.vram.decide_media_swap", lambda s: True)
     monkeypatch.setattr("localm.vram.unload_chat_for_media",
@@ -123,8 +127,11 @@ def test_generate_reports_done_when_reload_raises_after_success(monkeypatch):
     monkeypatch.setattr(plug._backend, "settings", lambda cfg: s)
     monkeypatch.setattr(plug._backend, "ensure_available",
                         lambda s, on_progress=None: (True, "ComfyUI is up."))
-    monkeypatch.setattr(plug._backend, "generate",
-                        lambda *a, **k: (True, "Image saved to out.png (seed 1)"))
+
+    def generate(*a, settle, **k):
+        settle(True, False)
+        return True, "Image saved to out.png (seed 1)"
+    monkeypatch.setattr(plug._backend, "generate", generate)
     monkeypatch.setattr("localm.vram.decide_media_swap", lambda s: True)
     monkeypatch.setattr("localm.vram.unload_chat_for_media",
                         lambda job, url, label, instance_token=None: True)

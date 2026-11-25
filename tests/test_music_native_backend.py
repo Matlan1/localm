@@ -301,6 +301,7 @@ def test_status_lists_the_defaults_to_download(no_comfy):
 # --------------------------------------------------------------------------- #
 
 def _music_app(tmp_path, monkeypatch):
+    monkeypatch.setattr("localm.audit.privacy_keeps", lambda kind: True)
     from fastapi import FastAPI
     from localm.plugins.engine import PluginManager
     from localm.plugins.gui.web import attach_gui
@@ -452,6 +453,7 @@ def test_cli_music_runs_through_the_backend_and_stops_the_runtime(tmp_path, monk
 
 def test_repl_generate_music_runs_through_the_backend(tmp_path, monkeypatch, no_comfy,
                                                       fake_generate):
+    monkeypatch.setenv("LOCALM_MODE", "log")
     from rich.console import Console
     from localm.cli import chat
     from localm.media.koboldcpp import server

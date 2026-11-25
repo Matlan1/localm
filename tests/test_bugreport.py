@@ -111,6 +111,19 @@ def test_report_footer_strip_removes_exactly_the_disclaimer_block():
     assert "too hot" in stripped
 
 
+def test_a_saved_report_does_not_say_it_was_sent():
+    text = bugreport.build_report("disk on fire")
+    assert "Sent to" not in text
+    assert text.rstrip().endswith("You can edit anything above before sending.")
+
+
+def test_report_footer_strip_removes_the_note_of_an_earlier_version():
+    text = bugreport.build_report("disk on fire")
+    old = text.replace("For the localm maintainer", "Sent to the localm maintainer")
+    assert old != text
+    assert bugreport._strip_report_footer(old) == bugreport._strip_report_footer(text)
+
+
 def test_report_footer_strip_tolerates_missing_trailing_newline():
     """A user who re-saves the file in an editor that trims trailing
     whitespace must still get a clean strip, not a silent no-op."""

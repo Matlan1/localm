@@ -792,7 +792,7 @@ def test_a_deeply_nested_bracket_string_is_one_entry_not_a_crash():
 
 # ---- settings tier ----
 
-_NEWLY_OWNER_ONLY = {"temp_location", "net_mode", "net_allow",
+_NEWLY_OWNER_ONLY = {"temp_location", "net_mode", "net_allow", "privacy_keep",
                      "memory_recall_in_privacy", "memory_recall_in_privacy_chat",
                      "memory_recall_in_privacy_coder"}
 

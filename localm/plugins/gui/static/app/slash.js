@@ -91,14 +91,18 @@ async function runGenerationInChat(spec, promptText) {
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
     const missing = createMissingModelOffer(null);
+    let held = false;
     const end = await streamJob(data.job_id, (line) => {
       if (!missing.show(line)) return;
       body.textContent = line;
       if (nearBottom(box)) box.scrollTop = box.scrollHeight;
-    }, undefined, undefined, missing.onEvent);
+    }, undefined, undefined, (ev) => {
+      if (ev.type === "held") held = true;
+      missing.onEvent(ev);
+    });
     if (end.status === "done" && end.result) {
       untrack();
-      conv.messages.push(spec.result(end.result));
+      conv.messages.push(spec.result(end.result, held ? "\n\n" + t("slash.heldNote") : ""));
       saveConversations(conv);
       renderChat();
     } else {
@@ -123,10 +127,10 @@ const GENERATE_IMAGE = {
   usage: "slash.usage.image", generating: "slash.generatingImage",
   status: "slash.imageStatus", failed: "slash.imageFailed",
   body: (prompt, picked) => ({ prompt, ...picked }),
-  result: (file) => ({
+  result: (file, note) => ({
     role: "assistant",
     content: [
-      { type: "text", text: t("slash.resultImageLabel") },
+      { type: "text", text: t("slash.resultImageLabel") + note },
       { type: "image_url", image_url: { url: "/api/imagine/file/" + encodeURIComponent(file) } },
     ],
   }),
@@ -136,8 +140,8 @@ const GENERATE_MUSIC = {
   usage: "slash.usage.music", generating: "slash.generatingTrack",
   status: "slash.musicStatus", failed: "slash.musicFailed",
   body: (tags, picked) => ({ tags, ...picked }),
-  result: (file) => ({
-    role: "assistant", content: t("slash.resultTrackLabel"),
+  result: (file, note) => ({
+    role: "assistant", content: t("slash.resultTrackLabel") + note,
     audio: "/api/music/file/" + encodeURIComponent(file),
   }),
 };
@@ -146,8 +150,8 @@ const GENERATE_VIDEO = {
   usage: "slash.usage.video", generating: "slash.generatingClip",
   status: "slash.videoStatus", failed: "slash.videoFailed",
   body: (prompt, picked) => ({ prompt, ...picked }),
-  result: (file) => ({
-    role: "assistant", content: t("slash.resultClipLabel"),
+  result: (file, note) => ({
+    role: "assistant", content: t("slash.resultClipLabel") + note,
     video: "/api/video/file/" + encodeURIComponent(file),
   }),
 };

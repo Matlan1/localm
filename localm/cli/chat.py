@@ -495,6 +495,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
     from ..audit import MODE_ENV_VAR, SessionMode, effective_mode
     if mode:
         os.environ[MODE_ENV_VAR] = mode.lower()
+    _held.sweep_leftovers()
     session_mode = effective_mode("chat")
     if session_mode == SessionMode.PRIVACY:
         from ..readline_privacy import suppress_readline_history
@@ -1283,6 +1284,7 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
 # the image/music/video plugins and the input_image confinement policy use. One
 # list, not a duplicated set of literals here: it decides which directories an
 # img2img input may be read from.
+from ..media import held as _held  # noqa: E402
 from ..media import paths as _media_paths  # noqa: E402
 
 
@@ -1318,15 +1320,14 @@ def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None
         return
     import time as _t
 
-    from ..audit import SessionMode, effective_mode
+    from ..audit import SessionMode, effective_mode, privacy_keeps
     from ..plugins.lookup import PluginUnavailable, plugin_api
     try:
         media_backend = plugin_api(spec["plugin"], "backend")
     except PluginUnavailable as e:
         console.print(f"[yellow]{escape(str(e))}[/yellow]")
         return
-    out_dir = home_dir / spec["subdir"]
-    out = out_dir / f"{_t.strftime('%Y%m%d_%H%M%S')}_cli{spec['ext']}"
+    name = f"{_t.strftime('%Y%m%d_%H%M%S')}_cli{spec['ext']}"
 
     def _unload_chat() -> None:
         console.print("[dim]Freeing VRAM (chat model unloads, "
@@ -1334,12 +1335,49 @@ def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None
         engine.unload()
 
     is_privacy = effective_mode("chat") == SessionMode.PRIVACY
-    out_dir.mkdir(parents=True, exist_ok=True)
-    _ok, message, _path = media_backend.generate_media(
-        arg, out, before_generate=_unload_chat,
+    kept = not is_privacy or privacy_keeps("media")
+    try:
+        out_dir = home_dir / spec["subdir"] if kept else _held.folder(spec["plugin"])
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        console.print(f"[red]Cannot use the output folder: {escape(str(e))}[/red]")
+        return
+    ok, message, path = media_backend.generate_media(
+        arg, out_dir / name, before_generate=_unload_chat,
         on_progress=lambda t: console.print(f"[dim]{escape(str(t))}[/dim]"),
         write_sidecar=not is_privacy, privacy=is_privacy)
     console.print(escape(message))
+    if ok and not kept:
+        _held.set_owner(spec["plugin"], path.name, None)
+        console.print("[dim]Privacy mode: not kept. It is removed when this chat ends; "
+                      "/save-media \\[file] keeps a copy.[/dim]")
+
+
+def _cmd_save_media(arg: str, console) -> None:
+    """REPL /save-media: copy the newest file this chat generated and holds
+    (privacy mode) to *arg*, or under its own name, confined to the cwd. An
+    existing file is not replaced."""
+    from rich.markup import escape
+
+    newest = [p for kind in _held.KINDS for p in _held.files(kind)[:1]]
+    if not newest:
+        console.print("[dim]Nothing to save: this chat holds no generated media.[/dim]")
+        return
+    source = max(newest, key=lambda p: p.stat().st_mtime)
+    target = _confined_to_cwd(arg or source.name, console)
+    if target is None:
+        return
+    if not target.suffix:
+        target = target.with_suffix(source.suffix)
+    if target.exists():
+        console.print(f"[red]Already exists: {escape(str(target))}[/red]", soft_wrap=True)
+        return
+    try:
+        _held.save_copy(source, target)
+    except OSError as e:
+        console.print(f"[red]Save failed: {escape(str(e))}[/red]", soft_wrap=True)
+        return
+    console.print(f"[green]✓[/green] Saved: {escape(str(target))}", soft_wrap=True)
 
 
 def _cmd_generate_image(cmd: str, arg: str, engine, console, home_dir) -> None:
@@ -1351,27 +1389,32 @@ def _cmd_generate_image(cmd: str, arg: str, engine, console, home_dir) -> None:
     _cmd_generate_media("generate-image", arg, engine, console, home_dir)
 
 
-def _cmd_save(arg: str, messages: list, console) -> None:
-    """REPL /save: write the conversation to JSON, confined to the cwd."""
+def _confined_to_cwd(target: str, console) -> Optional[Path]:
+    """*target* resolved inside the current directory, or None after printing why
+    it is refused (outside it, or not a valid path)."""
     from rich.markup import escape
 
-    target = arg or "chat.json"
-    # Confine writes to the current working directory: a path like "../x.json" or
-    # an absolute path elsewhere must not let the REPL write outside cwd.
     cwd = Path.cwd().resolve()
     try:
         resolved = (cwd / target).resolve()
     except (OSError, ValueError) as e:
         console.print(f"[red]Invalid save path: {escape(str(e))}[/red]", soft_wrap=True)
-        return
+        return None
     if resolved == cwd or cwd not in resolved.parents:
         console.print(
             f"[red]Refusing to save outside the current directory:[/red] "
             f"{escape(target)}\n[dim]Use a path inside {escape(str(cwd))}[/dim]",
             soft_wrap=True,
         )
-        return
-    _save_chat(messages, str(resolved))
+        return None
+    return resolved
+
+
+def _cmd_save(arg: str, messages: list, console) -> None:
+    """REPL /save: write the conversation to JSON, confined to the cwd."""
+    resolved = _confined_to_cwd(arg or "chat.json", console)
+    if resolved is not None:
+        _save_chat(messages, str(resolved))
 
 
 def _handle_command(
@@ -1458,6 +1501,8 @@ def _handle_command(
             console.print("[dim]Usage: /system <text>[/dim]")
     elif cmd == "save":
         _cmd_save(arg, messages, console)
+    elif cmd == "save-media":
+        _cmd_save_media(arg, console)
     elif cmd == "temp":
         try:
             requested = float(arg)
@@ -1505,6 +1550,7 @@ def _handle_command(
             "/generate-image <prompt> generate an image (built in, or ComfyUI)\n"
             "/generate-music <tags>  generate music (built in, or ComfyUI)\n"
             "/generate-video <prompt> generate a clip (built in, or ComfyUI)\n"
+            "/save-media \\[file]      keep the last generated file (privacy mode)\n"
             "/temp <float>           sampling temperature\n"
             "/tokens <int>           max response tokens"
             "[/dim]"

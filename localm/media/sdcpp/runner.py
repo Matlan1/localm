@@ -15,6 +15,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from localm.media import held
+
 _POLL_INTERVAL = 0.2
 
 PROBE_TIMEOUT = 120.0
@@ -23,6 +25,7 @@ GENERATE_TIMEOUT = 7200.0
 
 # How long a cancelled generation may take to stop before the worker is killed.
 CANCEL_GRACE = 15.0
+STOPPING_GRACE = 3.0   # the same while localm is stopping
 
 
 class SdCancelled(Exception):
@@ -158,6 +161,8 @@ class SdRunner:
                 if wanted:
                     cancel.set()
                     cancel_deadline = time.monotonic() + CANCEL_GRACE
+            if cancel_deadline is not None and held.CLOSING.is_set():
+                cancel_deadline = min(cancel_deadline, time.monotonic() + STOPPING_GRACE)
             try:
                 msg = resp_q.get(timeout=_POLL_INTERVAL)
             except _queue.Empty:

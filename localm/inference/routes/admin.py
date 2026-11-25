@@ -11,6 +11,7 @@ import asyncio
 import re
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 
 import localm.inference.http_server as _hs
 from localm import scopes
@@ -110,9 +111,13 @@ def register(app: FastAPI, ctx) -> None:
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def server_shutdown_ep():
         """Stop this server cleanly (owner / config-write scope). Loaded models
-        are unloaded before the process exits. Returns ``{"stopping": true}``."""
+        are unloaded before the process exits. Returns ``{"stopping": true}``, with
+        ``wait_s`` when a private generation is running: the seconds the stop waits
+        at most until it ended."""
+        from localm.media import held
+        wait = await run_in_threadpool(held.private_run_wait)
         _request_shutdown(instance_id=getattr(app.state, "instance_id", None))
-        return {"stopping": True}
+        return {"stopping": True, **({"wait_s": wait} if wait else {})}
 
     @app.post("/v1/server/restart",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])

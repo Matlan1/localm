@@ -38,6 +38,7 @@ def _mk_keys(*scope_lists):
 
 
 def _gallery_app(tmp_path, monkeypatch, plugin):
+    monkeypatch.setattr("localm.audit.privacy_keeps", lambda kind: True)
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)

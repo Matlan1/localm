@@ -5037,6 +5037,7 @@ class TestImageGeneration:
         assert r.status_code == 400
 
     def test_imagine_job_generates_and_returns_result(self, img_app, monkeypatch):
+        monkeypatch.setenv("LOCALM_MODE", "log")
         app, images = img_app
         import localm.image_gen.comfy as comfy
         monkeypatch.setattr(comfy, "ensure_comfy", lambda *a, **k: (True, "ComfyUI is running."))
@@ -5366,6 +5367,7 @@ class TestMusicPlugin:
                                json={"tags": "lofi", "duration_seconds": 99999}).status_code == 400
 
     def test_music_job_generates_and_returns_result(self, music_app, monkeypatch):
+        monkeypatch.setenv("LOCALM_MODE", "log")
         app, tracks = music_app
         import localm.image_gen.comfy as comfy
         import localm.music_gen as music_gen
@@ -5500,7 +5502,7 @@ class TestVideoEndpoints:
     def test_history_empty(self, video_app):
         app, _ = video_app
         with TestClient(app) as client:
-            assert client.get("/api/video/history").json() == {"videos": []}
+            assert client.get("/api/video/history").json() == {"videos": [], "held": []}
 
     def test_serve_and_delete_clip(self, video_app):
         app, videos = video_app
@@ -5540,6 +5542,7 @@ class TestVideoEndpoints:
         assert not (videos / "clip.mp4").exists()
 
     def test_video_job_generates_and_returns_result(self, video_app, monkeypatch):
+        monkeypatch.setenv("LOCALM_MODE", "log")
         app, videos = video_app
         import localm.image_gen.comfy as comfy
         import localm.video_gen as video_gen

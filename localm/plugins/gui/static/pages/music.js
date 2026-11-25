@@ -25,6 +25,7 @@ const musicGallery = createGallery({
   listKey: "tracks",
   itemKey: "music.item",
   gridId: "music-history",
+  heldAfterId: "music-result",
   bulkId: "music-bulk",
   moveDestKey: "localm.musicMoveDest",
   emptyIcon: "music",

@@ -759,8 +759,6 @@ def _resolve_session_config(work_dir, model, max_turns, max_tokens, temperature,
     # CI mode setup
     if ci:
         yes = True          # never prompt
-        if mode is None:
-            mode = "log"    # always leave an audit trail in CI
         # Strip Rich colors so log output is plain text
         import os as _os
         _os.environ.setdefault("NO_COLOR", "1")

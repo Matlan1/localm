@@ -224,11 +224,15 @@ def build(engines: EngineCache, coder_shell: bool = False,
         prompt = args.get("prompt", "")
         if not prompt:
             return _text_result("'prompt' is required", is_error=True)
-        from localm.audit import SessionMode, effective_mode
+        from localm.audit import SessionMode, effective_mode, privacy_keeps
         from localm.config import home_dir
+        from localm.media import held
         from localm.media import paths as _media_paths
 
         home = home_dir().resolve()
+        is_privacy = effective_mode("mcp") == SessionMode.PRIVACY
+        holding = (is_privacy and not args.get("output_path")
+                   and not privacy_keeps("media"))
 
         def _confine_output(raw: str) -> Path:
             """Resolve an MCP ``output_path`` to a NEW image file in a
@@ -295,7 +299,7 @@ def build(engines: EngineCache, coder_shell: bool = False,
         try:
             out_arg = args.get("output_path")
             out = (_confine_output(out_arg) if out_arg
-                   else home / _MCP_IMAGES_DIR
+                   else (held.folder("image") if holding else home / _MCP_IMAGES_DIR)
                    / f"mcp-{int(time.time())}-{secrets.token_hex(4)}.png")
             # input_image is a READ that is then UPLOADED to ComfyUI, over an
             # api_url sanitize_comfy_url permits to be a LAN or public host on
@@ -309,8 +313,11 @@ def build(engines: EngineCache, coder_shell: bool = False,
                        if args.get("input_image") else None)
         except ValueError as e:
             return _text_result(str(e), is_error=True)
+        except OSError as e:
+            return _text_result(
+                f"could not create the output folder: {e.strerror or type(e).__name__}",
+                is_error=True)
 
-        is_privacy = effective_mode("mcp") == SessionMode.PRIVACY
         # The ComfyUI generator builds its own rich Console / Progress on stdout;
         # the JSON-RPC frame stream lives on stdout too, so route any stray
         # output to stderr or it corrupts the protocol.
@@ -349,6 +356,10 @@ def build(engines: EngineCache, coder_shell: bool = False,
         finally:
             if not ok:
                 _release(out)
+        if ok and holding:
+            held.set_owner("image", out.name, None)
+            message += (f"\nPrivacy mode: {out} is not kept. It is removed when this MCP server "
+                        "stops; copy it, or pass output_path, to keep it.")
         return _text_result(message, is_error=not ok)
 
     def run_coder_task(args: dict) -> dict:
@@ -536,7 +547,7 @@ def build(engines: EngineCache, coder_shell: bool = False,
                 "type": "object",
                 "properties": {
                     "prompt":          {"type": "string", "description": "Image description"},
-                    "output_path":     {"type": "string", "description": "New image file to write: a relative path under <data dir>/mcp-images/, or an absolute path inside <data dir>/mcp-images/ or <data dir>/gui_images/; .png, .jpg, .jpeg or .webp; an existing file is refused (default: a new file in <data dir>/mcp-images/)"},
+                    "output_path":     {"type": "string", "description": "New image file to write: a relative path under <data dir>/mcp-images/, or an absolute path inside <data dir>/mcp-images/ or <data dir>/gui_images/; .png, .jpg, .jpeg or .webp; an existing file is refused (default: a new file in <data dir>/mcp-images/, or in privacy mode a file removed when this server stops)"},
                     "negative_prompt": {"type": "string", "description": "Things to avoid"},
                     "seed":            {"type": "integer", "description": "Reproducibility seed"},
                     "guidance":        {"type": "number", "description": "Guidance scale (default 3.5)"},

@@ -914,6 +914,7 @@ export const I18N_EN = {
   "slash.personaList": "Personas: {names}",
   "slash.pinned": "Pinned",
   "slash.removedFromFolder": "Removed from its folder",
+  "slash.heldNote": "Privacy mode: it is not kept. Save it before localm stops if you want to keep it.",
   "slash.resultClipLabel": "Here is the generated clip:",
   "slash.resultImageLabel": "Here is the generated image:",
   "slash.resultTrackLabel": "Here is the generated track:",
@@ -2146,6 +2147,9 @@ export const I18N_EN = {
   "settings.field.memoryRecallInPrivacyCoder.help": "With Allow memory recall in privacy mode on, recall the coder's past-session lessons during privacy-mode coder sessions (read-only).",
 
   // Settings > schema fields: Diagnostics
+  "settings.field.privacyKeep.label": "Keep in privacy mode",
+  "settings.field.privacyKeep.help": "What privacy mode keeps. With media chosen, generated images, music and video stay in their History. Without it (default) they can be seen and saved while localm runs, then they are removed.",
+  "settings.field.privacyKeep.option.media": "Generated images, music and video",
   "settings.field.keepDiagnostics.label": "Keep diagnostics for bug reports",
   "settings.field.keepDiagnostics.help": "Writes crash and hang diagnostics (stack traces, a debug log) even in privacy mode, never chat content. Debug log, crash guard and stall watchdog change from the next server start, the rest at once.",
 
@@ -3131,6 +3135,10 @@ export const I18N_EN = {
   "mediaGallery.copyPath": "copy path",
   "mediaGallery.copyPathFailed": "Copy failed: {message}",
   "mediaGallery.defaultPlaceholder": "default",
+  "mediaGallery.held.discardAll": "Remove all now",
+  "mediaGallery.held.discardAllTitle": "Remove every result that is not kept?",
+  "mediaGallery.held.discarded": "Removed",
+  "mediaGallery.held.note": "Privacy mode: these are not kept. They are removed when localm stops; download or move the ones you want to keep.",
   "mediaGallery.delete": "Delete",
   "mediaGallery.deleteFailed": "Delete failed: {message}",
   "mediaGallery.deleteFromDisk": "Delete from disk",

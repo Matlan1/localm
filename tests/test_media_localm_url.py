@@ -103,6 +103,6 @@ def test_music_cli_hands_the_backend_a_v1_base(server, monkeypatch):
 
     monkeypatch.setattr(media, "_offer_open", lambda path: None)
     media._via_backend(_Backend, {"backend": "native"}, "lofi", Path("o.flac"),
-                       "music", lyrics=None, duration=8.0)
+                       "music", explicit=True, lyrics=None, duration=8.0)
     assert got == {"self_url": root + "/v1", "swap": True}
     assert _Handler.seen == ["/v1/models/unload?media=false"]

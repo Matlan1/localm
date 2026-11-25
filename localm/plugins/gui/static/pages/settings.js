@@ -470,6 +470,31 @@ export function buildSettingControl(field) {
       break;
     }
     case "list": {
+      if ((field.options || []).length) {
+        const box = el("div", "option-list");
+        const boxes = field.options.map((opt) => {
+          const row = el("label", "inline-check");
+          const check = document.createElement("input");
+          check.type = "checkbox";
+          check.value = opt;
+          check.dataset.key = field.key;
+          check.checked = Array.isArray(value) && value.includes(opt);
+          check.addEventListener("change", () => markSettingDirty(check));
+          row.append(check, " " + fieldCatalogText(field, `option.${opt}`, opt));
+          box.appendChild(row);
+          return check;
+        });
+        read = () => boxes.filter((c) => c.checked).map((c) => c.value);
+        const write = (v) => {
+          for (const c of boxes) c.checked = Array.isArray(v) && v.includes(c.value);
+          markSettingDirty(boxes[0]);
+        };
+        wrap.appendChild(box);
+        if (field.help) wrap.appendChild(el("div", "sub", fieldCatalogText(field, "help", field.help)));
+        const optionsCtrl = { field, node: wrap, read, write, shown: read() };
+        for (const c of boxes) _controlByNode.set(c, optionsCtrl);
+        return optionsCtrl;
+      }
       input = document.createElement("input");
       input.type = "text";
       input.value = Array.isArray(value) ? value.join(", ") : (value ?? "");
