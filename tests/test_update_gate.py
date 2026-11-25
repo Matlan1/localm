@@ -724,7 +724,7 @@ def test_setup_goes_on_when_an_old_file_is_lost(inst, version, over):
     for text in ("part.py: its old version is lost", "run setup in", "unzip it over"):
         assert text in done.err, done.err
     um.write(inst.root, over)
-    shutil.rmtree(inst.root / "localm" / "__pycache__", ignore_errors=True)   # written in the same second
+    shutil.rmtree(inst.root / "localm" / "__pycache__", ignore_errors=True)
     before = um.tree(inst.root)
     done = inst.gate(LOCALM_SETUP="1")
     assert done.code == 0 and f"LocaLM {version}" in done.err and inst.phase() == restoring.SETUP, done.err
