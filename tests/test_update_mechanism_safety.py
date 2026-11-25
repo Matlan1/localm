@@ -212,12 +212,15 @@ def test_a_lost_old_file_is_never_called_restored(root):
     mover.forward(root, ID, plan)
     (root / ".localm-update" / ID / "old" / "01" / "localm" / "changed.py").unlink()
     (root / "localm" / "changed.py").write_bytes(b"damaged")
+    before = um.tree(root)
     for _ in range(3):
         result = undo(root)
         assert result.state == "failed" and any("changed.py" in e and "lost" in e
                                                 for e in result.errors)
-    assert (root / "localm" / "changed.py").read_bytes() == b"damaged"
-    assert (root / "VERSION").read_text(encoding="utf-8") == "1"
+        # A way back that cannot put every file back moves none: no mix of the two releases.
+        assert um.tree(root) == before
+        assert (root / "localm" / "changed.py").read_bytes() == b"damaged"
+        assert (root / "VERSION").read_text(encoding="utf-8") == "2"
 
 
 def test_a_lost_removed_file_is_never_called_restored(root):

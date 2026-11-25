@@ -870,7 +870,7 @@ def test_the_new_environment_ends_it_in_every_setup(inst, monkeypatch):
     assert bat.index(":install_ok") < bat.index('if defined LEFTUPDATE del /q ".localm-update\\job.json"') < (
         bat.index("call :step_done install-localm"))
     assert sh.index('elif [ "$LEFTUPDATE" = 1 ]') < sh.index("install_localm_packages || {") < sh.index(
-        'if [ "$LEFTUPDATE" = 1 ]; then rm -f ./.localm-update/job.json; fi') < sh.index(
+        'if [ "${LEFTUPDATE:-0}" = 1 ]; then rm -f ./.localm-update/job.json; fi') < sh.index(
         "step_done install-localm")
     gui = runpy.run_path(str(REPO / "installer" / "gui.py"), run_name="gui")
     made: list = []

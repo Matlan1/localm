@@ -93,8 +93,9 @@ def _make_uv_stub(bin_dir: Path) -> None:
     )
 
 
-def _run_install_block(tmp_path: Path, *, call_specs: dict[int, tuple[int, bool]]
-                        ) -> subprocess.CompletedProcess[str]:
+def _run_install_block(tmp_path: Path, *, call_specs: dict[int, tuple[int, bool]],
+                       env_extra: dict[str, str] | None = None,
+                       ) -> subprocess.CompletedProcess[str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     _make_uv_stub(bin_dir)
@@ -123,6 +124,8 @@ def _run_install_block(tmp_path: Path, *, call_specs: dict[int, tuple[int, bool]
     for n, (rc, creates) in call_specs.items():
         env[f"STUB_RC_{n}"] = str(rc)
         env[f"STUB_CREATE_{n}"] = "1" if creates else "0"
+    env.pop("LEFTUPDATE", None)
+    env.update(env_extra or {})
     return subprocess.run([_bash(), "-c", script], capture_output=True, text=True,
                           env=env, cwd=str(tmp_path), timeout=15)
 
@@ -171,6 +174,21 @@ def test_retry_itself_erroring_still_reaches_the_still_missing_warning(tmp_path)
     assert "retrying once" in result.stdout
     assert "STILL missing" in result.stdout
     assert "LOCALM_BIN_OK=0" in result.stdout
+
+
+@pytest.mark.parametrize(("left", "rc", "kept"), [("1", 0, False), ("1", 1, True), ("", 0, True)])
+def test_the_record_of_an_interrupted_update_goes_only_after_the_install(tmp_path, left, rc, kept):
+    # setup.sh sets LEFTUPDATE=1 when it found the record of an update it could not undo.
+    # The record goes once localm is installed into the new .venv, never when the install
+    # failed. The block also runs with LEFTUPDATE not set at all.
+    record = tmp_path / ".localm-update" / "job.json"
+    record.parent.mkdir()
+    record.write_text("{}", encoding="utf-8")
+    result = _run_install_block(tmp_path, call_specs={1: (rc, rc == 0)},
+                                env_extra={"LEFTUPDATE": left} if left else None)
+    assert (result.returncode == 0) is (rc == 0), result.stderr
+    assert "unbound variable" not in result.stderr
+    assert record.exists() is kept
 
 
 def test_retry_install_is_guarded_in_source():

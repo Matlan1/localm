@@ -45,6 +45,11 @@ import os
 import stat
 import sys
 
+TYPE_CHECKING = False
+if TYPE_CHECKING:
+    import builtins
+    from collections.abc import Callable, Iterable
+
 FOLDER = ".localm-run"
 
 #: The kinds of process :func:`enter` names itself. Anything else is "command"
@@ -1205,7 +1210,9 @@ def _end(entry: Entry, force: bool) -> None:
             os.close(fd)
 
 
-def end_others(install=None, *, timeout: float = 20.0, spare=(), holders=None):
+def end_others(install=None, *, timeout: float = 20.0,
+               spare: "Iterable[Entry | int] | Callable[[builtins.list[Entry]], Iterable[Entry | int]]" = (),
+               holders=None):
     """End every process of the install except this one, every process above it (a
     localm command that waits for this one among them), what this one started, and
     *spare* (entries or pids, or a function that gets the entries of all running processes,

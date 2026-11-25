@@ -931,7 +931,7 @@ install_localm_packages || {
   offer_report "localm install failed during setup" "installing localm and its packages failed - see the error output above."
   exit 1
 }
-if [ "$LEFTUPDATE" = 1 ]; then rm -f ./.localm-update/job.json; fi
+if [ "${LEFTUPDATE:-0}" = 1 ]; then rm -f ./.localm-update/job.json; fi
 
 # Verify the CLI entry point actually landed. Reported live: on a WSL2 clone under
 # a Windows-drive mount (/mnt/c, /mnt/d, ...) the install can report success while
