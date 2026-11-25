@@ -787,7 +787,7 @@ def test_a_part_that_another_process_changes_is_waited_for(inst, monkeypatch):
     with job.Lock(part, wait_s=0):
         code, lines = restoring._once(inst.root)
     assert code == restoring.FAILED and "another process" in lines[-1] and "run setup" not in lines[-1]
-    assert ran(inst.localm(), "1") and inst.is_old()
+    assert ran(inst.localm(), "1") and not inst.record.exists()
 
 
 def _cmd(inst, *lines, **env):
