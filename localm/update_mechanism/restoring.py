@@ -168,7 +168,7 @@ def _waiting(root, running: list) -> set:
 def ways_out(root) -> list:
     """What a user can do about an update that can be neither finished nor undone."""
     return [f"LocaLM does not start, because its files may be of two versions. The files the "
-            f"update replaced are in {mover.update_folder(root)}.",
+            f"update replaced are in {disk.short_path(mover.update_folder(root))}.",
             f"What helps: run setup in {root}. If it says this too, download LocaLM from "
             f"{_DOWNLOAD}, unzip it over {root} and run setup there (your chats, settings and "
             f"models stay). Setup with --uninstall removes LocaLM."]
@@ -223,7 +223,7 @@ def _set_aside(lock: job.Lock) -> str:
     if not in_setup() and disk.lstat(job.record_path(root)) is not None:
         os.rename(job.record_path(root), folder / f"aside-{stamp}.json")
     return (f"The files of this install are those of LocaLM {version}. What an interrupted "
-            f"update left is put aside in {folder}."
+            f"update left is put aside in {disk.short_path(folder)}."
             + (" Setup installs its Python packages again." if in_setup() else ""))
 
 

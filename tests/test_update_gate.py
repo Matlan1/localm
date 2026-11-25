@@ -732,7 +732,8 @@ def test_setup_goes_on_when_an_old_file_is_lost(inst, version, over):
     assert again.code == 0 and inst.phase() == restoring.SETUP, again.err
     cancelled = inst.localm()
     assert cancelled.code == 1 and "setup did not finish" in cancelled.err
-    assert ran(inst.localm(LOCALM_SETUP="1"), version)
+    done = inst.localm(LOCALM_SETUP="1")
+    assert ran(done, version) and done.err == "", done.err
     inst.record.unlink()
     done = inst.localm()
     assert ran(done, version) and done.err == ""
