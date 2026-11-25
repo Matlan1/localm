@@ -9,7 +9,8 @@ version back, whatever the phase, or ends an update that reached DONE.
 The update's own folder says how far it came, by the files that are there and not by
 what they hold: with ``done`` it is done and never undone, with ``ended`` it was
 undone, with neither it is put back by its plans. ``state.json`` there repeats the
-record, for the versions when the record is damaged.
+record, for the versions, and the phase of an update without plans, when the record is
+damaged.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import contextlib
 import os
 import stat
 from dataclasses import asdict, dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -541,12 +543,11 @@ def restore(lock: Lock, *, wait_s: Optional[float] = None,
         result.notes += [note for note in parts.notes if note != undone]
         result.held += parts.held
         for plan in reversed(plans):
-            kw: dict = {}
-            if plan.step in mover.VENVS:
-                kw["earlier"] = {d for p in plans if p.number < plan.number and p.step == plan.step
-                                 for d in p.dists}
-            step = packages if plan.step in mover.VENVS else mover
-            out = step.back(lock.root, record.id, plan, wait_s=wait_s, ask=ask, **kw)
+            earlier = {d for p in plans if p.number < plan.number and p.step == plan.step
+                       for d in p.dists}
+            step = (partial(packages.back, earlier=earlier) if plan.step in mover.VENVS
+                    else mover.back)
+            out = step(lock.root, record.id, plan, wait_s=wait_s, ask=ask)
             result.errors += out.errors
             result.packages += out.packages
             result.notes += out.notes
@@ -656,12 +657,13 @@ def _delete(lock: Lock, update_id: str) -> bool:
             with contextlib.suppress(OSError):   # only an empty one goes
                 os.rmdir(work)
             return disk.remove_tree(mine)
-        if mover.has_plans(root, update_id) or not _is_forgotten(root, update_id):
+        record = read(root)
+        if mover.has_plans(root, update_id) or (record is not None and record.id == update_id):
             return True
     if over == DONE and not _hand_over(root, update_id, Result("new")):
         return False
-    if not disk.remove_tree(work / "plans"):
-        return False
+    if disk.lstat(work / "plans") is not None:
+        os.rename(work / "plans", work / "gone")
     gone = remove_staged(root, update_id)
     for name in sorted(os.listdir(work)):
         path = work / name
@@ -673,12 +675,3 @@ def _delete(lock: Lock, update_id: str) -> bool:
     if gone:
         disk.unlink(work / STATE)
     return gone and disk.remove_tree(work)
-
-
-def _is_forgotten(root, update_id: str) -> bool:
-    """Whether the update *update_id*, which changed nothing, has no record."""
-    try:
-        record = read(root)
-    except Unreadable:
-        return False
-    return record is None or record.id != update_id

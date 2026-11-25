@@ -402,6 +402,52 @@ def test_a_script_of_another_version_is_not_the_old_one(root, monkeypatch, their
     assert script.read_bytes() == b"run 1.0, written by pip"
 
 
+WHEEL = "alpha-1.0.dist-info/WHEEL"
+
+
+def built(generator: str) -> tuple:
+    return "alpha", "1.0", {**ALPHA1[2], WHEEL: f"Generator: {generator}"}
+
+
+@pytest.mark.parametrize("how", ["copies", "killed"])
+def test_a_package_built_by_another_backend_is_the_old_one(root, monkeypatch, how):
+    """Also with a file nobody lists in its dist-info folder, whose copy is lost."""
+    uv.install(root / ".venv", built("1"))
+    (site(root) / "alpha-1.0.dist-info" / "desktop.ini").write_bytes(b"MINE")
+    if how == "copies":
+        moved(root)
+        shutil.rmtree(root / ".venv" / mover.VENV_FOLDER / ID / "old")
+        assert [p["name"] for p in uv.undo(root).packages] == ["alpha"]
+    else:
+        killed_before(root, "alpha/old.py", monkeypatch)
+        for name in ("WHEEL", "desktop.ini"):
+            for path in (root / ".venv" / mover.VENV_FOLDER / ID / "old").rglob(name):
+                path.unlink()
+    uv.install(root / ".venv", built("2"))
+    result = uv.undo(root)
+    assert (result.state, result.errors) == ("old", [])
+    assert (site(root) / WHEEL).read_bytes() == b"Generator: 2"
+
+
+@pytest.mark.parametrize("name", ["python", "pythonw", "python3", "python3.12"])
+def test_an_interpreter_of_the_venv_is_never_moved(root, name):
+    rel = f"Scripts/{name}.exe" if os.name == "nt" else f"bin/{name}"
+    python = root / ".venv" / rel
+    python.parent.mkdir(exist_ok=True)
+    python.write_bytes(b"PYTHON")
+    up = "/".join([".."] * len(SITE.split("/")))
+    theirs = ("alpha", "1.5", {"alpha/__init__.py": "15", f"{up}/{rel}": "PLANTED"})
+    moved(root)
+    uv.install(root / ".venv", theirs)
+    python.write_bytes(b"PYTHON")
+    result = uv.undo(root)
+    assert (result.state, result.errors) == ("old", [])
+    assert python.read_bytes() == b"PYTHON"
+    uv.install(root / ".venv", theirs)
+    assert not any(rel in packages._records(site(root), root / ".venv", f, "alpha")
+                   for f in packages_in(root) if f.startswith("alpha"))
+
+
 @pytest.mark.parametrize("what", ["metadata-only", "no-record", "record-of-nothing"])
 def test_a_package_without_its_whole_dist_info_is_named(root, what):
     uv.begun(root)
@@ -476,6 +522,19 @@ def test_packages_that_share_a_file_differently_are_as_they_were(tmp_path, last,
     result = uv.undo(path)
     assert (result.state, result.errors) == ("old", [])
     assert uv.tree(path) == before
+
+
+def test_an_edit_in_a_named_package_is_kept_before_it_is_installed_again(sharing):
+    moved(sharing, coming=[more(ALPHA2, "of alpha"), GAMMA])
+    theirs = ("beta", "2.0", {"beta.py": "V = 2", "beta2.py": "b", S: "of beta 2"})
+    uv.install(sharing / ".venv", theirs)
+    (site(sharing) / "beta2.py").write_bytes(b"MINE")
+    result = uv.undo(sharing)
+    assert [p["name"] for p in result.packages] == ["beta"]
+    assert not (site(sharing) / "beta2.py").exists() and b"MINE" in everything(sharing)
+    assert (site(sharing) / "beta.py").read_bytes() == b"V = 2"
+    uv.install(sharing / ".venv", more(BETA, "of beta"))
+    assert uv.undo(sharing).state == "old" and b"MINE" in everything(sharing)
 
 
 def test_a_version_that_took_a_file_of_another_package_names_that_one(root):
@@ -761,6 +820,63 @@ def test_a_damaged_plan_is_named_with_what_to_do(root, state):
     assert uv.tree(root) == now
     path.write_bytes(good)
     assert uv.undo(root).state == "old"
+
+
+@pytest.mark.parametrize("lost", ["01-files", "02-packages", "both"])
+@pytest.mark.parametrize("marks", ["kept", "gone"])
+@pytest.mark.parametrize("record", ["fine", "gone"])
+def test_a_plan_that_is_missing_is_like_a_damaged_one(root, lost, marks, record):
+    before = uv.tree(root)
+    um.stage(root)
+    uv.update(root, stop_before="finish")
+    now = uv.tree(root)
+    work = root / ".localm-update" / ID
+    good = {}
+    for path in [*work.glob("plans/*.json"), *work.glob("moved-*")]:
+        if (path.stem in (lost, "both") or lost == "both") if path.suffix else marks == "gone":
+            good[path] = path.read_bytes()
+            path.unlink()
+    if record == "gone":
+        (work.parent / "job.json").unlink()
+    for _ in range(2):
+        with pytest.raises(job.Unreadable, match="a plan is missing.*setup"):
+            uv.undo(root)
+    with job.Lock(root) as lock, pytest.raises((job.Unreadable, ValueError, job.Busy)):
+        job.finish(lock)
+    assert uv.tree(root) == now
+    for path, data in good.items():
+        path.write_bytes(data)
+    assert uv.undo(root).state == "old" and uv.tree(root) == before
+
+
+def test_a_first_plan_without_any_trace_is_missed(root):
+    um.stage(root)
+    uv.update(root, stop_before="finish")
+    work = root / ".localm-update" / ID
+    (work / "plans" / "01-files.json").unlink()
+    (work / "moved-01").unlink()
+    shutil.rmtree(work / "old")
+    with pytest.raises(job.Unreadable, match="a plan is missing"):
+        uv.undo(root)
+
+
+def test_only_marks_of_a_missing_plan_are_enough(root):
+    moved(root, coming=[GAMMA], leaving=[])
+    assert not (root / ".venv" / mover.VENV_FOLDER / ID / "old").exists()
+    (root / ".localm-update" / ID / "plans" / "01-packages.json").unlink()
+    with pytest.raises(job.Unreadable, match="a plan is missing"):
+        uv.undo(root)
+
+
+def test_a_finished_update_whose_folders_are_half_deleted_is_deleted(root, monkeypatch):
+    um.stage(root)
+    uv.update(root, stop_before="finish")
+    with monkeypatch.context() as m, job.Lock(root) as lock:
+        m.setattr(disk, "remove_tree", lambda path: False)
+        assert job.finish(lock).state == "new"
+    work = root / ".localm-update" / ID
+    (work / "gone" / "01-files.json").unlink()
+    assert uv.undo(root).state == "none" and um.left(root) == []
 
 
 def test_two_unfinished_updates_without_a_record_are_named_with_what_to_do(root):
