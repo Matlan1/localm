@@ -25,18 +25,6 @@ set "LOCALM_SETUP_GUI_SELF=%~f0"
 cd /d "%~dp0"
 set LOCALM_SETUP=1
 
-rem ---- an update that is not finished --------------------------------------------
-rem  Undoing it may replace this file: the command ends in the new start or in exit.
-if not exist ".localm-update\job.json" goto :update_gated
-if defined LOCALM_GATE goto :update_gated
-set "LOCALM_GATE=1"
-call scripts\update_gate.bat && "%~dp0setup-gui.bat" %* || (
-    pause
-    exit /b 1
-)
-:update_gated
-set "LOCALM_GATE="
-
 rem ---- start again with no console window ------------------------------------
 rem  USEBOX=1: messages go to message boxes and the "getting ready" window shows.
 set "USEBOX=1"
@@ -59,6 +47,16 @@ if not "%STARTRC%"=="0" goto start_setup
 exit /b 0
 
 :start_setup
+rem ---- an update that is not finished --------------------------------------------
+rem  Undoing it may replace this file: the command ends in the new start or in exit.
+if not exist ".localm-update\job.json" goto :update_gated
+if defined LOCALM_GATE goto :update_gated
+set "LOCALM_GATE=1"
+set "GATEIN="
+if "%USEBOX%"=="1" set "GATEIN=window"
+call scripts\update_gate.bat %GATEIN% && "%~dp0setup-gui.bat" %* || exit /b 1
+:update_gated
+set "LOCALM_GATE="
 set "LOCALM_SETUP_GUI_HIDDEN="
 set "LOCALM_SETUP_GUI_INPLACE="
 set "LOCALM_SETUP_GUI_SELF="

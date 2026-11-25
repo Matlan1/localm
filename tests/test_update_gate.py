@@ -353,6 +353,17 @@ def test_update_gate_bat_takes_no_python_from_path(tmp_path):
 
 
 @nt_only
+def test_update_gate_bat_says_it_in_a_window_for_a_program_without_a_console(tmp_path):
+    inst = Install(make_windows_clone(tmp_path, "localm.bat"))
+    (inst.root / "scripts" / "update_gate.pyw").write_text("print('WINDOW'); raise SystemExit(1)")
+    done = subprocess.run(["cmd", "/d", "/c", "call", str(inst.root / "scripts" / "update_gate.bat"),
+                           "window"], env=inst.env(), text=True, stdin=subprocess.DEVNULL,
+                          capture_output=True, timeout=120, **HIDDEN)
+    assert (done.returncode, done.stdout.strip()) == (1, "WINDOW")
+    assert "if \"%USEBOX%\"==\"1\" set \"GATEIN=window\"" in _text("setup-gui.bat")
+
+
+@nt_only
 @pytest.mark.parametrize("args,held", [(["--yes"], False), ([], True)])
 def test_rollback_bat_undoes_an_unfinished_update(tmp_path, args, held):
     inst = Install(make_windows_clone(tmp_path, "rollback.bat"))
@@ -381,7 +392,7 @@ def test_rollback_update_py(inst):
 @nt_only
 @pytest.mark.parametrize("script,until", [
     ("setup.bat", "setlocal EnableDelayedExpansion"),
-    ("setup-gui.bat", "rem ---- start again with no console window"),
+    ("setup-gui.bat", 'set "LOCALM_SETUP_GUI_HIDDEN="'),
     ("localm-launcher.bat", 'if exist ".venv\\Scripts\\pythonw.exe"')])
 def test_a_batch_script_undoes_it_first_and_starts_anew(tmp_path, script, until):
     """The script's own head, up to where its work begins."""
@@ -391,8 +402,8 @@ def test_a_batch_script_undoes_it_first_and_starts_anew(tmp_path, script, until)
     inst.old = um.tree(inst.root)
     inst.go(job.STEPS)
     cmd = ["cmd", "/d", "/c", "call", str(inst.root / script), "an arg"]
-    kw = {"env": inst.env(), "text": True, "stdin": subprocess.DEVNULL, "capture_output": True,
-          "timeout": 120, **HIDDEN}
+    kw = {"env": inst.env(LOCALM_SETUP_GUI_INPLACE="1"), "text": True, "stdin": subprocess.DEVNULL,
+          "capture_output": True, "timeout": 120, **HIDDEN}
     done = subprocess.run(cmd, **kw)
     assert inst.is_old() and done.stdout.count("BEGINS .") == 1, (done.stdout, done.stderr)
     um.write(inst.root / ".localm-update" / ID / "new", NEW)
