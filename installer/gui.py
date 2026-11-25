@@ -62,12 +62,11 @@ def _update_gate() -> None:
             or not os.path.lexists(ROOT / ".localm-update" / "job.json")):
         os.environ.pop("LOCALM_GATE", None)
         return
-    hidden = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     code = subprocess.call([sys.executable, "-I", "-S",
-                            str(ROOT / "scripts" / "update_gate.pyw")], creationflags=hidden)
+                            str(ROOT / "scripts" / "update_gate.pyw")])
     if code == 0:
         code = subprocess.call([sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]],
-                               env={**os.environ, "LOCALM_GATE": "1"}, creationflags=hidden)
+                               env={**os.environ, "LOCALM_GATE": "1"})
     sys.exit(code)
 
 

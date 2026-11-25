@@ -452,24 +452,26 @@ def test_a_shell_script_undoes_it_first(tmp_path, script, until):
 def test_a_program_with_windows_undoes_it_before_it_imports_localm(inst, script, monkeypatch):
     """The program's own head; the window is a fake one (update_gate.pyw is tested below)."""
     head = _text(script)
-    head = head[:head.index("    _update_gate()\n") + len("    _update_gate()\n")] + "print('BEGINS')\n"
+    head = head[:head.index("    _update_gate()\n") + len("    _update_gate()\n")] + (
+        "open('BEGINS', 'a').write('x')\n")
     path = inst.root / script
     path.parent.mkdir(exist_ok=True)
     path.write_text(head, encoding="utf-8")
+    begins = inst.root / "BEGINS"
     done = inst.run(str(path))
-    assert (done.code, done.out.split()) == (0, ["BEGINS"]), done.err
+    assert done.code == 0 and begins.read_text() == "x", done.err
     inst.go(job.STEPS)
     window = inst.root / "scripts" / "update_gate.pyw"
     window.write_text(
         "import subprocess, sys\nsys.exit(subprocess.call([sys.executable, '-I', '-S', "
         "sys.argv[0].replace('scripts', 'localm').replace('update_gate.pyw', '__init__.py')]))\n")
     done = inst.run(str(path))
-    assert (done.code, done.out.split()) == (0, ["BEGINS"]), done.err
+    assert done.code == 0 and begins.read_text() == "xx", done.err
     assert not inst.record.exists() and (inst.root / "VERSION").read_text() == "1"
     window.write_text("import sys; sys.exit(1)")
     inst.record.write_text("{")
     done = inst.run(str(path))
-    assert done.code == 1 and done.out == ""
+    assert done.code == 1 and begins.read_text() == "xx"
 
 
 def test_the_update_window_shows_why_and_tries_again(inst, monkeypatch):
@@ -712,7 +714,6 @@ def test_files_of_another_release_that_are_not_all_of_it(inst, listed, setup):
 
 
 @pytest.mark.parametrize("version,over", [("2", {}), ("2", {**NEW, "update-package.json": _statement(NEW, "2")}),
-                                          ("1", {**OLD, "update-package.json": _statement(OLD, "1")}),
                                           ("3", {**THREE, "update-package.json": _statement(THREE, "3")})])
 def test_setup_goes_on_when_an_old_file_is_lost(inst, version, over):
     inst.go(job.STEPS)
@@ -735,6 +736,14 @@ def test_setup_goes_on_when_an_old_file_is_lost(inst, version, over):
     inst.record.unlink()
     done = inst.localm()
     assert ran(done, version) and done.err == ""
+
+
+def test_the_lost_file_put_back_in_its_place_heals_it(inst):
+    inst.go(job.STEPS)
+    inst.lose("localm/part.py")
+    assert inst.localm().code == 1
+    um.write(inst.root, {"localm/part.py": OLD["localm/part.py"]})
+    assert ran(inst.localm(), "1") and inst.is_old()
 
 
 def test_a_mix_is_refused_by_setup_until_a_release_is_put_over_it(inst):
