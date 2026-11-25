@@ -560,6 +560,31 @@ def _register_compute_backends(binary_dir, lib) -> bool:
         return False
 
 
+def _settle_bundled_runtime() -> None:
+    """Wait for, or undo, an unfinished replacement of the bundled runtime's files
+    (``update_mechanism.steps``). Raises RuntimeError while its files are incomplete."""
+    try:
+        import localm_llama_runtime
+        folder = Path(os.path.realpath(localm_llama_runtime.LIB_DIR)).parent
+    except (ImportError, AttributeError, TypeError):
+        return
+    from localm.update_mechanism import steps
+    try:
+        result = steps.settle(folder)
+    except (OSError, *steps.STEP_ERRORS) as e:
+        raise RuntimeError(f"an interrupted replacement of the runtime in {folder} could not "
+                           f"be undone: {e}") from e
+    if result is None:
+        return
+    if result.errors:
+        raise RuntimeError(f"an interrupted replacement of the runtime in {folder} could not "
+                           "be undone: " + "; ".join(result.errors)
+                           + ("" if result.held else ". Install it again: localm setup-llama"))
+    if result.state == "busy":
+        raise RuntimeError(f"the runtime in {folder} is being replaced; try again when that is "
+                           "done")
+
+
 def load_lib() -> ctypes.CDLL:
     """Load (and cache) the native llama shared library.
 
@@ -572,6 +597,7 @@ def load_lib() -> ctypes.CDLL:
 
     name = lib_filename()
     explicit = os.environ.get("LLAMA_CPP_LIB")
+    _settle_bundled_runtime()
     binary_dir = runtime_binary_dir()
     if explicit and not binary_dir:
         # An explicit path straight at the file whose parent lacks the usual

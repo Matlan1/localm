@@ -180,10 +180,25 @@ def _staged_path(stage: Path) -> Path:
     return stage.with_name(stage.name + ".json")
 
 
+def note_staged(root, update_id: str, step: str, installed: Iterable[str]) -> None:
+    """Take what another program than uv put into the empty :func:`.mover.stage_folder`
+    of *step* as staged: the packages *installed* (canonical names), in place of the
+    ones of these names in the venv. Raises like :func:`stage_packages`."""
+    venv = mover.venv_of(root, step)
+    site = _site(venv)
+    stage = stage_folder(root, update_id, step=step)
+    wanted = [(name, "", False) for name, _f in _infos(site, installed)]
+    staged = _Staged(set(_leaving(venv, site, wanted)), set(installed), set())
+    _check_stage(stage, _site(stage), staged)
+    staged.write(_staged_path(stage))
+
+
 def stage_packages(root, update_id: str, argv: Iterable, *, env: Mapping, project: bool = False,
-                   run: Runner = run_hidden, more: bool = False, network: bool = False) -> bool:
+                   run: Runner = run_hidden, more: bool = False, network: bool = False,
+                   tree=None) -> bool:
     """Put what the uv command *argv* (:func:`command`) would install in *root* into
-    the staging venv of *update_id*, and note what it would remove. With *more* it
+    the staging venv of *update_id*, and note what it would remove. uv works on the
+    project in *tree*, *root* when not given. With *more* it
     is added to what earlier commands staged, and uv sees that as installed; else
     the staging venv is made anew. uv may download only with *network*. Returns
     False, with nothing staged, when uv has nothing to do. The venv itself is not
@@ -204,12 +219,10 @@ def stage_packages(root, update_id: str, argv: Iterable, *, env: Mapping, projec
     full = command(argv, project=project, network=network)
     stage = stage_folder(root, update_id)
     path = _staged_path(stage)
+    tree = root if tree is None else tree
     staged = _Staged.read(path) if more and disk.lstat(path) is not None else None
-    if staged is None:
-        code, output = run([*full, "--dry-run"], str(root), env)
-    else:
-        target = _into(full, root, env, stage)
-        code, output = run([*target[0], "--dry-run"], str(root), target[2])
+    target = _into(full, tree, env, venv if staged is None else stage)
+    code, output = run([*target[0], "--dry-run"], str(tree), target[2])
     if code != 0:
         raise Refused(f"uv cannot prepare the packages: {_last(output)}")
     removed, installed = changes(output)
@@ -236,7 +249,7 @@ def stage_packages(root, update_id: str, argv: Iterable, *, env: Mapping, projec
         disk.remove_tree(staged_site / folder)
         staged.base = {rel for rel in staged.base if not rel.startswith(inner)}
         staged.removed.add((name, folder))
-    _run(run, *_into(full, root, env, stage))
+    _run(run, *_into(full, tree, env, stage))
     staged.installed -= {e[0] for e in removed}
     staged.installed |= {e[0] for e in installed}
     _check_stage(stage, staged_site, staged)
@@ -389,16 +402,16 @@ def listing(venv: Path) -> set:
 
 # ---------------------------------------------------------------- the moves
 
-def plan_packages(root, update_id: str) -> Plan:
+def plan_packages(root, update_id: str, step: str = PACKAGES) -> Plan:
     """The plan that moves what :func:`stage_packages` staged into the venv and takes
     out what it replaces. Every file in the place of a new one is moved aside, also
     one of another package or of the user, whose own file is kept. Reads only.
 
     Raises :class:`Refused` when nothing is staged or the packages to replace are no
     longer those, and what :func:`.mover.build` raises."""
-    venv = mover.venv_of(root)
+    venv = mover.venv_of(root, step)
     site = _site(venv)
-    stage = stage_folder(root, update_id)
+    stage = stage_folder(root, update_id, step=step)
     staged = _Staged.read(_staged_path(stage))
     removed, installed = staged.removed, staged.installed
     touched = {n for n, _f in removed} | installed
@@ -432,8 +445,8 @@ def plan_packages(root, update_id: str) -> Plan:
             "link" not in old and not {None, old["copy"]} & {s and s["sha256"] for s in said[rel]})
 
     number = mover.next_number(root, update_id)
-    a = mover.area(root, update_id, PACKAGES, number)
-    plan = mover.build(a, PACKAGES, number, new, leaving,
+    a = mover.area(root, update_id, step, number)
+    plan = mover.build(a, step, number, new, leaving,
                        identify=disk.quick_identity, edited=edited)
     for op in plan.ops:
         op.dist = (dists if op.old is None else owners).get(op.path, "")
@@ -455,18 +468,19 @@ def _stated(row: Optional[tuple]) -> Optional[dict]:
     return {"sha256": raw.hex(), "size": size}
 
 
-def forward(root, update_id: str, plan: Plan, argv: Iterable, *, env: Mapping,
+def forward(root, update_id: str, plan: Plan, argv: Optional[Iterable], *, env: Mapping,
             project: bool = False, run: Runner = run_hidden,
             wait_s: Optional[float] = None, ask: Optional[disk.Ask] = None) -> None:
     """Make the moves of *plan* (:func:`plan_packages`), then ask uv whether it has
-    anything left to do for *argv*, the last command staged. *ask* as in
-    :func:`.mover.forward`. Raises
-    :class:`.mover.StepFailed`, with everything moved back, when any of it fails or
-    is interrupted. Other programs' uv waits during the moves."""
+    anything left to do for *argv*, the last command staged (None: uv is not asked).
+    *ask* as in :func:`.mover.forward`. Raises :class:`.mover.StepFailed`, with
+    everything moved back, when any of it fails or is interrupted. Other programs' uv waits during the moves."""
     locked = contextlib.ExitStack()
 
     def nothing_left(_a: Area) -> None:
         locked.close()
+        if argv is None:
+            return
         code, output = run([*command(argv, project=project), "--dry-run"], str(root),
                            _environment(env))
         if code != 0:
@@ -526,8 +540,9 @@ def back(root, update_id: str, plan: Plan, *, wait_s: Optional[float] = None,
     try:
         a = mover.area(root, update_id, plan.step, plan.number)
         a.watch(op.path for op in plan.ops)
-        if disk.lstat(Path(root) / ".venv") is not None and not a.base.is_dir():
-            raise Refused(f"{Path(root) / '.venv'} leads nowhere")
+        venv = Path(root) / mover.VENVS[plan.step]
+        if disk.lstat(venv) is not None and not a.base.is_dir():
+            raise Refused(f"{venv} leads nowhere")
         names = set(plan.dists).difference(earlier)
         wait = Wait(wait_s, ask)
         with _uv_waits(plan, a.base, wait):

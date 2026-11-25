@@ -232,18 +232,19 @@ class Area:
         disk.prune(folder, stop)
 
 
-def venv_of(root) -> Path:
-    """The venv of the install at *root*, with a link to it followed. Raises
-    :class:`Refused` when there is none."""
-    venv = disk.real_folder(Path(root) / ".venv")
+def venv_of(root, step: str = "packages") -> Path:
+    """The venv the package step *step* of *root* changes, with a link to it followed.
+    Raises :class:`Refused` when there is none."""
+    path = Path(root) / VENVS[step]
+    venv = disk.real_folder(path)
     if not (venv / "pyvenv.cfg").is_file():
-        raise Refused(f"{Path(root) / '.venv'} is not a Python environment")
+        raise Refused(f"{path} is not a Python environment")
     return venv
 
 
-def venv_folder(root, update_id: str) -> Path:
-    """The folder in the venv that belongs to the update *update_id*."""
-    venv = disk.real_folder(Path(root) / ".venv")
+def venv_folder(root, update_id: str, step: str = "packages") -> Path:
+    """The folder in the venv of *step* that belongs to the update *update_id*."""
+    venv = disk.real_folder(Path(root) / VENVS[step])
     return plain_folder(plain_folder(venv / VENV_FOLDER) / check_id(update_id))
 
 
@@ -255,13 +256,21 @@ def area(root, update_id: str, step: str, number: int) -> Area:
         kept = plain_folder(plain_folder(update_folder(root) / "kept") / update_id)
         return Area(disk.real_folder(root), old_folder(work, number),
                     plain_folder(work / "new"), kept, guard=True, exact=True)
-    if step == PACKAGES:
-        venv = disk.real_folder(Path(root) / ".venv")
-        mine = venv_folder(root, update_id)
+    if step in BASES:
+        mine = plain_folder(work / step)
+        kept = plain_folder(plain_folder(update_folder(root) / "kept") / update_id)
+        return Area(plain_folder(disk.real_folder(root) / BASES[step]),
+                    old_folder(mine, number), new_folder(root, update_id, step),
+                    plain_folder(kept / step), exact=step == TREE,
+                    closed=(FOLDER, VENV_FOLDER, VENV_KEPT))
+    if step in VENVS:
+        venv = disk.real_folder(Path(root) / VENVS[step])
+        mine = venv_folder(root, update_id, step)
         kept = plain_folder(plain_folder(venv / VENV_KEPT) / update_id)
         site = shared.updater_components.site_packages(venv)
         stay = [venv / "Scripts", venv / "bin", *([site, *site.parents] if site else [])]
-        return Area(venv, old_folder(mine, number), stage_folder(root, update_id, number), kept,
+        return Area(venv, old_folder(mine, number), stage_folder(root, update_id, number, step),
+                    kept,
                     closed=(VENV_FOLDER, VENV_KEPT, "pyvenv.cfg", ".lock"), stay=stay)
     raise Unreadable(f"the plan of the update names an unknown step {step[:40]!r}")
 
@@ -272,19 +281,33 @@ def old_folder(mine: Path, number: int) -> Path:
     return plain_folder(plain_folder(mine / "old") / f"{number:02d}")
 
 
-def stage_folder(root, update_id: str, number: Optional[int] = None) -> Path:
-    """The staging venv of the package plan *number* of the update *update_id*, None
-    for the next one. The package plans are counted from 01, in their order."""
+def new_folder(root, update_id: str, step: str) -> Path:
+    """Where the new files of *step*, one of :data:`BASES`, are prepared."""
+    return plain_folder(plain_folder(work_folder(root, update_id) / step) / "new")
+
+
+def stage_folder(root, update_id: str, number: Optional[int] = None,
+                 step: str = "packages") -> Path:
+    """The staging venv of the plan *number* of the package step *step* of the update
+    *update_id*, None for the next one. The plans of a step are counted from 01, in
+    their order."""
     folder = _plans_folder(root, update_id)
     names = os.listdir(folder) if disk.lstat(folder) is not None else ()
-    nth = 1 + sum(n.endswith(f"-{PACKAGES}.json") and (number is None or n < f"{number:02d}")
+    nth = 1 + sum(n.endswith(f"-{step}.json") and (number is None or n < f"{number:02d}")
                   for n in names)
-    return plain_folder(plain_folder(venv_folder(root, update_id) / "stage") / f"{nth:02d}")
+    return plain_folder(plain_folder(venv_folder(root, update_id, step) / "stage") / f"{nth:02d}")
 
 
 FILES, PACKAGES = "files", "packages"
+#: A step on the uv inside the install, on the whole folder of a job (file names
+#: compared exactly), on the whole folder of a job, and on the venv inside the folder
+#: of a job.
+TREE, WHOLE, VENV, UV = "tree", "whole", "venv", "uv"
+#: The venv of each package step, and the folder of each other step, below the root.
+VENVS = {PACKAGES: ".venv", VENV: "venv"}
+BASES = {UV: ".uv", TREE: "", WHOLE: ""}
 #: The steps a plan can be of.
-STEPS = (FILES, PACKAGES)
+STEPS = (FILES, *VENVS, *BASES)
 
 
 # -------------------------------------------------------------------- plans

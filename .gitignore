@@ -62,6 +62,9 @@ localm-home.cfg
 .localm-uninstall-pending
 .localm-setup-journal
 .localm-setup-tmp/
+.localm-update/
+.localm-old/
+runtime/localm_llama_runtime/lib.incoming*/
 .localm-setup-starting-*
 .localm-gui-bootstrap
 

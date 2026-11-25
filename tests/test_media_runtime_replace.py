@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Reinstalling a native media runtime (stable-diffusion.cpp, KoboldCpp) never
-loses the installed one: a folder that cannot be moved aside is left whole, and
-a new folder that cannot be moved in puts the old one back. Every install step
+loses the installed one: a file that cannot be moved aside leaves the folder whole,
+and a new file that cannot be moved in puts the old ones back. Every install step
 and its failure reach the debug log, and a download refused because network
 access is off names the Settings place and the terminal command.
 
@@ -26,6 +26,7 @@ from localm.media.koboldcpp import pins as kpins
 from localm.media.koboldcpp import runtime as kruntime
 from localm.media.sdcpp import _binding, pins as spins
 from localm.media.sdcpp import runtime as sruntime
+from localm.update_mechanism import disk
 
 BODY = b"MZ-not-really-koboldcpp" + os.urandom(4096)
 SHA = hashlib.sha256(BODY).hexdigest()
@@ -84,52 +85,112 @@ def media_runtime(request):
     return request.getfixturevalue(request.param)
 
 
+def _installed(install, dest: Path) -> dict:
+    """Install the runtime and make each of its files differ from what is installed
+    next; returns the :func:`_snapshot`."""
+    install()
+    for path in dest.iterdir():
+        if path.suffix in (".txt", ".dll") or path.name == kruntime.launcher_name():
+            path.write_bytes(path.read_bytes() + b"installed")
+    return _snapshot(dest)
+
+
 def _snapshot(folder: Path) -> dict:
     return {p.relative_to(folder).as_posix(): p.read_bytes()
             for p in sorted(folder.rglob("*")) if p.is_file()}
 
 
-def test_a_folder_that_cannot_be_moved_aside_is_left_whole(media_runtime, monkeypatch):
-    install, dest, provision_error = media_runtime
-    install()
-    before = _snapshot(dest)
-    real_replace = os.replace
+@pytest.fixture(autouse=True)
+def short_wait(monkeypatch):
+    monkeypatch.setattr(disk, "HELD_WAIT_S", 0.2)
 
-    def replace(src, dst):
-        if Path(src) == dest:
-            raise PermissionError(13, "The process cannot access the file", str(src))
-        return real_replace(src, dst)
-    monkeypatch.setattr(os, "replace", replace)
+
+def _refuse_rename(monkeypatch, refused, error=None):
+    """Make ``os.rename(src, dst)`` fail where *refused* says so."""
+    real = os.rename
+
+    def rename(src, dst):
+        if refused(disk.short_path(Path(src)), disk.short_path(Path(dst))):
+            raise error or PermissionError(13, "The process cannot access the file", str(src))
+        return real(src, dst)
+    monkeypatch.setattr(os, "rename", rename)
+    return lambda: monkeypatch.setattr(os, "rename", real)
+
+
+def _inside(path: str, folder: Path) -> bool:
+    return Path(path).is_relative_to(os.path.realpath(folder))
+
+
+def test_a_file_that_cannot_be_moved_aside_leaves_the_folder_whole(media_runtime, monkeypatch):
+    install, dest, provision_error = media_runtime
+    before = _installed(install, dest)
+    _refuse_rename(monkeypatch, lambda src, dst: src.endswith("z-last.txt") and _inside(src, dest))
     with pytest.raises(provision_error) as info:
         install(force=True)
     assert _snapshot(dest) == before
     assert "is in use and was left as it is" in str(info.value)
 
 
-def test_a_new_folder_that_cannot_be_moved_in_puts_the_old_one_back(media_runtime,
-                                                                   monkeypatch):
+def test_a_new_file_that_cannot_be_moved_in_puts_the_old_ones_back(media_runtime, monkeypatch):
     install, dest, provision_error = media_runtime
-    install()
-    before = _snapshot(dest)
-    real_replace = os.replace
-
-    def replace(src, dst):
-        if Path(dst) == dest and Path(src).name == "staging":
-            raise PermissionError(13, "Access is denied", str(dst))
-        return real_replace(src, dst)
-    monkeypatch.setattr(os, "replace", replace)
+    before = _installed(install, dest)
+    _refuse_rename(monkeypatch,
+                   lambda src, dst: _inside(dst, dest) and f"{os.sep}new{os.sep}" in src,
+                   OSError(28, "No space left on device"))
     with pytest.raises(provision_error) as info:
         install(force=True)
     assert _snapshot(dest) == before
     assert "the installed ones were kept" in str(info.value)
 
 
+def test_a_failed_test_of_a_new_build_keeps_the_installed_one(sdcpp):
+    install, dest, provision_error = sdcpp
+    install()
+    before = _snapshot(dest)
+
+    def broken(_rt):
+        raise RuntimeError("no driver")
+    with pytest.raises(sruntime.LoadTestError, match="no driver"):
+        sruntime.install("cpu", force=True, probe=broken)
+    assert _snapshot(dest) == before
+    assert sruntime.load_test_failed("cpu") is None
+
+
+def test_a_failed_test_of_a_first_build_is_remembered(sdcpp):
+    _install, dest, _error = sdcpp
+
+    def broken(_rt):
+        raise RuntimeError("no driver")
+    with pytest.raises(sruntime.LoadTestError):
+        sruntime.install("cpu", probe=broken)
+    assert sruntime.load_test_failed("cpu") == "no driver"
+    assert [f.name for f in dest.iterdir()] == [sruntime.FAILED_MARKER]
+
+
+def test_a_build_for_an_update_stays_aside(media_runtime, tmp_path):
+    install, dest, _error = media_runtime
+    install()
+    before = _snapshot(dest)
+    into = dest.parent / "aside"
+    into.mkdir()
+    if dest.parent.name == "sdcpp":
+        sruntime.install("cpu", into=into, probe=lambda rt: {"devices": [["CPU", "cpu"]]})
+        marker = sruntime.MARKER
+    else:
+        def unpack(binary, staging, tmp):
+            staging.mkdir(parents=True)
+            (staging / kruntime.launcher_name()).write_bytes(b"another")
+        kruntime.install("nocuda", into=into, unpack=unpack, version_of=lambda _p: kpins.VERSION)
+        marker = kruntime.MARKER
+    assert _snapshot(dest) == before
+    assert (into / dest.name / marker).is_file()
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows refuses to move a folder "
                     "with an open file; POSIX allows it")
 def test_a_file_held_open_keeps_every_installed_file(media_runtime):
     install, dest, provision_error = media_runtime
-    install()
-    before = _snapshot(dest)
+    before = _installed(install, dest)
     held = sorted(p for p in dest.iterdir() if p.is_file())[-1]
     with open(held, "rb"):
         with pytest.raises(provision_error):
@@ -143,7 +204,8 @@ def test_a_forced_reinstall_replaces_the_folder_and_leaves_no_copy(media_runtime
     (dest / "stale.txt").write_text("from the old install", encoding="utf-8")
     install(force=True)
     assert not (dest / "stale.txt").exists()
-    assert [p.name for p in dest.parent.iterdir() if p.name.startswith(".")] == []
+    assert [p.name for p in dest.parent.iterdir() if p.name.startswith(".")] == [".localm-update"]
+    assert [p.name for p in (dest.parent / ".localm-update").iterdir()] == ["lock"]
 
 
 def test_install_steps_and_the_failure_reach_the_debug_log(media_runtime, monkeypatch,
@@ -155,14 +217,30 @@ def test_install_steps_and_the_failure_reach_the_debug_log(media_runtime, monkey
     logged = [r.getMessage() for r in caplog.records if r.name == "localm"]
     assert shown and all(any(m in line for line in logged) for m in shown)
     caplog.clear()
-    monkeypatch.setattr(os, "replace", lambda s, d: (_ for _ in ()).throw(
-        PermissionError(13, "denied", str(s))))
+    _refuse_rename(monkeypatch, lambda src, dst: True)
     with caplog.at_level(logging.INFO, logger="localm"), pytest.raises(provision_error):
         install(force=True)
     warnings = [r for r in caplog.records
                 if r.name == "localm" and r.levelno == logging.WARNING]
     failures = [r for r in warnings if "was refused" not in r.getMessage()]
     assert len(failures) == 1 and "failed" in failures[0].getMessage()
+
+
+def test_a_runtime_that_cannot_be_put_back_is_installed_again(media_runtime, monkeypatch):
+    from localm.update_mechanism import disk
+    install, dest, provision_error = media_runtime
+    _installed(install, dest)
+    allow = _refuse_rename(monkeypatch, lambda src, dst: _inside(dst, dest))
+    with pytest.raises(provision_error):
+        install(force=True)
+    allow()
+    kept = [p for p in (dest.parent / ".localm-update").rglob("old") if p.is_dir()]
+    assert kept and all(disk.remove_tree(p) for p in kept)
+    install()
+    assert sorted(p.name for p in (dest.parent / ".localm-update").iterdir()) == ["lock"]
+    reinstalled = _snapshot(dest)
+    install(force=True)
+    assert _snapshot(dest) == reinstalled
 
 
 def test_the_sdcpp_runtime_is_named_for_images_and_video(sdcpp):
@@ -203,23 +281,18 @@ def test_a_policy_refusal_that_is_not_net_mode_off_keeps_its_reason():
     assert text == "the download was refused by the network policy: example.org is on the deny list"
 
 
-def test_when_the_old_folder_cannot_be_put_back_its_files_stay_where_the_error_says(
+def test_files_that_cannot_be_put_back_are_put_back_by_the_next_install(
         media_runtime, monkeypatch):
     install, dest, provision_error = media_runtime
-    install()
-    before = _snapshot(dest)
-    real_replace = os.replace
-
-    def replace(src, dst):
-        if Path(dst) == dest:
-            raise PermissionError(13, "Access is denied", str(dst))
-        return real_replace(src, dst)
-    monkeypatch.setattr(os, "replace", replace)
-    with pytest.raises(provision_error) as info:
+    before = _installed(install, dest)
+    allow = _refuse_rename(monkeypatch, lambda src, dst: _inside(dst, dest))
+    with pytest.raises(provision_error, match="The process cannot access the file"):
         install(force=True)
-    kept = [p for p in dest.parent.iterdir() if p.name.startswith(f".{dest.name}.previous-")]
-    assert len(kept) == 1 and _snapshot(kept[0]) == before
-    assert str(kept[0]) in str(info.value)
+    with pytest.raises(provision_error, match="an interrupted install in .* could not be undone"):
+        install()
+    allow()
+    install()
+    assert _snapshot(dest) == before
 
 
 @pytest.fixture

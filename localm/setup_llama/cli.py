@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import sys
 from pathlib import Path
 from typing import Optional
@@ -23,7 +24,8 @@ from localm.setup_llama.runtime_dir import (_exit_provisioning_busy, _exit_runti
 from localm.setup_llama.versions import (_apply_version_request, _pin_note_for_backend,
                                          _record_runtime_history)
 from localm.setup_llama.cuda import _ARM64_CUDA_LINES, _CUDA_LINE
-from localm.setup_llama.provision import _provision_with_fallback
+from localm.setup_llama.provision import (BUILD_UNUSABLE_EXIT, _provision_with_fallback,
+                                          _refuse_other_backend)
 from localm.setup_llama.rocm_cpu import installed_cpu_overlay
 import localm.setup_llama as _sl
 
@@ -80,6 +82,16 @@ BACKENDS: tuple[str, ...] = ("auto", "vulkan", "cuda", "sycl", "hip", "cpu",
 @click.option("--keep-choice", "keep_choice", is_flag=True, hidden=True,
               help="Re-provision without changing the recorded backend choice "
                    "(used by 'localm update').")
+@click.option("--only", "only", is_flag=True, hidden=True,
+              help="Try no other build and no other backend when this one does not "
+                   "work (used by 'localm update').")
+@click.option("--into", "into", default=None, hidden=True,
+              type=click.Path(file_okay=False, path_type=Path),
+              help="Provision and test in this folder and leave the installed runtime "
+                   "as it is (used by 'localm update').")
+@click.option("--prove", "prove", default=None, hidden=True,
+              type=click.Path(file_okay=False, path_type=Path),
+              help="Test the runtime in this folder and exit (used by 'localm update').")
 @click.option("--yes", "-y", "assume_yes", is_flag=True,
               help="Non-interactive: accept the recommended action at every prompt "
                    "(e.g. fetch the self-contained CUDA runtime). Used by the "
@@ -87,7 +99,8 @@ BACKENDS: tuple[str, ...] = ("auto", "vulkan", "cuda", "sycl", "hip", "cpu",
 def main(from_dir: Optional[str], backend: str, url: Optional[str],
          sha256: Optional[str], force: bool, tag: Optional[str],
          rollback: bool, assume_yes: bool, cuda_line: Optional[str] = None,
-         keep_choice: bool = False) -> None:
+         keep_choice: bool = False, only: bool = False, into: Optional[Path] = None,
+         prove: Optional[Path] = None) -> None:
     """Download or copy the native llama.cpp binaries into localm's own venv.
 
     The chosen backend is load-tested after provisioning. If it cannot load on
@@ -124,6 +137,11 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
     lib_name = _sl._lib_name()
     target = _sl._repo_runtime_lib()
     _sl.set_vc_unattended(assume_yes)
+    if prove is not None:
+        _prove(prove)
+        return
+    if into is not None:
+        force = keep_choice = only = True
     if cuda_line:
         cuda_line = cuda_line.lower()
         _require_staging_context(backend, cuda_line, from_dir, url, rollback)
@@ -151,42 +169,125 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
         if backend.lower() in ("auto", installed or ""):
             keep_choice = True
     target.mkdir(parents=True, exist_ok=True)
+    if into is None and _settle(target):
+        force = True
 
     if _keeps_existing_install(target, lib_name, backend, force, assume_yes, from_dir):
         return
     if not from_dir:
         _refuse_when_net_off()
 
-    # Everything below actually MUTATES target (clear + refill), so it is guarded
-    # by the cross-process provisioning lock: two processes provisioning the same
-    # target must not interleave. Above this point only the "already provisioned"
-    # short-circuit runs, which at most removes the choice record.
+    # The provisioning lock: two processes provisioning the same target must not
+    # interleave. The new build is fetched and tested in a folder of its own; the
+    # installed one is replaced at the end, whole (runtime_dir.put_in_place).
     vc_absent = False
+    installed_now: Optional[tuple] = None
     try:
-        with _sl._provisioning_lock(target), _sl.keep_previous_runtime(
-                target, on_failure=lambda: _restore_pin(pin_before)):
-            if cuda_line:
-                _provision_staged_cuda(cuda_line, target, lib_name, sha256)
+        with _sl._provisioning_lock(target), _restoring_pin(pin_before):
+            if into is None:
+                _refuse_in_use(target)
+            with _sl.staged_runtime(target, into) as staged:
+                if cuda_line:
+                    installed_now = _provision_staged_cuda(cuda_line, staged, lib_name, sha256)
+                elif from_dir:
+                    _provision_from_dir(from_dir, staged, lib_name)
+                elif url:
+                    _provision_from_url(url, staged, lib_name, sha256)
+                else:
+                    installed_now = _provision_release(backend, staged, sha256, assume_yes,
+                                                       keep_choice=keep_choice, only=only)
+                vc_absent = (not cuda_line and _sl.vc_runtime_missing(staged)
+                             and not _sl._native_loads_ok()[0])
+                if into is None:
+                    _put_in_place(target, staged)
+            if into is None:
+                if installed_now:
+                    _record_runtime_history(*installed_now)
                 _refresh_install_record(target)
-                return
-            if from_dir:
-                _provision_from_dir(from_dir, target, lib_name)
-            elif url:
-                _provision_from_url(url, target, lib_name, sha256)
-            else:
-                _provision_release(backend, target, sha256, assume_yes,
-                                   keep_choice=keep_choice)
-
-            _refresh_install_record(target)
-            vc_absent = (_sl.vc_runtime_missing(target)
-                         and not _sl._native_loads_ok()[0])
-            if not vc_absent:
-                _sl._verify()
+                if not vc_absent and not cuda_line:
+                    _sl._verify()
     except ProvisioningBusyError as e:
         _restore_pin(pin_before)
         _exit_provisioning_busy(e)
+    if cuda_line:
+        _say_staged_cuda(cuda_line, target)
     if vc_absent:
         _exit_vc_runtime_absent()
+
+
+@contextlib.contextmanager
+def _restoring_pin(before: Optional[str]):
+    """Put the llama.cpp pin back (:func:`_restore_pin`) when the block fails."""
+    failed = True
+    try:
+        yield
+        failed = False
+    except SystemExit as e:
+        failed = e.code not in (0, None)
+        raise
+    finally:
+        if failed:
+            _restore_pin(before)
+
+
+def _settle(target: Path) -> bool:
+    """Put the runtime in *target* back when a process that was replacing it ended.
+    Returns whether it is incomplete for good and has to be installed again. Exits
+    non-zero when a program has to end first."""
+    import os
+
+    from localm.update_mechanism import steps
+    try:
+        broken = steps.mend(Path(os.path.realpath(target)).parent)
+    except (steps.Failed, *steps.STEP_ERRORS) as e:
+        console.print(f"[red]The runtime in {escape(str(target))} could not be put back after "
+                      f"an interrupted setup:[/red] {escape(str(e))}")
+        sys.exit(1)
+    if broken:
+        console.print(f"[yellow]The runtime in {escape(str(target))} is incomplete after an "
+                      "interrupted setup and is installed again.[/yellow]")
+    return broken
+
+
+def _refuse_in_use(target: Path) -> None:
+    try:
+        _sl.refuse_runtime_in_use(target)
+    except RuntimeInUseError as e:
+        _exit_runtime_in_use(e)
+
+
+def _put_in_place(target: Path, staged: Path) -> None:
+    """Replace the runtime in *target* by the one in *staged*
+    (``runtime_dir.put_in_place``). Exits non-zero when it cannot be replaced."""
+    from localm.update_mechanism import steps
+    try:
+        _sl.put_in_place(target, staged)
+    except RuntimeInUseError as e:
+        _exit_runtime_in_use(e)
+    except (steps.STEP_ERRORS + (steps.Failed,)) as e:
+        console.print(f"[red]The new build could not be put in place:[/red] {escape(str(e))}")
+        if not getattr(e, "errors", None):
+            console.print("[green]The runtime that was installed before is in place.[/green]")
+        sys.exit(1)
+
+
+def _prove(folder: Path) -> None:
+    """Test that the runtime in *folder* works on this machine (``--prove``). Exits
+    with ``BUILD_UNUSABLE_EXIT`` when it does not."""
+    import os
+
+    from localm.setup_llama.provision import _chosen_backend_loads
+    os.environ["LLAMA_CPP_LIB"] = str(folder / _sl._lib_name())
+    backend = _sl._provisioned_backend(folder) or "cpu"
+    if not (folder / _sl._lib_name()).is_file():
+        console.print(f"[red]There is no runtime in {escape(str(folder))}.[/red]")
+        sys.exit(BUILD_UNUSABLE_EXIT)
+    ok, detail = _chosen_backend_loads(backend)
+    if not ok:
+        console.print(f"[red]The {backend} runtime does not work here:[/red] "
+                      f"{escape(str(detail))}")
+        sys.exit(BUILD_UNUSABLE_EXIT)
+    console.print(f"[green]OK - the {backend} runtime works on this machine.[/green]")
 
 
 def _exit_vc_runtime_absent() -> None:
@@ -286,9 +387,10 @@ def _require_staging_context(backend: str, cuda_line: str, from_dir: Optional[st
 
 
 def _provision_staged_cuda(cuda_line: str, target: Path, lib_name: str,
-                           sha256: Optional[str]) -> None:
+                           sha256: Optional[str]) -> tuple:
     """Fetch the *cuda_line* CUDA build and runtime libraries into *target*
-    without testing that they load, and record that they were not tested.
+    without testing that they load, and record that they were not tested. Returns
+    the backend and build for the runtime history.
 
     Exits non-zero when the fetch fails or the archive holds no library; it never
     falls back to another backend."""
@@ -314,13 +416,16 @@ def _provision_staged_cuda(cuda_line: str, target: Path, lib_name: str,
     _sl._install_runtime_wheel(_sl._runtime_pkg_dir())
     _record_provisioned_backend(target, "cuda", build=used_tag)
     _record_backend_choice(target, None)
-    _record_runtime_history("cuda", used_tag)
     try:
         _sl.record_staged_cuda(target, cuda_line)
     except OSError as e:
         console.print(f"[red]Could not record the staged runtime in "
                       f"{escape(str(target))}:[/red] {escape(str(e))}")
         sys.exit(1)
+    return "cuda", used_tag
+
+
+def _say_staged_cuda(cuda_line: str, target: Path) -> None:
     console.print(f"[yellow]Staged the {cuda_line} CUDA runtime in {escape(str(target))}. It has NOT "
                   "been load-tested: a container started from this image tests it on "
                   "the GPU host before serving.[/yellow]")
@@ -482,7 +587,8 @@ def _provision_from_dir(from_dir: str, target: Path, lib_name: str) -> None:
                       f"Point --from at the build output containing {lib_name}. "
                       "The installed runtime was left as it was.")
         sys.exit(1)
-    console.print(f"[green]Copied {n} file(s)[/green] into {escape(str(target))}")
+    console.print(f"[green]Copied {n} file(s)[/green] into "
+                  f"{escape(str(_sl._repo_runtime_lib()))}")
     _sl._install_runtime_wheel(_sl._runtime_pkg_dir())
     loaded, detail = _sl._native_loads_ok()
     if loaded:
@@ -565,12 +671,15 @@ def _refuse_without_prebuilt(chosen: str) -> None:
 
 
 def _provision_release(backend: str, target: Path, sha256: Optional[str],
-                       assume_yes: bool, keep_choice: bool = False) -> None:
+                       assume_yes: bool, keep_choice: bool = False,
+                       only: bool = False) -> tuple:
     """Install *backend* from its release asset, with the CUDA dialogue, the
     load test and its fallbacks, then record the backend and build, and the
     user's choice when a different backend ended up installed. *keep_choice*
     never removes an existing choice record; it still records *backend* when
-    no record exists and a different backend ended up installed."""
+    no record exists and a different backend ended up installed. *only*: exits
+    instead of installing another backend (``_provision_with_fallback``). Returns the
+    backend and build for the runtime history."""
     requested = None if backend == "auto" else backend
     chosen = _sl._auto_backend() if backend == "auto" else backend
     _refuse_without_prebuilt(chosen)
@@ -610,12 +719,16 @@ def _provision_release(backend: str, target: Path, sha256: Optional[str],
             info, assume_yes, det, explicit=requested is not None, same_major_ok=keep_choice)
         if chosen != "cuda" and not_used_reason is None:
             requested = chosen
+        if only and chosen != "cuda":
+            _refuse_other_backend("cuda", not_used_reason or f"{chosen} was chosen instead",
+                                  BUILD_UNUSABLE_EXIT)
     _pin_note_for_backend(chosen)
     failure: list = []
     result, used_tag = _provision_with_fallback(chosen, target, sha256,
                                                 with_cudart, assume_yes,
                                                 cuda_line, failure=failure,
-                                                explicit=requested is not None)
+                                                explicit=requested is not None,
+                                                **({"only": True} if only else {}))
     if failure and not not_used_reason:
         not_used_reason = f"the {chosen} build could not be used here: {failure[0]}"
     # Record the build tag for EVERY backend now, not only amd-rocm. The old
@@ -632,15 +745,13 @@ def _provision_release(backend: str, target: Path, sha256: Optional[str],
     # _ROCM_BUILD with the SIMD CPU backend installed over it, else _ROCM_TAG.
     build = _sl.rocm_build(target) if result == "amd-rocm" else used_tag
     _record_provisioned_backend(target, result, build=build)
-    _record_runtime_history(result, build)
     if keep_choice and _read_backend_choice(target) is not None:
         if not_used_reason:
             console.print(f"[yellow]{result} installed:[/yellow] {escape(not_used_reason)}")
         _print_pending_choice(target)
-    elif keep_choice and requested == result:
-        return
-    else:
+    elif not (keep_choice and requested == result):
         _settle_backend_choice(target, requested, result, not_used_reason)
+    return result, build
 
 
 def _settle_backend_choice(target: Path, requested: Optional[str], result: str,

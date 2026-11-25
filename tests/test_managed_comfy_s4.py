@@ -451,137 +451,138 @@ def test_update_refuses_an_archive_of_another_commit(home, tmp_path, monkeypatch
     assert not (root / "VERSION").exists()
 
 
-def test_update_rollback_surfaces_failed_patch_reapply(home, tmp_path, monkeypatch):
-    """When a mid-update failure triggers rollback and the source IS restored
-    but the localm patch set cannot be re-applied on it, update must NOT report a
-    clean rollback: the failed re-apply is surfaced in the returned message.
-    Discarding the rollback's apply_patches outcomes would tell the user the prior
-    install was restored 'exactly as it was' while it was left UNPATCHED (the
-    __func__ fix gone, ACE-Step music broken)."""
-    from localm.media import managed_comfy_update as upd
+def test_a_patch_that_cannot_be_applied_changes_nothing(home, tmp_path, monkeypatch):
     from localm.media import comfy_patches as cp
-
-    _hub, repo, c1, _c2, c3 = _build_update_remote(tmp_path, monkeypatch)
-    root = _install_managed_from(repo, c1)
-
-    # The forward apply (call #1, at c3) is real and succeeds; the ROLLBACK re-apply
-    # (call #2, on the restored c1 source) simulates a patch that cannot be applied.
-    real_apply = cp.apply_patches
-    calls = {"n": 0}
-
-    def _fake_apply(managed_dir, patches=None):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return real_apply(managed_dir, patches)
-        return [cp.PatchOutcome(cp.FUNC_PATCH.name, cp.FAILED,
-                                "simulated re-apply failure")]
-
-    monkeypatch.setattr(upd, "apply_patches", _fake_apply)
-
-    # c3 deletes main.py -> the forward update reaches the not-installed check and rolls
-    # back to c1 (the rollback trigger is NOT a patch failure, isolating this leg).
-    result = upd.update_managed_comfy(
-        comfyui_repo=repo, target_commit=c3, reinstall_requirements=False)
-
-    assert not result.ok
-    assert calls["n"] == 2                    # forward apply + rollback re-apply both ran
-    assert source_archive.tree_commit(root) == c1  # the source WAS restored ...
-    assert (root / "main.py").is_file()
-    # ... but the FAILED patch re-apply is SURFACED, not hidden behind a clean rollback.
-    assert "could not be re-applied on the restored install" in result.message
-    assert "simulated re-apply failure" in result.message
-
-
-def _refuse_writes(monkeypatch, name, times=None):
-    """Make every copy onto the managed tree's file *name* fail (its write and
-    its restore), or only the first *times* of them; copies into the backup
-    folder still work. Returns the list of refused destinations."""
-    real = source_archive.shutil.copy2
-    refused = []
-
-    def flaky(src, dst, *a, **k):
-        if (os.path.basename(str(dst)) == name and "-backup-" not in str(dst)
-                and (times is None or len(refused) < times)):
-            refused.append(str(dst))
-            raise OSError(f"{name} is in use")
-        return real(src, dst, *a, **k)
-
-    monkeypatch.setattr(source_archive.shutil, "copy2", flaky)
-    return refused
-
-
-def test_update_reports_a_mixed_tree_when_a_file_cannot_be_put_back(home, tmp_path,
-                                                                    monkeypatch):
     from localm.media import managed_comfy_update as upd
 
     _hub, repo, c1, c2, _c3 = _build_update_remote(tmp_path, monkeypatch)
     root = _install_managed_from(repo, c1)
-    real_copy2 = source_archive.shutil.copy2
-    refused = _refuse_writes(monkeypatch, ".gitignore")
+    before = _tree_of(root)
+    monkeypatch.setattr(upd, "apply_patches", lambda d: [
+        cp.PatchOutcome(cp.FUNC_PATCH.name, cp.FAILED, "simulated failure")])
 
     result = upd.update_managed_comfy(
         comfyui_repo=repo, target_commit=c2, reinstall_requirements=False)
 
-    assert len(refused) == 3
-    assert not result.ok
-    assert ".gitignore is in use" in result.message
-    assert "ALSO failed" in result.message and "e.g. .gitignore" in result.message
-    assert "mixed state" in result.message
-    kept = [p for p in root.parent.iterdir() if "-backup-" in p.name]
-    assert len(kept) == 1 and str(kept[0]) in result.message
-    gitignore = "venv/\nmodels/\ncustom_nodes/\noutput/\n"
-    assert (kept[0] / ".gitignore").read_text(encoding="utf-8") == gitignore
-    assert not (root / ".gitignore").exists()
+    assert not result.ok and "simulated failure" in result.message
+    assert _tree_of(root) == before
 
-    monkeypatch.setattr(source_archive.shutil, "copy2", real_copy2)
+
+def _tree_of(root: Path) -> dict:
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in sorted(root.rglob("*"))
+            if p.is_file() and ".localm-update" not in p.parts}
+
+
+def _refuse_moves(monkeypatch, refused):
+    """Make every rename for which ``refused(src, dst)`` is true fail; returns the call
+    that allows them again."""
+    real = os.rename
+
+    def rename(src, dst):
+        if refused(str(src), str(dst)):
+            raise OSError(28, "No space left on device", str(dst))
+        return real(src, dst)
+    monkeypatch.setattr(os, "rename", rename)
+    return lambda: monkeypatch.setattr(os, "rename", real)
+
+
+def test_a_file_that_cannot_be_moved_in_puts_every_file_back(home, tmp_path, monkeypatch):
+    from localm.media import managed_comfy_update as upd
+
+    _hub, repo, c1, c2, _c3 = _build_update_remote(tmp_path, monkeypatch)
+    root = _install_managed_from(repo, c1)
+    before = _tree_of(root)
+    _refuse_moves(monkeypatch, lambda src, dst: dst.endswith("VERSION")
+                  and f"{os.sep}new{os.sep}" in src)
+
+    result = upd.update_managed_comfy(
+        comfyui_repo=repo, target_commit=c2, reinstall_requirements=False)
+
+    assert not result.ok and "No space left" in result.message
+    assert _tree_of(root) == before
+    assert mc.is_managed_comfy_installed()
+
+
+def test_files_that_cannot_be_put_back_are_put_back_by_the_next_update(home, tmp_path,
+                                                                      monkeypatch):
+    from localm.media import managed_comfy_update as upd
+
+    _hub, repo, c1, c2, _c3 = _build_update_remote(tmp_path, monkeypatch)
+    root = _install_managed_from(repo, c1)
+    before = _tree_of(root)
+    inside = os.path.realpath(root)
+    allow = _refuse_moves(monkeypatch, lambda src, dst: "VERSION" in dst or (
+        ".localm-update" in src and dst.endswith("gone_at_c2.py") and inside in dst))
+
+    result = upd.update_managed_comfy(
+        comfyui_repo=repo, target_commit=c2, reinstall_requirements=False)
+    assert not result.ok and "mixed state" in result.message
+    assert not (root / "gone_at_c2.py").exists()
+
+    allow()
+    assert mc.settle_managed_comfy() is None
+    assert _tree_of(root) == before
     again = upd.update_managed_comfy(
         comfyui_repo=repo, target_commit=c2, reinstall_requirements=False)
     assert again.ok, again.message
     assert source_archive.tree_commit(root) == c2
-    assert [p for p in root.parent.iterdir() if "-backup-" in p.name] == kept
-    assert (kept[0] / ".gitignore").read_text(encoding="utf-8") == gitignore
 
 
-def test_update_retries_a_restore_that_failed_once_and_rolls_back_cleanly(home, tmp_path,
-                                                                         monkeypatch):
+def test_an_update_whose_process_ended_is_undone_by_the_next_use(home, tmp_path, monkeypatch):
     from localm.media import managed_comfy_update as upd
+    from localm.update_mechanism import job, mover
 
     _hub, repo, c1, c2, _c3 = _build_update_remote(tmp_path, monkeypatch)
     root = _install_managed_from(repo, c1)
-    refused = _refuse_writes(monkeypatch, "main.py", times=2)
+    before = _tree_of(root)
 
-    result = upd.update_managed_comfy(
-        comfyui_repo=repo, target_commit=c2, reinstall_requirements=False)
+    class Ended(BaseException):
+        pass
 
-    assert len(refused) == 2
-    assert not result.ok
-    assert "main.py is in use" in result.message and "ALSO failed" not in result.message
-    assert (root / "main.py").read_text(encoding="utf-8") == "print('comfy')\n"
-    assert source_archive.tree_commit(root) == c1
+    def end(*_a, **_k):
+        raise Ended
+    with monkeypatch.context() as ending:
+        ending.setattr(job, "restore", end)
+        ending.setattr(mover, "back", end)
+        ending.setattr(mover, "_back", end)
+        _refuse_moves(ending, lambda src, dst: "VERSION" in dst and end())
+        with pytest.raises(Ended):
+            upd.update_managed_comfy(
+                comfyui_repo=repo, target_commit=c2, reinstall_requirements=False)
+    assert _tree_of(root) != before
     assert mc.is_managed_comfy_installed()
-    assert [p.name for p in root.parent.iterdir() if "-backup-" in p.name] == []
+    assert _tree_of(root) == before
 
 
-def test_a_custom_node_backup_that_is_kept_stays_out_of_custom_nodes(home, tmp_path, monkeypatch):
+def test_a_custom_node_is_prepared_outside_custom_nodes(home, tmp_path, monkeypatch):
+    from localm.media import managed_comfy_fresh as fresh
     from localm.media import managed_comfy_update as upd
 
-    hub = FakeGitHub(tmp_path / "hub").install(monkeypatch)
-    repo, c1 = hub.add("o", "Node", {"__init__.py": "old\n"})
-    _, c2 = hub.add("o", "Node", {"__init__.py": "new\n"})
-    root = tmp_path / "comfyui"
+    hub, repo, c1, c2, _c3 = _build_update_remote(tmp_path, monkeypatch)
+    root = _install_managed_from(repo, c1)
+    node_repo, n1 = hub.add("o", "Node", {"__init__.py": "old\n", "dropped.py": "x\n"})
+    _, n2 = hub.add("o", "Node", {"__init__.py": "new\n"})
     node = root / "custom_nodes" / "Node"
-    node.parent.mkdir(parents=True)
-    source_archive.fetch_tree(repo, c1, node)
-    refused = _refuse_writes(monkeypatch, "__init__.py")
+    node.parent.mkdir(exist_ok=True)
+    source_archive.fetch_tree(node_repo, n1, node)
+    (node / "mine.json").write_text("settings", encoding="utf-8")
+    pin = fresh.CustomNodePin(name="Node", repo=node_repo, commit=n2,
+                              **{k: getattr(fresh._GGUF_NODE, k)
+                                 for k in fresh._GGUF_NODE.__dataclass_fields__
+                                 if k not in ("name", "repo", "commit")})
+    monkeypatch.setattr(fresh, "required_custom_nodes",
+                        lambda *a: type("Required", (), {"nodes": [pin]})())
+    from localm.media import managed_comfy_packages
+    monkeypatch.setattr(managed_comfy_packages, "prepare", lambda *a, **k: False)
 
-    changes = []
-    ok, detail, _ = upd._replace_source(node, repo, c2, changes, None)
+    result = upd.update_managed_comfy(
+        comfyui_repo=repo, target_commit=c2, reinstall_requirements=True)
 
-    assert refused and not ok and "__init__.py is in use" in detail
-    assert [p.name for p in (root / "custom_nodes").iterdir()] == ["Node"]
-    kept = [p for p in root.iterdir() if "-backup-" in p.name]
-    assert len(kept) == 1 and changes[0].rollback() == ["__init__.py"]
-    assert (kept[0] / "__init__.py").read_text(encoding="utf-8") == "old\n"
+    assert result.ok, result.message
+    assert sorted(p.name for p in node.iterdir()) == [
+        source_archive.SOURCE_RECORD, "__init__.py", "mine.json"]
+    assert (node / "__init__.py").read_text(encoding="utf-8") == "new\n"
+    assert [p.name for p in node.parent.iterdir()] == ["Node"]
 
 
 def test_update_and_remove_work_on_a_tree_past_the_path_limit(home, tmp_path, monkeypatch,

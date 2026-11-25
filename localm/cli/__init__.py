@@ -61,6 +61,7 @@ from . import (  # noqa: F401
     browser as _browser,
     rerank as _rerank,
     speak as _speak,
+    update_steps as _update_steps,
 )
 
 # Commands added to groups after their registration get the help options too.

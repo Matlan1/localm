@@ -3,6 +3,10 @@
 before it touches the installed runtime, so a failed download (offline, a bad
 archive) leaves the working runtime in place."""
 
+import os
+import subprocess
+import sys
+
 import pytest
 
 import localm.setup_llama as sl
@@ -96,53 +100,142 @@ def _fill_with(content):
     return fill
 
 
-def test_a_build_that_does_not_load_is_replaced_by_the_one_before(tmp_path):
+def _put(target, content=b"new working build", into=None):
+    """What setup-llama does with a build: provision it aside, then put it in place."""
+    with sl.staged_runtime(target, into) as staged:
+        sl._replace_target(staged, _fill_with(content))
+        if into is None:
+            sl.put_in_place(target, staged)
+
+
+def test_a_build_that_does_not_load_changes_nothing(tmp_path):
     target = tmp_path / "lib"
     before = _installed(target)
-    failures = []
     with pytest.raises(SystemExit) as exc:
-        with sl.keep_previous_runtime(target, on_failure=lambda: failures.append(1)):
-            sl._replace_target(target, _fill_with(b"new build that does not load"))
-            sl._replace_target(target, _fill_with(b"fallback that does not load either"))
+        with sl.staged_runtime(target) as staged:
+            sl._replace_target(staged, _fill_with(b"new build that does not load"))
+            sl._replace_target(staged, _fill_with(b"fallback that does not load either"))
             sl.sys.exit(1)
     assert exc.value.code == 1
     assert _snapshot(target) == before
-    assert failures == [1]
-    assert not sl._backup_path(target).exists()
+    assert [p.name for p in tmp_path.iterdir()] == ["lib"]
 
 
-def test_a_build_that_loads_is_kept_and_the_old_one_deleted(tmp_path):
+def test_a_build_that_loads_replaces_the_old_one_whole(tmp_path):
     target = tmp_path / "lib"
     _installed(target)
-    failures = []
-    with sl.keep_previous_runtime(target, on_failure=lambda: failures.append(1)):
-        sl._replace_target(target, _fill_with(b"new working build"))
+    _put(target)
     assert (target / sl._lib_name()).read_bytes() == b"new working build"
     assert (target / ".localm-backend").read_text(encoding="utf-8") == "vulkan b99999"
     assert not (target / "ggml-base.dll").exists()
-    assert failures == []
-    assert not sl._backup_path(target).exists()
+    assert (target / ".gitkeep").exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == [".localm-update", "lib"]
+    assert [p.name for p in (tmp_path / ".localm-update").iterdir()] == ["lock"]
 
 
-def test_an_exception_restores_the_runtime_too(tmp_path):
+def test_the_build_aside_is_the_one_that_is_tested(tmp_path, monkeypatch):
+    target = tmp_path / "lib"
+    _installed(target)
+    monkeypatch.setenv("LLAMA_CPP_LIB", "the user's")
+    seen = []
+    with sl.staged_runtime(target) as staged:
+        seen.append(os.environ["LLAMA_CPP_LIB"])
+    assert seen == [str(staged / sl._lib_name())]
+    assert os.environ["LLAMA_CPP_LIB"] == "the user's"
+
+
+def test_the_users_choice_goes_with_the_new_build(tmp_path):
+    target = tmp_path / "lib"
+    _installed(target)
+    sl._record_backend_choice(target, "cuda", "no driver")
+    _put(target)
+    assert sl._read_backend_choice(target)["requested"] == "cuda"
+    with sl.staged_runtime(target) as staged:
+        assert sl._read_backend_choice(staged)["requested"] == "cuda"
+        sl._record_backend_choice(staged, None)
+        sl._replace_target(staged, _fill_with(b"another"))
+        sl.put_in_place(target, staged)
+    assert sl._read_backend_choice(target) is None
+
+
+def test_a_build_for_an_update_stays_aside(tmp_path):
+    target, into = tmp_path / "lib", tmp_path / "aside"
+    before = _installed(target)
+    _put(target, into=into)
+    assert _snapshot(target) == before
+    assert (into / sl._lib_name()).read_bytes() == b"new working build"
+
+
+def test_a_runtime_in_use_is_refused_before_anything_changes(tmp_path, monkeypatch):
     target = tmp_path / "lib"
     before = _installed(target)
-    with pytest.raises(RuntimeError):
-        with sl.keep_previous_runtime(target):
-            sl._replace_target(target, _fill_with(b"new"))
-            raise RuntimeError("load test crashed")
+    monkeypatch.setattr(sl, "_files_in_use",
+                        lambda t: [target / sl._lib_name()] if t.name == target.name else [])
+    with pytest.raises(sl.RuntimeInUseError):
+        _put(target)
     assert _snapshot(target) == before
 
 
-def test_a_failure_before_any_replace_still_calls_on_failure(tmp_path):
+_KILLED = """
+import os, sys
+from pathlib import Path
+from localm.update_mechanism import disk, steps
+count, at = 0, int(sys.argv[2])
+real = os.rename
+def rename(*args):
+    global count
+    if count == at:
+        os._exit(9)
+    count += 1
+    return real(*args)
+from localm import setup_llama as sl
+target = Path(sys.argv[1])
+staged = target.with_name("lib.incoming")
+staged.mkdir()
+for name in (sl._lib_name(), "ggml-base.dll", "new.dll", ".localm-backend"):
+    (staged / name).write_bytes(b"new " + name.encode())
+os.rename = rename
+sl.put_in_place(target, staged)
+"""
+
+
+def test_a_setup_killed_while_it_replaces_the_runtime_is_undone_by_the_next_use(tmp_path):
+    states = []
+    for at in range(40):
+        target = tmp_path / str(at) / "lib"
+        target.parent.mkdir()
+        before = _installed(target)
+        done = subprocess.run([sys.executable, "-c", _KILLED, str(target), str(at)],
+                              capture_output=True, text=True, timeout=120,
+                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if done.returncode == 0:
+            states.append("done")
+            break
+        assert done.returncode == 9, done.stderr
+        assert sl.settle_runtime(target) is None
+        assert _snapshot(target) == before, at
+        states.append("old")
+    assert states[-1] == "done" and len(states) > 6
+
+
+def test_a_runtime_that_cannot_be_put_back_is_installed_again(tmp_path):
+    from localm.update_mechanism import disk, job, mover, steps
     target = tmp_path / "lib"
-    before = _installed(target)
-    failures = []
-    with pytest.raises(SystemExit):
-        with sl.keep_previous_runtime(target, on_failure=lambda: failures.append(1)):
-            sl.sys.exit(1)
-    assert _snapshot(target) == before
-    assert failures == [1]
+    _installed(target)
+    place = steps.Place(tmp_path, "ab" * 16)
+    (place.new(mover.WHOLE) / "lib").mkdir()
+    (place.new(mover.WHOLE) / "lib" / sl._lib_name()).write_bytes(b"half")
+    with job.Lock(tmp_path) as lock:
+        job.start(lock, place.id, old="1", new="2")
+        job.advance(lock, job.MOVING)
+        job.advance(lock, job.STEPS)
+        steps.move_in(tmp_path, place.id, mover.WHOLE)
+    assert disk.remove_tree(mover.area(tmp_path, place.id, mover.WHOLE, 1).old)
+    assert "is lost" in (sl.settle_runtime(target) or "")
+    assert sl.cli._settle(target) is True
+    _put(target)
+    assert (target / sl._lib_name()).read_bytes() == b"new working build"
+    assert sl.settle_runtime(target) is None and sl.cli._settle(target) is False
 
 
 def test_a_failed_provision_puts_the_pin_back(monkeypatch):

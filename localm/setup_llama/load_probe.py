@@ -111,6 +111,9 @@ _PROBE_NO_BACKENDS = 88
 _PROBE_ABI_MISMATCH = 89
 
 
+_PROBE_MODEL_FAILED = 91
+
+
 # The prefix _native_loads_ok puts on an ABI rejection. A string WE own on both
 # ends - written here, matched by _is_abi_rejection - so it cannot drift with
 # anyone else's message. Not a substring search over a traceback.
@@ -120,6 +123,8 @@ _ABI_REJECT_PREFIX = "the runtime does not match this build's struct layout"
 # load_lib() runs verify_abi and RE-RAISES (see _loader.py: `except Exception:
 # _loaded_lib = None; raise`), so AbiMismatch propagates out uncaught and can be
 # caught here. Verified by reading that call site, not assumed.
+# argv: a model file (``tiny_model``) to load, on the GPU where there is one, and to
+# decode two tokens with.
 _LOAD_PROBE_CODE = f"""\
 import sys
 from localm.inference.backends.llamacpp import _loader
@@ -129,8 +134,21 @@ try:
 except AbiMismatch as e:
     sys.stderr.write(str(e))
     sys.exit({_PROBE_ABI_MISMATCH})
-sys.exit(0 if _loader.compute_backends_available() else {_PROBE_NO_BACKENDS})
+if not _loader.compute_backends_available():
+    sys.exit({_PROBE_NO_BACKENDS})
+try:
+    from localm.inference.backends.llamacpp.llama import LlamaCpp
+    model = LlamaCpp(sys.argv[1], n_ctx=64, n_gpu_layers=99)
+    for _ in model._generate([1, 10, 11], 2, 0.0, 1, 1.0, 1.0):
+        pass
+    model.close()
+except Exception as e:
+    sys.stderr.write(type(e).__name__ + ": " + str(e).split(chr(10))[0])
+    sys.exit({_PROBE_MODEL_FAILED})
 """
+
+# Seconds the load test may take (a GPU backend may compile its shaders in it).
+_LOAD_PROBE_LIMIT_S = 300
 
 
 _PROBE_NO_GPU_DEVICE = 90
@@ -188,7 +206,8 @@ def _is_abi_rejection(detail: Optional[str]) -> bool:
 
 def _native_loads_ok(env: Optional[dict] = None) -> tuple:
     """Load-test the provisioned native library in a FRESH interpreter, exactly
-    as ``localm run`` will, AND confirm it registered a compute backend. A build
+    as ``localm run`` will, AND confirm it registered a compute backend and loads and
+    runs a tiny model. A build
     can load cleanly yet register ZERO backends ("no backends are loaded"), which
     must count as a FAILED provision, not a silent success - otherwise
     _provision_with_fallback's "prove it loads" guarantee holds only for
@@ -197,10 +216,15 @@ def _native_loads_ok(env: Optional[dict] = None) -> tuple:
     setup process clean (the loader mutates the DLL/lib search path) and matches
     the real run environment. *env* is the child's environment (default this
     process's). Returns (ok, last_error_line)."""
+    import tempfile
+    from pathlib import Path
+    from localm.setup_llama import tiny_model
     try:
-        r = subprocess.run([sys.executable, "-c", _LOAD_PROBE_CODE],
-                           capture_output=True, text=True, timeout=120, env=env,
-                           creationflags=_NO_WINDOW)
+        with tempfile.TemporaryDirectory(prefix="localm-runtime-check-") as tmp:
+            model = tiny_model.write(Path(tmp) / "check.gguf")
+            r = subprocess.run([sys.executable, "-c", _LOAD_PROBE_CODE, str(model)],
+                               capture_output=True, text=True, timeout=_LOAD_PROBE_LIMIT_S,
+                               env=env, creationflags=_NO_WINDOW)
     except Exception as e:
         return False, str(e)
     if r.returncode == 0:
@@ -208,12 +232,17 @@ def _native_loads_ok(env: Optional[dict] = None) -> tuple:
     if r.returncode == _PROBE_NO_BACKENDS:
         return False, ('runtime loaded but registered no compute backends '
                        '("no backends are loaded") - this build does not fit this machine')
+    if r.returncode == _PROBE_MODEL_FAILED:
+        why = _informative_error_line((r.stderr or "").strip())
+        return False, f"the runtime loaded but could not run a model: {why}"
     if r.returncode == _PROBE_ABI_MISMATCH:
         # Kept behind its own prefix so callers can recognise this specific
         # outcome without re-parsing upstream's wording - see _is_abi_rejection.
         why = _informative_error_line((r.stderr or "").strip()) or "layout drift"
         return False, f"{_ABI_REJECT_PREFIX}: {why}"
     detail = (r.stderr or r.stdout or "").strip()
+    if not detail and r.returncode:
+        return False, f"the load test ended with exit code {r.returncode:#x}"
     return False, _informative_error_line(detail)
 
 

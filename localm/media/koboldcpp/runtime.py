@@ -397,7 +397,8 @@ def install(build: str, *, force: bool = False,
             on_progress: Optional[Progress] = None,
             cancel_check: Optional[Callable[[], bool]] = None,
             unpack: Optional[Callable[[Path, Path, Path], None]] = None,
-            version_of: Optional[Callable[[Path], str]] = None) -> Runtime:
+            version_of: Optional[Callable[[Path], str]] = None,
+            into: Optional[Path] = None) -> Runtime:
     """Download, verify, unpack and check the runtime for *build*.
 
     Network access goes through ``netpolicy`` as an explicit download, every
@@ -406,15 +407,18 @@ def install(build: str, *, force: bool = False,
     processes; one that finds the runtime installed by the holder before it
     returns that. *cancel_check* is polled during the download and the unpack
     (raising :class:`InstallCancelled`). *unpack* and *version_of* replace the
-    real subprocess steps (tests only). An installed runtime of the same build
-    stays in place until the new one can be moved in. Every progress message,
-    and the failure, is also written to the debug log."""
+    real subprocess steps (tests only). The checked runtime is moved in under a
+    record (``update_mechanism.steps``); an installed one of the same build stays,
+    also when this fails or this process ends. With *into* (a folder on the volume
+    of :func:`runtimes_root`) it is left there as ``<tag>-<build>`` and nothing of the
+    installed ones changes. Every progress message, and the failure, is also written
+    to the debug log."""
     from localm.debuglog import logger
     from localm.media.runtime_files import logged
     say = logged(on_progress, "koboldcpp runtime")
     try:
         return _install(build, force=force, say=say, cancel_check=cancel_check,
-                        unpack=unpack, version_of=version_of)
+                        unpack=unpack, version_of=version_of, into=into)
     except InstallCancelled:
         logger.info("koboldcpp runtime: installing the %s build was cancelled", build)
         raise
@@ -426,24 +430,27 @@ def install(build: str, *, force: bool = False,
 def _install(build: str, *, force: bool, say: Progress,
              cancel_check: Optional[Callable[[], bool]],
              unpack: Optional[Callable[[Path, Path, Path], None]],
-             version_of: Optional[Callable[[Path], str]]) -> Runtime:
+             version_of: Optional[Callable[[Path], str]],
+             into: Optional[Path] = None) -> Runtime:
     plat = platform_key()
     if plat is None or (plat, build) not in pins.ASSETS:
         raise ProvisionError(
             f"KoboldCpp publishes no '{build}' build for this platform "
             f"(available: {', '.join(available_builds(plat)) or 'none'}).")
-    if not force:
+    if into is None:
+        from localm.media.runtime_files import settle_runtimes
+        force = settle_runtimes(runtimes_root(), ProvisionError) or force
+    if not force and into is None:
         rt = installed(build)
         if rt is not None:
             return rt
     from localm import netpolicy
-    from localm.folder_swap import ReplaceError, replace_dir
-    from localm.media.runtime_files import refused_download_message
+    from localm.media.runtime_files import put_runtime, refused_download_message
     name, size, sha = pins.ASSETS[(plat, build)]
     root = runtimes_root()
     dest = runtime_dir(build)
     with _install_lock(build, say, cancel_check):
-        if not force:
+        if not force and into is None:
             rt = installed(build)
             if rt is not None:
                 return rt
@@ -474,11 +481,11 @@ def _install(build: str, *, force: bool, say: Progress,
             (staging / MARKER).write_text(json.dumps(
                 {"tag": pins.TAG, "version": pins.VERSION, "build": build, "asset": name,
                  "sha256": sha}, indent=2), encoding="utf-8")
-            try:
-                replace_dir(staging, dest)
-            except ReplaceError as e:
-                raise ProvisionError(
-                    f"{e}; stop any music generation that is using it and retry") from e
+            put_runtime(into if into is not None else root, dest.name, staging,
+                        record=into is None, error=ProvisionError,
+                        busy="stop any music generation that is using it and retry")
+            if into is not None:
+                dest = Path(into) / dest.name
     say(f"Native music runtime ready (KoboldCpp {pins.VERSION}, {build} build)")
     return Runtime(build=build, path=dest, launcher=dest / launcher_name())
 

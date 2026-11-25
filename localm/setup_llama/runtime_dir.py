@@ -570,7 +570,6 @@ def _replace_target(target: Path, fill):
     try:
         result = fill(staging)
         _sl._bundle_missing_native_deps(staging)
-        _move_into_backup(target)
         _sl._clear_target_or_refuse(target)
         target.mkdir(parents=True, exist_ok=True)
         for entry in sorted(staging.iterdir()):
@@ -583,109 +582,84 @@ def _replace_target(target: Path, fill):
     return result
 
 
-_ACTIVE_BACKUPS: dict = {}
-
-
-def _backup_path(target: Path) -> Path:
-    """Where :func:`keep_previous_runtime` holds the replaced runtime: a sibling
-    ``<target>.previous``, on the same volume so moving it is a rename."""
-    return target.parent / (target.name + ".previous")
-
-
-def _clearable_entries(target: Path) -> list[Path]:
-    """The entries of *target* that :func:`_clear_target` removes: files other
-    than _KEPT_ON_CLEAR, and the _BLAS_LIBRARY_DIRS subdirectories."""
-    out: list[Path] = []
-    for f in sorted(target.iterdir()):
-        if ((f.is_file() and f.name not in _KEPT_ON_CLEAR)
-                or (f.is_dir() and f.name in _BLAS_LIBRARY_DIRS)):
-            out.append(f)
-    return out
-
-
-def _move_into_backup(target: Path) -> None:
-    """When :func:`keep_previous_runtime` is active for *target* and nothing has
-    been kept yet, move the installed runtime into its backup folder. A file that
-    cannot be moved (in use) moves everything already moved back and raises
-    RuntimeInUseError with *target* as it was. No-op otherwise."""
-    state = _ACTIVE_BACKUPS.get(str(target))
-    if state is None or state["filled"] or not target.is_dir():
-        return
-    backup = state["dir"]
-    moved: list[tuple[Path, Path]] = []
-    for entry in _clearable_entries(target):
-        dest = backup / entry.name
-        try:
-            os.replace(entry, dest)
-        except OSError as e:
-            for src, dst in reversed(moved):
-                os.replace(dst, src)
-            raise RuntimeInUseError([entry], partial=False) from e
-        moved.append((entry, dest))
-    state["filled"] = True
-
-
-def _restore_backup(target: Path, backup: Path) -> bool:
-    """Clear *target* and move the kept runtime in *backup* back into it.
-    Returns False when a file could not be removed or moved back."""
-    if target.is_dir() and _locked_after_stopping_own_probes(
-            target, lambda: _sl._clear_target(target)):
-        return False
-    target.mkdir(parents=True, exist_ok=True)
-    ok = True
-    for entry in sorted(backup.iterdir()):
-        dest = target / entry.name
-        try:
-            if dest.is_dir() and entry.is_dir():
-                shutil.rmtree(dest)
-            os.replace(entry, dest)
-        except OSError as e:
-            logger.warning("could not restore %s into %s: %s", entry, target, e)
-            ok = False
-    return ok
-
-
 @contextlib.contextmanager
-def keep_previous_runtime(target: Path, on_failure=None):
-    """Keep the runtime that a provision inside this block replaces, and put it
-    back when the block fails.
-
-    The first :func:`_replace_target` on *target* inside the block moves the
-    installed files (the backend marker included) into ``<target>.previous``
-    instead of deleting them. When the block raises, or exits through
-    ``sys.exit`` with a non-zero code, the new files are cleared, the kept ones
-    are moved back and *on_failure* is called (also when nothing was replaced).
-    On success the kept runtime is deleted. When the restore itself fails, the
-    kept files stay in ``<target>.previous`` and the console says where. The
-    caller must hold the provisioning lock."""
-    backup = _backup_path(target)
-    if backup.exists():
-        shutil.rmtree(backup)
-    backup.mkdir(parents=True)
-    state = {"dir": backup, "filled": False}
-    _ACTIVE_BACKUPS[str(target)] = state
-    failed = True
+def staged_runtime(live: Path, into: Optional[Path] = None):
+    """Provision into a folder of its own, with the runtime in *live* in use: yields
+    that folder, *into* or ``<live>.incoming``, and makes this process and its children
+    load the runtime in it (``LLAMA_CPP_LIB``). It starts empty but for the user's
+    backend choice of *live* and is removed at the end; *into* stays when the block
+    succeeds. The caller must hold the provisioning lock of *live*."""
+    folder = (Path(into) if into is not None
+              else _staging_path(Path(os.path.realpath(live))))
+    if folder.exists():
+        shutil.rmtree(folder)
+    folder.mkdir(parents=True)
+    choice = live / _CHOICE_MARKER
+    if choice.is_file():
+        shutil.copy2(choice, folder / _CHOICE_MARKER)
+    before = os.environ.get("LLAMA_CPP_LIB")
+    os.environ["LLAMA_CPP_LIB"] = str(folder / _sl._lib_name())
+    done = False
     try:
-        yield
-        failed = False
+        yield folder
+        done = True
     except SystemExit as e:
-        failed = e.code not in (0, None)
+        done = e.code in (0, None)
         raise
     finally:
-        _ACTIVE_BACKUPS.pop(str(target), None)
-        restored = True
-        if failed and state["filled"]:
-            restored = _restore_backup(target, backup)
-            if restored:
-                console.print("[yellow]The new build was not kept; the runtime that "
-                              "was installed before is back in place.[/yellow]")
-            else:
-                console.print(f"[red]The runtime that was installed before could not "
-                              f"be fully restored.[/red] Its files are in {backup}")
-        if failed and on_failure is not None:
-            on_failure()
-        if restored:
-            shutil.rmtree(backup, ignore_errors=True)
+        if before is None:
+            os.environ.pop("LLAMA_CPP_LIB", None)
+        else:
+            os.environ["LLAMA_CPP_LIB"] = before
+        if folder.exists() and not (done and into is not None):
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+def refuse_runtime_in_use(live: Path) -> None:
+    """Raise RuntimeInUseError when the runtime in *live* cannot be replaced now; this
+    install's own runtime probe daemon is stopped and is no reason."""
+    in_use = _locked_after_stopping_own_probes(live, lambda: _sl._files_in_use(live))
+    if in_use:
+        raise RuntimeInUseError(in_use, partial=False)
+
+
+def _files_to_replace(live: Path) -> list[Path]:
+    """The files of the runtime in *live* a new one replaces: :func:`_clearable_files`
+    and the choice record."""
+    choice = live / _CHOICE_MARKER
+    return _clearable_files(live) + ([choice] if choice.is_file() else [])
+
+
+def put_in_place(live: Path, staged: Path) -> None:
+    """Make the runtime provisioned in the folder *staged* the one in *live*, with the
+    files moved under a record (``update_mechanism.steps``): when it fails, or this
+    process ends at any moment, the runtime that was there is complete again (after
+    :func:`settle_runtime`, in the second case). *staged* is on the volume of *live*
+    and is gone afterwards. Raises RuntimeInUseError before anything changes, and
+    ``steps.Failed``."""
+    from localm.update_mechanism import disk, mover, steps
+    live = Path(os.path.realpath(live))
+    live.mkdir(parents=True, exist_ok=True)
+    _sl.refuse_runtime_in_use(live)
+    removed = [f"{live.name}/{f.relative_to(live).as_posix()}" for f in _files_to_replace(live)]
+    with steps.Work(live.parent) as work:
+        disk.move(Path(staged), work.new(mover.WHOLE) / live.name, disk.Wait())
+        steps.change(work, [lambda: steps.move_in(live.parent, work.id, mover.WHOLE,
+                                                  remove=removed)], whole=True)
+
+
+def settle_runtime(live: Path) -> Optional[str]:
+    """Put back the runtime in *live* when a process that was replacing it ended, or
+    wait while one moves its files. Returns None, or why the runtime may be
+    incomplete. Never raises."""
+    from localm.update_mechanism import steps
+    try:
+        result = steps.settle(Path(os.path.realpath(live)).parent)
+    except Exception as e:
+        return str(e)
+    if result is None or (result.state != "busy" and not result.errors):
+        return None
+    return "; ".join(result.errors) or "its files are being replaced"
 
 
 def _exit_runtime_in_use(e: RuntimeInUseError) -> None:

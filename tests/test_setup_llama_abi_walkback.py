@@ -62,7 +62,12 @@ def _flat(capsys) -> str:
 #  The probe: an ABI rejection is told apart STRUCTURALLY, not by text          #
 # --------------------------------------------------------------------------- #
 
-def _stub_localm_tree(root: Path, loader_body: str) -> None:
+_LLAMA = ("class LlamaCpp:\n    def __init__(self, *_a, **_kw):\n        pass\n"
+          "    def _generate(self, *_a):\n        return iter([1])\n"
+          "    def close(self):\n        pass\n")
+
+
+def _stub_localm_tree(root: Path, loader_body: str, llama_body: str = _LLAMA) -> None:
     """A minimal importable `localm.inference.backends.llamacpp` whose load_lib
     does whatever *loader_body* says. Lets the REAL probe string run in a REAL
     subprocess against a controlled failure."""
@@ -74,12 +79,13 @@ def _stub_localm_tree(root: Path, loader_body: str) -> None:
     (pkg / "_abi.py").write_text(
         "class AbiMismatch(Exception):\n    pass\n", encoding="utf-8")
     (pkg / "_loader.py").write_text(loader_body, encoding="utf-8")
+    (pkg / "llama.py").write_text(llama_body, encoding="utf-8")
 
 
 def _run_probe(root: Path):
     """Run the ACTUAL probe string the installer uses. `python -c` puts cwd on
     sys.path, so the stub tree above shadows the real package."""
-    return subprocess.run([sys.executable, "-c", sl._LOAD_PROBE_CODE],
+    return subprocess.run([sys.executable, "-c", sl._LOAD_PROBE_CODE, "a model"],
                           cwd=str(root), capture_output=True, text=True, timeout=60)
 
 
@@ -106,6 +112,17 @@ def test_probe_exits_zero_on_a_healthy_load(tmp_path):
         "def load_lib():\n    return object()\n"
         "def compute_backends_available():\n    return True\n"))
     assert _run_probe(tmp_path).returncode == 0
+
+
+def test_probe_exits_the_model_code_when_a_model_does_not_run(tmp_path):
+    _stub_localm_tree(tmp_path, (
+        "def load_lib():\n    return object()\n"
+        "def compute_backends_available():\n    return True\n"),
+        "class LlamaCpp:\n    def __init__(self, path, **_kw):\n"
+        "        raise RuntimeError('cannot load ' + path + chr(10) + 'more')\n")
+    r = _run_probe(tmp_path)
+    assert r.returncode == sl._PROBE_MODEL_FAILED
+    assert r.stderr == "RuntimeError: cannot load a model"
 
 
 def test_probe_exits_no_backends_code_when_nothing_registers(tmp_path):

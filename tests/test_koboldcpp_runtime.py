@@ -71,8 +71,8 @@ def test_install_verifies_unpacks_and_marks(fake_release):
     assert meta == {"tag": pins.TAG, "version": pins.VERSION, "build": "nocuda",
                     "asset": "fake-nocuda.exe", "sha256": SHA}
     assert runtime.installed("nocuda") is not None
-    leftovers = [p.name for p in runtime.runtimes_root().iterdir()]
-    assert leftovers == [rt.path.name]
+    leftovers = sorted(p.name for p in runtime.runtimes_root().iterdir())
+    assert leftovers == [".localm-update", rt.path.name]
 
 
 def test_an_installed_runtime_is_not_downloaded_again(fake_release):

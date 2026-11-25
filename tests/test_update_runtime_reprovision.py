@@ -1002,14 +1002,17 @@ def test_the_load_check_loads_this_installs_library_through_the_probe(tmp_path):
     sl = SimpleNamespace(
         _lib_name=lambda: "llama.lib-under-test",
         _native_gpu_loads_ok=lambda env=None: seen.update(gpu=env["LLAMA_CPP_LIB"]) or (True, ""),
-        _native_loads_ok=lambda env=None: seen.update(cpu=env["LLAMA_CPP_LIB"]) or (False, "no"))
+        _native_loads_ok=lambda env=None: seen.update(cpu=env["LLAMA_CPP_LIB"]) or loads[0])
+    loads = [(True, "")]
     lib = tmp_path / "lib"
     lib.mkdir()
     ok, why = updater_runtime._runtime_loads(lib, "cuda", sl)
     assert ok is False and "llama.lib-under-test is missing" in why and seen == {}
     (lib / "llama.lib-under-test").write_bytes(b"x")
     assert updater_runtime._runtime_loads(lib, "cuda", sl) == (True, "")
+    loads[0] = (False, "no")
     assert updater_runtime._runtime_loads(lib, "cpu", sl) == (False, "no")
+    assert updater_runtime._runtime_loads(lib, "cuda", sl) == (False, "no")
     library = str(lib / "llama.lib-under-test")
     assert seen == {"gpu": library, "cpu": library}
 
