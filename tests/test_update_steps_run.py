@@ -441,9 +441,8 @@ def test_a_child_of_an_update_converts_nothing_in_the_data_folder(tmp_path, monk
             "print(load_config()['gui_proxy_remote_images'])")
     for update_id, stays in ((ID, True), ("", False)):
         env = steps_update.child_env(os.environ, um.REPO, home, update_id)
-        (status, last), said = None, None
-        said = []
-        status, last = steps_update.run_child([sys.executable, "-c", code], cwd=tmp_path, env=env,
+        said: list = []
+        status, _last = steps_update.run_child([sys.executable, "-c", code], cwd=tmp_path, env=env,
                                               say=said.append)
         assert status == 0 and "on" in said
         assert ((home / "config.json").read_text(encoding="utf-8") == text) is stays

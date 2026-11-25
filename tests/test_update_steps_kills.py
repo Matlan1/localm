@@ -32,9 +32,16 @@ UV = "uv.exe" if NT else "uv"
 _OURS = {".localm-update", ".localm-old", ".localm-kept", "lib.incoming", ".lock", "__pycache__"}
 
 
+LINKED = "data/comfyui/nodes"
+
+
 def tree(top: Path) -> dict:
-    """The files and links below *top*, without those of the mechanism itself."""
-    return {rel: what for rel, what in um.tree(top, skip=()).items()
+    """The files and links below *top*, also in :class:`Linked`'s folder, without those
+    of the mechanism itself."""
+    found = um.tree(top, skip=())
+    if (top / LINKED).exists():
+        found |= {f"{LINKED}/{rel}": what for rel, what in um.tree(top / "theirs").items()}
+    return {rel: what for rel, what in found.items()
             if not _OURS & set(rel.split("/")) and what != ("folder",)}
 
 
@@ -154,6 +161,26 @@ class Comfyui(Step):
         self.part_spec(top, steps_update.COMFYUI, removed=self.remove, packages=self.packages)
 
 
+class Linked(Step):
+    """A folder of the managed ComfyUI that is a link to one of the user's."""
+
+    def build(self, top: Path) -> None:
+        self.root, self.part, self.whole = "root", "data/comfyui", False
+        um.write(top, {"root/VERSION": "1", f"{self.part}/main.py": "same",
+                       "theirs/mine.txt": "the user's"})
+        _venv(top / self.part / "venv")
+        self.old(top / "theirs")
+        if NT:
+            import _winapi
+            _winapi.CreateJunction(str(top / "theirs"), str(top / LINKED))
+        else:
+            os.symlink(top / "theirs", top / LINKED)
+        self.new(steps.Place(self.own(top), ID).new(mover.TREE) / "nodes")
+        self.remove = ["nodes/removed"]
+        self.kinds = {**self.kinds_in(LINKED), "own": "theirs/mine.txt"}
+        self.part_spec(top, steps_update.COMFYUI, removed=self.remove, packages=False)
+
+
 class Uv(Step):
     def build(self, top: Path) -> None:
         self.root = self.part = "root"
@@ -209,7 +236,7 @@ def _staged_packages(root: Path, step: str, venv: str) -> dict:
 
 STEPS = {"runtime": (Runtime, "runtime"), "sdcpp": (Folders, "sdcpp"),
          "koboldcpp": (Folders, "koboldcpp"), "comfyui-tree": (Comfyui, "tree"),
-         "comfyui-packages": (Comfyui, "packages"), "uv": (Uv, "uv"),
+         "comfyui-packages": (Comfyui, "packages"), "comfyui-linked": (Linked, "linked"), "uv": (Uv, "uv"),
          "packages": (Packages, "packages")}
 NAMES = [*STEPS, *(f"{n}-alone" for n in STEPS if n not in ("uv", "packages"))]
 

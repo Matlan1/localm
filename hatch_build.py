@@ -23,6 +23,7 @@ test_a_running_launcher_is_left_out_of_the_build.
 """
 import os
 import subprocess
+from os import environ
 from pathlib import Path
 
 from hatchling.metadata.plugin.interface import MetadataHookInterface
@@ -120,7 +121,7 @@ class LocalmScriptsHook(MetadataHookInterface):
 
     def update(self, metadata: dict) -> None:
         scripts = dict(self.config["console-scripts"])
-        if os.name == "nt" and not os.environ.get(UPDATE_ID):
+        if os.name == "nt" and not environ.get(UPDATE_ID):
             stop_own_probe_daemon(self.root)
             try:
                 scripts = scripts_for_this_build(self.root, scripts)

@@ -263,10 +263,9 @@ def test_a_runtime_the_user_chose_is_neither_put_back_nor_blocked(tmp_path, monk
     monkeypatch.setitem(sys.modules, "localm_llama_runtime",
                         types.SimpleNamespace(LIB_DIR=str(root / "lib"), lib_dir=lambda: None))
     monkeypatch.setattr(_loader, "_loaded_lib", None)
-    monkeypatch.setenv("LLAMA_CPP_LIB", str(chosen / _loader.lib_filename()))
-    with pytest.raises(Exception) as failed:
-        _loader.load_lib()
-    assert "could not be undone" not in str(failed.value)
+    explicit = str(chosen / _loader.lib_filename())
+    monkeypatch.setenv("LLAMA_CPP_LIB", explicit)
+    assert _loader._settled_binary_dir(explicit) == chosen
     monkeypatch.delenv("LLAMA_CPP_LIB")
     with pytest.raises(RuntimeError, match="is lost.*localm setup-llama"):
         _loader.load_lib()

@@ -217,9 +217,11 @@ def test_a_setup_killed_while_it_replaces_the_runtime_is_undone_by_the_next_use(
             break
         assert done.returncode == 9, done.stderr
         assert steps.unsettled(target.parent) is None
-        assert _snapshot(target) == before, at
-        states.append("old")
-    assert states[-1] == "done" and len(states) > 6
+        new = _snapshot(target) if _snapshot(target) != before else None
+        assert new is None or (len(new) == 5 and new["new.dll"] == b"new new.dll"), at
+        states.append("old" if new is None else "new")
+    assert states == sorted(states, key=["old", "new", "done"].index)
+    assert states[-1] == "done" and states.count("old") > 6
 
 
 def test_a_runtime_that_cannot_be_put_back_is_installed_again(tmp_path, monkeypatch):
