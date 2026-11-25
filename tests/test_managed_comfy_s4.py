@@ -1054,16 +1054,17 @@ def _users_own(tmp_path, monkeypatch):
     hub = FakeGitHub(tmp_path / "hub").install(monkeypatch)
     repo, c1 = hub.add("fake", "ComfyUI", _tree(**{
         "models/changes.yaml": "one", "models/stays.yaml": "source", "models/goes.yaml": "source",
-        "models/emptied.py": "code", "models/fills_up": ""}))
+        "models/emptied.py": "code", "models/emptied.txt": "text", "models/fills_up": ""}))
     _, c2 = hub.add("fake", "ComfyUI", _tree(**{
         "models/changes.yaml": "two", "models/stays.yaml": "source", "models/emptied.py": "",
-        "models/fills_up": "full", "models/added.py": "", "models/put_here": ""}))
+        "models/emptied.txt": "", "models/fills_up": "full", "models/added.py": "", "models/put_here": ""}))
     root = _install_managed_from(repo, c1)
     theirs = tmp_path / "theirs"
     theirs.mkdir()
     for name in ("changes.yaml", "stays.yaml", "goes.yaml"):
         (theirs / name).write_text(f"mine: {name}")
     (theirs / "emptied.py").write_text("code")
+    (theirs / "emptied.txt").write_text("text")
     (theirs / "fills_up").write_text("")
     import shutil
     shutil.rmtree(root / "models")
@@ -1071,9 +1072,10 @@ def _users_own(tmp_path, monkeypatch):
     return hub, repo, c2, root, theirs
 
 
-_PUT_IN = {"changes.yaml": "two", "emptied.py": "", "fills_up": "full", "added.py": ""}
+_PUT_IN = {"changes.yaml": "two", "emptied.py": "", "emptied.txt": "", "fills_up": "full",
+           "added.py": ""}
 _KEPT = {"changes.yaml": "mine: changes.yaml", "goes.yaml": "mine: goes.yaml",
-         "emptied.py": "code", "fills_up": ""}
+         "emptied.py": "code", "emptied.txt": "text", "fills_up": ""}
 
 
 def _kept_files(root: Path) -> dict:
@@ -1088,7 +1090,7 @@ def test_a_file_of_the_user_behind_a_link_is_kept_or_left_alone(home, tmp_path, 
     assert result.ok, result.message
     assert _files(theirs) == {**_PUT_IN, "stays.yaml": "mine: stays.yaml"}
     assert _kept_files(root) == _KEPT
-    assert "4 file(s) that were your own" in result.message and "kept" in result.message
+    assert "5 file(s) that were your own" in result.message and "kept" in result.message
     assert [p.name for p in (root / ".localm-update").iterdir() if p.is_dir()] == ["kept"]
 
 
