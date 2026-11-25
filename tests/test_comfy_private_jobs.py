@@ -353,6 +353,116 @@ def test_what_comfyui_keeps_is_decided_when_the_result_is_written(
     assert _left(comfy) == [] and comfy.history == {}
 
 
+def test_the_decision_about_comfyui_is_the_one_about_the_file(comfy, tmp_path, unstripped):
+    settled: list = []
+    for public in range(1, 12):
+        asked: list = []
+
+        def leave_nothing(asked=asked, public=public):
+            asked.append(1)
+            return len(asked) > public
+        ok, _m = _generation(comfy, tmp_path)(
+            {"output_dir": str(comfy.output)}, "p", tmp_path / "x.png",
+            leave_nothing=leave_nothing,
+            settle=lambda kept, private: settled.append(kept) or "")
+        assert ok and settled[-1] is ("p1" in comfy.history)
+        assert settled[-1] is (_left(comfy) == ["a.png", "preview.png"])
+        comfy.history.clear()
+    assert set(settled) == {True, False}
+
+
+def test_what_settling_says_is_in_the_message(comfy, tmp_path, unstripped):
+    ok, message = _generation(comfy, tmp_path)(
+        {}, "p", tmp_path / "x.png", settle=lambda kept, private: "WARNING: it stays")
+    assert (ok, message) == (True, "saved\nWARNING: it stays")
+
+
+def test_a_stop_waits_until_the_result_is_settled(comfy, tmp_path, unstripped):
+    from localm.media import held
+    waits: list = []
+    state: list = []
+    _generation(comfy, tmp_path, during=lambda: state.append(1))(
+        {"output_dir": str(comfy.output)}, "p", tmp_path / "x.png",
+        leave_nothing=lambda: bool(state),
+        settle=lambda kept, private: waits.append(held.private_run_wait()) or "")
+    assert waits == [held._END_LIMIT_S] and held.private_run_wait() == 0
+
+
+@pytest.mark.parametrize("refuses", [True, False])
+def test_a_job_that_turned_private_is_noted(comfy, monkeypatch, refuses):
+    from localm.media import held
+    monkeypatch.setattr(cc, "_PRIVATE_STOP_WAIT_S", 0.2)
+    state: list = []
+    notes: list = []
+
+    def cancel():
+        if not state:
+            assert list(held.root_dir().glob("*/comfy/*")) == []
+            state.append(1)
+            return False
+        notes.extend(p.read_text() for p in held.root_dir().glob("*/comfy/*"))
+        return True
+
+    def job():
+        _submit(comfy)
+        comfy.running.append("p1")
+        comfy.ignores_stop = refuses
+        cc.comfy_poll_until_done(comfy.url, "p1", max_poll_seconds=20, cancel_check=cancel,
+                                 sleep_seconds=0.02)
+        held.CLOSING.set()
+        return False, "Generation cancelled."
+    try:
+        cc.run_leaving_nothing(job, comfy_output_dir=str(comfy.output),
+                               private=lambda: bool(state))
+    finally:
+        held.CLOSING.clear()
+    assert len(notes) == 1 and "p1" in notes[0] and comfy.url in notes[0]
+    assert len(list(held.root_dir().glob("*/comfy/*"))) == (1 if refuses else 0)
+
+
+def test_a_job_that_is_private_only_for_a_while_is_noted_only_then(comfy):
+    from localm.media import held
+    state = iter([False, True])
+    seen: list = []
+
+    def job():
+        _submit(comfy)
+        comfy.running.append("p1")
+
+        def cancel():
+            seen.append(len(list(held.root_dir().glob("*/comfy/*"))))
+            comfy.running.clear()
+            comfy.job("p1", ("output", "a.png"))
+            return False
+        cc.comfy_poll_until_done(comfy.url, "p1", max_poll_seconds=20, cancel_check=cancel,
+                                 sleep_seconds=0.02)
+        return True, "saved"
+    assert cc.run_leaving_nothing(job, private=lambda: next(state, False)) == (True, "saved")
+    assert seen == [1] and list(held.root_dir().glob("*/comfy/*")) == []
+    assert _left(comfy) == ["a.png"]
+
+
+def test_an_input_image_a_kept_job_still_uses_stays(comfy, tmp_path):
+    from tests.media_bytes import png_bytes
+    source = tmp_path / "in.png"
+    source.write_bytes(png_bytes())
+    comfy.upload_bytes, comfy.upload_replies = png_bytes(), True
+
+    def kept():
+        cc._upload_image(source, comfy.url)
+
+        def private():
+            name = cc._upload_image(source, comfy.url)
+            return cc.UploadedInputCopy(name, comfy.url, delete_outputs=True,
+                                        comfy_output_dir=str(comfy.output)).run(
+                                            lambda: (True, "saved"))
+        assert _run(comfy, private) == (True, "saved")
+        assert len(list(comfy.input.iterdir())) == 1
+        return True, "kept"
+    assert cc.run_leaving_nothing(kept, private=lambda: False) == (True, "kept")
+    assert len(list(comfy.input.iterdir())) == 1
+
+
 def test_a_job_that_stays_public_leaves_comfyui_as_it_is(comfy, tmp_path, unstripped):
     ok, _m = _generation(comfy, tmp_path)({}, "p", tmp_path / "x.png")
     assert ok and _left(comfy) == ["a.png", "preview.png"] and "p1" in comfy.history
@@ -557,6 +667,6 @@ def test_the_facade_leaves_nothing_in_privacy_mode_that_keeps_no_media(
     s = {"output_dir": "o", "workdir": ""}
     assert facade.generate(s, "p", tmp_path / "x.png", privacy=privacy) == (True, "ok")
     assert (asked[0]["comfy_output_dir"], asked[0]["comfy_workdir"]) == ("o", None)
-    assert (asked[0]["private"](), asked[0]["clean_finished"]()) == (expected, False)
+    assert asked[0]["private"]() is expected and asked[0]["clean"](True) is expected
     monkeypatch.setattr("localm.audit.privacy_keeps", lambda kind: not kept)
     assert asked[0]["private"]() is expected

@@ -202,7 +202,7 @@ def test_a_note_that_cannot_be_deleted_is_not_a_cut_off_job(monkeypatch):
     other = held.note_comfy_job("u", "http://127.0.0.1:8188", "job-2")
     with monkeypatch.context() as m:
         _locked(m, note)
-        held.forget_comfy_job(note)
+        held.forget_note(note)
         assert note.is_file()
         held.discard_all()
         assert note.is_file()
@@ -219,7 +219,7 @@ def test_a_note_that_could_not_be_deleted_goes_when_localm_stops(monkeypatch):
     note = held.note_comfy_job("t", "http://127.0.0.1:8188", "job-1")
     with monkeypatch.context() as m:
         _locked(m, note)
-        held.forget_comfy_job(note)
+        held.forget_note(note)
     assert held.discard_all() is True
     assert not held.root_dir().exists()
 
@@ -877,16 +877,163 @@ def test_a_result_written_after_the_mode_turned_private_is_not_kept():
     for name in ("a.png", "a.png.json", "b.png"):
         (d / name).write_bytes(b"x")
     (d / "b.png.json").write_bytes(b"x")
-    assert gallery.settle("image", d / "b.png", lambda: True, lambda: False) == d / "b.png"
+    job = MagicMock()
+    settle = gallery.settle
+    assert settle(job, "image", d / "b.png", None, True, False) == (d / "b.png", "")
     assert (d / "b.png.json").is_file()
-    assert gallery.settle("image", d / "b.png", lambda: True, lambda: True) == d / "b.png"
-    moved = gallery.settle("image", d / "a.png", lambda: False, lambda: True)
-    assert held.is_held(moved) and moved.read_bytes() == b"x"
+    assert settle(job, "image", d / "b.png", None, True, True) == (d / "b.png", "")
+    moved, warning = settle(job, "image", d / "a.png", None, False, True)
+    assert held.is_held(moved) and moved.read_bytes() == b"x" and warning == ""
+    assert list(held.root_dir().glob("*/comfy/*")) == []
     assert [p.name for p in d.iterdir()] == ["b.png"]
     held.CLOSING.set()
     with pytest.raises(OSError, match="stopping"):
-        gallery.settle("image", d / "b.png", lambda: False, lambda: True)
+        settle(job, "image", d / "b.png", None, False, True)
     assert list(d.iterdir()) == []
+
+
+def _open_elsewhere(monkeypatch, *paths):
+    real = Path.unlink
+
+    def unlink(self, missing_ok=False):
+        if self in paths:
+            raise PermissionError(32, "in use")
+        return real(self, missing_ok=missing_ok)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    monkeypatch.setattr(held, "_REMOVE_RETRY_SECONDS", 0)
+
+
+@pytest.mark.parametrize("copies", [True, False])
+def test_a_file_open_elsewhere_after_the_switch_is_said_and_removed_later(monkeypatch, copies):
+    from localm.media import gallery
+    d = _home() / "gui_images"
+    d.mkdir(parents=True)
+    (d / "a.png").write_bytes(b"x")
+    (d / "a.png.json").write_text('{"prompt": "SECRET"}')
+    job = MagicMock()
+    with monkeypatch.context() as m:
+        _open_elsewhere(m, d / "a.png")
+        if copies:
+            _moved, said = gallery.settle(job, "image", d / "a.png", "key:ka", False, True)
+        else:
+            m.setattr(held.shutil, "copyfileobj",
+                      lambda s, t: (_ for _ in ()).throw(OSError("disk full")))
+            with pytest.raises(OSError, match="disk full") as e:
+                gallery.settle(job, "image", d / "a.png", "key:ka", False, True)
+            said = str(e.value)
+        assert "WARNING" in said and str(d / "a.png") in said
+        assert [p.name for p in d.iterdir()] == ["a.png"]
+        held.forget("image", "a.png")
+        assert gallery.owner_of("image", "a.png") == "key:ka"
+        held.discard_all()
+        assert (d / "a.png").is_file()
+    held.sweep_leftovers()
+    assert list(d.iterdir()) == [] and gallery.owner_of("image", "a.png") is None
+    assert not held.root_dir().exists()
+
+
+def test_a_sidecar_open_elsewhere_is_said_and_a_file_saved_since_is_kept(monkeypatch):
+    from localm.media import gallery
+    d = _home() / "gui_images"
+    d.mkdir(parents=True)
+    (d / "a.png").write_bytes(b"x")
+    (d / "a.png.json").write_text('{"prompt": "SECRET"}')
+    with monkeypatch.context() as m:
+        _open_elsewhere(m, d / "a.png.json")
+        moved, said = gallery.settle(MagicMock(), "image", d / "a.png", None, False, True)
+        assert str(d / "a.png.json") in said and str(d / "a.png") + " " not in said
+    time.sleep(0.05)
+    held.save_copy(moved, d / "a.png")
+    held.discard_all()
+    assert [p.name for p in d.iterdir()] == ["a.png"]
+
+
+def test_a_noted_file_that_is_gone_is_nothing_to_remove():
+    note = held.note_gallery_file("image", _home() / "gui_images" / "gone.png")
+    for name, text in (("file-bad", "[[["), ("file-up", '["image", "../x.png", 0]')):
+        note.with_name(name).write_text(text)
+    assert held.discard_all() is True and not held.root_dir().exists()
+
+
+@pytest.mark.parametrize("kind", list(KINDS))
+def test_a_stop_waits_for_the_move_of_a_result_that_turned_private(server, kind, monkeypatch):
+    from localm.inference import http_server
+    app, client = server
+    path, body, target, folder, _key = KINDS[kind]
+    _config(mode="log")
+    moving, go_on = threading.Event(), threading.Event()
+    real = held.save_copy
+
+    def slow(*a, **k):
+        moving.set()
+        go_on.wait(20)
+        return real(*a, **k)
+    monkeypatch.setattr(held, "save_copy", slow)
+
+    def fake(prompt, out, **kwargs):
+        Path(out).write_bytes(BYTES[kind]())
+        Path(out).with_name(Path(out).name + ".json").write_text('{"prompt": "SECRET"}')
+        _config(mode="privacy")
+        return True, "saved"
+    with patch(target, fake), patch.object(http_server, "_engines", {}), \
+            patch.object(http_server, "_engine", None):
+        job = app.state.jobs.get(client.post(path, json=body).json()["job_id"])
+        assert moving.wait(20)
+        assert held.private_run_wait() == held._END_LIMIT_S
+        assert not [p for p in (_home() / folder).iterdir() if p.suffix == ".json"]
+        threading.Timer(0.5, go_on.set).start()
+        http_server._shutdown_teardown()
+    _ended(job)
+    assert _media_files() == [] and list((_home() / folder).iterdir()) == []
+
+
+def test_a_stop_killed_during_the_move_leaves_a_note_for_the_next_start(monkeypatch):
+    from localm.media import gallery
+    d = _home() / "gui_images"
+    d.mkdir(parents=True)
+    (d / "a.png").write_bytes(b"x")
+
+    def killed(*a, **k):
+        raise KeyboardInterrupt
+    with monkeypatch.context() as m:
+        m.setattr(held, "save_copy", killed)
+        with pytest.raises(KeyboardInterrupt):
+            gallery.settle(MagicMock(), "image", d / "a.png", None, False, True)
+    assert (d / "a.png").is_file()
+    held.discard_all()
+    assert list(d.iterdir()) == []
+
+
+@pytest.mark.parametrize("headers", [{"X-Localm-Session-Mode": "privacy"},
+                                     {"X-Client-Id": "chat"}])
+def test_a_private_stop_request_does_not_make_a_kept_job_private(server, headers, monkeypatch):
+    from localm.inference import http_server
+    app, client = server
+    _config(mode="log", chat_mode="privacy")
+    stopping = threading.Event()
+    monkeypatch.setattr(http_server, "_do_shutdown", lambda **k: stopping.set())
+    started, finish = threading.Event(), threading.Event()
+
+    def fake(prompt, out, **kwargs):
+        started.set()
+        finish.wait(20)
+        Path(out).write_bytes(media_bytes.png_bytes())
+        return True, "saved"
+    with patch(KINDS["image"][2], fake):
+        job = app.state.jobs.get(client.post("/api/imagine", json={"prompt": "x"}).json()["job_id"])
+        assert started.wait(20)
+        assert client.post("/v1/server/shutdown", headers=headers).json() == {"stopping": True}
+        assert stopping.wait(10)
+        finish.set()
+        assert _ended(job) == "done"
+    assert (_home() / "gui_images" / job.result).is_file() and held.files("image") == []
+
+
+def test_a_look_at_a_job_never_decides_for_it():
+    from localm.plugins.media_config import keep_check
+    answers = iter([True, False, True])
+    keeps = keep_check(lambda: next(answers))
+    assert keeps(peek=True) is False and keeps() is True
 
 
 @pytest.mark.parametrize("kind", list(KINDS))
@@ -894,7 +1041,7 @@ def test_each_job_asks_again_when_its_result_is_written(server, kind, monkeypatc
     monkeypatch.setenv("LOCALM_MODE", "log")
     written: list = []
     monkeypatch.setattr(f"localm.plugins.builtin.{kind}.plug.media_keep_check",
-                        lambda request: lambda: not written)
+                        lambda request: lambda peek=False: not written)
     real = BYTES[kind]
     monkeypatch.setitem(BYTES, kind, lambda: written.append(1) or real())
     job, (out, _k) = _generate(server, kind)
@@ -1029,7 +1176,7 @@ def test_a_job_whose_mode_turns_private_before_it_starts_keeps_nothing():
     body = _make_generate(
         ImagineRequest(prompt="x"), input_image=None, lora_name=None, out_path=Path("a.png"),
         owner=None, self_url="http://127.0.0.1:1/v1", instance_token=None,
-        keeps=lambda: False)
+        keeps=lambda peek=False: False)
     with patch("localm.media.gallery.job_output_path",
                side_effect=lambda j, kind, name, kept: paths.append((name, kept))):
         body(job)

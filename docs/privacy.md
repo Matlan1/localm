@@ -132,7 +132,10 @@ In privacy mode a generated image, track or clip is not kept unless you choose t
 - On the pages, in the chat page and for `POST /v1/images/generations`, whether a result
   is kept is decided when it is written: after a switch to privacy mode the result being
   made and the rest of that request are not kept, nor are the job's files in ComfyUI.
-  Once a request is not kept it stays so. The commands (`localm image`, `music`, `video`
+  Once a request is not kept it stays so. The result is then moved out of its History
+  folder and its sidecar deleted; when another program has the file open, it stays there
+  for its owner, the job's output names it, and it is deleted when localm stops or at its
+  next start. The commands (`localm image`, `music`, `video`
   and `run`), the MCP tool and the coder decide when the generation starts.
 - **Saving always works**: the download and move actions, `-o` of `localm image`,
   `localm music` and `localm video`, `output_path` of the MCP `generate_image` tool,
@@ -159,8 +162,10 @@ seconds to stop, and localm is at the end of a stop after 12: what ComfyUI write
 that stays there, and the job's output names the job. After a crash or a kill nothing is
 left to remove what ComfyUI holds: a job queued in a ComfyUI that keeps running stays
 there, with its files, the image it was given and its history entry, until you clear it.
-While a private job is in ComfyUI, `<data dir>/run/private-media/` notes its ComfyUI
-address and job id and nothing else. After a crash the next start of the server says on
+An image it was given stays while another running generation uses the same one.
+While a private job, or one that turned private, is in ComfyUI,
+`<data dir>/run/private-media/` notes its ComfyUI address and job id and nothing else.
+After a crash, or a stop that ComfyUI did not follow, the next start of the server says on
 its console that the job was cut off, and the app tells the owner once; until it has, the
 note stays and each start of the server tells it again. `localm image`, `music`, `video`,
 `run` and `mcp` do not tell it. What a ComfyUI you run
@@ -235,7 +240,8 @@ which models:
   next start reports the operation as interrupted.
 - **Coordination files.** `<data dir>/run/` holds the running instance's entry, locks
   that keep two localm processes from loading models at once (`run/gpu-lease/`), the
-  address and id of a private ComfyUI job in progress (`run/private-media/`), and the
+  address and id of a private ComfyUI job in progress and the name of a History file that
+  could not be deleted yet (`run/private-media/`), and the
   crash marker of the running server, removed at a normal stop.
 - **Caches.** `<data dir>/cache/` holds what the GPU driver compiles for a model
   (`cache/comgr` on AMD ROCm) and package and download caches. On AMD ROCm the driver

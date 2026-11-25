@@ -11,7 +11,8 @@ of a held file is written: its owner lives in memory here.
 
 A private ComfyUI job in progress is noted in ``<pid>-<random>/comfy/`` by its
 address and job id, so a later server start can say that one was cut off. The
-note stays until the app has shown it.
+note stays until the app has shown it. A gallery file that must not be kept and is
+not gone yet is noted there by its name, until it is removed.
 
 Whether a folder's process still runs is decided by an OS lock on
 ``<pid>-<random>.lock`` beside it, which the system drops when that process ends
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import contextvars
 import filecmp
 import json
 import os
@@ -44,6 +46,7 @@ _REMOVE_RETRY_SECONDS = 0.2
 _LOCK = threading.RLock()
 
 _COMFY_NOTES = "comfy"
+_FILE_NOTE = "file-"
 _ENDED = ".ended"
 
 #: The owner of a held file made while no key existed, once one does: nobody's id,
@@ -157,24 +160,46 @@ def folder(kind: str) -> Path:
 
 def note_comfy_job(token: str, api_url: str, prompt_id: str) -> Optional[Path]:
     """Record, with no content, that a private job was sent to the ComfyUI at
-    *api_url*, in the note that is returned, until :func:`forget_comfy_job` of it.
+    *api_url*, in the note that is returned, until :func:`forget_note` of it.
     Never raises ``OSError``: without the record (None) a job cut off by a crash is
     not reported at the next start."""
+    return _write_note(token, [api_url, prompt_id],
+                       "a private ComfyUI job could not be noted (%s); if localm is killed "
+                       "now, its next start does not report it")
+
+
+def note_gallery_file(kind: str, path: Path) -> Optional[Path]:
+    """Record that the *kind* gallery file *path*, as it is now, and its sidecar must
+    not be kept, in the note that is returned, until :func:`forget_note` of it: a stop
+    and the next start remove them. Never raises ``OSError``; None when it cannot be
+    recorded."""
+    return _write_note(_FILE_NOTE + secrets.token_hex(8), [kind, path.name, _changed(path)],
+                       "a file to remove could not be noted (%s); when it stays now, the "
+                       "next start does not remove it")
+
+
+def _changed(path: Path) -> int:
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return 0   # See test_a_noted_file_that_is_gone_is_nothing_to_remove.
+
+
+def _write_note(name: str, data: list, failed: str) -> Optional[Path]:
     try:
         with _LOCK:
-            note = _open_session().dir / _COMFY_NOTES / token
+            note = _open_session().dir / _COMFY_NOTES / name
             note.parent.mkdir(mode=0o700, exist_ok=True)
-            note.write_text(json.dumps([api_url, prompt_id]), encoding="utf-8")
+            note.write_text(json.dumps(data), encoding="utf-8")
             return note
     except OSError as e:
-        logger.warning("held media: a private ComfyUI job could not be noted (%s); if localm "
-                       "is killed now, its next start does not report it", e)
+        logger.warning("held media: " + failed, e)
         return None
 
 
-def forget_comfy_job(note: Path) -> None:
-    """Drop the *note* of an ended job. One that cannot be deleted now is marked as
-    ended and deleted later. Never raises ``OSError``."""
+def forget_note(note: Path) -> None:
+    """Drop the *note* of an ended job or a removed file. One that cannot be deleted
+    now is marked as ended and deleted later. Never raises ``OSError``."""
     with _LOCK:
         try:
             note.unlink(missing_ok=True)
@@ -182,8 +207,8 @@ def forget_comfy_job(note: Path) -> None:
             try:
                 note.with_name(note.name + _ENDED).touch()
             except OSError as e:
-                logger.warning("held media: the note of an ended ComfyUI job stays (%s); a "
-                               "later start may report that job as cut off", e)
+                logger.warning("held media: a note that is done with stays (%s); a later "
+                               "start may act on it", e)
 
 
 def _drop_ended_notes(session_dir: Path) -> bool:
@@ -196,7 +221,43 @@ def _drop_ended_notes(session_dir: Path) -> bool:
             mark.unlink(missing_ok=True)
         except OSError as e:
             gone = False
-            logger.debug("held media: the note of an ended ComfyUI job stays (%s)", e)
+            logger.debug("held media: a note that is done with stays (%s)", e)
+    return gone
+
+
+def _live_notes(session_dir: Path) -> list[Path]:
+    """The notes in *session_dir* that are not marked as ended."""
+    d = session_dir / _COMFY_NOTES
+    names = {p.name for p in d.iterdir()} if d.is_dir() else set()
+    return [d / n for n in sorted(names) if not n.endswith(_ENDED) and n + _ENDED not in names]
+
+
+def _remove_noted_files(session_dir: Path) -> bool:
+    """Remove the gallery files noted in *session_dir*, their sidecars and their owner
+    index entries. Returns whether they are gone."""
+    from localm.media import gallery, paths
+    gone = True
+    for note in _live_notes(session_dir):
+        if not note.name.startswith(_FILE_NOTE):
+            continue
+        try:
+            kind, name, changed = json.loads(note.read_text(encoding="utf-8"))
+            valid = kind in KINDS and name == Path(name).name and name.strip(".") != ""
+        except OSError as e:
+            logger.debug("held media: a note cannot be read (%s)", e)
+            gone = False
+            continue
+        except (ValueError, TypeError, RecursionError):
+            forget_note(note)
+            continue
+        if valid:
+            path = paths.gallery(kind) / name
+            files = [path] if path.is_file() and _changed(path) == changed else []
+            if not all([remove(p) for p in (*files, path.with_name(f"{name}.json"))]):
+                gone = False
+                continue
+            gallery.forget_never_kept([(kind, name)])
+        forget_note(note)
     return gone
 
 
@@ -204,12 +265,9 @@ def _cut_off_jobs(session_dir: Path) -> list[tuple[str, Path]]:
     """What to tell the owner about each ComfyUI job noted in *session_dir* that did
     not end, with its note."""
     told = []
-    d = session_dir / _COMFY_NOTES
-    names = {p.name for p in d.iterdir()} if d.is_dir() else set()
-    for name in sorted(names):
-        if name.endswith(_ENDED) or name + _ENDED in names:
+    for p in _live_notes(session_dir):
+        if p.name.startswith(_FILE_NOTE):
             continue
-        p = d / name
         try:
             url, prompt_id = json.loads(p.read_text(encoding="utf-8"))
             url, prompt_id = (re.sub(r"[^\x21-\x7e]", "", str(x))[:200]
@@ -331,13 +389,16 @@ def save_copy(source: Path, target: Path,
             raise
 
 
-def _remove_tree(path: Path) -> bool:
-    """Delete *path*, retrying while another program has a file in it open.
+def remove(path: Path) -> bool:
+    """Delete the file or folder *path*, retrying while another program has it open.
     Returns whether it is gone; a failure is logged as a warning."""
     error: Optional[OSError] = None
     for attempt in range(_REMOVE_ATTEMPTS):
         try:
-            shutil.rmtree(path)
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
             return True
         except FileNotFoundError:
             if not path.exists():
@@ -352,11 +413,12 @@ def _remove_tree(path: Path) -> bool:
 
 
 def _clear(session_dir: Path) -> bool:
-    """Delete *session_dir*, or all of it but its ComfyUI notes while one must stay.
+    """Delete *session_dir*, or all of it but its notes while one must stay.
     Returns whether that is gone."""
-    if not _drop_ended_notes(session_dir) or _cut_off_jobs(session_dir):
-        return all([_remove_tree(p) for p in session_dir.iterdir() if p.name != _COMFY_NOTES])
-    return _remove_tree(session_dir)
+    removed = _remove_noted_files(session_dir)
+    if not _drop_ended_notes(session_dir) or not removed or _cut_off_jobs(session_dir):
+        return all([remove(p) for p in session_dir.iterdir() if p.name != _COMFY_NOTES])
+    return remove(session_dir)
 
 
 def discard_all() -> bool:
@@ -493,9 +555,11 @@ def run(not_kept: Callable[[], bool],
 
 def private_run_wait() -> float:
     """How many seconds a stop waits at most for the generations running now whose
-    result must not be kept; 0 when there is none."""
+    result must not be kept; 0 when there is none. Each is asked outside the caller's
+    own request."""
     with _runs_cv:
-        return _END_LIMIT_S if any(not_kept() for (not_kept,) in _runs) else 0.0
+        return _END_LIMIT_S if any(contextvars.Context().run(not_kept)
+                                   for (not_kept,) in _runs) else 0.0
 
 
 def end_private_runs() -> bool:

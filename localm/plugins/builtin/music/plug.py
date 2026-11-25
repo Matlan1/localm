@@ -147,7 +147,7 @@ async def music(req: MusicRequest, request: Request):
     keeps = media_keep_check(request)
 
     def private():
-        return not keeps() or media_session_is_private()
+        return not keeps(peek=True) or media_session_is_private()
 
     @media_handover_job
     def _generate(job):
@@ -251,6 +251,13 @@ async def music(req: MusicRequest, request: Request):
                 kwargs["shift"] = req.shift
             if req.model_overrides:
                 kwargs["model_overrides"] = req.model_overrides
+
+            def _settle(kept, private_now, path: Path = track_path):
+                nonlocal track_path
+                track_path, stays = gallery.settle(job, "music", path, owner, kept,
+                                              private_now)
+                return stays
+
             ok, message = _backend.generate(
                 s, req.tags, track_path,
                 self_url=self_url,
@@ -264,15 +271,13 @@ async def music(req: MusicRequest, request: Request):
                 placement=placement,
                 cancel=lambda: job.cancel(),
                 privacy=private,
-                leave_nothing=lambda: not keeps(),
+                leave_nothing=lambda: not keeps(peek=True),
+                settle=_settle,
                 **kwargs,
             )
             job.push({"type": "line", "text": message})
             if ok:
-                track_path = gallery.settle("music", track_path, keeps, private)
                 job.result = track_path.name
-                gallery.push_stamp_warning(
-                    job, gallery.record_owner("music", track_path, owner))
                 if held.is_held(track_path):
                     gallery.push_held(job)
             # Recorded before the chat model reload that runs on leaving the block.

@@ -181,13 +181,14 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
     extras = native_extras or {}
     saved_names: list = []
     held_names: list = []
+    left: list = []
     fixed_path = out_path
 
-    def kept():
-        return in_gallery if keeps is None else keeps()
+    def kept(peek=False):
+        return in_gallery if keeps is None else keeps(peek)
 
     def private():
-        return not kept() or media_session_is_private()
+        return not kept(peek=True) or media_session_is_private()
 
     def _generate(job):
         from localm.config import load_config
@@ -304,17 +305,26 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             size_kwargs = ({"width": width, "height": height}
                            if width is not None and height is not None else {})
 
-            def _on_saved(path):
-                path = gallery.settle("image", path, keeps, private)
+            def _decide():
+                kept_now = kept()
+                return kept_now, not kept_now or media_session_is_private()
+
+            def _on_saved(path, decision=None):
+                if in_gallery:
+                    path, stays = gallery.settle(job, "image", path, owner,
+                                                 *(decision or _decide()))
+                    left.extend([stays] if stays else [])
                 saved_names.append(path.name)
                 if held.is_held(path):
                     held_names.append(path.name)
-                if in_gallery:
-                    gallery.push_stamp_warning(
-                        job, gallery.record_owner("image", path, owner))
                 if len(saved_names) == 1:
                     job.result = path.name
                 job.push({"type": "image", "name": path.name})
+
+            def _settle(*decision):
+                if not saved_names:
+                    _on_saved(out_path, decision)
+                return "\n".join(left)
             native_kwargs = ({**{k: v for k, v in extras.items() if v is not None},
                               "on_saved": _on_saved,
                               "on_queue_state": lambda state: job.progress(phase=state)}
@@ -352,11 +362,10 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
                 cancel=lambda: job.cancel(),
                 privacy=private,
                 withhold_on_trace=withhold_on_trace,
-                leave_nothing=lambda: not kept(),
+                leave_nothing=lambda: not kept(peek=True),
+                settle=_settle,
             )
             job.push({"type": "line", "outcome": True, "text": message})
-            if ok and not saved_names:
-                _on_saved(out_path)
             if in_gallery and held_names:
                 gallery.push_held(job)
             # Recorded before the chat model reload that runs on leaving the block.
@@ -838,9 +847,6 @@ def _make_upscale(*, source, upscaler, name, keeps, owner, self_url, instance_to
     ``_make_generate``): runtime check, VRAM handover, upscaling, and the
     chat-model reload on every exit path."""
 
-    def private():
-        return not keeps() or media_session_is_private()
-
     def _upscale(job):
         from localm.config import load_config
         out_path = gallery.job_output_path(job, "image", name, keeps())
@@ -880,14 +886,17 @@ def _make_upscale(*, source, upscaler, name, keeps, owner, self_url, instance_to
             final: list = []
 
             def _on_saved(path):
-                final.append(gallery.settle("image", path, keeps, private))
-                gallery.push_stamp_warning(
-                    job, gallery.record_owner("image", final[0], owner))
+                kept = keeps()
+                path, stays = gallery.settle(job, "image", path, owner, kept,
+                                             not kept or media_session_is_private())
+                final.append(path)
+                if stays:
+                    say(stays)
 
-            with held.run(lambda: not keeps(), lambda: job.cancel()) as ending:
+            with held.run(lambda: not keeps(peek=True), lambda: job.cancel()) as ending:
                 ok, message = native.upscale(
                     s, source, upscaler, out_path, extra_meta=extra_meta,
-                    write_sidecar=not private(),
+                    write_sidecar=keeps(peek=True) and not media_session_is_private(),
                     cancel_check=lambda: job.cancel_requested or ending(),
                     on_progress=say,
                     on_saved=_on_saved,

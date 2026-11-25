@@ -218,26 +218,46 @@ HELD_NOTE = ("Privacy mode: this is not kept. It is removed when localm stops; s
              "to keep it.")
 
 
-def settle(media_kind: str, path: Path, keeps: Optional[Callable[[], bool]],
-           private: Callable[[], bool]) -> Path:
-    """Where the file *path* a job has just written stays: *path* itself, or, when
-    it is in the gallery and *keeps* now answers False, the held folder it is moved
-    to. Its sidecar is deleted when *private* answers True. Raises ``OSError`` when
-    it cannot be moved; it is then deleted."""
-    if keeps is None or _held.is_held(path):
-        return path
-    kept = keeps()
-    target = path
-    try:
-        if not kept:
-            target = _held.folder(media_kind) / path.name
-            _held.save_copy(path, target)
-    finally:
-        if not kept:
-            path.unlink(missing_ok=True)
-        if not kept or private():
-            path.with_suffix(path.suffix + ".json").unlink(missing_ok=True)
-    return target
+def settle(job, media_kind: str, path: Path, owner: Optional[str], kept: bool,
+           private: bool) -> tuple[Path, str]:
+    """Where the file *path* that *job* has just written stays, its *owner* recorded:
+    *path* itself, or, when it is in the gallery and not *kept*, the held folder it is
+    moved to. Its sidecar is deleted when *private*. Also returns "" or a WARNING naming
+    the file that could not be deleted: it then belongs to *owner* and is removed when
+    localm stops or next starts (``held.note_gallery_file``). Raises ``OSError`` when
+    *path* cannot be moved; it is then deleted."""
+    target, warning = path, ""
+    sidecar = path.with_suffix(path.suffix + ".json")
+    if private and not _held.is_held(path) and (not kept or sidecar.exists()):
+        note = _held.note_gallery_file(media_kind, sidecar if kept else path)
+        left = [] if _held.remove(sidecar) else [sidecar]
+        try:
+            if not kept:
+                target = _held.folder(media_kind) / path.name
+                _held.save_copy(path, target)
+        except OSError as e:
+            if not _held.remove(path):
+                left.append(path)
+            raise OSError(f"{e}{_left(job, media_kind, left, owner, note)}") from e
+        if not kept and not _held.remove(path):
+            left.append(path)
+        warning = _left(job, media_kind, left, owner, note).strip()
+    push_stamp_warning(job, record_owner(media_kind, target, owner))
+    return target, warning
+
+
+def _left(job, media_kind: str, left: list, owner: Optional[str],
+          note: Optional[Path]) -> str:
+    """Drop *note* when no file is *left* of it; else give them to *owner* and say in
+    a WARNING line which stay."""
+    if not left:
+        if note is not None:
+            _held.forget_note(note)
+        return ""
+    for path in left:
+        push_stamp_warning(job, stamp_owner(media_kind, path.name.removesuffix(".json"), owner))
+    return (f"\nWARNING: {' and '.join(map(str, left))} could not be deleted (another program "
+            "may have it open). It is removed when localm stops or at its next start.")
 
 
 def push_held(job) -> None:

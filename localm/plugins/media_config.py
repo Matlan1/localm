@@ -271,8 +271,10 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
     ``generate`` takes the extra keywords ``privacy`` (a bool or a callable),
     ``withhold_on_trace`` (both default False) and ``leave_nothing`` (a callable),
     which are not passed to the backend. The callables are asked when the generation
-    starts and again when its result is written; ``leave_nothing`` is also asked from
-    other threads. ``leave_nothing`` (default: ``privacy`` is set and the
+    starts and once when its result is written, which decides; ``leave_nothing`` is also
+    asked in between and from other threads. ``settle(kept, private)`` is then called
+    with that decision after a successful generation, before a stop goes on; what it
+    returns is added to the message. ``leave_nothing`` (default: ``privacy`` is set and the
     ``privacy_keep`` setting does not list media, decided at the start) makes a
     backend that declares ``NEEDS_COMFY_SERVER`` also remove every other file the job
     left in ComfyUI's output and temp folders, however the job ended
@@ -327,6 +329,7 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
                  leave_nothing: Optional[Callable[[], bool]] = None,
                  cancel_check: Optional[Callable[[], bool]] = None,
                  cancel: Optional[Callable[[], None]] = None,
+                 settle: Optional[Callable[[bool, bool], str]] = None,
                  **kwargs) -> tuple[bool, str]:
         if "delete_outputs" in kwargs or "containment_required" in kwargs:
             raise TypeError("generate() sets delete_outputs and containment_required "
@@ -344,6 +347,13 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
             not_kept = at_start and not privacy_keeps("media")
             leave_nothing = lambda: not_kept  # noqa: E731
         before = _file_state(out_path) if embeds else None
+        decided: list[tuple[bool, bool]] = []
+
+        def decision() -> tuple[bool, bool]:
+            if not decided:
+                not_kept_now = leave_nothing()
+                decided.append((not_kept_now, not_kept_now or private()))
+            return decided[0]
 
         def run(ending) -> tuple[bool, str]:
             ok, message = impl.generate(
@@ -351,6 +361,7 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
                 delete_outputs=bool(at_start or s.get("delete_outputs")),
                 cancel_check=lambda: bool(cancel_check and cancel_check()) or ending(),
                 **kwargs)
+            not_kept, private_now = decision()
             if not (ok and embeds
                     and Path(out_path).exists() and Path(out_path).stat().st_size > 0):
                 return ok, message
@@ -358,12 +369,13 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
             result = strip_output(output_kind, Path(out_path))
             if not result.failed:
                 return ok, message
-            if strict or private():
+            if strict or private_now:
                 return False, f"Output withheld: {result.reason}{_remove_withheld(out_path)}"
             return ok, f"{message}\n{result.reason}"
 
         from localm.media import held
-        with held.run(leave_nothing, cancel) as ending:
+        with held.run(lambda: decided[0][0] if decided else leave_nothing(),
+                      cancel) as ending:
             if ending():
                 return False, "localm is stopping."
             if getattr(impl, "NEEDS_COMFY_SERVER", False):
@@ -371,12 +383,16 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
                 ok, message = run_leaving_nothing(
                     lambda: run(ending), comfy_output_dir=s.get("output_dir") or None,
                     comfy_workdir=s.get("workdir") or None, private=leave_nothing,
-                    clean_finished=lambda: not at_start and private())
+                    clean=lambda ok: decision()[0] or (ok and not at_start and decision()[1]))
             else:
                 ok, message = run(ending)
-        if (not ok and embeds and (strict or private())
-                and _file_state(out_path) not in (None, before)):
-            message += _remove_withheld(out_path)
+            not_kept, private_now = decision()
+            if (not ok and embeds and (strict or private_now)
+                    and _file_state(out_path) not in (None, before)):
+                message += _remove_withheld(out_path)
+            if ok and settle is not None:
+                stays = settle(not not_kept, private_now)
+                message += f"\n{stays}" if stays else ""
         return ok, message
 
     return SimpleNamespace(resolve=resolve, supports=supports,
@@ -428,15 +444,18 @@ def media_is_kept() -> bool:
     return privacy_keeps("media") or not media_session_is_private()
 
 
-def keep_check(kept_now: Callable[[], bool]) -> Callable[[], bool]:
+def keep_check(kept_now: Callable[[], bool]) -> Callable[..., bool]:
     """A callable answering *kept_now* (asked here too) until it once answered
-    False, and False from then on."""
+    False, and False from then on. Called with ``peek=True`` the answer does not
+    count for later calls."""
     kept = kept_now()
 
-    def keeps() -> bool:
+    def keeps(peek: bool = False) -> bool:
         nonlocal kept
-        kept = kept and kept_now()
-        return kept
+        now = kept and kept_now()
+        if not peek:
+            kept = now
+        return now
     return keeps
 
 

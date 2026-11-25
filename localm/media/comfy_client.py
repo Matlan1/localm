@@ -2772,6 +2772,7 @@ def _upload_image(image_path: Path, api_url: str) -> str:
     )
     jobs = _TRACKED_JOBS.get()
     if jobs is not None:
+        jobs.inputs.add(upload_name)
         jobs.uploading(api_url, upload_name)
     try:
         with _comfy_urlopen(req, timeout=30) as resp:
@@ -2786,6 +2787,7 @@ def _upload_image(image_path: Path, api_url: str) -> str:
         raise
     if jobs is not None:
         jobs.uploads[str(name)] = jobs.uploads.pop(upload_name)
+        jobs.inputs.add(str(name))
     return name
 
 
@@ -2978,8 +2980,9 @@ class _TrackedJobs:
         self.notes: set[Path] = set()
         self.api_urls: dict[str, str] = {}
         self.unanswered: set[str] = set()
-        self.unconfirmed = False
+        self.unconfirmed = ""
         self.uploads: dict[str, str] = {}
+        self.inputs: set[str] = set()
         self.outputs: dict[str, dict] = {}
         self.handled: set[tuple] = set()
 
@@ -3017,6 +3020,19 @@ class _TrackedJobs:
         self.unanswered.discard(sent_id)
         del self.api_urls[sent_id]
 
+    def note_if_private(self) -> bool:
+        """Note what ComfyUI has of a job that is private now and was not when it was
+        sent. Returns whether it is private."""
+        if not self.private():
+            return False
+        if not self.notes:
+            sent = list(self.api_urls.items())
+            if self.unconfirmed:
+                sent.append(("unknown", self.unconfirmed))
+            for prompt_id, api_url in sent:
+                self._note(api_url, prompt_id)
+        return True
+
     def _note(self, api_url: str, prompt_id: str) -> None:
         parts = urllib.parse.urlsplit(api_url)
         note = held.note_comfy_job(
@@ -3026,7 +3042,7 @@ class _TrackedJobs:
 
     def forget_notes(self) -> None:
         for note in self.notes:
-            held.forget_comfy_job(note)
+            held.forget_note(note)
 
     def finished(self, prompt_id: str, entry: dict) -> None:
         self.outputs[prompt_id] = entry.get("outputs") or {}
@@ -3038,15 +3054,18 @@ class _TrackedJobs:
         return self._key(prompt_id, info) in self.handled
 
 
+_live_jobs: list[_TrackedJobs] = []
+_live_jobs_lock = threading.Lock()
+
+
+def _input_in_use(name: str, by: Optional[_TrackedJobs]) -> bool:
+    """Whether a running generation other than *by* sent ComfyUI the same image."""
+    with _live_jobs_lock:
+        return any(name in jobs.inputs for jobs in _live_jobs if jobs is not by)
+
+
 _TRACKED_JOBS: contextvars.ContextVar[Optional[_TrackedJobs]] = contextvars.ContextVar(
     "localm_tracked_comfy_jobs", default=None)
-
-
-def _private_jobs() -> Optional[_TrackedJobs]:
-    """The jobs of the :func:`run_leaving_nothing` call this code runs in, when they
-    are to leave nothing."""
-    jobs = _TRACKED_JOBS.get()
-    return jobs if jobs is not None and jobs.private() else None
 
 
 _PRIVATE_STOP_WAIT_S = 10.0
@@ -3055,20 +3074,16 @@ _PRIVATE_ENTRY_WAIT_S = 2.0
 _JOB_MARKER = "localm_job"
 
 
-def _always_private() -> bool:
-    return True
-
-
 def run_leaving_nothing(job, *, comfy_output_dir: Optional[str] = None,
                         comfy_workdir: Optional[str] = None,
-                        private: Callable[[], bool] = _always_private,
-                        clean_finished: Callable[[], bool] = lambda: False,
+                        private: Callable[[], bool] = lambda: True,
+                        clean: Optional[Callable[[bool], bool]] = None,
                         ) -> tuple[bool, str]:
-    """Run *job* (a generation returning ``(ok, message)``) and, when *private* says
-    so at its end, remove every file its ComfyUI jobs left in ComfyUI's output and
-    temp folders, plus their history entries and the images sent to it, however it
-    ended. A finished generation is cleaned up like that when *clean_finished* says
-    so, too. Otherwise ComfyUI keeps what it has.
+    """Run *job* (a generation returning ``(ok, message)``) and, when *clean* (by
+    default *private*) says so for its ``ok`` at its end, remove every file its ComfyUI
+    jobs left in ComfyUI's output and temp folders, plus their history entries and the
+    images sent to it, however it ended. Otherwise ComfyUI keeps what it has. *private*
+    is asked while the job runs.
 
     The files are the ones ComfyUI lists for the job; each is deleted only when
     it is byte for byte what ComfyUI serves under that name. A finished
@@ -3078,12 +3093,26 @@ def run_leaving_nothing(job, *, comfy_output_dir: Optional[str] = None,
     exception, what stays is also reported at a later start
     (``held.note_comfy_job``)."""
     jobs = _TrackedJobs(private)
+    with _live_jobs_lock:
+        _live_jobs.append(jobs)
+    try:
+        return _run_tracked(job, jobs, clean or (lambda ok: private()), comfy_output_dir,
+                            comfy_workdir)
+    finally:
+        with _live_jobs_lock:
+            _live_jobs.remove(jobs)
+
+
+def _run_tracked(job, jobs: _TrackedJobs, clean: Callable[[bool], bool],
+                 comfy_output_dir: Optional[str], comfy_workdir: Optional[str],
+                 ) -> tuple[bool, str]:
     token = _TRACKED_JOBS.set(jobs)
     try:
         ok, message = job()
     except BaseException:
+        jobs.note_if_private()
         stay, other = (_remove_private_jobs(jobs, comfy_output_dir, comfy_workdir)
-                       if private() else ([], []))
+                       if clean(False) else ([], []))
         if stay or other:
             from localm.debuglog import logger
             logger.warning("%s", "; ".join(stay + other))
@@ -3092,8 +3121,10 @@ def run_leaving_nothing(job, *, comfy_output_dir: Optional[str] = None,
         raise
     finally:
         _TRACKED_JOBS.reset(token)
-    if not (private() or (ok and clean_finished())):
+    if not clean(ok):
+        jobs.forget_notes()
         return ok, message
+    jobs.note_if_private()
     stay, other = _remove_private_jobs(jobs, comfy_output_dir, comfy_workdir)
     if not held.CLOSING.is_set() or not (stay or other):
         jobs.forget_notes()
@@ -3150,6 +3181,8 @@ def _remove_private_jobs(jobs: _TrackedJobs, comfy_output_dir: Optional[str],
             other.append("ComfyUI's history entry of this job, which holds the prompt, may "
                          f"remain (job {prompt_id})")
     for name, api_url in jobs.uploads.items():
+        if _input_in_use(name, jobs):
+            continue
         reason = remove_uploaded_input(api_url, name, comfy_output_dir=comfy_output_dir,
                                        comfy_workdir=comfy_workdir)
         if reason:
@@ -3366,6 +3399,8 @@ class UploadedInputCopy:
                     and not _comfy_job_stopped(self.api_url, self.prompt_id)):
                 reason = ("ComfyUI did not stop this job, so a copy of your input "
                           "image stays in its input folder")
+            elif _input_in_use(self.name, jobs):
+                reason = ""
             else:
                 reason = remove_uploaded_input(
                     self.api_url, self.name, comfy_output_dir=self.comfy_output_dir,
@@ -3584,7 +3619,7 @@ def comfy_submit_prompt(api_url: str, workflow: dict, *, timeout: float = 10.0):
             prompt_id = json.loads(response.read().decode("utf-8")).get("prompt_id")
         if not prompt_id:
             if jobs is not None and not sent_id:
-                jobs.unconfirmed = True
+                jobs.unconfirmed = api_url
             return SUBMIT_NO_ID, None
         if jobs is not None and sent_id:
             jobs.accepted(sent_id, str(prompt_id))
@@ -3598,7 +3633,7 @@ def comfy_submit_prompt(api_url: str, workflow: dict, *, timeout: float = 10.0):
         if jobs is not None and sent_id and _certainly_refused(e):
             jobs.refused(sent_id)
         elif jobs is not None and not sent_id:
-            jobs.unconfirmed = not _certainly_refused(e)
+            jobs.unconfirmed = "" if _certainly_refused(e) else api_url
         if isinstance(e, urllib.error.HTTPError):
             return SUBMIT_HTTP_ERROR, e
         return (SUBMIT_URL_ERROR if isinstance(e, urllib.error.URLError) else SUBMIT_ERROR), e
@@ -3708,9 +3743,10 @@ def comfy_poll_until_done(
     last_poll_err: Optional[Exception] = None
     jobs = _TRACKED_JOBS.get()
     while time.time() - start_time < max_poll_seconds:
+        private = jobs is not None and jobs.note_if_private()
         if cancel_check and cancel_check():
             cancel_comfy_prompt(api_url, prompt_id)
-            if _private_jobs() is None:
+            if not private:
                 clear_comfy_history(api_url, prompt_id)
             return POLL_CANCELLED, None
         if on_tick is not None:

@@ -159,7 +159,7 @@ async def video(req: VideoRequest, request: Request):
     keeps = media_keep_check(request)
 
     def private():
-        return not keeps() or media_session_is_private()
+        return not keeps(peek=True) or media_session_is_private()
 
     @media_handover_job
     def _generate(job):
@@ -271,6 +271,13 @@ async def video(req: VideoRequest, request: Request):
             if _backend.supports(s, "SUPPORTS_JOB_OPTIONS"):
                 kwargs["on_preview"] = lambda p: job.push(frame_event(p))
                 kwargs["on_queue_state"] = lambda state: job.progress(phase=state)
+
+            def _settle(kept, private_now, path: Path = out_path):
+                nonlocal out_path
+                out_path, stays = gallery.settle(job, "video", path, owner, kept,
+                                              private_now)
+                return stays
+
             ok, message = _backend.generate(
                 s, req.prompt, out_path,
                 self_url=self_url,
@@ -285,15 +292,13 @@ async def video(req: VideoRequest, request: Request):
                 placement=placement,
                 cancel=lambda: job.cancel(),
                 privacy=private,
-                leave_nothing=lambda: not keeps(),
+                leave_nothing=lambda: not keeps(peek=True),
+                settle=_settle,
                 **kwargs,
             )
             job.push({"type": "line", "text": message})
             if ok:
-                out_path = gallery.settle("video", out_path, keeps, private)
                 job.result = out_path.name
-                gallery.push_stamp_warning(
-                    job, gallery.record_owner("video", out_path, owner))
                 if held.is_held(out_path):
                     gallery.push_held(job)
             # Recorded before the chat model reload that runs on leaving the block.
