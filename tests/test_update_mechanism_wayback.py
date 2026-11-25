@@ -47,6 +47,7 @@ def again(root: Path, result: job.Result, *names: str) -> job.Result:
     assert result.state == "failed" and len(result.errors) == len(names), result
     assert [(p["step"], p["name"], p["version"]) for p in result.packages] == [
         ("packages", name, "1.0") for name in names], result
+    assert not any("stays so" in n and "alpha/" in n.rpartition("stays so")[2] for n in result.notes)
     for p in result.packages:
         uv.install(root / ".venv" if (root / ".venv").exists() else uv.venv(root),
                    {"alpha": ALPHA1, "beta": BETA}[p["name"]])
@@ -174,6 +175,17 @@ def test_an_edited_package_file_that_is_lost_is_healed_by_the_release(root):
     assert uv.undo(root).state == "failed"
     uv.install(root / ".venv", ALPHA1)
     assert uv.undo(root).state == "old"
+
+
+def test_an_edited_package_file_that_is_lost_is_healed_by_the_same_content(root):
+    (site(root) / "alpha" / "data.txt").write_bytes(b"MINE")
+    moved(root)
+    (root / ".venv" / mover.VENV_FOLDER / ID / "old" / "01" / SITE / "alpha" / "data.txt").unlink()
+    (site(root) / "alpha" / "data.txt").write_bytes(b"MINE")
+    os.utime(site(root) / "alpha" / "data.txt", (1, 1))
+    result = uv.undo(root)
+    assert (result.state, result.errors) == ("old", [])
+    assert (site(root) / "alpha" / "data.txt").read_bytes() == b"MINE"
 
 
 def test_an_edited_release_file_that_is_lost_is_healed_by_the_release(root):
@@ -711,7 +723,8 @@ def test_what_is_damaged_of_the_state_never_stops_a_start(root, monkeypatch, sta
     assert result.errors == [] and uv.tree(root) == before
     assert result.state in {"done": ("new", "none"), "left": ("new", "none"),
                             "ending": ("old", "none")}.get(step, ("old",))
-    assert b"MINE" in everything(root) and um.left(root) in ([], ["kept"])
+    assert b"MINE" in everything(root)
+    assert um.left(root) in ([], ["kept"], *([[ID]] if step == "ending" else []))
     assert uv.undo(root).state == "none"
 
 

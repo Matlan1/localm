@@ -906,8 +906,6 @@ class _Back:
             self.sources[op.path] = path
         elif is_old(self.a, op, self.wait):
             self._settle(op)
-        elif op.dist in self.whole:
-            self.left.add(op.path)
         elif op.dist or (st is None and not self._was_moved(op)):
             self._leave(op)
         elif op.edited and not op.release and (
@@ -939,7 +937,7 @@ class _Back:
 
     def _leave(self, op: Op) -> None:
         self.left.add(op.path)
-        self.theirs.append(op.path)
+        self.theirs += [] if op.dist else [op.path]
         if self.numbers[op.path] in self.marks.changed:
             self._mark("-", op)
 
