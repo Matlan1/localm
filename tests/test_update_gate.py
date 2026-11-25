@@ -777,6 +777,19 @@ def test_the_ways_out_are_for_what_waiting_and_closing_cannot_help(inst, monkeyp
     assert ("account that installed it" in said_) == isinstance(result, PermissionError)
 
 
+def test_a_part_that_another_process_changes_is_waited_for(inst, monkeypatch):
+    part = inst.root / "runtime"
+    part.mkdir()
+    with job.Lock(inst.root) as lock:
+        inst.start(lock, job.STEPS)
+        job.add_part(lock, part)
+    monkeypatch.delenv("LOCALM_SETUP", raising=False)
+    with job.Lock(part, wait_s=0):
+        code, lines = restoring._once(inst.root)
+    assert code == restoring.FAILED and "another process" in lines[-1] and "run setup" not in lines[-1]
+    assert ran(inst.localm(), "1") and inst.is_old()
+
+
 def _cmd(inst, *lines, **env):
     script = inst.root.parent / "do.bat"
     script.write_text("@echo off\r\n" + "\r\n".join(lines) + "\r\n")
