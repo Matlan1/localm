@@ -47,7 +47,10 @@ def tree(top: Path) -> dict:
 
 class Step:
     """A step on a small tree. *kinds* names the file of each kind, relative to the
-    tree; a kind the step cannot meet is not among them."""
+    tree; a kind the step cannot meet is not among them. *left* is what stays of an update
+    that is done."""
+
+    left: list = []
 
     def __init__(self, name: str, *, alone: bool = False, links: bool = True) -> None:
         self.name, self.alone, self.links = name, alone, links
@@ -162,7 +165,10 @@ class Comfyui(Step):
 
 
 class Linked(Step):
-    """A folder of the managed ComfyUI that is a link to one of the user's."""
+    """A folder of the managed ComfyUI that is a link to one of the user's, whose replaced
+    files are kept."""
+
+    left = ["kept"]
 
     def build(self, top: Path) -> None:
         self.root, self.part, self.whole = "root", "data/comfyui", False
@@ -320,7 +326,8 @@ def test_a_step_ended_at_any_place_is_old_or_finished(bench):
     old = tree(top)
     went = _result(bench.run(step, top))
     new = tree(top)
-    assert went["done"] and new != old and um.left(top / step.root) == []
+    assert went["done"] and new != old and um.left(top / step.part) == step.left
+    assert um.left(top / step.root) == (step.left if step.root == step.part else [])
     assert new[step.kinds["own"]] == old[step.kinds["own"]]
     failing, failed_top = bench.build("failed")
     failed = _result(bench.run(failing, failed_top, fail=True))
