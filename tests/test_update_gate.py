@@ -130,7 +130,8 @@ class Install:
 
     def env(self, **more) -> dict:
         env = {k: v for k, v in os.environ.items()
-               if not k.startswith("LOCALM_") and k not in ("PYTHONHOME", "VIRTUAL_ENV")}
+               if not k.startswith("LOCALM_") and k not in (
+                   "PYTHONHOME", "VIRTUAL_ENV", "PYTHONDONTWRITEBYTECODE")}
         return {**env, "PYTHONPATH": str(self.root), "PYTHONNOUSERSITE": "1",
                 "LOCALM_HOME": str(self.root / "home"), **more}
 
@@ -702,6 +703,8 @@ def test_the_files_of_a_start_are_never_absent_while_an_update_moves_them():
     tracked = subprocess.run(["git", "ls-files", *mover.GATE_FILES], cwd=REPO, text=True,
                              capture_output=True, **HIDDEN).stdout.split()
     assert set(mover.GATE_FILES) == set(tracked)
+    loaded = re.findall(r"^\s+from localm import (\w+)", _text("localm/__init__.py"), re.M)
+    assert loaded and {"localm/__init__.py", *(f"localm/{n}.py" for n in loaded)} <= set(mover.GATE_FILES)
     callers = {p for p in (*REPO.glob("*.bat"), *REPO.glob("*.sh"), REPO / "launcher.pyw",
                            REPO / "installer" / "gui.py", REPO / "scripts" / "rollback_update.py")
                if ".localm-update" in p.read_text(encoding="utf-8")}
