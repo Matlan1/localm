@@ -262,6 +262,25 @@ def test_an_unknown_stored_key_warning_names_the_file_and_the_key(home, monkeypa
         "its value is ignored and the key is kept in the file."]
 
 
+@pytest.mark.parametrize("update_id, stays", [("ab" * 16, True), ("", False)])
+def test_a_process_of_an_update_migrates_the_settings_only_in_memory(home, monkeypatch, update_id,
+                                                                     stays):
+    monkeypatch.setenv("LOCALM_UPDATE_ID", update_id)
+    text = json.dumps({"gui_proxy_remote_images": True})
+    cfg.CONFIG_FILE.write_text(text, encoding="utf-8")
+    assert cfg.load_config()["gui_proxy_remote_images"] == cfg.REMOTE_IMAGE_ON
+    assert (cfg.CONFIG_FILE.read_text(encoding="utf-8") == text) is stays
+
+
+def test_a_process_of_an_update_converts_no_plugin(monkeypatch):
+    from types import SimpleNamespace
+
+    from localm.plugins.engine import PluginManager
+    monkeypatch.setenv("LOCALM_UPDATE_ID", "ab" * 16)
+    PluginManager._refresh_installed_builtins(SimpleNamespace(
+        _store_root="x", _installed_set=lambda: pytest.fail("plugins were converted")))
+
+
 def test_migrations_map_a_stored_boolean_remote_image_value():
     stored = {"gui_proxy_remote_images": True}
     cfg._apply_config_migrations(stored)
