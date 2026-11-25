@@ -12,8 +12,8 @@ from pathlib import Path
 #: The modules beside this package that it loads. Each imports only the standard
 #: library at module level.
 MODULES = ("_apply_update", "update_package", "updater_components")
-#: Modules of the build copied beside them when it has them.
-ALSO = ("procs",)
+#: Modules of the build copied beside them when it has them, loaded with :func:`also`.
+ALSO = ("procs", "_home_cfg")
 
 _PACKAGE = Path(__file__).resolve().parent
 
@@ -33,6 +33,11 @@ def _load(name: str):
 apply_update = _load("_apply_update")
 update_package = _load("update_package")
 updater_components = _load("updater_components")
+
+
+def also(name: str):
+    """The module *name* of :data:`ALSO`, None when this copy does not have it."""
+    return _load(name) if (_PACKAGE.parent / f"{name}.py").is_file() else None
 
 
 def copy_applier(localm_dir, dest) -> Path:
