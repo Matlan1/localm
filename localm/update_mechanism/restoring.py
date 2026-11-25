@@ -91,6 +91,8 @@ def _once(root) -> tuple:
                     notes, why = result.notes, [_NOT_BACK + line for line in result.errors]
                     if not why or result.held:
                         return (FAILED if why else OK), [*notes, *why]
+                    if not in_setup():
+                        return FAILED, [*notes, *why, *ways_out(root)]
             except mover.Unreadable as e:
                 why = [_NOT_BACK + str(e)]
             aside = _set_aside(lock)

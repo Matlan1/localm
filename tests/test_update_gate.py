@@ -834,7 +834,7 @@ def test_setup_goes_on_with_a_new_environment_and_always_uninstalls(tmp_path, sc
         done = setup(arg)
         assert re.search(r"BEGINS \[0?\]", done.stdout), (done.stdout, done.stderr)
     assert inst.phase() != restoring.SETUP
-    part.write_text(NEW["localm/part.py"])
+    um.write(inst.root, {"localm/part.py": NEW["localm/part.py"]})
     for _ in range(2):
         done = setup()
         assert "BEGINS [1]" in done.stdout and inst.phase() == restoring.SETUP, (done.stdout, done.stderr)
