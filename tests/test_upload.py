@@ -335,3 +335,12 @@ def test_upload_accepts_more_files_than_the_default_form_part_cap(scoped_app):
                    files=[("file", (f"f{i}.txt", b"x")) for i in range(n)])
         assert r.status_code == 200, r.text
         assert len(r.json()["uploaded"]) == n
+
+
+def test_listing_or_deleting_uploads_creates_no_folder(scoped_app):
+    key = _writer_key()
+    with TestClient(scoped_app) as c:
+        r = c.get("/api/uploads", headers=_hdr(key))
+        assert r.status_code == 200 and r.json()["items"] == []
+        assert c.delete("/api/uploads/none.txt", headers=_hdr(key)).status_code == 404
+    assert not (scoped_app.state._home / "uploads").exists()

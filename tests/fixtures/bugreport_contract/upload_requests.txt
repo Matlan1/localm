@@ -18,4 +18,4 @@ Content-type: application/json
 User-agent: localm-bugreport
 X-localm-token: explicit-token
 
-{"title": "t", "body": "edited footer\n\n---\nSent to the localm maintainer ({{MAINTAINER_EMAIL}}). You can edit anything above before sending. (edited)\n"}
+{"title": "t", "body": "edited footer\n\n---\nFor the localm maintainer ({{MAINTAINER_EMAIL}}). You can edit anything above before sending. (edited)\n"}

@@ -243,11 +243,14 @@ def register(app: FastAPI, ctx) -> None:
                 unresolved = await run_in_threadpool(embedding_model_unresolved, asked)
                 if unresolved:
                     save_warnings.append(unresolved)
+        # A blank or null value unsets the model, so the default one applies.
         if "embedding_model" in body and not confirm:
             from localm.config import load_config
-            new_model = str(body["embedding_model"]).strip()
-            current_model = str(load_config().get("embedding_model") or "")
-            if new_model and new_model != current_model:
+            from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
+            new_model = str(body["embedding_model"] or "").strip() or DEFAULT_EMBEDDING_MODEL
+            current_model = str(load_config().get("embedding_model")
+                                or DEFAULT_EMBEDDING_MODEL).strip()
+            if new_model != current_model:
                 from localm.rag import collection_provenance_note, collection_provenance_report
                 affected = await run_in_threadpool(
                     collection_provenance_report, candidate_model=new_model)

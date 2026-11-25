@@ -83,6 +83,8 @@ def main() -> int:
     """Print the device list as one JSON line. Exit 0 with ``[]`` when torch
     is not installed or sees no device; exit 1 with ``[]`` when torch failed.
     A failure, torch not installed included, is described on stderr."""
+    from localm import comgr_temp
+    comgr_temp.register()
     try:
         devices = _enumerate()
     except BaseException as e:

@@ -410,3 +410,19 @@ class TestSessionMarkdownIdentity:
         assert "message from session B" in text2
         assert "message from session B" not in text1
         assert "message from session A" not in text2
+
+
+class TestSessionMarkdownPath:
+    def test_the_named_path_is_the_one_written(self, tmp_path):
+        agent = _make_agent(tmp_path, SessionMode.PRIVACY)
+        agent._messages = [{"role": "user", "content": "hi"}]
+        named = agent.session_markdown_path("2026-01-01_000000")
+        assert agent._write_session_markdown(named) == named
+        assert named.is_file() and agent._checkpoint_id in named.name
+
+    def test_a_path_of_the_users_is_written_directly(self, tmp_path):
+        agent = _make_agent(tmp_path, SessionMode.PRIVACY)
+        agent._messages = [{"role": "user", "content": "hi"}]
+        target = tmp_path / "notes" / "out.md"
+        assert agent._write_session_markdown(target) == target
+        assert target.is_file() and not (tmp_path / ".localcoder").exists()

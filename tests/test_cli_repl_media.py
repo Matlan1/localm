@@ -44,14 +44,14 @@ def _run_repl_media(command: str, generate_target: str, *, mode, api_url,
     return calls, engine
 
 
-@pytest.mark.parametrize("command,target,ext,subdir", [
+@pytest.mark.parametrize("command,target,ext,kind", [
     ("/generate-music happy lo-fi beats",
-     "localm.music_gen.generate_music", ".flac", "gui_music"),
+     "localm.music_gen.generate_music", ".flac", "music"),
     ("/generate-video a cat surfing",
-     "localm.video_gen.generate_video", ".mp4", "gui_video"),
+     "localm.video_gen.generate_video", ".mp4", "video"),
 ])
 def test_repl_media_privacy_no_sidecar(tmp_path, monkeypatch, command, target,
-                                       ext, subdir):
+                                       ext, kind):
     from localm import cli
     from localm.audit import SessionMode
 
@@ -66,8 +66,10 @@ def test_repl_media_privacy_no_sidecar(tmp_path, monkeypatch, command, target,
     # Privacy mode must also delete ComfyUI's own on-disk output copy (it
     # embeds the full prompt/workflow as metadata), not just the sidecar.
     assert calls.get("delete_outputs") is True
-    # Output is routed into the per-medium GUI dir with the right extension.
-    assert calls["out"].parent == tmp_path / subdir
+    # The output is held for the chat, not written to the gallery.
+    from localm.media import held
+    assert calls["out"].parent == held.folder(kind)
+    assert not (tmp_path / f"gui_{kind}").exists()
     assert calls["out"].suffix == ext
     # The chat model is unloaded to free VRAM before generation.
     engine.unload.assert_called_once()

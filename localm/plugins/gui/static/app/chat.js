@@ -3675,6 +3675,7 @@ window.openImageLightbox = openImageLightbox;
 // lexical-only / pending-embedding recall is visible, not invisible.
 const MEMORY_DEGRADE_LABELS = {
   no_embedder: "chat.memoryChip.noEmbedder",
+  embedder_failed: "chat.memoryChip.embedderFailed",
   no_vectors: "chat.memoryChip.noVectors",
   low_coverage: "chat.memoryChip.lowCoverage",
   dim_mismatch: "chat.memoryChip.dimMismatch",
@@ -3750,9 +3751,21 @@ export function buildMemoryChip(mem) {
 }
 
 /** The sentence for the outcome of a "remember ..." request the server handled
- *  for a message: `saved` is `{ text, status }`, status "saved" | "exists" |
- *  "full" | "failed". */
+ *  for a message: `saved` is `{ text, status }`, status "saved" | "exists" | "full" |
+ *  "failed" | "off". For a message with several requests it is `{ status, facts }`:
+ *  `facts` ([{ text, status }]) gives one line per outcome, naming the facts it
+ *  applies to. */
 export function memorySavedText(saved) {
+  const facts = saved && Array.isArray(saved.facts) ? saved.facts : [];
+  if (facts.length > 1) {
+    const lines = { saved: "chat.memory.saved", exists: "chat.memory.exists",
+                    full: "chat.memory.fullFact", failed: "chat.memory.failedFact",
+                    off: "chat.memory.off" };
+    return Object.entries(lines).flatMap(([status, line]) => {
+      const named = facts.filter((f) => f && f.status === status).map((f) => f.text);
+      return named.length ? [t(line, { text: named.join("; ") })] : [];
+    }).join("\n");
+  }
   const key = { saved: "chat.memory.saved", exists: "chat.memory.exists",
                 full: "chat.memory.full", off: "chat.memory.off" }[saved && saved.status] || "chat.memory.saveFailed";
   return t(key, { text: (saved && saved.text) || "" });

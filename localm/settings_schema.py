@@ -737,6 +737,11 @@ CORE_FIELDS: list = [
                  "override.",
                  group="Privacy", owner="coder", options=_PRIVACY_INHERIT,
                  tier=Tier.OWNER),
+    SettingField("privacy_keep", Widget.LIST, "Keep in privacy mode",
+                 "What privacy mode keeps. With media chosen, generated images, music "
+                 "and video stay in their History. Without it (default) they can be "
+                 "seen and saved while localm runs, then they are removed.",
+                 group="Privacy", options=["media"], tier=Tier.OWNER),
     SettingField("memory_enabled", Widget.TOGGLE, "Memory recall",
                  "Recall the durable facts localm has learned about you and add them to "
                  "the system prompt each chat turn. Off = keep the facts, but stop "
@@ -782,9 +787,9 @@ CORE_FIELDS: list = [
     # A small on-device model, loaded separately from the chat model. The known
     # keys are bge-small-en-v1.5 and nomic-embed-text-v1.5.
     SettingField("embedding_model", Widget.TEXT, "Embedding model",
-                 "A known key, registered name or GGUF path. Fetched on first use only "
-                 "when network access is allow; else use Download on the Knowledge or "
-                 "memory page. Until then search is by keyword.",
+                 "A known key, registered name or GGUF path. A missing key is fetched on "
+                 "first use under network allow (not set: only if no embedding model is "
+                 "registered), else with Download on Knowledge or memory.",
                  # Owner-only because branch 1 of resolve_embedding_model_path()
                  # returns a CALLER-CHOSEN filesystem path with no confined_*
                  # check, and that path is then handed to llama.cpp's native GGUF
@@ -1598,7 +1603,13 @@ def _validate_one(key: str, val, field: SettingField, default):
         raise ValueError(f"{key}: {val!r} is not one of {field.options}")
 
     if widget == Widget.LIST:
-        return _to_str_list(key, val)
+        items = _to_str_list(key, val)
+        if field.options:
+            unknown = [i for i in items if i not in field.options]
+            if unknown:
+                raise ValueError(f"{key}: {unknown[0]!r} is not one of {field.options}")
+            items = [o for o in field.options if o in items]
+        return items
 
     if widget == Widget.PATHLIST:
         # A list of folder paths. Run each through the RAG indexer's hard floor
@@ -1930,8 +1941,11 @@ def schema_json(values: Optional[dict] = None, *, is_owner: bool = True) -> list
 
     A model-source credential field (``CREDENTIAL_KEYS``) also carries
     ``status_unknown``: True when its store file exists but could not be read,
-    in which case ``is_set`` and ``env_set`` are both False."""
-    from localm.config import DEFAULT_CONFIG
+    in which case ``is_set`` and ``env_set`` are both False.
+
+    A field of ``keys_kept_when_set`` also carries ``chosen``: whether somebody set
+    it, at whatever value; a null or blank value sent for it unsets it."""
+    from localm.config import DEFAULT_CONFIG, config_key_stored, keys_kept_when_set
     base = DEFAULT_CONFIG if values is None else values
     # The GUI's Media section skips group="Media" fields in the flat form and
     # shows per-plugin-mapped globals ONLY inside the per-plugin boxes, so it
@@ -1978,6 +1992,8 @@ def schema_json(values: Optional[dict] = None, *, is_owner: bool = True) -> list
             # or override alike - as solid, indistinguishable text.
             if f.key in DEFAULT_CONFIG:
                 d["shipped_default"] = DEFAULT_CONFIG[f.key]
+            if f.key in keys_kept_when_set():
+                d["chosen"] = values is not None and config_key_stored(f.key)
         if f.key == "binary_dir":
             try:
                 from localm.config import find_binary_dir

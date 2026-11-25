@@ -267,3 +267,52 @@ test("blanking a nullable NUMBER field that held a real override sends null", as
   assert.equal(patches.length, 1);
   assert.equal(patches[0].embedding_gpu_layers, null);
 });
+
+// ---------------------------------------------------------------- //
+//  A field whose setting is a choice even at the default value      //
+// ---------------------------------------------------------------- //
+
+function choiceSchema(value, chosen) {
+  return { fields: [{ key: "embedding_model", widget: "text", label: "Embedding model",
+    help: "", group: "Server", owner: "core", default: value,
+    shipped_default: "bge-small-en-v1.5", chosen }] };
+}
+
+async function saveChoice(schema, value) {
+  const patches = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(schema, patches) });
+  await render(win);
+  const input = win.document.querySelector('input[data-key="embedding_model"]');
+  const shown = input.value;
+  if (value !== undefined) {
+    input.value = value;
+    input.dispatchEvent(new win.Event("input"));
+  }
+  runScript(win, 'saveSettingsSection([...document.querySelectorAll(".settings-section")]' +
+    '.find((s) => s.querySelector(\'[data-key="embedding_model"]\')).dataset.sec);');
+  await new Promise((r) => setTimeout(r, 0));
+  return { shown, patches };
+}
+
+test("a cleared choice is sent as null, whether it was another model or the default", async () => {
+  for (const chosen of ["nomic-embed-text-v1.5", "bge-small-en-v1.5"]) {
+    const { shown, patches } = await saveChoice(choiceSchema(chosen, true), "");
+    assert.equal(shown, chosen, "a choice renders solid");
+    assert.deepEqual(patches, [{ embedding_model: null }]);
+  }
+});
+
+test("the default's own name typed into an unset field is sent as a choice", async () => {
+  const { shown, patches } = await saveChoice(
+    choiceSchema("bge-small-en-v1.5", false), "bge-small-en-v1.5");
+  assert.equal(shown, "");
+  assert.deepEqual(patches, [{ embedding_model: "bge-small-en-v1.5" }]);
+});
+
+test("an untouched field sends nothing, chosen or not", async () => {
+  for (const [value, chosen] of [["bge-small-en-v1.5", false], ["bge-small-en-v1.5", true],
+                                 ["nomic-embed-text-v1.5", true]]) {
+    const { patches } = await saveChoice(choiceSchema(value, chosen));
+    assert.deepEqual(patches, []);
+  }
+});

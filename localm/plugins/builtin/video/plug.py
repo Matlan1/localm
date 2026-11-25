@@ -20,7 +20,6 @@ by default.
 from __future__ import annotations
 
 import os
-import shutil
 import time
 from typing import Optional
 from pathlib import Path
@@ -31,13 +30,14 @@ from pydantic import BaseModel, Field
 
 from localm.inference.http_server import path_formatter, principal_id
 from localm.audit import carry_request_privacy
-from localm.media import gallery
+from localm.media import gallery, held
 from localm.media import paths as media_paths
 from localm.media.native_models import (
     MAX_LORAS, LoraChoice, check_generation_extras, check_request,
 )
-from localm.plugins.media_config import media_session_is_private, range_refusal
-from localm.pathsafe import confined_file, confined_name
+from localm.plugins.media_config import (
+    media_keep_check, media_session_is_private, range_refusal,
+)
 from localm.pathscrub import map_strings
 from localm.jobmanager import frame_event
 from localm.selfclient import resolve_self_url
@@ -84,7 +84,7 @@ def _video_dir() -> Path:
 
 
 def _video_path(name: str) -> Path:
-    return confined_file(_video_dir(), name, "clip")
+    return media_paths.media_file("video", _video_dir(), name, "clip")
 
 
 async def _require_native_size(width: int, height: int) -> None:
@@ -131,7 +131,8 @@ async def video(req: VideoRequest, request: Request):
     logger.info("video: %d-char prompt (seconds=%g)", len(req.prompt), req.seconds)
     input_image = None
     if req.input_image:
-        input_image = media_paths.confined_input_image(req.input_image)
+        input_image = media_paths.confined_input_image(req.input_image,
+                                                       gallery.may_use(request))
     native_choice, native_loras = check_request(req.native_models, req.loras, "video")
     native_extras = check_generation_extras(req.sample_method, req.scheduler, None)
     native_extras = {k: native_extras[k] for k in ("sample_method", "scheduler")
@@ -153,14 +154,19 @@ async def video(req: VideoRequest, request: Request):
     # keyless server too.
     instance_token = getattr(request.app.state, "instance_token", None)
 
-    video_dir = _video_dir()
-    video_dir.mkdir(parents=True, exist_ok=True)
-    out_path = video_dir / f"{time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.mp4"
+    out_name = f"{time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.mp4"
     owner = principal_id(request)
+    keeps = media_keep_check(request)
+
+    def private():
+        return not keeps(peek=True) or media_session_is_private()
 
     @media_handover_job
     def _generate(job):
         from localm.config import load_config
+        out_path = gallery.job_output_path(job, "video", out_name, keeps())
+        if out_path is None:
+            return False
         # Resolved here, in the job's own worker thread, not the route above.
         _cfg = load_config()
         s = _backend.prepare_for_job(_backend.settings(_cfg), _cfg)
@@ -265,33 +271,42 @@ async def video(req: VideoRequest, request: Request):
             if _backend.supports(s, "SUPPORTS_JOB_OPTIONS"):
                 kwargs["on_preview"] = lambda p: job.push(frame_event(p))
                 kwargs["on_queue_state"] = lambda state: job.progress(phase=state)
-            is_privacy = media_session_is_private()
+
+            def _settle(kept, private_now, path: Path = out_path):
+                nonlocal out_path
+                out_path, stays = gallery.settle(job, "video", path, owner, kept,
+                                              private_now)
+                return stays
+
             ok, message = _backend.generate(
                 s, req.prompt, out_path,
                 self_url=self_url,
                 instance_token=instance_token,
                 # privacy mode: no sidecar (the clip's own metadata is stripped
                 # in every mode)
-                write_sidecar=not is_privacy,
+                write_sidecar=not private(),
                 on_progress=lambda t: job.push({"type": "line", "text": t}),
                 input_image=input_image,
                 swap=gen_swap,
                 cancel_check=lambda: job.cancel_requested,
                 placement=placement,
-                privacy=is_privacy,
+                cancel=lambda: job.cancel(),
+                privacy=private,
+                leave_nothing=lambda: not keeps(peek=True),
+                settle=_settle,
                 **kwargs,
             )
             job.push({"type": "line", "text": message})
             if ok:
                 job.result = out_path.name
-                gallery.push_stamp_warning(
-                    job, gallery.stamp_owner("video", out_path.name, owner))
+                if held.is_held(out_path):
+                    gallery.push_held(job)
             # Recorded before the chat model reload that runs on leaving the block.
             job.mark_outcome("done" if ok else "failed")
         return ok
 
     job = jobs.start_fn("video", carry_request_privacy(_generate),
-                        result_path=out_path.name,
+                        result_path=out_name,
                         owner=owner)
     return {"job_id": job.id}
 
@@ -330,7 +345,7 @@ async def video_file(name: str):
     media = {".mp4": "video/mp4", ".webm": "video/webm",
              ".gif": "image/gif"}.get(path.suffix.lower(),
                                       "application/octet-stream")
-    return FileResponse(str(path), media_type=media)
+    return FileResponse(str(path), media_type=media, headers=gallery.file_headers(path))
 
 
 @_router.delete("/api/video/file/{name}",
@@ -348,28 +363,9 @@ async def video_delete(name: str):
 @_router.post("/api/video/file/{name}/move",
               dependencies=[Depends(gallery.require_owner("video"))])
 async def video_move(name: str, req: MoveFileRequest, request: Request):
-    """Move a generated clip (and its sidecar) to a folder on this machine.
-
-    The destination is checked BEFORE the mkdir: require_owner proves artifact
-    ownership, not authority over the host filesystem."""
-    path = _video_path(name)
-    dest_dir = media_paths.confined_move_dest(request, req.dest)
-    show = path_formatter(request)
-    try:
-        dest_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        raise HTTPException(400, f"Cannot create destination: {show(e)}") from e
-    if not dest_dir.is_dir():
-        raise HTTPException(400, f"Not a directory: {show(req.dest)}")
-    target = dest_dir / path.name
-    if target.exists():
-        raise HTTPException(409, f"Already exists: {show(target)}")
-    shutil.move(str(path), str(target))
-    sidecar = path.with_suffix(path.suffix + ".json")
-    if sidecar.is_file():
-        shutil.move(str(sidecar), str(dest_dir / sidecar.name))
-    gallery.forget_owner("video", name)     # left the gallery dir
-    return {"status": "moved", "path": show(target)}
+    """Move a generated clip (and its sidecar) to a folder on this machine."""
+    return gallery.move_out(request, "video", _video_path(name), req.dest,
+                            path_formatter(request))
 
 
 @_router.post("/api/video/file/{name}/rename",
@@ -377,7 +373,7 @@ async def video_move(name: str, req: MoveFileRequest, request: Request):
 async def video_rename(name: str, req: RenameFileRequest):
     """Rename a generated clip (and its metadata sidecar) in place.
 
-    Mirrors the image plugin's rename: confined_name re-confines the CALLER's
+    Mirrors the image plugin's rename: rename_target re-confines the CALLER's
     string to the gallery dir, so a traversal or absolute path is rejected
     rather than escaping it - require_owner proves ownership of the source
     artifact, never authority over the destination path."""
@@ -387,9 +383,7 @@ async def video_rename(name: str, req: RenameFileRequest):
         raise HTTPException(400, "Empty name")
     if not new_name.lower().endswith(path.suffix.lower()):
         new_name += path.suffix          # keep the extension
-    target = confined_name(_video_dir(), new_name)
-    if target.exists():
-        raise HTTPException(409, f"Already exists: {new_name}")
+    target = media_paths.rename_target("video", path, new_name)
     path.rename(target)
     sidecar = path.with_suffix(path.suffix + ".json")
     if sidecar.is_file():
@@ -418,7 +412,8 @@ async def video_history(request: Request):
                           "size_bytes": p.stat().st_size,
                           "mtime": p.stat().st_mtime})
     allowed = set(gallery.owned_names(request, "video", [it["name"] for it in items]))
-    return {"videos": [it for it in items if it["name"] in allowed]}
+    return {"videos": [it for it in items if it["name"] in allowed],
+            "held": gallery.held_items(request, "video", show_path)}
 
 
 @_router.get("/api/video/comfy-models")

@@ -3,7 +3,7 @@
 
   GET  /api/activity              - what this server is doing (no id needed)
   GET  /api/jobs/{id}/events      - stream one job (SSE)
-  POST /api/jobs/{id}/cancel      - cancel one job
+  POST /api/jobs/{id}/cancel      - cancel one job, or say that a note was shown
 
 KERNEL routes, despite the path this module sits at. They are registered from
 ``attach_engine``, not ``attach_gui``, so a headless ``localm serve`` answers
@@ -23,6 +23,7 @@ import json
 import time
 
 from fastapi import Depends, FastAPI, Request
+from starlette.concurrency import run_in_threadpool
 
 from localm.inference.http_server import (
     _require_auth, job_owner_ok, path_formatter, require_owner,
@@ -125,6 +126,8 @@ def register(app: FastAPI, jobs) -> None:
 
     @app.post("/api/jobs/{job_id}/cancel", dependencies=[Depends(_require_auth)])
     async def job_cancel(job=Depends(owned_job)):
+        if await run_in_threadpool(jobs.note_shown, job):
+            return {"status": "shown"}
         if job.finished_at is not None:
             return {"status": "not_running", "state": job.status}
         job.cancel()

@@ -551,7 +551,21 @@ def entry_process_state(entry: dict) -> tuple[str, str]:
                        f"prove that pid {pid} is still that server.")
 
 
-def kill_pid(pid: int, *, timeout: float = 10.0,
+#: How long ``localm stop`` and the GUI wait for a clean stop.
+STOP_TIMEOUT_S = 10.0
+
+
+def shutdown_wait(reply) -> float:
+    """How many seconds to wait for the server whose ``POST /v1/server/shutdown``
+    answered *reply* (a ``requests.Response``): ``STOP_TIMEOUT_S``, and the
+    ``wait_s`` it says it needs for private generations (60 at most)."""
+    try:
+        return STOP_TIMEOUT_S + min(60.0, max(0.0, float(reply.json()["wait_s"])))
+    except (AttributeError, ValueError, KeyError, TypeError, RecursionError):
+        return STOP_TIMEOUT_S
+
+
+def kill_pid(pid: int, *, timeout: float = STOP_TIMEOUT_S,
              start_identity: Optional[dict] = None) -> bool:
     """Direct-process fallback for ``localm stop`` when a graceful HTTP shutdown
     (POST /v1/server/shutdown) could not be confirmed - the server did not

@@ -197,7 +197,8 @@ scheduler also on the Video page); an empty field uses the model's own default.
   values** fills the fields with the current suggestion, replacing what is there.
 - **Upscale a gallery image** with a registered upscaler model: the detail view of an
   image has an Upscale action (`POST /api/imagine/file/{name}/upscale` with
-  `{"upscaler": "<registered name>"}`), which saves a new gallery image at the model's
+  `{"upscaler": "<registered name>"}`), which saves a new gallery image (held like the
+  others in privacy mode) at the model's
   scale (4x for RealESRGAN x4) and keeps the original's settings in its sidecar.
 - **Upscaler models** are ESRGAN / RealESRGAN files registered with the type `upscaler`
   (`localm pull <repo>:<file> --type upscaler`, or `localm set-type <name> upscaler`).

@@ -8,6 +8,7 @@ a non-empty memory still do.
 
 from __future__ import annotations
 
+import threading
 import types
 
 import pytest
@@ -41,6 +42,9 @@ def loads(monkeypatch):
 def home(tmp_path, monkeypatch):
     monkeypatch.setattr(plug, "_home", lambda: tmp_path)
     monkeypatch.setenv("LOCALM_MODE", "log")
+    monkeypatch.setattr(plug, "_stop", threading.Event())
+    monkeypatch.setattr(plug, "_fill_pending", False)
+    monkeypatch.setattr(plug, "_fill_stores", {})
     return tmp_path
 
 
@@ -84,6 +88,9 @@ def test_get_memory_with_legacy_file_still_migrates(client, home, loads):
     assert r.status_code == 200, r.text
     assert sorted(i["text"] for i in r.json()["items"]) == [
         "drives a tram", "likes oolong"]
+    for t in threading.enumerate():
+        if t.name == "memory vector fill":
+            t.join(20)
     assert len(loads) == 1
     assert plug._chat_store().path.with_suffix(".legacy-imported").exists()
 

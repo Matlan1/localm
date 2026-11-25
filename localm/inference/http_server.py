@@ -5680,11 +5680,54 @@ def _dbg_swallow(msg: str, *, level: str = "debug") -> None:
         pass
 
 
+def _end_private_media_runs() -> None:
+    """End the running generations that must leave nothing, before anything they need
+    is stopped."""
+    try:
+        from localm.media import held
+        held.end_private_runs()
+    except Exception:
+        _dbg_swallow("ending the running private generations failed (non-fatal)",
+                     level="warning")
+
+
+@contextmanager
+def _media_runs_again():
+    """Around a stop or restart: generations may run again when it did not end this
+    process."""
+    try:
+        yield
+    finally:
+        from localm.vram import MEDIA_CLOSING
+        MEDIA_CLOSING.clear()
+
+
+def _discard_held_media() -> None:
+    """Delete the generated media held for this run, once nothing that writes it is
+    left."""
+    try:
+        from localm.media import held
+        held.discard_all()
+    except Exception:
+        _dbg_swallow("removing generated media held for this run failed; the next start "
+                     "removes it", level="warning")
+
+
+def _finish_comgr_temp() -> None:
+    """Remove the empty temp folders this server's ended GPU processes left."""
+    try:
+        from localm import comgr_temp
+        comgr_temp.finish()
+    except Exception:
+        _dbg_swallow("removing the GPU runtime's empty temp folders failed (non-fatal)")
+
+
+@_media_runs_again()
 def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
     """The stop sequence, WITHOUT the process exit.
 
-    Stops in-flight job children (both the GUI's and the coder plugin's own
-    background shell/agent jobs), closes every live GUI coder session
+    Ends the running private generations, stops in-flight job children (both the GUI's
+    and the coder plugin's own background shell/agent jobs), closes every live GUI coder session
     (waiting a few seconds at most), stops any localm-launched ComfyUI instance,
     unloads the model so the native context is freed cleanly (a hard exit
     while it is loaded segfaults during teardown), releases the shared
@@ -5706,6 +5749,7 @@ def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
         _dbg_swallow("removing this instance's registry entry during shutdown "
                      "failed (non-fatal); it is reaped once the process is gone",
                      level="warning")
+    _end_private_media_runs()
     # Stop the child processes of any in-flight background job FIRST. A start_cli
     # job runs `python -m localm <cmd>` as a real child (a model pull, a runtime
     # provision, a ComfyUI setup): os._exit below bypasses atexit, the job worker
@@ -5818,6 +5862,8 @@ def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
         _speech_mod.release_for_exit()
     except Exception:
         _dbg_swallow("speech worker release during shutdown failed (non-fatal)")
+    _discard_held_media()
+    _finish_comgr_temp()
     try:
         from localm import bugreport
         bugreport.disarm_crash_guard(instance_id=instance_id)
@@ -5972,6 +6018,7 @@ def _mark_fds_noninheritable() -> None:
         pass  # never let fd hygiene block the restart
 
 
+@_media_runs_again()
 def _do_restart(*, update_watchdog: Optional[dict] = None,
                 port: Optional[int] = None,
                 instance_id: Optional[str] = None) -> None:
@@ -6008,6 +6055,7 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     before re-exec spawns a fresh worker into them. Best-effort: an
     unmeasurable or wedged probe must not block a restart the user asked for,
     and vram_capacity() is itself deadline-bounded."""
+    _end_private_media_runs()
     # Stop the child processes of any in-flight background job FIRST. A start_cli
     # job runs `python -m localm <cmd>` as a real child (a model pull, a runtime
     # provision, a ComfyUI setup): os.execv below bypasses atexit, the job worker
@@ -6157,6 +6205,8 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         released_embedder = _speech_mod.release_for_exit() or released_embedder
     except Exception:
         _dbg_swallow("speech worker release during restart failed (non-fatal)")
+    _discard_held_media()
+    _finish_comgr_temp()
 
     # Wait for the frees above to actually land before re-exec. The re-exec'd
     # process spawns a brand-new GGUF worker that constructs a fresh
@@ -6490,6 +6540,30 @@ def _init_session_audit():
     return AppContext(recorder=_session_recorder)
 
 
+def _remove_leftovers(app: FastAPI) -> None:
+    """Remove what earlier localm processes left: generated media that was not to be
+    kept and empty GPU temp folders. A private ComfyUI job one of them left
+    unfinished is told to the owner, on the console and in the activity list (which
+    no scoped key sees there: its owner is nobody's id), until the app showed it."""
+    def tell(text: str, note) -> None:
+        from localm.auth import any_key_configured
+        from localm.console import console
+        from localm.media import held
+        console.print(text, style="yellow", markup=False)
+        jobs = getattr(app.state, "jobs", None)
+        if jobs is not None:
+            jobs.add_note("imagine", text,
+                          held.OWNER_ONLY if any_key_configured() else None,
+                          lambda: held.dismiss_note(note))
+    try:
+        from localm.media import held
+        held.sweep_leftovers(tell)
+    except Exception:
+        _dbg_swallow("removing generated media left by an earlier run failed", level="warning")
+    from localm import comgr_temp
+    comgr_temp.sweep()
+
+
 def _make_lifespan():
     """The app's lifespan. Startup publishes the running loop (_server_loop),
     sweeps expired browser sessions, installs the asyncio exception handler,
@@ -6523,6 +6597,7 @@ def _make_lifespan():
         except Exception:
             from localm.debuglog import logger as _dbg
             _dbg.warning("session sweep at startup failed", exc_info=True)
+        await asyncio.get_running_loop().run_in_executor(None, _remove_leftovers, app)
         # Route an uncaught asyncio task exception through the bug reporter
         # instead of a silent "Task exception was never retrieved". Skipped under
         # pytest so the test runner keeps its own loop handling.
@@ -8975,6 +9050,36 @@ def _capability_route_header(route, placement=None) -> dict:
     return {"X-Localm-Model-Routing": blob}
 
 
+# The X-Localm-Memory value stays below this many bytes.
+MEMORY_HEADER_BYTES = 4096
+# The encoded bytes each text of that header may take, the first that fits.
+_MEMORY_HEADER_TEXT_BYTES = (200, 100, 40)
+
+
+def _cut_for_header(text: str, room: int) -> str:
+    """*text* cut so that its JSON form takes at most *room* bytes, a cut marked with
+    "..." at the end."""
+    if len(text) <= room and len(json.dumps(text)) - 2 <= room:
+        return text
+    out, size = [], 3
+    for ch in text[:room]:
+        size += len(json.dumps(ch)) - 2
+        if size > room:
+            break
+        out.append(ch)
+    return "".join(out).rstrip() + "..." if room >= 3 else ""
+
+
+def _cut_texts(value, room: int):
+    """*value* (JSON data) with every ``text`` string in it cut to *room* bytes."""
+    if isinstance(value, list):
+        return [_cut_texts(v, room) for v in value]
+    if isinstance(value, dict):
+        return {k: _cut_for_header(v, room) if k == "text" and isinstance(v, str)
+                else _cut_texts(v, room) for k, v in value.items()}
+    return value
+
+
 def _memory_used_header(ctx) -> dict:
     """Observability: render the memory plugin's per-turn recall (stashed in
     ``ctx.state`` by its inlet) into a response-header dict so a client can show a
@@ -8983,8 +9088,11 @@ def _memory_used_header(ctx) -> dict:
     for this turn (plugin disabled, privacy mode, recall off). The value is
     compact ASCII JSON, header-safe: ``{"n":<int>,"degrade":<reason|null>,"items":
     [{"id","text","source","kind"}...],"saved":{"text","status"}}`` (``saved`` only
-    when the message asked to remember something) - json.dumps(ensure_ascii=True)
-    escapes newlines and non-ASCII, so the blob is a single header-legal line."""
+    when the message asked to remember something; with several facts it holds
+    ``"facts":[{"text","status"}...]`` in place of ``text``) -
+    json.dumps(ensure_ascii=True) escapes newlines and non-ASCII, so the blob is a
+    single header-legal line. Each text is cut (``_cut_for_header``) so that the
+    whole value stays under MEMORY_HEADER_BYTES."""
     if ctx is None:
         return {}
     state = getattr(ctx, "state", {})
@@ -8999,7 +9107,13 @@ def _memory_used_header(ctx) -> dict:
     if saved is not None:
         payload["saved"] = saved
     try:
-        blob = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+        for room in _MEMORY_HEADER_TEXT_BYTES:
+            blob = json.dumps(_cut_texts(payload, room), ensure_ascii=True,
+                              separators=(",", ":"))
+            if len(blob) < MEMORY_HEADER_BYTES:
+                return {"X-Localm-Memory": blob}
+        blob = json.dumps(_cut_texts({**payload, "items": []}, 0), ensure_ascii=True,
+                          separators=(",", ":"))
     except (TypeError, ValueError):
         return {}
     return {"X-Localm-Memory": blob}

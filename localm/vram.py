@@ -1039,6 +1039,9 @@ def note_other_vram_holders(
 HANDOVER_POLL_SECONDS = 0.25
 _handover_cv = threading.Condition()
 _handover_jobs = 0
+
+#: Set while this process stops or restarts (``localm.media.held.end_private_runs``).
+MEDIA_CLOSING = threading.Event()
 _handover_reloading = False
 _handover_deferred: Optional[tuple] = None
 _handover_deferred_backends: list = []
@@ -1162,7 +1165,10 @@ def reload_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
     is freed or reloaded here: the reload, and the freeing of this job's backend, is
     left to the last job to finish. While the reload runs, jobs that start wait for
     it. The last job's reload-after setting governs: when it is off, a reload an
-    earlier job left to it is dropped and those backends stay loaded."""
+    earlier job left to it is dropped and those backends stay loaded. Does nothing
+    while localm is stopping."""
+    if MEDIA_CLOSING.is_set():
+        return
     if not s["reload_after"]:
         _drop_deferred_reload_if_last()
         job.push({"type": "line", "text":

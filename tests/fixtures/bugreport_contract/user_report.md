@@ -100,4 +100,4 @@ Error: Bearer <redacted>
 ```
 
 ---
-Sent to the localm maintainer ({{MAINTAINER_EMAIL}}). You can edit anything above before sending.
+For the localm maintainer ({{MAINTAINER_EMAIL}}). You can edit anything above before sending.

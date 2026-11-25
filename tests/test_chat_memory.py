@@ -32,7 +32,8 @@ def home(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def client(home):
+def client(home, monkeypatch):
+    monkeypatch.setattr(plug, "_HOST", None)
     app = FastAPI()
     app.include_router(plug._router)
     return TestClient(app)

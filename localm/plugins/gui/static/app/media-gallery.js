@@ -55,7 +55,7 @@ export function reportMediaLoadFailure(player, what, onFail) {
 /** Build one gallery. Returns { refresh, render, state } - `refresh` is what
  *  the page and the tab dispatcher call. */
 export function createGallery(cfg) {
-  const state = { items: [], selected: new Set(), showAll: false };
+  const state = { items: [], held: [], selected: new Set(), showAll: false };
 
   const fileURL = (name, node, event) =>
     urlFor(`/api/${cfg.slug}/file/${encodeURIComponent(name)}`, node, event);
@@ -112,7 +112,9 @@ export function createGallery(cfg) {
           t("mediaGallery.loadFailedHttp", { status: r.status })));
         return;
       }
-      state.items = (await r.json())[cfg.listKey] || [];
+      const data = await r.json();
+      state.items = data[cfg.listKey] || [];
+      state.held = data.held || [];
     } catch (e) {
       grid.replaceChildren(emptyState("warning",
         t("mediaGallery.loadFailed", { plural: t(`${cfg.itemKey}.other`) }),
@@ -130,6 +132,7 @@ export function createGallery(cfg) {
     if (!grid) return;
     releaseDetailURL();
     grid.replaceChildren();
+    renderHeld();
     renderBulkBar();
     if (!state.items.length) {
       grid.appendChild(emptyState(cfg.emptyIcon, t(cfg.emptyTitleKey), t(cfg.emptyHintKey)));
@@ -144,6 +147,37 @@ export function createGallery(cfg) {
       toggle.onclick = () => { state.showAll = !state.showAll; render(); };
       grid.appendChild(toggle);
     }
+  }
+
+  /** The results privacy mode does not keep, under the page's result area: each
+   *  can be opened, downloaded, moved or removed; none is in the History grid. */
+  function renderHeld() {
+    const after = $(cfg.heldAfterId);
+    if (!after) return;
+    let box = $(cfg.heldAfterId + "-held");
+    if (!state.held.length) { if (box) box.remove(); return; }
+    if (!box) {
+      box = el("div", "media-held");
+      box.id = cfg.heldAfterId + "-held";
+      after.after(box);
+    }
+    const cards = el("div", "media-grid");
+    for (const item of state.held) cards.appendChild(buildCard(item));
+    const discard = el("button", "btn-secondary btn-danger", t("mediaGallery.held.discardAll"));
+    discard.type = "button";
+    discard.onclick = () => confirmDanger(t("mediaGallery.held.discardAllTitle"),
+      t("mediaGallery.confirmDeleteBulk.body"), t("mediaGallery.held.discardAll"), async () => {
+        let failed = 0;
+        for (const item of [...state.held]) {
+          try { await apiDelete(item.name); }
+          catch (e) { failed++; toast(`${item.name}: ${e.message}`, true); }
+        }
+        if (!failed) toast(t("mediaGallery.held.discarded"));
+        refresh();
+      });
+    const actions = el("div", "actions");
+    actions.appendChild(discard);
+    box.replaceChildren(el("div", "sub", t("mediaGallery.held.note")), cards, actions);
   }
 
   function buildCard(item) {
@@ -164,7 +198,7 @@ export function createGallery(cfg) {
       thumb.classList.toggle("selected", sel.checked);
       renderBulkBar();
     };
-    thumb.appendChild(sel);
+    if (!item.held) thumb.appendChild(sel);
 
     // hover quick actions (top-right)
     const acts = el("div", "thumb-acts");

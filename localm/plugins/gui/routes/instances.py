@@ -121,7 +121,7 @@ def register(app: FastAPI, ctx) -> None:
         from localm.debuglog import logger
         from localm.selfclient import self_request
 
-        timeout = 10.0
+        timeout = instances.STOP_TIMEOUT_S
         home = home_dir()
         # Removes only entries whose process is gone; the code below reports
         # and removes stale ones.
@@ -191,7 +191,7 @@ def register(app: FastAPI, ctx) -> None:
                     # misconfiguration. Falls back to a direct kill.
                     graceful_denied = True
                 elif resp.status_code == 200:
-                    deadline = time.monotonic() + timeout
+                    deadline = time.monotonic() + instances.shutdown_wait(resp)
                     while time.monotonic() < deadline and not stopped:
                         if not instances.pid_alive(int(pid or -1)):
                             stopped = True

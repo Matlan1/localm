@@ -14,11 +14,19 @@ import math
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TypeGuard
 
 logger = logging.getLogger("localm")
 
 _LINUX_BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
+
+
+_MAX_PID = 2 ** 32 - 1
+
+
+def is_pid(value) -> TypeGuard[int]:
+    """True when *value* is an int a process id can be."""
+    return type(value) is int and 0 < value <= _MAX_PID
 
 
 def _is_zombie(pid: int) -> bool:
@@ -40,6 +48,9 @@ def _is_zombie(pid: int) -> bool:
     may itself contain ``)`` - so split on the LAST ``)``, never the first.
     See test_pid_alive_is_false_for_an_unreaped_child.
     """
+    if not is_pid(pid):
+        return False
+    pid = int(pid)
     try:
         with open(f"/proc/{pid}/stat", "rb") as fh:
             return fh.read().decode("utf-8", "replace").rpartition(")")[2].split()[0] == "Z"
@@ -63,7 +74,7 @@ def pid_liveness(pid: int) -> Optional[bool]:
     platform cannot tell (Windows without a working psutil, an unexpected
     OSError from the signal-0 probe). A zombie is reported dead, see
     _is_zombie. A pid that is not a positive int is False."""
-    if not isinstance(pid, int) or pid <= 0:
+    if not is_pid(pid):
         return False
     if sys.platform == "win32":
         try:
@@ -75,7 +86,7 @@ def pid_liveness(pid: int) -> Optional[bool]:
     try:
         os.kill(pid, 0)
         return not _is_zombie(pid)
-    except ProcessLookupError:
+    except (ProcessLookupError, OverflowError):
         return False
     except PermissionError:
         return True       # exists, owned by someone else
@@ -100,9 +111,12 @@ def process_start_identity(pid: int) -> dict | None:
     Linux: ``{"boot": <boot id or None>, "ticks": <start time in clock ticks
     since boot>}``, read from /proc. Windows and macOS: ``{"created": <psutil
     create_time>}``, the creation timestamp the kernel stores when the process
-    starts; None there when psutil is not installed. Every other platform:
-    None.
+    starts; None there when psutil is not installed. Every other platform, and
+    a *pid* that is not a positive int: None.
     """
+    if not is_pid(pid):
+        return None
+    pid = int(pid)
     if sys.platform.startswith("linux"):
         # Start ticks come from /proc, not psutil's create_time. See
         # test_a_live_holder_keeps_its_lock_across_a_clock_step.

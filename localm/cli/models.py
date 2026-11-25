@@ -2515,9 +2515,10 @@ def _restarted_as(instances, entry: dict, entries: list) -> Optional[str]:
 @click.argument("instance_id", required=False)
 @click.option("--all", "stop_all", is_flag=True,
               help="Stop every running localm instance.")
-@click.option("--timeout", default=10.0, show_default=True, type=float,
+@click.option("--timeout", default=None, type=float,
               help="Seconds to wait for a clean shutdown before forcing the "
-                   "process to end.")
+                   "process to end. [default: 10, and up to 12 more while a private "
+                   "image, music or video generation is ended]")
 def stop_cmd(instance_id, stop_all, timeout):
     """Stop a running localm server.
 
@@ -2650,7 +2651,8 @@ def stop_cmd(instance_id, stop_all, timeout):
                     # the process directly.
                     graceful_denied = True
                 elif resp.status_code == 200:
-                    deadline = time.monotonic() + timeout
+                    deadline = time.monotonic() + (
+                        instances.shutdown_wait(resp) if timeout is None else timeout)
                     while time.monotonic() < deadline and not stopped:
                         if not instances.pid_alive(int(pid or -1)):
                             stopped = True
@@ -2690,7 +2692,8 @@ def stop_cmd(instance_id, stop_all, timeout):
                 stopped = True
             else:
                 stopped = instances.kill_pid(
-                    int(pid or -1), timeout=timeout,
+                    int(pid or -1),
+                    timeout=instances.STOP_TIMEOUT_S if timeout is None else timeout,
                     start_identity=entry.get("start_identity"))
             if stopped:
                 # A direct kill bypasses the server's own clean-shutdown path

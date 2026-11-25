@@ -792,7 +792,10 @@ configured, `response_format` defaults to `url`: the gallery file route
 route cannot be fetched by an API client, so `b64_json` is the default and asking for
 `url` is a `400`. In privacy mode nothing is kept: the image is generated into a
 private directory, returned as `b64_json` (the default there; asking for `url` is a
-`400`), and the directory is deleted before the response is sent.
+`400`), and the directory is deleted before the response is sent. An image written after
+the session turned private during the request, and each one after it, is returned as
+`b64_json`, whatever format was asked for, with a warning, and not kept, in ComfyUI
+neither.
 
 The image is returned only when its embedded metadata (which can carry the prompt)
 was stripped and, when ComfyUI's own copy is to be removed, that copy is gone;
@@ -984,7 +987,8 @@ still-reclaiming GPU driver). An API-only instance that a second `localm gui`
 attached to comes back with the GUI mounted again. `POST /v1/server/shutdown`
 unloads and exits without relaunching - a clean alternative to force-closing
 the window or a Ctrl+C that does not always land. Both return immediately
-(`{"restarting": true}` / `{"stopping": true}`) while the actual
+(`{"restarting": true}` / `{"stopping": true}`, the latter with `wait_s`, seconds, while
+a private generation has to be ended first) while the actual
 restart/shutdown runs a moment later, so the response reaches the client
 first.
 
@@ -1003,7 +1007,7 @@ Read and update `<data dir>/config.json`. PATCH accepts only known keys and
 persists immediately; engine values (context sizes, GPU layers) apply on the
 next model load. These settings widen a trust boundary and are hidden from, and refused for, a
 non-owner `config:write` key - only an `admin`-scoped key or the open-mode
-owner may read or change them: `allow_network_drives`, `allowed_hosts`, `binary_dir`, `bind_host`, `browser_allow`, `browser_custom_domain_rules`, `browser_deny`, `browser_enabled`, `browser_engine`, `bugreport_upload_token`, `bugreport_upload_url`, `canvas_allow_navigation`, `chat_mode`, `civitai_api_key`, `coder_mode`, `coder_reviewer`, `coder_reviewer_model`, `coder_unattended_network`, `coder_untrusted_provenance`, `comfy_api_url`, `comfy_launch_cmd`, `comfy_output_dir`, `comfy_workdir`, `cors_origins`, `embedding_model`, `gui_preview_enabled`, `gui_preview_owner_only`, `gui_proxy_remote_images`, `hf_token`, `hf_trust_remote_code`, `keep_diagnostics`, `llama_runtime_history`, `llama_runtime_pin`, `memory_recall_in_privacy`, `memory_recall_in_privacy_chat`, `memory_recall_in_privacy_coder`, `metrics_enabled`, `mode`, `net_allow`, `net_allow_model_downloads`, `net_allow_private`, `net_deny`, `net_mode`, `net_search_url`, `rag_allowed_roots`, `rag_denied_roots`, `rag_indexing_mode`, `require_auth`, `spec_draft_model`, `temp_location`, `tls_cert`, `tls_enabled`, `tls_key`, `update_allow_prerelease`, `update_ignore_net_policy`, `update_token`, `update_url`.
+owner may read or change them: `allow_network_drives`, `allowed_hosts`, `binary_dir`, `bind_host`, `browser_allow`, `browser_custom_domain_rules`, `browser_deny`, `browser_enabled`, `browser_engine`, `bugreport_upload_token`, `bugreport_upload_url`, `canvas_allow_navigation`, `chat_mode`, `civitai_api_key`, `coder_mode`, `coder_reviewer`, `coder_reviewer_model`, `coder_unattended_network`, `coder_untrusted_provenance`, `comfy_api_url`, `comfy_launch_cmd`, `comfy_output_dir`, `comfy_workdir`, `cors_origins`, `embedding_model`, `gui_preview_enabled`, `gui_preview_owner_only`, `gui_proxy_remote_images`, `hf_token`, `hf_trust_remote_code`, `keep_diagnostics`, `llama_runtime_history`, `llama_runtime_pin`, `memory_recall_in_privacy`, `memory_recall_in_privacy_chat`, `memory_recall_in_privacy_coder`, `metrics_enabled`, `mode`, `net_allow`, `net_allow_model_downloads`, `net_allow_private`, `net_deny`, `net_mode`, `net_search_url`, `privacy_keep`, `rag_allowed_roots`, `rag_denied_roots`, `rag_indexing_mode`, `require_auth`, `spec_draft_model`, `temp_location`, `tls_cert`, `tls_enabled`, `tls_key`, `update_allow_prerelease`, `update_ignore_net_policy`, `update_token`, `update_url`.
 
 Two further keys, `plugins` and `plugins_enabled`, are plugin STATE rather than
 settings: this endpoint cannot validate what is inside them, and their own write
@@ -1030,7 +1034,8 @@ unchanged. A new `embedding_model` that names a registered model of another type
 (a chat model, for example), a GGUF file whose header marks it as another type,
 or a reranker is refused with a 400; one that names no
 known key, registered model or file yet is saved, and the answer carries
-`warnings`, a list of sentences saying so. A change to `embedding_model` that would leave an existing
+`warnings`, a list of sentences saying so. Sending an `embedding_model`, the default's name
+included, chooses that model; `null` or `""` unsets the choice. A change to `embedding_model` that would leave an existing
 collection's vectors unusable is not applied by the first request: it answers 200
 `{"needs_confirm": true, "model", "collections", "note"}`, and the same body with
 `"confirm": true` applies it. PATCH errors: 400 for an unknown key, an invalid
@@ -1450,7 +1455,13 @@ namespace.
 When the memory plugin recalls facts for a chat turn, `POST /v1/chat/completions`
 returns an `X-Localm-Memory` response header: a compact JSON blob with the count
 of injected facts, the items, and a degrade reason when semantic recall could not
-be used (for example `no_embedder` before `localm setup-embeddings`).
+be used (for example `no_embedder` before `localm setup-embeddings`, or
+`embedder_failed` when the installed embedding model could not be loaded). When the
+message asked to remember something, `saved` holds its outcome, `{"text", "status"}`
+with status `saved`, `exists`, `full`, `failed` or `off` (memory is off); with several
+requests in one message it is `{"status", "facts"}`, where `facts` lists every fact as
+`{"text", "status"}` and `status` is `saved` when any was saved. Each text in the header is
+cut to a short length (a cut ends in `...`), and the whole value stays under 4 KB.
 
 ## Other routes the GUI and plugins serve
 

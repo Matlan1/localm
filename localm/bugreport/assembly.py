@@ -276,7 +276,7 @@ def _report_footer() -> str:
     the saved file or a downloaded copy (they genuinely can still edit it),
     false the instant the SAME text is what actually got sent - see
     _strip_report_footer(), the single place that fact is acted on."""
-    return (f"Sent to the localm maintainer ({MAINTAINER_EMAIL}). "
+    return (f"For the localm maintainer ({MAINTAINER_EMAIL}). "
             "You can edit anything above before sending.")
 
 
@@ -293,13 +293,15 @@ def _strip_report_footer(text: str) -> str:
 
     Exact-suffix match built from the SAME _report_footer() text
     build_report() appends, so the append site and the strip site cannot
-    silently drift apart. Tolerates a missing trailing newline (a
+    silently drift apart; a report saved by a version whose note began "Sent to
+    the" is stripped too. Tolerates a missing trailing newline (a
     manually re-saved file); a body that never had the footer, or had it
     edited away, is returned unchanged - never raises."""
     footer = _report_footer()
-    for suffix in (f"\n\n---\n{footer}\n", f"\n\n---\n{footer}"):
-        if text.endswith(suffix):
-            return text[: -len(suffix)]
+    for known in (footer, footer.replace("For the", "Sent to the", 1)):
+        for suffix in (f"\n\n---\n{known}\n", f"\n\n---\n{known}"):
+            if text.endswith(suffix):
+                return text[: -len(suffix)]
     return text
 
 

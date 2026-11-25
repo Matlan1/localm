@@ -132,8 +132,8 @@ def _image_upscale(monkeypatch, *, backend_call):
     monkeypatch.setattr(native, "upscaler_vram_estimate_bytes", lambda name: 2 * GB)
     monkeypatch.setattr(native, "upscale", backend_call)
     monkeypatch.setattr(plug._backend, "free_vram", lambda s: True)
-    return plug._make_upscale(source=Path("in.png"), upscaler="x", out_path=Path("out.png"),
-                              owner=None, self_url="http://127.0.0.1:8642/v1",
+    return plug._make_upscale(source=Path("in.png"), upscaler="x", name="out.png",
+                              keeps=lambda peek=False: True, owner=None, self_url="http://127.0.0.1:8642/v1",
                               instance_token=None, extra_meta={})
 
 

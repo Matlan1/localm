@@ -38,10 +38,10 @@ _ASKED_RE = re.compile(r"^\s*" + _GREETING + _ASKING, re.IGNORECASE)
 
 _CONNECT_RE = re.compile(
     r"^(?:\s*(?:bitte|please)\b)?\s*(?P<punct>[:,])?\s*"
-    r"(?:(?P<kw>that(?![\w'’])|dass|daß|this(?=\s*:))[\s:,]*)?",
+    r"(?:(?P<kw>that(?![\w'\u2019])|dass|daß|this(?=\s*:))[\s:,]*)?",
     re.IGNORECASE)
 _FIRST_PERSON_RE = re.compile(
-    r"^(?:i|i'm|i’m|i've|i'll|i'd|my|me|we|we're|our|mine|ich|mein\w*|meine\w*|wir|unser\w*)\b",
+    r"^(?:i|i'm|i\u2019m|i've|i'll|i'd|my|me|we|we're|our|mine|ich|mein\w*|meine\w*|wir|unser\w*)\b",
     re.IGNORECASE)
 _RECOLLECTION_RE = re.compile(
     r"^(?:time|day|night|moment|one\s+time|summer|winter|trip|conversation|chat)\b",
@@ -65,13 +65,120 @@ _BACK_REFERENCE_RE = re.compile(
 _IMPERATIVE_NEXT_RE = re.compile(
     r"^\s*(?:(?:and|then|now|please|pls|ok|okay)[,!]?\s+)*" + _TASK_ON_IT,
     re.IGNORECASE)
-_PARAGRAPH_RE = re.compile(r"\n\s*\n")
+_LINE_BREAKS_RE = re.compile("\r\n|[\r\x0b\x0c\x1c\x1d\x1e\x85\u2028]")
+_PARAGRAPH_RE = re.compile("\\n[\\s\u200b-\u200d\u2060\ufeff]*\\n")
 _TERMINATOR_RE = re.compile(r"[.!?]+(?=\s|$)")
 _ABBREVIATIONS = frozenset((
     "e.g i.e z.b d.h u.a z.t v.a u.s.w etc vs bzw usw ca inc ltd co corp dr mr mrs ms "
     "prof st jr sr nr tel str evtl ggf bspw approx no").split())
 _MIN_FACT_CHARS = 6
 _MAX_SCAN_CHARS = 4000
+_MAX_FACTS = 8
+
+# A line that starts a quotation, a fence or separator, a list item, or a "Word:"
+# line. No further request is taken from it or after it.
+_FOREIGN_LINE_RE = re.compile(
+    "[>\"\u201c\u201e\u00ab]|['\u2018](?!\\d)|`{3}|~{3}|-{3}|={3}|[-*+\u2022]\\s|"
+    "\\d{1,3}[.)]\\s|[^\\W\\d_][^:.!?]*:(?:\\s|$)")
+# Words that announce somebody else's text after them.
+_SOURCE = (
+    r"(?:wrote|writes|written|says|said|saying|texted|texts|mailed|emailed|e-mailed|"
+    r"messaged|posted|replied|answered|asked|told|sent|quote[sd]?|reads|mail|email|"
+    r"e-mail|message|letter|text|note|article|page|site|website|comment|post|review|"
+    r"schrieb|schreibt|geschrieben|sagt|sagte|gesagt|meint|meinte|fragt|fragte|"
+    r"antwortet|antwortete|geantwortet|schickt|schickte|geschickt|erzählt|erzählte|"
+    r"nachricht|brief|artikel|seite|webseite|kommentar|zitat|notiz)")
+_INTRODUCES_RE = re.compile(
+    r"\b" + _SOURCE + r"\b[^:]*:(?:\s|$)"
+    r"|\b" + _SOURCE + r"\b.*\b(?:this|the\s+following|that|das|dies|dieses|folgendes)\s*[.!]*$"
+    r"|\b(?:below|the\s+following|as\s+follows|forwarded|pasted|copied|"
+    r"unten|folgende[nmrs]?|weitergeleitet\w*|kopiert\w*)\b",
+    re.IGNORECASE)
+_COURTESY_RE = re.compile(
+    r"^\s*(?:thanks(?:\s+(?:a\s+lot|so\s+much|very\s+much))?|thank\s+you(?:\s+(?:so|very)\s+much)?|"
+    r"thx|cheers|great|perfect|ok(?:ay)?|danke(?:\s+(?:dir|schön|sehr))?|vielen\s+dank|"
+    r"super|prima|gut)[ \t]*(?:[.!,]+|\n)\s*", re.IGNORECASE)
+_LETTER_OPENING_RE = re.compile(r"^\s*(?:hey|hi|hello|hallo)\b", re.IGNORECASE)
+_QUOTE_PAIRS = (("\u201c", "\u201d"), ("\u201e", "\u201c"), ("\u00ab", "\u00bb"))
+
+
+def _plain_breaks(text: str) -> str:
+    """*text* with every Unicode line break as a newline and every paragraph
+    separator as an empty line."""
+    return _LINE_BREAKS_RE.sub("\n", text.replace("\u2029", "\n\n"))
+
+
+def _opens_request(line: str) -> bool:
+    return bool(_EN_RE.match(line) or _DE_RE.match(line))
+
+
+def _is_foreign(line: str) -> bool:
+    return bool(_FOREIGN_LINE_RE.match(line)) and not _opens_request(line)
+
+
+def _ends_sentence(line: str) -> bool:
+    """True when the text line *line* ends a sentence."""
+    return (line.endswith((".", "!", "?"))
+            and not (line.endswith(".") and _is_abbreviation(line.rstrip(".!?"))))
+
+
+def _is_abbreviation(text: str) -> bool:
+    return text[text.rfind(" ") + 1:].lower().strip("\"'([") in _ABBREVIATIONS
+
+
+def _sentence_and_rest(para: str, on_new_line: bool) -> tuple:
+    """``(sentence, rest)`` of the paragraph *para*: its first sentence, with its line
+    breaks read as spaces, and what a further request may be taken from.
+
+    Text with no sentence end runs on over any line. Text that has one ends at a line
+    that starts a quotation, a fence, a list item, a "Word:" line or a request. The
+    rest is "" when such a foreign line (the first line too, when *on_new_line*) was
+    reached, when more text follows on a line the sentence ran on into, when it ran on
+    past a line that ended a sentence (a lower-case word after a full stop), or when
+    nothing is left; it ends before the first foreign line."""
+    lines = [line for line in (" ".join(raw.split()) for raw in para.split("\n")) if line]
+    if not lines:
+        return "", ""
+    own = next((n for n, line in enumerate(lines)
+                if (n or on_new_line) and _is_foreign(line)), len(lines))
+    stop = next((n for n in range(1, len(lines)) if _ends_sentence(lines[n - 1])
+                 and (n == own or _opens_request(lines[n]))), len(lines))
+    first = " ".join(lines[:stop])
+    sentence = _first_sentence(first)
+    last, end = 0, len(lines[0])
+    while end < len(sentence):
+        last += 1
+        end += 1 + len(lines[last])
+    tail = lines[last][len(lines[last]) - (end - len(sentence)):].strip()
+    if (last >= own or (last and _without_courtesies(tail + "\n").strip())
+            or any(_ends_sentence(line) for line in lines[:last])):
+        return sentence, ""
+    return sentence, "\n".join([tail, *lines[last + 1:own]]).strip()
+
+
+def _without_courtesies(text: str) -> str:
+    """*text* without the "Thanks!" and the like it opens with."""
+    while (polite := _COURTESY_RE.match(text)) is not None:
+        text = text[polite.end():]
+    return text
+
+
+def _quotes_open(text: str) -> bool:
+    """True when *text* opens a quotation or code span it does not close."""
+    if text.count('"') % 2 or text.count("`") % 2:
+        return True
+    if any(text.count(opening) > text.count(closing) for opening, closing in _QUOTE_PAIRS):
+        return True
+    opened = len(re.findall(r"(?:^|\s)['\u2018](?=\S)", text))
+    closed = len(re.findall(r"(?<=\S)['\u2019](?=[\s.,!?;:]|$)", text))
+    return opened > closed
+
+
+def _ends_chain(sentence: str) -> bool:
+    """True when what follows *sentence* in the message may be somebody else's
+    words, so no further fact is taken from it."""
+    return (sentence.endswith(":") or _quotes_open(sentence)
+            or bool(_INTRODUCES_RE.search(sentence)))
 
 
 def _first_sentence(text: str) -> str:
@@ -83,9 +190,8 @@ def _first_sentence(text: str) -> str:
         end = m.start()
         if end and para[end - 1] == " ":
             end -= 1
-        word = para[para.rfind(" ", 0, end) + 1:end].lower().strip("\"'([")
         nxt = m.end() + 1 if para[m.end():m.end() + 1] == " " else m.end()
-        if m.group().startswith(".") and (word in _ABBREVIATIONS
+        if m.group().startswith(".") and (_is_abbreviation(para[:end])
                                           or para[nxt:nxt + 1].islower()):
             continue
         return para[:m.end()]
@@ -93,8 +199,23 @@ def _first_sentence(text: str) -> str:
 
 
 def explicit_fact(message: str) -> Optional[str]:
-    """The fact a chat *message* asks to remember, or None when it is not such a
-    request.
+    """The first fact a chat *message* asks to remember (see :func:`explicit_facts`),
+    or None when it is not such a request."""
+    facts = explicit_facts(message)
+    return facts[0] if facts else None
+
+
+def explicit_facts(message: str) -> list[str]:
+    """Every fact a chat *message* asks to remember, in order, or [] when it is not
+    such a request. A sentence of the same paragraph that directly follows the
+    sentence of a fact and is itself a request ("Remember that X. Remember that Y.",
+    with at most a "Thanks!" between) adds its own fact, up to _MAX_FACTS; on a line
+    the fact ran on into it does not. The chain ends at a paragraph break, at a line
+    that starts a quotation, a fence, a list item or a "Word:" line, at anything that
+    is not such a request, and after a fact that announces or opens somebody else's
+    words ("Bob wrote me this:", an unclosed quotation).
+
+    The rules below apply to each request in turn.
 
     The message must open with the request (after an optional greeting, "please"
     or "can you"). English "remember"/"keep in mind"/"don't forget" need a "that",
@@ -110,10 +231,27 @@ def explicit_fact(message: str) -> Optional[str]:
     explain it"), refers back to earlier chat ("from earlier", "you wrote"), or is
     followed by a task on it ("... . Fix it."). Only the first _MAX_SCAN_CHARS
     characters of *message* are read. The fact is the first sentence after the
-    request, trailing punctuation removed, cut to MAX_TEXT_LEN."""
-    text = message[:_MAX_SCAN_CHARS].strip() if isinstance(message, str) else ""
-    if not text:
-        return None
+    request, trailing punctuation removed, cut to MAX_TEXT_LEN. A line break in it is
+    a space (see _sentence_and_rest)."""
+    text = _plain_breaks(message[:_MAX_SCAN_CHARS]).strip() if isinstance(message, str) else ""
+    facts: list[str] = []
+    while text and len(facts) < _MAX_FACTS:
+        got = _one_request(text)
+        if got is None:
+            break
+        fact, text = got
+        if fact not in facts:
+            facts.append(fact)
+        text = _without_courtesies(text)
+        if _LETTER_OPENING_RE.match(text):
+            break
+    return facts
+
+
+def _one_request(text: str) -> Optional[tuple]:
+    """``(fact, the rest of the request's paragraph)`` for the request that opens
+    *text*, or None when *text* does not open with a request for a fact. The rest is
+    "" when the chain of requests ends with this fact."""
     for rx, english in ((_EN_RE, True), (_DE_RE, False)):
         m = rx.match(text)
         if m is None:
@@ -132,7 +270,9 @@ def explicit_fact(message: str) -> Optional[str]:
                 return None
         elif not keyword and verb.split()[0] in ("vergiss", "denk", "denke", "erinnere"):
             return None
-        sentence = _first_sentence(rest)
+        sentence, after = _sentence_and_rest(
+            _PARAGRAPH_RE.split(rest.strip())[0],
+            "\n" in m.group("rest")[:connect.end()])
         if sentence.endswith("?") and not (_ASKED_RE.match(text) and keyword):
             return None
         fact = sentence.strip("\"'").rstrip(".!?,;: ").strip()
@@ -146,5 +286,8 @@ def explicit_fact(message: str) -> Optional[str]:
             if (_REQUEST_RE.search(fact) or _BACK_REFERENCE_RE.search(fact)
                     or _IMPERATIVE_NEXT_RE.match(following)):
                 return None
-        return fact[:MAX_TEXT_LEN]
+        if (_ends_chain(sentence)
+                or _PARAGRAPH_RE.search(m.group("rest")[:connect.end()])):
+            return fact[:MAX_TEXT_LEN], ""
+        return fact[:MAX_TEXT_LEN], after
     return None

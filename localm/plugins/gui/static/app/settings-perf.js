@@ -2304,8 +2304,8 @@ export async function rememberFact(fact) {
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
-    await refreshMemory();
     toast(t("memory.remembered"));
+    refreshMemory();
   } catch (e) {
     toast(t("memory.couldNotSave", { message: e.message }), true);
   }
@@ -2719,7 +2719,10 @@ export function parseMemoryHeader(resp) {
     if (!data || typeof data.n !== "number") return null;
     const saved = data.saved && typeof data.saved === "object"
       && typeof data.saved.status === "string"
-      ? { text: String(data.saved.text || ""), status: data.saved.status } : null;
+      ? { text: String(data.saved.text || ""), status: data.saved.status,
+          ...(Array.isArray(data.saved.facts) ? { facts: data.saved.facts
+            .filter((f) => f && typeof f.status === "string")
+            .map((f) => ({ text: String(f.text || ""), status: f.status })) } : {}) } : null;
     return {
       n: data.n,
       degrade: data.degrade ?? null,
@@ -3342,7 +3345,9 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // show a "used N memories" chip (survives reload; opens the memory modal).
   if (memUsed && (memUsed.n > 0 || memUsed.saved)) reply.memory = memUsed;
   if (memUsed && memUsed.saved) {
-    toast(memorySavedText(memUsed.saved), memUsed.saved.status !== "saved" && memUsed.saved.status !== "exists");
+    const unsaved = (memUsed.saved.facts || [memUsed.saved])
+      .some((f) => f.status !== "saved" && f.status !== "exists");
+    toast(memorySavedText(memUsed.saved), unsaved);
     if (memUsed.saved.status === "saved") refreshMemory();
   }
   // Save usage on the reply itself, not just the DOM, so tok/s and the context

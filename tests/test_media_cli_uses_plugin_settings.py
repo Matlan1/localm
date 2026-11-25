@@ -112,7 +112,7 @@ def test_the_generate_commands_pass_the_per_plugin_url(plugin, argv, cfg_home,
     monkeypatch.setattr(media_cli, "_generate_or_abort", _capture)
 
     cmd = getattr(media_cli, plugin + "_cmd")
-    CliRunner().invoke(cmd, argv)
+    CliRunner().invoke(cmd, [*argv, "-o", "stubbed.out"])
 
     assert seen, f"the {plugin} command never reached the generate step"
     assert seen[0].rstrip("/") == "http://127.0.0.1:9999", (

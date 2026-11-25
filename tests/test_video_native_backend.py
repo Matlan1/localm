@@ -372,6 +372,7 @@ def test_ensure_available_reports_an_unexpected_model_check_failure(monkeypatch)
 
 @pytest.fixture
 def video_app(fake_video, tmp_path, monkeypatch):
+    monkeypatch.setattr("localm.audit.privacy_keeps", lambda kind: True)
     monkeypatch.setattr("localm.vram.decide_media_swap", lambda s: False)
     monkeypatch.setattr("localm.vram.media_single_device_shortfall", lambda s: None)
     from fastapi import FastAPI
@@ -616,7 +617,8 @@ def test_cli_video_reports_a_native_refusal(fake_video, cli_runner, tmp_path):
     assert "multiple of 16" in result.output and runner.loads == []
 
 
-def test_chat_repl_generates_video_natively(fake_video, tmp_path):
+def test_chat_repl_generates_video_natively(fake_video, tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALM_MODE", "log")
     from rich.console import Console
 
     from localm.cli.chat import _cmd_generate_media

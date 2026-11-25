@@ -53,7 +53,7 @@ def _invoke(args, generate_target, *, mode, default_api_url_target,
         stack.enter_context(patch("localm.audit.effective_mode", return_value=mode))
         for p in extra_patches:
             stack.enter_context(p)
-        result = CliRunner().invoke(main, args)
+        result = CliRunner().invoke(main, [*args, "-o", "out.bin"])
     return calls, result
 
 
@@ -106,7 +106,7 @@ class TestImageCmdPrivacy:
              patch("localm.audit.effective_mode", return_value=SessionMode.PRIVACY), \
              patch("localm.cli.media._maybe_apply_func_shim_and_retry",
                    fake_retry_helper):
-            result = CliRunner().invoke(main, ["image", "a cat"])
+            result = CliRunner().invoke(main, ["image", "a cat", "-o", "out.png"])
         assert result.exit_code == 0, result.output
         assert len(calls) == 2
         assert calls[0].get("delete_outputs") is True

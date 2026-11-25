@@ -342,6 +342,23 @@ def automatic_write_allowed(surface: str, cwd=None) -> bool:
         return False
 
 
+PRIVACY_KEEP_KINDS = ("media",)
+
+
+def privacy_keeps(kind: str) -> bool:
+    """True when the ``privacy_keep`` setting lists *kind* (one of
+    :data:`PRIVACY_KEEP_KINDS`): privacy mode keeps that kind of data. False when
+    it does not, and when the setting cannot be read. Never raises."""
+    try:
+        from localm.config import load_config_checked
+        cfg, read_ok = load_config_checked()
+        kept = cfg.get("privacy_keep")
+        return (read_ok and isinstance(kept, list)
+                and kind in PRIVACY_KEEP_KINDS and kind in kept)
+    except Exception:   # noqa: BLE001 - an unreadable setting must fail closed
+        return False
+
+
 _mgmt_events.set_write_gate(lambda: automatic_write_allowed("server"))
 
 
@@ -763,6 +780,18 @@ def caller_cap(client_id: Optional[str] = None,
         except ValueError:
             caps.append(SessionMode.PRIVACY)
     return most_private(*caps) if caps else None
+
+
+def caller_is_recorded(client_id: Optional[str] = None,
+                       caller_mode: Optional[str] = None) -> bool:
+    """True when the caller's own limit (:func:`caller_cap`) is a mode that writes
+    to disk. False when it is privacy, when the caller has none, and when it
+    cannot be resolved. Never raises."""
+    try:
+        cap = caller_cap(client_id, caller_mode)
+    except Exception:   # noqa: BLE001 - an unresolvable mode must fail closed
+        return False
+    return cap is not None and cap != SessionMode.PRIVACY
 
 
 class CallerRecorder:

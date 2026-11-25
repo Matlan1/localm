@@ -244,7 +244,10 @@ def ensure_spawn_uses_venv_python() -> None:
     ``sys.executable``) - see module docstring. Windows-only; a no-op elsewhere.
     Best-effort: leaves multiprocessing's default untouched if the expected
     layout is not found - this must never block a normal launch, branded or
-    not."""
+    not. Also starts the cleanup of what the child's GPU runtime leaves in the
+    temp folder (``comgr_temp.watch``)."""
+    from localm import comgr_temp
+    comgr_temp.watch()
     base_python = real_base_python()
     if base_python is not None:
         multiprocessing.set_executable(str(base_python))

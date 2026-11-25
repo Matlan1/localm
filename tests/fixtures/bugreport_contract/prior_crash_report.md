@@ -98,4 +98,4 @@ Thread 0x0002 (most recent call first):
 ```
 
 ---
-Sent to the localm maintainer ({{MAINTAINER_EMAIL}}). You can edit anything above before sending.
+For the localm maintainer ({{MAINTAINER_EMAIL}}). You can edit anything above before sending.
