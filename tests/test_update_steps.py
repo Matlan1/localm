@@ -636,7 +636,7 @@ def counted(real):
         done = real(*a, **k)
         return done
     return call
-for name in ("copy_whole", "_compare"):
+for name in ("copy_whole", "_flush", "_compare"):
     setattr(disk, name, counted(getattr(disk, name)))
 with steps.Work(root) as work:
     new = work.new(mover.TREE)
@@ -665,4 +665,4 @@ def test_a_move_to_another_volume_that_is_killed_is_undone(tmp_path, end):
         killed += 1
         result = steps.settle(root)
         assert result.errors == [] and um.tree(root) == before, at
-    assert killed >= 6 and done.returncode == 0
+    assert killed >= 8 and done.returncode == 0
