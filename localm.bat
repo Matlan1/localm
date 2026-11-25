@@ -37,6 +37,17 @@ set "RC=%errorlevel%" & goto :resumed
 rem------------------------------------------------------
 set "RC=%errorlevel%" & goto :resumed
 :main
+rem ---- an update that is not finished --------------------------------------------
+rem  Undoing it may replace this file: the command ends in the new start or in exit.
+if not exist "%~dp0.localm-update\job.json" goto :update_gated
+if defined LOCALM_GATE goto :update_gated
+set "LOCALM_GATE=1"
+call "%~dp0scripts\update_gate.bat" && "%~dp0localm.bat" %* || (
+    pause
+    exit /b 1
+)
+:update_gated
+set "LOCALM_GATE="
 set "PY=%~dp0.venv\Scripts\python.exe"
 if exist "%PY%" goto :have_venv
 echo No .venv found in %~dp0

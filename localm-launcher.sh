@@ -2,6 +2,12 @@
 # localm graphical launcher (Linux / macOS) - opens the tkinter launcher, which
 # lets you pick a mode (GUI / chat / server / coder), a model, and options.
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# An update that is not finished may replace this file: it is then started anew.
+if [ -e "$HERE/.localm-update/job.json" ] && [ -z "${LOCALM_GATE:-}" ]; then
+  bash "$HERE/scripts/update_gate.sh" || exit 1
+  LOCALM_GATE=1 exec bash "$HERE/localm-launcher.sh" "$@"
+fi
+unset LOCALM_GATE
 if [ ! -x "$HERE/.venv/bin/python" ]; then
   echo "No .venv found in $HERE. Run:  bash \"$HERE/setup.sh\"" >&2
   exit 1

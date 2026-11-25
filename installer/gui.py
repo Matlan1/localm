@@ -53,6 +53,25 @@ ROOT = Path(__file__).resolve().parents[1]
 _SRC = Path(__file__).resolve().parents[1]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
+
+
+def _update_gate() -> None:
+    """Wait for an unfinished update of this install or undo it, before anything of localm
+    is imported, then start this file anew, which may have been replaced."""
+    if ("LOCALM_GATE" in os.environ
+            or not os.path.lexists(ROOT / ".localm-update" / "job.json")):
+        os.environ.pop("LOCALM_GATE", None)
+        return
+    code = subprocess.call([sys.executable, "-I", "-S",
+                            str(ROOT / "scripts" / "update_gate.pyw")])
+    if code == 0:
+        code = subprocess.call([sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]],
+                               env={**os.environ, "LOCALM_GATE": "1"})
+    sys.exit(code)
+
+
+if __name__ == "__main__":
+    _update_gate()
 from localm import setup_spec as spec  # noqa: E402
 
 APP_NAME = "LocaLM"

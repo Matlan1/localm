@@ -12,6 +12,12 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 export LOCALM_SETUP=1
+# An update that is not finished may replace this file: it is then started anew.
+if [ -e "./.localm-update/job.json" ] && [ -z "${LOCALM_GATE:-}" ]; then
+  bash "./scripts/update_gate.sh" || exit 1
+  LOCALM_GATE=1 exec bash "./setup.sh" "$@"
+fi
+unset LOCALM_GATE
 
 #   --uninstall (or uninstall / --rollback)  remove LocaLM from this folder
 #   --purge-data        with --uninstall: also delete the saved data

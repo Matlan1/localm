@@ -159,7 +159,8 @@ def _put_back(root: str, folder: str, update: str) -> int:
     hidden = 0 if shown else subprocess.CREATE_NO_WINDOW
     _say("An update of LocaLM was interrupted. Putting the previous version back...")
     return subprocess.run(
-        [sys.executable, "-I", "-S", program, "restore", root], creationflags=hidden,
+        [sys.executable, "-I", "-S", *(("-X", "utf8") if sys.flags.utf8_mode else ()), program,
+         "restore", root], creationflags=hidden,
         stdin=None if _at_terminal() else subprocess.DEVNULL, stdout=subprocess.DEVNULL).returncode
 
 
