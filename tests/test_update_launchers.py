@@ -185,11 +185,12 @@ def test_this_localm_bat_replaced_while_localm_runs_ends_clean(tmp_path, replace
 
 @nt_only
 @pytest.mark.parametrize("call", [True, False])
+@pytest.mark.parametrize("args,held", [(["--yes"], False), (["-y"], False), ([], True)])
 @pytest.mark.parametrize("rc", ["0", "2"])
-def test_rollback_bat_replaced_while_it_runs_ends_clean(tmp_path, rc, call):
+def test_rollback_bat_replaced_while_it_runs_ends_clean(tmp_path, rc, args, held, call):
     done = _swap_run(tmp_path, (ROOT / "rollback.bat").read_bytes(), _ALL_STRAY, rc,
-                     ["--yes"], script="rollback.bat", call=call)
-    _check_clean(done, rc, held=True)
+                     args, script="rollback.bat", call=call)
+    _check_clean(done, rc, held=held)
 
 
 # --------------------------------------------------------------------------- #
