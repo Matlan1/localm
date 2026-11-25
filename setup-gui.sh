@@ -14,12 +14,13 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 export LOCALM_SETUP=1
-# An update that is not finished may replace this file: it is then started anew.
+# An update that is not finished may replace this file: it is then started anew. One that
+# could not be undone is still there then; the window need not ask again.
 if [ -e "./.localm-update/job.json" ] && [ -z "${LOCALM_GATE:-}" ]; then
-  bash "./scripts/update_gate.sh" || exit 1
+  bash "./scripts/update_gate.sh" window || exit 1
   LOCALM_GATE=1 exec bash "./setup-gui.sh" "$@"
 fi
-unset LOCALM_GATE
+if [ ! -e "./.localm-update/job.json" ]; then unset LOCALM_GATE; fi
 
 # The uv release this setup installs; its installer script runs only when its
 # sha256 matches UV_INSTALLER_SHA256.

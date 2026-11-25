@@ -908,6 +908,7 @@ class _Back:
         self.whole = frozenset(whole)
         self.numbers = {op.path: n for n, op in enumerate(plan.ops)}
         self.unsure = marks.last
+        self.lost = False
         self.failed: set = set()
         self.left: set = set()
         self.theirs: list = []
@@ -917,6 +918,8 @@ class _Back:
         for op in self.plan.ops:   # before anything moves
             if op.old is not None:
                 self._each(op, self._find_source)
+        if self.lost:
+            return
         swaps = [op for op in self.plan.ops if op.swap]
         rest = [op for op in self.plan.ops if not op.swap]
         created = frozenset(self.plan.folders)
@@ -943,6 +946,7 @@ class _Back:
             self._fail(op, e)
 
     def _fail(self, op: Op, why: Exception) -> None:
+        self.lost |= isinstance(why, Refused)
         self.failed.add(op.path)
         self.out.fail(why)
 

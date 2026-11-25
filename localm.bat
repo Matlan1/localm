@@ -44,6 +44,7 @@ if defined LOCALM_GATE goto :update_gated
 set "LOCALM_GATE=1"
 set "GATE=%~dp0scripts\update_gate.bat"
 call "%%GATE%%" && "%~dp0localm.bat" %* || (
+    set "LOCALM_GATE="
     pause
     exit /b 1
 )

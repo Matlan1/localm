@@ -14,8 +14,9 @@ import sys
 
 #: The Python versions localm runs on (``requires-python`` in pyproject.toml).
 _PYTHONS = ((3, 12),)
-#: Seconds to wait for a running update when nobody sits at a terminal.
-_WAIT_S, _MCP_WAIT_S = 3600.0, 60.0
+#: Seconds to wait for a running update when nobody sits at a terminal, and those after
+#: which the program that is updating is named.
+_WAIT_S, _MCP_WAIT_S, _NAME_S = 3600.0, 60.0, 60.0
 
 
 def _gate(me=None) -> bool:
@@ -29,37 +30,47 @@ def _gate(me=None) -> bool:
     except (FileNotFoundError, NotADirectoryError):
         return False
     except OSError as e:
-        _say(f"{record} cannot be read: {e}")
+        _say(f"{record} cannot be read: {e}. Start LocaLM with the account that installed it.")
+        sys.exit(1)
     if sys.version_info[:2] not in _PYTHONS:
         _say(f"An update of LocaLM in {root} is not finished, and this Python "
              f"({sys.version.split()[0]}) cannot run LocaLM. Start LocaLM by its own launcher.")
         sys.exit(1)
     import time
     mark = me and os.path.join(folder, f"waiting-{me.pid}-{me.start}")
-    end = None if _at_terminal() else time.monotonic() + (
-        _MCP_WAIT_S if me and me.purpose == "mcp" else _WAIT_S)
+    begun = time.monotonic()
+    end = begun + (float("inf") if _tty(sys.stderr) and _tty(sys.stdin)
+                   else _MCP_WAIT_S if me and me.purpose == "mcp" else _WAIT_S)
+    name_at = min(begun + _NAME_S, end)
     waited = False
     try:
         while os.path.lexists(record):
             update, phase = _job(record)
+            if me and phase == "setup" and os.environ.get("LOCALM_SETUP") == "1":
+                return waited
             held = _held(folder)
             if held and update and _let_through(folder, update, phase, me):
                 return waited
-            if mark:
-                _touch(mark)
+            if not held and os.environ.get("LOCALM_UNINSTALL") == "1":
+                return waited
+            if mark and not _touch(mark):
+                mark = None
             if held:
                 if not waited:
                     waited = True
                     _say("LocaLM is being updated. Waiting until that has ended...")
-                if end is None or time.monotonic() < end:
+                if time.monotonic() < name_at:
                     time.sleep(0.2)
                     continue
-            code = _put_back(root, folder, update)
+                name_at = end
+            elif phase != "setup":
+                _say("An update of LocaLM was interrupted. Putting the previous version back...")
             waited = True
+            window = _window(root, me) and not _chosen(folder, update, me)
+            code = _put_back(root, folder, update, window)
             if code == 0:
                 break
-            if (code != 3 and not _held(folder)) or (
-                    end is not None and time.monotonic() >= end):
+            if window or (code != 3 and not _held(folder)) or time.monotonic() >= end:
                 sys.exit(1)
     except KeyboardInterrupt:
         sys.exit(130)
@@ -69,22 +80,40 @@ def _gate(me=None) -> bool:
     return waited
 
 
-def _touch(mark: str, remove: bool = False) -> None:
+def _touch(mark: str, remove: bool = False) -> bool:
     """Make or *remove* the file that says that this process waits here. The restore
     program, which ends what an update left running, does not end the waiting ones."""
     try:
         os.unlink(mark) if remove else open(mark, "ab").close()
     except OSError as e:
         _say(f"{mark}: {e}")
+        return False
+    return True
 
 
 def _say(text: str) -> None:
+    """Print *text* on stderr, as long as that can be written to."""
     if sys.stderr is not None:
-        print(text, file=sys.stderr, flush=True)
+        try:
+            print(text, file=sys.stderr, flush=True)
+        except (OSError, ValueError):
+            sys.stderr = None
 
 
-def _at_terminal() -> bool:
-    return bool(sys.stderr and sys.stdin and sys.stderr.isatty() and sys.stdin.isatty())
+def _tty(stream) -> bool:
+    try:
+        return bool(stream and stream.isatty())
+    except ValueError:
+        return False
+
+
+def _window(root: str, me) -> bool:
+    """Whether this is a start of the GUI from a menu of the desktop, where nothing that
+    is printed is seen."""
+    return bool(me and me.purpose == "gui" and os.name == "posix"
+                and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+                and not any(map(_tty, (sys.stdin, sys.stdout, sys.stderr)))
+                and os.path.isfile(os.path.join(root, "scripts", "update_gate.pyw")))
 
 
 def _is_id(name) -> bool:
@@ -103,11 +132,15 @@ def _job(record: str) -> tuple:
 
 
 def _held(folder: str) -> bool:
-    """Whether a process holds the lock of the update."""
+    """Whether a process holds the lock of the update, or that cannot be told."""
+    lock, flags = os.path.join(folder, "lock"), getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(os.path.join(folder, "lock"), os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
-    except OSError:
-        return False
+        try:
+            fd = os.open(lock, os.O_RDWR | flags)
+        except PermissionError:
+            fd = os.open(lock, os.O_RDONLY | flags)
+    except OSError as e:
+        return isinstance(e, PermissionError)
     try:
         if sys.platform == "win32":
             import msvcrt
@@ -122,26 +155,35 @@ def _held(folder: str) -> bool:
         os.close(fd)
 
 
+def _chosen(folder: str, update: str, me) -> bool:
+    """Whether the running *update* chose this process (it wrote its id and this one's pid
+    and start into ``started``), or such a process started this one."""
+    if os.environ.get("LOCALM_UPDATE_STARTED") == update:
+        return True
+    try:
+        with open(os.path.join(folder, "started"), encoding="ascii") as f:
+            return bool(me) and f.read(200).strip() == f"{update} {me.pid}-{me.start}"
+    except (OSError, ValueError):
+        return False
+
+
 def _let_through(folder: str, update: str, phase: str, me) -> bool:
-    """Whether the running *update* started this process or chose it (it wrote its pid and
-    start into ``<id>/started``), or such a process started this one."""
+    """Whether the running *update* started this process or chose it."""
     if os.environ.get("LOCALM_UPDATE_ID") == update and phase in ("steps", "starting"):
         return True
-    chosen = os.environ.get("LOCALM_UPDATE_STARTED") == update
-    if phase == "starting" and me and not chosen:
-        try:
-            with open(os.path.join(folder, update, "started"), encoding="ascii") as f:
-                chosen = f.read(100).strip() == f"{me.pid}-{me.start}"
-        except (OSError, ValueError):
-            return False
-    if phase == "starting" and chosen:
+    chosen = phase == "starting" and _chosen(folder, update, me)
+    if chosen:
         os.environ["LOCALM_UPDATE_STARTED"] = update
-    return phase == "starting" and chosen
+    return chosen
 
 
-def _put_back(root: str, folder: str, update: str) -> int:
-    """Run the restore program of *update* and return its exit status."""
+def _put_back(root: str, folder: str, update: str, window: bool) -> int:
+    """Run the restore program of *update*, or the *window* that does, and return its exit
+    status."""
     import subprocess
+    if window:
+        return subprocess.call([sys.executable, "-I", "-S",
+                                os.path.join(root, "scripts", "update_gate.pyw")])
     if not update:
         ids = [n for n in os.listdir(folder) if _is_id(n)]
         update = ids[0] if len(ids) == 1 else ""
@@ -153,15 +195,14 @@ def _put_back(root: str, folder: str, update: str) -> int:
             break
     else:
         _say(f"An update of LocaLM in {root} was interrupted and nothing is left that can undo "
-             f"it. Unzip LocaLM over that folder, delete {folder} and run setup.")
+             f"it. Unzip LocaLM over that folder, delete everything in {folder} except kept "
+             f"(files of your own) and run setup.")
         return 1
-    shown = sys.platform != "win32" or (sys.stderr and sys.stderr.isatty())
-    hidden = 0 if shown else subprocess.CREATE_NO_WINDOW
-    _say("An update of LocaLM was interrupted. Putting the previous version back...")
+    hidden = 0 if _tty(sys.stderr) else getattr(subprocess, "CREATE_NO_WINDOW", 0)
     return subprocess.run(
         [sys.executable, "-I", "-S", *(("-X", "utf8") if sys.flags.utf8_mode else ()), program,
          "restore", root], creationflags=hidden,
-        stdin=None if _at_terminal() else subprocess.DEVNULL, stdout=subprocess.DEVNULL).returncode
+        stdin=None if _tty(sys.stdin) else subprocess.DEVNULL, stdout=subprocess.DEVNULL).returncode
 
 
 if __name__ == "__main__":

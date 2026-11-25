@@ -4,7 +4,7 @@
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # An update that is not finished may replace this file: it is then started anew.
 if [ -e "$HERE/.localm-update/job.json" ] && [ -z "${LOCALM_GATE:-}" ]; then
-  bash "$HERE/scripts/update_gate.sh" || exit 1
+  bash "$HERE/scripts/update_gate.sh" window || exit 1
   LOCALM_GATE=1 exec bash "$HERE/localm-launcher.sh" "$@"
 fi
 unset LOCALM_GATE

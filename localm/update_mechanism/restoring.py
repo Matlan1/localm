@@ -18,6 +18,9 @@ from . import disk, job, mover, shared, steps, steps_update
 OK, FAILED, BUSY = 0, 1, 3
 #: The phases in which nothing of the install was changed or the new version is in use.
 _LEAVES_RUNNING = (job.ENDING, job.DONE, job.ENDED)
+#: The phase in the record of an install whose setup has to install the packages before
+#: anything of localm starts (``localm/__init__.py`` lets what setup starts through).
+SETUP = "setup"
 #: Seconds a process that has just started has until it says that it waits.
 _ARRIVE_S = 1.0
 _DOWNLOAD = "https://github.com/Matlan1/localm/releases"
@@ -25,8 +28,12 @@ _NOT_BACK = "The interrupted update could not be undone: "
 
 
 def say(text: str) -> None:
+    """Print *text* on stderr, as long as that can be written to."""
     if sys.stderr is not None:
-        print(text, file=sys.stderr, flush=True)
+        try:
+            print(text, file=sys.stderr, flush=True)
+        except (OSError, ValueError):
+            sys.stderr = None
 
 
 def at_terminal() -> bool:
@@ -67,48 +74,74 @@ def _once(root) -> tuple:
     """One attempt: the exit status and the lines for the user."""
     try:
         with job.Lock(root) as lock:
+            if _waits_for_setup(root) and not in_setup():
+                return FAILED, [f"LocaLM's setup did not finish. Run setup in {root} again."]
+            notes: list = []
             try:
-                running = _end_running(lock)
-                if running:
-                    return FAILED, [_NOT_BACK + line for line in running]
-                result = steps_update.put_back(
-                    lock, uv=find_uv(root), env=environment(root), say=say,
-                    network=network(root), ask=_ask if at_terminal() else None)
+                if _is_another_release(root):
+                    why = ["LocaLM was replaced by another release while an update of it was "
+                           "not finished."]
+                else:
+                    running = _end_running(lock)
+                    if running:
+                        return FAILED, [_NOT_BACK + line for line in running]
+                    result = steps_update.put_back(
+                        lock, uv=find_uv(root), env=environment(root), say=say,
+                        network=network(root), ask=_ask if at_terminal() else None)
+                    notes, why = result.notes, [_NOT_BACK + line for line in result.errors]
+                    if not why or result.held:
+                        return (FAILED if why else OK), [*notes, *why]
             except mover.Unreadable as e:
-                aside = _set_aside(lock)
-                return (OK, [aside]) if aside else (FAILED, [_NOT_BACK + str(e), *ways_out(root)])
+                why = [_NOT_BACK + str(e)]
+            aside = _set_aside(lock)
+            return (OK, [*notes, aside]) if aside else (FAILED, [*notes, *why, *ways_out(root)])
     except job.Busy as e:
         by = ", ".join(f"{h['name']} (pid {h['pid']})"
                        for h in disk.holders_of(mover.update_folder(root) / "lock"))
         return BUSY, [f"{e}{by and ': ' + by}"]
+    except PermissionError as e:
+        return FAILED, [f"{_NOT_BACK}{e}. Close the program that holds it, or start LocaLM with "
+                        f"the account that installed it."]
     except steps.STEP_ERRORS as e:
-        return FAILED, [_NOT_BACK + str(e)]
-    return (FAILED if result.errors else OK,
-            [*result.notes, *(_NOT_BACK + line for line in result.errors)])
+        return FAILED, [_NOT_BACK + str(e), *([] if isinstance(e, disk.Held) else ways_out(root))]
 
 
 # ------------------------------------------------------------- what still runs
 
 def _end_running(lock: job.Lock) -> list:
     """End what an interrupted update left running, except the processes that wait at
-    the gate for this. Returns a line for each that still runs."""
+    the gate for this and the programs they started. Returns a line for each process of
+    localm that still runs, the ones above this one among them."""
     procs, record = shared.also("procs"), job.current(lock.root)
     if procs is None or record is None or record.phase in _LEAVES_RUNNING:
         return []
     root, holders = disk.short_path(disk.real_folder(lock.root)), shared.apply_update.rm_holders
+    seen: dict = {}
+
+    def arrives(e) -> bool:
+        return time.monotonic() - seen.setdefault(e.key, time.monotonic()) < _ARRIVE_S
+
+    def spared(running) -> set:
+        found = _waiting(lock.root, running)
+        for e in running:
+            if arrives(e) if e.recorded else e.parent and e.parent[0] in found:
+                found.add(e.pid)
+        return found
+
     try:
-        until = time.monotonic() + _ARRIVE_S
         while True:
+            left = procs.end_others(root, spare=spared, holders=holders)
             running = procs.list(root, holders=holders)
             waiting = _waiting(lock.root, running)
-            if all(e.pid in waiting for e in running) or time.monotonic() >= until:
+            left = left or [e for e in running if e.recorded and e.pid not in waiting]
+            if not any([arrives(e) for e in left]):
                 break
             time.sleep(0.1)
-        left = procs.end_others(root, spare=waiting, holders=holders)
     except OSError as e:
         return [str(e), *(_in_the_way(w) for w in getattr(e, "in_the_way", ()))]
     return [f"a process of LocaLM still runs ({e.purpose}): "
-            + "; ".join(_in_the_way(w) for w in e.in_the_way) for e in left]
+            + "; ".join(map(_in_the_way, e.in_the_way or ({"pid": e.pid, "name": "process"},)))
+            for e in left]
 
 
 def _in_the_way(what: dict) -> str:
@@ -134,33 +167,62 @@ def ways_out(root) -> list:
     """What a user can do about an update that can be neither finished nor undone."""
     return [f"LocaLM does not start, because its files may be of two versions. The files the "
             f"update replaced are in {mover.update_folder(root)}.",
-            f"What helps: download LocaLM from {_DOWNLOAD}, unzip it over {root} and run setup "
-            f"there (your chats, settings and models stay)."]
+            f"What helps: run setup in {root}. If it says this too, download LocaLM from "
+            f"{_DOWNLOAD}, unzip it over {root} and run setup there (your chats, settings and "
+            f"models stay). Setup with --uninstall removes LocaLM."]
+
+
+def _is_another_release(root) -> bool:
+    """Whether another release was put over the install: what tells one release from
+    another is neither as the unfinished update found it nor as it leaves it."""
+    record = job.current(root)
+    if (record is None or record.phase in (job.DONE, job.ENDED)
+            or not mover.has_plans(root, record.id)):
+        return False
+    ops = [op for plan in mover.read_plans(root, record.id) if plan.step == mover.FILES
+           for op in plan.ops]
+    for rel in (shared.update_package.NAME, "localm/__init__.py"):
+        known = [i for op in ops if op.path == rel for i in (op.old, op.new, *op.release) if i]
+        path = disk.real_folder(root) / rel
+        if known and disk.lstat(path) is not None and not any(disk.same(path, i) for i in known):
+            return True
+    return False
+
+
+def _waits_for_setup(root) -> bool:
+    try:
+        raw = disk.read_json(job.record_path(root), job.MAX_RECORD_BYTES)
+    except ValueError:
+        return False
+    return isinstance(raw, dict) and raw.get("phase") == SETUP
 
 
 def _set_aside(lock: job.Lock) -> str:
-    """Put what an update that cannot be told left away, when the files of the install are
-    exactly those of one release and no Python package of it was being replaced, or setup
-    is running, which installs the packages. Returns the line that says so, else an empty
-    string."""
+    """Put what an update that can be neither finished nor undone left away, when the
+    files of the install are exactly those of one release. Under setup the record stays,
+    in phase :data:`SETUP`, until setup has made a new Python environment; otherwise this
+    does nothing when Python packages were being replaced. Returns the line that says so,
+    or an empty string."""
     root = disk.real_folder(lock.root)
     ids = [n for n in job.ids(root) if job.over_of(root, n) is None]
-    staged = [f for f in (mover.venv_folder(root, n) for n in ids) if disk.lstat(f) is not None]
-    version = "" if staged and not in_setup() else release_of(root)
-    if not version:
+    version = release_of(root)
+    if not version or (not in_setup() and any(
+            disk.lstat(mover.venv_folder(root, n)) is not None for n in ids)):
         return ""
     stamp = time.strftime("%Y%m%d-%H%M%S")
     folder = mover.update_folder(root)
-    for path in staged:
-        kept = path.parent.with_name(".localm-kept")
-        kept.mkdir(exist_ok=True)
-        os.rename(path, kept / f"{path.name}-{stamp}")
+    if in_setup():
+        disk.write_json(job.record_path(root), {"id": "0" * 32, "phase": SETUP})
+        kept = disk.real_folder(root / ".venv") / mover.VENV_KEPT
+        if disk.lstat(kept) is not None:
+            disk.move(kept, folder / "kept" / f"venv-{stamp}", disk.Wait())
     for name in ids:
         os.rename(folder / name, folder / f"aside-{name}-{stamp}")
-    if disk.lstat(job.record_path(root)) is not None:
+    if not in_setup() and disk.lstat(job.record_path(root)) is not None:
         os.rename(job.record_path(root), folder / f"aside-{stamp}.json")
     return (f"The files of this install are those of LocaLM {version}. What an interrupted "
-            f"update left is put aside in {folder}.")
+            f"update left is put aside in {folder}."
+            + (" Setup installs its Python packages again." if in_setup() else ""))
 
 
 def release_of(root) -> str:

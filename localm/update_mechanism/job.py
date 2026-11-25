@@ -411,7 +411,7 @@ def _end_parts(lock: Lock, update_id: str, end) -> Result:
                                    for p in result.packages]
         except (Busy, Unreadable, Unsafe, Held, OSError, ValueError) as e:
             all_parts.errors.append(f"{folder}: {e}")
-            if isinstance(e, Held):
+            if isinstance(e, (Held, Busy)):
                 all_parts.held.append(e)
     return all_parts
 
@@ -465,7 +465,7 @@ class Result:
     file and package that is not as it should be, *packages* the packages among them
     (:class:`.mover.Outcome`): installing exactly those again and calling again puts
     the old version back. *notes* are lines for the user; *held* has each
-    :class:`.disk.Held` behind an error or note. Calling again goes on from there."""
+    :class:`.disk.Held` and :class:`Busy` behind an error or note. Calling again goes on from there."""
     state: str
     errors: list = field(default_factory=list)
     packages: list = field(default_factory=list)
@@ -673,7 +673,7 @@ def cleanup(lock: Lock, *, keep: Optional[str] = None) -> list:
     left."""
     _held(lock)
     left = []
-    for name in ("job.json.tmp", "job.json.gone"):
+    for name in ("job.json.tmp", "job.json.gone", "started"):
         with contextlib.suppress(OSError, Held):   # a write that never took effect
             disk.unlink(record_path(lock.root).with_name(name))
     staged = disk.real_folder(lock.root / ".venv") / mover.VENV_FOLDER

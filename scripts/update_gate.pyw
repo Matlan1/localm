@@ -13,13 +13,14 @@ GATE = Path(__file__).resolve().parent.parent / "localm" / "__init__.py"
 _HIDDEN = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
 
-def run(say) -> tuple:
-    """Run the gate and give each line it prints to *say*. Returns its exit status and
-    all it printed."""
+def run(say, started) -> tuple:
+    """Run the gate, give its process to *started* and each line it prints to *say*.
+    Returns its exit status and all it printed."""
     proc = subprocess.Popen([sys.executable, "-I", "-S", "-X", "utf8", str(GATE)],
                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                             stderr=subprocess.PIPE, text=True, encoding="utf-8",
                             errors="replace", **_HIDDEN)
+    started(proc)
     lines = []
     for line in proc.stderr:
         lines.append(line.rstrip())
@@ -27,8 +28,8 @@ def run(say) -> tuple:
     return proc.wait(), "\n".join(lines)
 
 
-def _run_into(said: list, result: list) -> None:
-    result.append(run(said.append))
+def _run_into(said: list, started: list, result: list) -> None:
+    result.append(run(said.append, started.append))
 
 
 def main() -> int:
@@ -38,21 +39,26 @@ def main() -> int:
         window = tk.Tk()
     except Exception as e:
         print(f"[!] no window can be shown: {e}", file=sys.stderr)
-        return run(lambda line: print(line, file=sys.stderr, flush=True))[0]
+        return run(lambda line: print(line, file=sys.stderr, flush=True), lambda proc: None)[0]
     window.title("LocaLM")
-    window.protocol("WM_DELETE_WINDOW", lambda: None)
+    closed: list = []
+    window.protocol("WM_DELETE_WINDOW", lambda: closed.append(True))
     text = tk.StringVar(window, "Checking an update of LocaLM...")
     tk.Label(window, textvariable=text, width=70, height=6, wraplength=480).pack(padx=16, pady=16)
     while True:
         said: list = []
+        started: list = []
         result: list = []
-        worker = threading.Thread(target=_run_into, args=(said, result), daemon=True)
+        worker = threading.Thread(target=_run_into, args=(said, started, result), daemon=True)
         worker.start()
         while worker.is_alive():
             if said:
                 text.set(said[-1])
             window.update()
             worker.join(0.1)
+            if closed and started:
+                started[0].terminate()
+                return 1
         code, all_said = result[0] if result else (1, "The update could not be checked.")
         if code == 0:
             messagebox.showinfo("LocaLM", all_said or "LocaLM can be used.", parent=window)

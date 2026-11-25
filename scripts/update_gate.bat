@@ -8,29 +8,31 @@ rem  made from; never one from PATH. With the argument "window" it says everythi
 rem  window (update_gate.pyw).
 rem  An update replaces this file while it runs: the run is one block that ends in exit.
 setlocal EnableExtensions DisableDelayedExpansion
-cd /d "%~dp0.."
+set "ROOT=%~dp0.."
 set "PY="
-set "CAND=.venv\Scripts\python.exe"
+set "CAND=%ROOT%\.venv\Scripts\python.exe"
 call :try
-for /d %%D in (".python\*") do (
+for /d %%D in ("%ROOT%\.python\*") do (
     set "CAND=%%~D\python.exe"
     call :try
 )
-if not defined PY if exist ".venv\pyvenv.cfg" for /f "usebackq tokens=1,* delims== " %%A in (".venv\pyvenv.cfg") do if /i "%%A"=="home" (
+if not defined PY if exist "%ROOT%\.venv\pyvenv.cfg" for /f "usebackq tokens=1,* delims== " %%A in ("%ROOT%\.venv\pyvenv.cfg") do if /i "%%A"=="home" (
     set "CAND=%%~B\python.exe"
     call :try
 )
 set "RUN=localm\__init__.py"
 if "%~1"=="window" set "RUN=scripts\update_gate.pyw"
 if defined PY (
-    "%PY%" -I -S "%CD%\%RUN%"
+    "%PY%" -I -S "%ROOT%\%RUN%"
     call set "RC=%%errorlevel%%"
     call exit /b %%RC%%
 )
-echo An update of LocaLM was interrupted and no Python is left in "%CD%" 1>&2
-echo that can undo it. Download LocaLM, unzip it over that folder, delete the folder 1>&2
-echo .localm-update in it and run setup. Your chats, settings and models stay. 1>&2
-if "%~1"=="window" "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms; [void][Windows.Forms.MessageBox]::Show('An update of LocaLM was interrupted and no Python is left that can undo it in ' + (Get-Location) + '. Download LocaLM, unzip it over that folder, delete the folder .localm-update in it and run setup. Your chats, settings and models stay.', 'LocaLM')"
+for %%R in ("%ROOT%") do set "ROOT=%%~fR"
+echo An update of LocaLM was interrupted and no Python is left in "%ROOT%" 1>&2
+echo that can undo it. Download LocaLM, unzip it over that folder, delete everything in 1>&2
+echo its folder .localm-update except kept, which has files of your own, and run setup. 1>&2
+echo Your chats, settings and models stay. 1>&2
+if "%~1"=="window" "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms; [void][Windows.Forms.MessageBox]::Show('An update of LocaLM was interrupted and no Python is left that can undo it in ' + $env:ROOT + '. Download LocaLM, unzip it over that folder, delete everything in its folder .localm-update except kept, which has files of your own, and run setup. Your chats, settings and models stay.', 'LocaLM')"
 exit /b 4
 
 :try

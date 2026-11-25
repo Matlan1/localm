@@ -11,6 +11,7 @@ if not exist ".localm-update\job.json" goto :update_gated
 if defined LOCALM_GATE goto :update_gated
 set "LOCALM_GATE=1"
 call scripts\update_gate.bat && "%~dp0localm-launcher.bat" %* || (
+    set "LOCALM_GATE="
     pause
     exit /b 1
 )

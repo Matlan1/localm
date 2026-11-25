@@ -278,7 +278,8 @@ that starts later, or that asks which processes run (one written by another mach
 container, copied here with the folder, or, on a Linux system without a machine id,
 left from before a restart, stays). A process that waits while an update of localm is
 not finished has an empty file in `.localm-update/` named after its process id and start
-time until it goes on.
+time until it goes on; one that was ended while it waited leaves that file until the
+update is put back.
 
 ---
 
