@@ -420,8 +420,9 @@ def test_a_package_built_by_another_backend_is_the_old_one(root, monkeypatch, ho
         assert [p["name"] for p in uv.undo(root).packages] == ["alpha"]
     else:
         killed_before(root, "alpha/old.py", monkeypatch)
-        for path in (root / ".venv" / mover.VENV_FOLDER / ID / "old").rglob("WHEEL"):
-            path.unlink()
+        for name in ("WHEEL", "desktop.ini"):
+            for path in (root / ".venv" / mover.VENV_FOLDER / ID / "old").rglob(name):
+                path.unlink()
     uv.install(root / ".venv", built("2"))
     result = uv.undo(root)
     assert (result.state, result.errors) == ("old", [])
