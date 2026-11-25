@@ -172,8 +172,14 @@ else:
     _procs.enter()
     _round = globals().get("_round", 0) + 1
     if _gate(_procs.current()) and _round < 3:
-        # The files just put in place are read instead of the ones this began with.
-        import importlib
+        # The files just put in place are read instead of the ones this began with, whose
+        # compiled copies may have the same size and time.
+        import importlib.util
+        for _file in (__file__, _procs.__file__):
+            try:
+                os.unlink(importlib.util.cache_from_source(_file))
+            except OSError:
+                pass
         sys.modules.pop("localm.procs", None)
         globals().pop("procs", None)
         importlib.invalidate_caches()

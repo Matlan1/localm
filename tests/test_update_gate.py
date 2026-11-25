@@ -213,7 +213,12 @@ def test_killed_at_many_points_the_next_start_runs_one_whole_version(tmp_path):
 
 
 def test_the_process_that_undid_it_runs_the_old_gate_and_process_record(inst):
+    """Also when the files of both versions have the same size and time."""
     inst.go(job.STARTING)
+    for path in (inst.root / ".localm-update").rglob("*.py"):
+        os.utime(path, (1.7e9, 1.7e9))
+    for path in (inst.root / "localm").glob("*.py"):
+        os.utime(path, (1.7e9, 1.7e9))
     done = inst.run("-c", "import localm, localm.procs as p; print(localm.__version__, p.BUILD,"
                           " p.current().pid > 0)")
     assert done.out.split() == ["1", "1", "True"], (done.out, done.err)
