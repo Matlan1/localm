@@ -568,7 +568,8 @@ def _set_aside(a: Area, plan: Plan, names: set, wait: Wait, out: Outcome) -> Non
                 continue
             try:
                 mover.aside(a, op, path, wait, out)
-                a.prune(path.parent)
+                if rel not in ops:
+                    a.prune(path.parent)
             except (OSError, Held) as e:
                 held = True
                 if rel not in ops:

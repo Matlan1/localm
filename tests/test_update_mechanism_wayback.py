@@ -902,6 +902,13 @@ def test_a_package_folder_that_changes_only_its_case_goes_there_and_back(root, o
         n for n in there if "__pycache__" not in n}
 
 
+def test_an_empty_folder_that_was_there_before_the_update_stays(root):
+    (site(root) / "alpha" / "sub" / "__pycache__").mkdir(parents=True)
+    before = uv.tree(root)
+    moved(root, coming=[("alpha", "2.0", {**ALPHA2[2], "alpha/sub/x.py": "x"})])
+    assert (uv.undo(root).state, uv.tree(root) == before) == ("old", True)
+
+
 @insensitive
 def test_a_folder_that_changed_its_case_goes_back_around_a_file_of_the_user(root):
     uv.install(root / ".venv", CASEY1)
