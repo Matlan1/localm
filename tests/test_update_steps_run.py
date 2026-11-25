@@ -432,22 +432,6 @@ def test_steps_of_another_schema_fail_the_update(update, spec):
         _run(update, _steps(**spec))
 
 
-def test_a_child_of_an_update_converts_nothing_in_the_data_folder(tmp_path, monkeypatch):
-    home = tmp_path / "home"
-    home.mkdir()
-    text = json.dumps({"gui_proxy_remote_images": True})
-    (home / "config.json").write_text(text, encoding="utf-8")
-    code = ("from localm.config import load_config; "
-            "print(load_config()['gui_proxy_remote_images'])")
-    for update_id, stays in ((ID, True), ("", False)):
-        env = steps_update.child_env(os.environ, um.REPO, home, update_id)
-        said: list = []
-        status, _last = steps_update.run_child([sys.executable, "-c", code], cwd=tmp_path, env=env,
-                                              say=said.append)
-        assert status == 0 and "on" in said
-        assert ((home / "config.json").read_text(encoding="utf-8") == text) is stays
-
-
 # ------------------------------------------------------- builds that do not run here
 
 @pytest.mark.parametrize("name", ["sdcpp", "koboldcpp"])

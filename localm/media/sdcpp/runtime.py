@@ -456,10 +456,10 @@ def _install(backend: str, *, force: bool, say: Progress,
                for name, _sha in pins.EXTRA_ASSETS.get((plat, backend), [])):
             (staging / NVIDIA_CUDA_LICENSE).write_text(NVIDIA_CUDA_LICENSE_NOTICE,
                                                        encoding="utf-8")
-        rt = Runtime(backend=backend, path=staging, extra_dirs=extra_dirs_for(backend))
+        new = Runtime(backend=backend, path=staging, extra_dirs=extra_dirs_for(backend))
         say(f"Testing the {RUNTIME_LABEL} ({backend})...")
         try:
-            devices = twice(lambda: _tested_devices(rt, probe or _probe), LoadTestError)
+            devices = twice(lambda: _tested_devices(new, probe or _probe), LoadTestError)
         except LoadTestError as e:
             if into is None and installed(backend) is None:
                 dest.mkdir(exist_ok=True)

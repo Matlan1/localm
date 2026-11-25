@@ -16,6 +16,8 @@ from typing import Optional
 
 import click
 
+import localm.setup_llama as _sl
+
 _EXC_HEADER_RE = re.compile(
     r"^(?:[\w.]+\.)?\w*(?:Error|Exception|Warning|Interrupt|Exit)(?::|\s|\Z)")
 
@@ -224,7 +226,7 @@ def _made(test):
         except OSError as e:
             tries -= 1
             if not tries:
-                raise LoadTestNotRun(f"the load test of the runtime could not be run: {e}") from e
+                raise _sl.LoadTestNotRun(f"the load test of the runtime could not be run: {e}") from e
             time.sleep(_PAUSE_S)
 
 
