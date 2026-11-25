@@ -11,6 +11,9 @@
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey" alt="Platform: Windows | Linux">
 </p>
 
+> [!WARNING]
+> **Short pause: hardware failure.** My graphics card died, so work on LocaLM is on hold until I've sorted out replacement hardware. Sorry for the delay on open issues and the next release. Everything already published keeps working as before, and I'll pick things back up as soon as I can.
+
 At its core LocaLM is a model loader plus a plugin engine: chat works out of the box, and everything else, from the coding agent to music generation, is a plugin you install only if you want it, or write yourself. See [Offline first](#features) for exactly what does and does not touch the network.
 
 <p align="center">
