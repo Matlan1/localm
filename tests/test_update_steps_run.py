@@ -459,3 +459,31 @@ def test_a_media_build_that_does_not_run_here_is_left_out_with_a_note(tmp_path, 
     assert "the launcher could not be started" in note and "v1) stays" in note
     assert "does not work until" in note and "--force" in note
     assert (steps.Place(base, ID).new(mover.WHOLE) / "v2-good" / "launcher").is_file()
+
+
+@pytest.mark.parametrize("name,command", [("sdcpp", "localm setup-sdcpp --backend cpu --force"),
+                                          ("koboldcpp", "localm setup-music --force")])
+def test_a_media_runtime_that_is_broken_for_good_refuses_the_update(tmp_path, monkeypatch, name,
+                                                                    command):
+    from localm.cli import update_prepare
+    from localm.media.koboldcpp import runtime as kobold
+    from localm.media.sdcpp import runtime as sdcpp
+    runtime = sdcpp if name == "sdcpp" else kobold
+    root, base = um.install(tmp_path / "root"), tmp_path / "data" / name
+    um.write(base, {"v1-cpu/launcher": "old"})
+    (root / ".localm-update" / ID).mkdir(parents=True)
+    with steps.Work(base) as work:
+        um.write(work.new(mover.WHOLE), {"v1-cpu/launcher": "new"})
+        with job.Lock(base) as lock:
+            job.start(lock, work.id, old="", new="")
+            job.advance(lock, job.MOVING)
+            job.advance(lock, job.STEPS)
+            steps.move_in(base, work.id, mover.WHOLE)
+    (mover.area(base, work.id, mover.WHOLE, 1).old / "v1-cpu/launcher").unlink()
+    monkeypatch.setattr(runtime, "runtimes_root", lambda: base)
+    monkeypatch.setattr(runtime, "install", lambda *a, **k: pytest.fail("it was fetched"))
+    plan = {"label": "native runtime", "target": "v2", "current": "v1", "items": ["cpu"]}
+    with pytest.raises(update_prepare.PrepareFailed) as refused:
+        update_prepare._prepare_folders(root, ID, name, plan, {"notes": []}, lambda _t: None)
+    assert command in str(refused.value)
+    assert not (base / ".localm-update" / ID).exists()

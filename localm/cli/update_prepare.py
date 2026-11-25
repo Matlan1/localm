@@ -155,7 +155,8 @@ def _run_localm(args: list, say: Say) -> tuple:
 def _prepare_folders(root: Path, update_id: str, name: str, plan: dict, out: dict,
                      say: Say) -> Optional[dict]:
     """Fetch and test each build of the sd.cpp or KoboldCpp runtime the update installs.
-    One that does not work on this machine is left out, with a note."""
+    One that does not work on this machine is left out, with a note. Raises
+    :class:`PrepareFailed`, also for a runtime that has to be installed again first."""
     from localm.media.koboldcpp import runtime as kobold
     from localm.media.sdcpp import runtime as sdcpp
     from localm.update_mechanism import job, mover, steps
@@ -163,7 +164,10 @@ def _prepare_folders(root: Path, update_id: str, name: str, plan: dict, out: dic
     base = runtime.runtimes_root()
     from localm.media.runtime_files import settle_runtimes
     try:
-        settle_runtimes(base, PrepareFailed)
+        if settle_runtimes(base, PrepareFailed):
+            raise PrepareFailed(
+                f"files of the installed {plan['label']} are lost since an install of it was "
+                f"interrupted. Install it again, then update: {_command(name, plan['items'][0])}")
         steps.sweep(base)
         job.own_part(root, update_id, base)
         into = steps.Place(base, update_id).new(mover.WHOLE)
@@ -188,14 +192,18 @@ def _prepare_folders(root: Path, update_id: str, name: str, plan: dict, out: dic
     return {"kind": "folders", "label": plan["label"], "root": _located(root, base)}
 
 
+def _command(name: str, item: str) -> str:
+    """The command that installs the build *item* of the native media runtime *name*."""
+    return (f"localm setup-sdcpp --backend {item} --force" if name == "sdcpp"
+            else "localm setup-music --force")
+
+
 def _left_out(name: str, plan: dict, item: str, why: str) -> str:
     """The note for a build of a native media runtime the update leaves out."""
-    what, retry = (("Image and video generation", f"localm setup-sdcpp --backend {item} --force")
-                   if name == "sdcpp" else
-                   ("Music generation", "localm setup-music --force"))
+    what = "Image and video generation" if name == "sdcpp" else "Music generation"
     return (f"the {item} build of the {plan['label']} {plan['target']} was not installed: {why}. "
             f"The installed one ({plan['current']}) stays, and this version cannot use it: {what} "
-            f"with the {item} build does not work until it is installed. To try again: {retry}")
+            f"with the {item} build does not work until it is installed. To try again: {_command(name, item)}")
 
 
 def _prepare_comfyui(root: Path, update_id: str, plan: dict, say: Say) -> dict:

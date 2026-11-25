@@ -542,7 +542,8 @@ def _clear_target_or_refuse(target: Path) -> None:
 def _staging_path(target: Path) -> Path:
     """Where a new build is assembled before it replaces *target*: a sibling
     ``<target>.incoming``, on the same volume so the swap is a rename."""
-    return target.parent / (target.name + ".incoming")
+    from localm.update_mechanism.job import INCOMING
+    return target.parent / (target.name + INCOMING)
 
 
 def _replace_target(target: Path, fill):

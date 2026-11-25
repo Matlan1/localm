@@ -223,7 +223,9 @@ returning the managed ComfyUI to its previous version. An update that is interru
 (a crash, a power cut) is undone the next time the managed ComfyUI is used or updated;
 when a file it kept for that is lost, localm says so and the managed ComfyUI has to be
 set up again. A folder in it that is a link or a mount (a models or output folder on
-another drive) stays one: localm replaces only source files in it that changed.
+another drive) stays one: localm replaces only source files in it that changed between
+the two versions and moves each file it replaces or removes there to
+`.localm-update/kept` in the managed ComfyUI, which the update says.
 It only touches the managed instance. By default it does not update ComfyUI's Python
 packages, which can be several GB; pass `--reinstall-requirements` when a new pin
 changed them. They are fetched first too, and put back when the update fails.

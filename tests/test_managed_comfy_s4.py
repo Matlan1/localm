@@ -585,6 +585,40 @@ def test_a_custom_node_is_prepared_outside_custom_nodes(home, tmp_path, monkeypa
     assert [p.name for p in node.parent.iterdir()] == ["Node"]
 
 
+def test_a_custom_node_behind_a_link_is_updated_whole(home, tmp_path, monkeypatch):
+    from localm.media import managed_comfy_fresh as fresh
+    from localm.media import managed_comfy_packages
+    from localm.media import managed_comfy_update as upd
+
+    hub, repo, c1, c2, _c3 = _build_update_remote(tmp_path, monkeypatch)
+    root = _install_managed_from(repo, c1)
+    node_repo, n1 = hub.add("o", "Node", {"__init__.py": "old\n", "same.py": "same\n",
+                                          "lost.py": "lost\n", "v": "1"})
+    _, n2 = hub.add("o", "Node", {"__init__.py": "", "sub/__init__.py": "", "same.py": "same\n",
+                                  "lost.py": "lost\n", "v": "2"})
+    theirs = tmp_path / "theirs"
+    source_archive.fetch_tree(node_repo, n1, theirs / "Node")
+    (theirs / "Node" / "same.py").write_bytes(b"mine\n")
+    (theirs / "Node" / "lost.py").unlink()
+    _link(root / "custom_nodes", theirs)
+    pin = fresh.CustomNodePin(name="Node", repo=node_repo, commit=n2,
+                              **{k: getattr(fresh._GGUF_NODE, k)
+                                 for k in fresh._GGUF_NODE.__dataclass_fields__
+                                 if k not in ("name", "repo", "commit")})
+    monkeypatch.setattr(fresh, "required_custom_nodes",
+                        lambda *a: type("Required", (), {"nodes": [pin]})())
+    monkeypatch.setattr(managed_comfy_packages, "prepare", lambda *a, **k: False)
+
+    result = upd.update_managed_comfy(
+        comfyui_repo=repo, target_commit=c2, reinstall_requirements=True)
+
+    assert result.ok, result.message
+    files = _files(theirs / "Node")
+    files.pop(source_archive.SOURCE_RECORD)
+    assert files == {"__init__.py": "", "sub/__init__.py": "", "same.py": "mine\n",
+                     "lost.py": "lost\n", "v": "2"}
+
+
 def test_update_and_remove_work_on_a_tree_past_the_path_limit(home, tmp_path, monkeypatch,
                                                               max_path):  # noqa: F811
     from localm.media import managed_comfy_update as upd
@@ -1012,6 +1046,73 @@ def test_an_update_writes_only_changed_source_through_a_folder_of_the_user(home,
     for name in ("output", "models", "custom_nodes"):
         assert os.path.realpath(root / name) == os.path.realpath(theirs / name)
     assert (root / "VERSION").is_file()
+
+
+def _users_own(tmp_path, monkeypatch):
+    """A managed ComfyUI whose ``models`` leads to a folder of the user's, which holds
+    files under names of ComfyUI's source."""
+    hub = FakeGitHub(tmp_path / "hub").install(monkeypatch)
+    repo, c1 = hub.add("fake", "ComfyUI", _tree(**{
+        "models/changes.yaml": "one", "models/stays.yaml": "source", "models/goes.yaml": "source",
+        "models/emptied.py": "code", "models/fills_up": ""}))
+    _, c2 = hub.add("fake", "ComfyUI", _tree(**{
+        "models/changes.yaml": "two", "models/stays.yaml": "source", "models/emptied.py": "",
+        "models/fills_up": "full", "models/added.py": "", "models/put_here": ""}))
+    root = _install_managed_from(repo, c1)
+    theirs = tmp_path / "theirs"
+    theirs.mkdir()
+    for name in ("changes.yaml", "stays.yaml", "goes.yaml"):
+        (theirs / name).write_text(f"mine: {name}")
+    (theirs / "emptied.py").write_text("code")
+    (theirs / "fills_up").write_text("")
+    import shutil
+    shutil.rmtree(root / "models")
+    _link(root / "models", theirs)
+    return hub, repo, c2, root, theirs
+
+
+_PUT_IN = {"changes.yaml": "two", "emptied.py": "", "fills_up": "full", "added.py": ""}
+_KEPT = {"changes.yaml": "mine: changes.yaml", "goes.yaml": "mine: goes.yaml",
+         "emptied.py": "code", "fills_up": ""}
+
+
+def _kept_files(root: Path) -> dict:
+    (kept,) = (root / ".localm-update" / "kept").iterdir()
+    return _files(kept / "tree" / "models")
+
+
+def test_a_file_of_the_user_behind_a_link_is_kept_or_left_alone(home, tmp_path, monkeypatch):
+    from localm.media import managed_comfy_update as upd
+    _hub, repo, c2, root, theirs = _users_own(tmp_path, monkeypatch)
+    result = upd.update_managed_comfy(comfyui_repo=repo, target_commit=c2)
+    assert result.ok, result.message
+    assert _files(theirs) == {**_PUT_IN, "stays.yaml": "mine: stays.yaml"}
+    assert _kept_files(root) == _KEPT
+    assert "4 file(s) that were your own" in result.message and "kept" in result.message
+    assert [p.name for p in (root / ".localm-update").iterdir() if p.is_dir()] == ["kept"]
+
+
+def test_a_source_that_cannot_be_compared_loses_no_file_behind_a_link(home, tmp_path,
+                                                                      monkeypatch):
+    from localm.media import managed_comfy_update as upd
+    hub, repo, c2, root, theirs = _users_own(tmp_path, monkeypatch)
+    hub.archives = {url: path for url, path in hub.archives.items() if c2 in url}
+    result = upd.update_managed_comfy(comfyui_repo=repo, target_commit=c2)
+    assert result.ok, result.message
+    assert _files(theirs) == {**_PUT_IN, "stays.yaml": "source"}
+    assert _kept_files(root) == {**_KEPT, "stays.yaml": "mine: stays.yaml"}
+    assert "could not be compared" in result.log
+
+
+def test_an_update_compares_with_the_old_source_only_for_the_users_folders(home, tmp_path,
+                                                                           monkeypatch):
+    from localm.media import managed_comfy_update as upd
+    hub, repo, c1, c2, _c3 = _build_update_remote(tmp_path, monkeypatch)
+    _install_managed_from(repo, c1)
+    hub.requested.clear()
+    result = upd.update_managed_comfy(comfyui_repo=repo, target_commit=c2)
+    assert result.ok, result.message
+    assert [url.rpartition("/")[2] for url in hub.requested] == [c2]
 
 
 def test_an_update_that_fails_puts_the_users_folder_back(home, tmp_path, monkeypatch):

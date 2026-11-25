@@ -292,6 +292,8 @@ OWNER = "owner.json"
 #: In the folder of an update that is prepared: the lock of the process that prepares
 #: it, and the name of a folder of it beside its own.
 BUSY, BESIDE = "busy", "beside.json"
+#: What setup-llama adds to the name of the folder it fills, for the one it unpacks in.
+INCOMING = ".incoming"
 
 
 def part_path(root, folder) -> str:
@@ -391,9 +393,10 @@ def _end_parts(lock: Lock, update_id: str, end) -> Result:
     for folder in reversed(part_folders(lock.root, update_id)):
         try:
             if disk.lstat(folder) is None:
-                gone = disk.lstat(folder.parent) is not None
+                gone = disk.lstat(folder.parent) is not None and bool(os.listdir(folder.parent))
                 (all_parts.notes if gone else all_parts.errors).append(
-                    f"{folder} was removed and stays so" if gone else f"{folder} cannot be reached")
+                    f"{folder} was removed and stays so" if gone else
+                    f"{folder} cannot be reached (if it was deleted, create it as an empty folder)")
                 continue
             part = _lock_part(lock, folder)
             record = _current(part.root)
@@ -415,9 +418,8 @@ def _end_parts(lock: Lock, update_id: str, end) -> Result:
 def settle(lock: Lock, *, wait_s: Optional[float] = None) -> Result:
     """End what an interrupted change left in the component folder of *lock*, or do
     nothing (state ``busy``) when it is a part of an update that has not ended. A
-    part that had reached its end when its update ended as done is ended as done;
-    everything else is put back, waiting *wait_s* for held files. Raises like
-    :func:`restore`."""
+    part whose update says that it is done is ended as done; everything else is put
+    back, waiting *wait_s* for held files. Raises like :func:`restore`."""
     record = _current(lock.root)
     if record is None:
         cleanup(lock)
@@ -427,7 +429,8 @@ def settle(lock: Lock, *, wait_s: Optional[float] = None) -> Result:
         of = read(whole) if disk.lstat(whole) is not None else None
         if of is not None and of.id == record.id:
             return Result("busy")
-        if record.phase in (STARTING, DONE):
+        if record.phase == DONE or (
+                record.phase == STARTING and _over(whole, record.id) == DONE):
             return finish(lock)
     return restore(lock, wait_s=wait_s)
 
@@ -440,7 +443,8 @@ def abandon(lock: Lock) -> None:
     _held(lock)
     for update_id in _ids(lock.root):
         whole = owner(lock.root, update_id)
-        if whole is not None and disk.lstat(mover.update_folder(whole) / update_id) is not None:
+        if (whole is not None and disk.lstat(mover.update_folder(whole) / update_id) is not None
+                and _over(whole, update_id) != DONE):
             raise Busy("an update of localm is not finished")
     for update_id in _ids(lock.root):
         if disk.lstat(mover.work_folder(lock.root, update_id) / STATE) is None:
@@ -618,7 +622,8 @@ def discard(root, update_id: str) -> bool:
         beside = None
     gone = remove_staged(root, update_id)
     if isinstance(beside, str) and "/" not in disk.clean(beside):
-        gone = disk.remove_tree(disk.real_folder(root) / beside) and gone
+        for name in (beside, beside + INCOMING):
+            gone = disk.remove_tree(disk.real_folder(root) / name) and gone
     return gone and disk.remove_tree(work)
 
 
@@ -686,9 +691,22 @@ def cleanup(lock: Lock, *, keep: Optional[str] = None) -> list:
     return left
 
 
+def _waited_for(root, update_id: str) -> bool:
+    """Whether a part of the update *update_id*, which is done, has not ended or cannot be
+    reached; it ends as done while the update's folder says so."""
+    for folder in part_folders(root, update_id):
+        if disk.lstat(folder) is None:
+            return True
+        record = _current(folder)
+        if record is not None and record.id == update_id:
+            return True
+    return False
+
+
 def _delete(lock: Lock, update_id: str) -> bool:
     """Delete the folders of *update_id* when it is over, its plans first and what says
-    that it is over last. Returns False when a part is left."""
+    that it is over last; that stays while a part of it waits (:func:`_waited_for`).
+    Returns False when something is left."""
     root = lock.root
     work = mover.work_folder(root, update_id)
     over = _over(root, update_id)
@@ -710,6 +728,7 @@ def _delete(lock: Lock, update_id: str) -> bool:
             return True
     if over == DONE and not _hand_over(root, update_id, Result("new")):
         return False
+    waited = over == DONE and _waited_for(root, update_id)
     if disk.lstat(work / "plans") is not None:
         os.rename(work / "plans", work / "gone")
     gone = remove_staged(root, update_id)
@@ -718,8 +737,10 @@ def _delete(lock: Lock, update_id: str) -> bool:
         st = os.lstat(path)
         if stat.S_ISDIR(st.st_mode) or disk.is_link(st):
             gone = disk.remove_tree(path) and gone
-        elif name not in (STATE, over):
+        elif name not in (STATE, over) and not (waited and name == PARTS):
             disk.unlink(path)
+    if waited:
+        return False
     if gone:
         disk.unlink(work / STATE)
     return gone and disk.remove_tree(work)

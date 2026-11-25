@@ -164,7 +164,8 @@ def plan_staged(root, update_id: str, step: str, *, remove: Iterable[str] = ()) 
     """The plan that makes the files prepared for *step* (:meth:`Work.new`) those of
     its area, and takes the files *remove* out, those that are staged excepted. A
     staged file equal to the installed one is left out. Files are known by size and
-    time (links by target). Reads only.
+    time (links by target), new ones in a folder that is a link or a mount also by their
+    content; an old file there is the user's own. Reads only.
 
     Raises :class:`.mover.Refused` for a name that is taken by something else,
     :class:`.disk.Unsafe` and OSError."""
@@ -180,9 +181,10 @@ def plan_staged(root, update_id: str, step: str, *, remove: Iterable[str] = ()) 
         assert source_st is not None
         if st is None or (stat.S_ISDIR(st.st_mode) and not disk.is_link(st)) or (
                 not _same_content(path, st, source, source_st)):
-            new[rel] = disk.quick_identity(source)
+            known = disk.quick_identity(source)
+            new[rel] = disk.with_copy(source, known) if a.linked(rel) else known
     return mover.build(a, step, number, new, set(remove) - set(staged), identify=disk.quick_identity,
-                       edited=lambda _rel, _old: False)
+                       edited=lambda rel, _old: a.linked(rel) is not None)
 
 
 def move_in(root, update_id: str, step: str, *, remove: Iterable[str] = (),

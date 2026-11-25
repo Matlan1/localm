@@ -64,7 +64,7 @@ localm-home.cfg
 .localm-setup-tmp/
 .localm-update/
 .localm-old/
-runtime/localm_llama_runtime/lib.incoming*/
+runtime/localm_llama_runtime/lib.*/
 .localm-setup-starting-*
 .localm-gui-bootstrap
 

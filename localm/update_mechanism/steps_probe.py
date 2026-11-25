@@ -69,7 +69,7 @@ def probe(python, root, *, version: str, home, env: Mapping, update_id: str = ""
         if answer != version:
             return f"localm {answer} answered instead of {version}"
         return None
-    except (ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as e:
+    except (ValueError, KeyError, TypeError, RecursionError, subprocess.TimeoutExpired) as e:
         return f"localm {version} could not be checked: {e}{_tail(lines)}"
     finally:
         _end(proc)
@@ -87,7 +87,7 @@ def _ask(port: int, deadline: float) -> Optional[str]:
             body = json.loads(response.read(64 * 1024).decode("utf-8"))
             if response.status == 200 and isinstance(body, dict):
                 return str(body.get("version"))
-        except (OSError, HTTPException, ValueError):
+        except (OSError, HTTPException, ValueError, RecursionError):
             pass
         finally:
             conn.close()

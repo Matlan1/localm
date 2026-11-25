@@ -147,6 +147,7 @@ class Area:
         self.closed = frozenset(n.casefold() for n in closed)
         self.stay = frozenset([base, *stay])
         self._plain: set = set()
+        self._links: dict = {}
         self._twins: set = set()
         self._guarded = self._guards() if guard else set()
 
@@ -215,6 +216,19 @@ class Area:
         """Whether *path* (*st* from ``lstat``) is a folder, or a link to one that is
         followed."""
         return _is_folder(st) or (self.follow and disk.is_link(st) and path.is_dir())
+
+    def linked(self, rel: str) -> Optional[Path]:
+        """The folder below *base* that *rel* lies in and that is a link that is followed
+        or a mount, None for none."""
+        path = self.base
+        for part in rel.split("/")[:-1] if self.follow else ():
+            path = path / part
+            if path not in self._links:
+                st = disk.lstat(path)
+                self._links[path] = st is not None and (disk.is_link(st) or os.path.ismount(path))
+            if self._links[path]:
+                return path
+        return None
 
     def _is_twin(self, rel: str) -> bool:
         return bool(self._twins) and rel.casefold() in self._twins

@@ -74,7 +74,10 @@ def _serve_probe() -> None:
 def update_record_cmd(old: str, new: str, kept: str) -> None:
     """Record what an update that is done changed."""
     from localm.cli import update_prepare as prepared
-    problems = prepared.record(old, new, json.loads(kept))
+    try:
+        problems = prepared.record(old, new, json.loads(kept))
+    except (ValueError, RecursionError) as e:
+        problems = [f"the kept runtimes: {e}"]
     for problem in problems:
         print(problem, flush=True)
     sys.exit(1 if problems else 0)

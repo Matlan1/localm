@@ -72,7 +72,7 @@ def settle_runtimes(root: Path, error: type[Exception]) -> bool:
     except (steps.Failed, *steps.STEP_ERRORS) as e:
         raise error(f"an interrupted install in {root} could not be undone: {e}") from e
     if broken:
-        logger.warning("an interrupted install in %s cannot be undone; the runtime is "
+        logger.warning("an interrupted install in %s cannot be undone; the runtime has to be "
                        "installed again", root)
     return broken
 

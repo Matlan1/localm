@@ -174,7 +174,7 @@ class Linked(Step):
             import _winapi
             _winapi.CreateJunction(str(top / "theirs"), str(top / LINKED))
         else:
-            os.symlink(top / "theirs", top / LINKED)
+            os.symlink("../../theirs", top / LINKED)
         self.new(steps.Place(self.own(top), ID).new(mover.TREE) / "nodes")
         self.remove = ["nodes/removed"]
         self.kinds = {**self.kinds_in(LINKED), "own": "theirs/mine.txt"}

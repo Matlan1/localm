@@ -291,6 +291,17 @@ def _install_with_part(tmp_path):
     return root, part
 
 
+def _part_moved(lock, part):
+    """Start the update staged for *lock*'s install and move in its part *part*."""
+    job.start(lock, um.UPDATE_ID, old="1", new="2")
+    job.advance(lock, job.MOVING)
+    job.advance(lock, job.STEPS)
+    held = job.add_part(lock, part)
+    um.write(mover.new_folder(part, um.UPDATE_ID, mover.TREE), NEW)
+    steps.move_in(part, um.UPDATE_ID, mover.TREE, remove=LEAVES)
+    job.advance(held, job.STARTING)
+
+
 def test_a_part_of_a_running_update_is_not_put_back_by_its_user(tmp_path):
     root, part = _install_with_part(tmp_path)
     um.stage(root)
@@ -351,8 +362,75 @@ def test_a_part_that_cannot_be_reached_keeps_the_update_unfinished(tmp_path):
         assert job.restore(lock).state == "old"
 
 
+def test_a_part_on_a_drive_that_is_not_mounted_keeps_the_update_unfinished(tmp_path):
+    root, part = _install_with_part(tmp_path)
+    before = um.tree(part)
+    um.stage(root)
+    with job.Lock(root) as lock:
+        _part_moved(lock, part)
+    part.rename(tmp_path / "unplugged")   # its folder is left, empty, like a mount point
+    with job.Lock(root) as lock:
+        result = job.restore(lock)
+    assert result.state == "failed" and "cannot be reached" in result.errors[0]
+    (tmp_path / "unplugged").rename(part)
+    assert steps.settle(part).state == "busy"
+    with job.Lock(root) as lock:
+        assert job.restore(lock).state == "old"
+    assert um.tree(part, (".localm-update",)) == before
+
+
+def test_an_empty_folder_stands_for_a_part_that_was_deleted(tmp_path):
+    root, part = _install_with_part(tmp_path)
+    um.stage(root)
+    with job.Lock(root) as lock:
+        _part_moved(lock, part)
+    shutil.rmtree(part)
+    with job.Lock(root) as lock:
+        assert "create" in job.restore(lock).errors[0]
+    part.mkdir()
+    with job.Lock(root) as lock:
+        assert job.restore(lock).state == "old"
+
+
+def test_a_part_that_comes_back_after_its_update_was_undone_is_put_back(tmp_path):
+    root, part = _install_with_part(tmp_path)
+    before = um.tree(part)
+    um.write(part.parent, {"other": "x"})
+    um.stage(root)
+    with job.Lock(root) as lock:
+        _part_moved(lock, part)
+    part.rename(tmp_path / "away")
+    with job.Lock(root) as lock:
+        assert job.restore(lock).state == "old"
+    (tmp_path / "away").rename(part)
+    assert steps.settle(part).state == "old"
+    assert um.tree(part, (".localm-update",)) == before
+
+
+def test_a_part_of_an_update_that_is_done_can_be_replaced_whole(tmp_path):
+    root, part = _install_with_part(tmp_path)
+    um.stage(root)
+    with job.Lock(root) as lock:
+        _part_moved(lock, part)
+        job.advance(lock, job.STARTING)
+    part.rename(tmp_path / "unplugged")
+    with job.Lock(root) as lock:
+        job.finish(lock)
+    (tmp_path / "unplugged").rename(part)
+    _damage(part)
+    assert steps.mend(part) is True
+    with steps.Work(part) as work:
+        prepared(work, files={"main.py": "newest"})
+        steps.change(work, [lambda: steps.move_in(part, work.id, mover.TREE)], whole=True)
+    assert (part / "main.py").read_text() == "newest"
+    with job.Lock(root) as lock:
+        assert job.cleanup(lock) == []
+    assert um.left(root) == []
+
+
 def test_a_part_the_user_removed_does_not_keep_the_update_unfinished(tmp_path):
     root, part = _install_with_part(tmp_path)
+    um.write(part.parent, {"other": "x"})
     um.stage(root)
     with job.Lock(root) as lock:
         job.start(lock, um.UPDATE_ID, old="1", new="2")
@@ -385,6 +463,9 @@ def test_a_part_that_cannot_be_reached_at_the_end_stays_new(tmp_path):
     part.with_name("unplugged").rename(part)
     assert steps.settle(part).state == "new"
     assert (part / "main.py").read_text() == "new main" and job.read(part) is None
+    with job.Lock(root) as lock:
+        assert job.cleanup(lock) == []
+    assert um.left(root) == []
 
 
 def test_a_record_of_parts_that_is_damaged_changes_nothing(tmp_path):
@@ -437,7 +518,8 @@ root, part, update_id = sys.argv[2:5]
 work = steps_update.Preparing(root, update_id) if part else steps.Work(root)
 work.__enter__()
 work.new(mover.TREE).joinpath("big").write_text("x")
-work.beside("lib.incoming").mkdir()
+work.beside("lib.1234abcd").mkdir()
+os.mkdir(os.path.join(root, "lib.1234abcd.incoming"))
 if part:
     job.own_part(root, update_id, part)
     steps.Place(part, update_id).new(mover.TREE).joinpath("big").write_text("x")
@@ -461,7 +543,7 @@ def test_what_a_killed_preparation_left_is_deleted_by_the_next_one(tmp_path):
     root = component(tmp_path / "c")
     before = um.tree(root)
     _killed(root)
-    assert um.left(root) != [] and (root / "lib.incoming").exists()
+    assert um.left(root) != [] and (root / "lib.1234abcd.incoming").exists()
     with steps.Work(root):
         pass
     assert um.left(root) == [] and um.tree(root) == before
@@ -609,6 +691,39 @@ def test_a_component_with_a_folder_on_another_volume_is_replaced_or_put_back(
     if not works:
         assert um.tree(root) == before
     assert um.left(root) == []
+
+
+@pytest.mark.parametrize("works", [True, False])
+def test_a_linked_folder_on_a_disk_with_coarse_times_is_replaced_or_put_back(
+        tmp_path, monkeypatch, works):
+    root, far = component(tmp_path / "c"), tmp_path / "far"
+    (root / "nodes").rename(far)
+    if os.name == "nt":
+        import _winapi
+        _winapi.CreateJunction(str(far), str(root / "nodes"))
+    else:
+        os.symlink(far, root / "nodes")
+    across(monkeypatch, far)
+    real = shutil.copystat
+
+    def copystat(src, dst, **kw):
+        real(src, dst, **kw)
+        real_dst = os.path.realpath(disk.short_path(Path(dst)))
+        if real_dst.startswith(os.path.realpath(far) + os.sep):
+            coarse = os.stat(dst).st_mtime_ns // 2_000_000_000 * 2_000_000_000
+            os.utime(dst, ns=(coarse, coarse))
+    monkeypatch.setattr(shutil, "copystat", copystat)
+    with steps.Work(root) as work:
+        prepared(work, files={"nodes/n.py": "new node", "nodes/empty.py": ""})
+        for name in ("n.py", "empty.py"):
+            os.utime(work.new(mover.TREE) / "nodes" / name, ns=(10 ** 18 + 10 ** 9,) * 2)
+        try:
+            steps.change(work, [lambda: steps.move_in(root, work.id, mover.TREE)],
+                         prove=lambda: None if works else "no")
+        except steps.Failed as e:
+            assert (e.reason, e.errors) == ("no", [])
+    assert (far / "n.py").read_text() == ("new node" if works else "old node")
+    assert (far / "empty.py").exists() is works
 
 
 _CROSSING = """

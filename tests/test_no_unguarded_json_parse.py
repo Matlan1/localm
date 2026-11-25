@@ -25,6 +25,8 @@ _JSON_BASES = {"json", "_json", "tomllib", "tomli"}
 _CALLER_HANDLES = {
     "inference/backends/llamacpp/_loader.py::_parse":
         "only called by _probe_roundtrip, which catches Exception",
+    "media/managed_comfy_packages.py::add":
+        "only called by report, which catches RecursionError",
     "plugins/builtin/chat/plug.py::_conv_meta":
         "only called inside a try that catches Exception",
     "inference/backends/_hf_fp8.py::_safetensors_header":

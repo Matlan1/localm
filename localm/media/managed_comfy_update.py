@@ -23,6 +23,7 @@ replaces are moved aside, and pip installs the fetched wheels with no network.
 
 from __future__ import annotations
 
+import filecmp
 import json
 import os
 import shutil
@@ -81,20 +82,33 @@ class PrepareError(Exception):
 @dataclass
 class Prepared:
     """An update of the managed ComfyUI, ready to be moved in. *removed*: files of the
-    current source the new one does not have. *packages*: whether Python packages are
-    staged."""
+    current source the new one does not have. *sources*: the source trees it replaces.
+    *packages*: whether Python packages are staged."""
     target: str
     previous: str
     removed: list = field(default_factory=list)
+    sources: list = field(default_factory=list)
     packages: bool = False
     outcomes: list = field(default_factory=list)
     deps_changed: bool = False
 
 
-def _stage_tree(installed: Path, staged: Path, repo: str, commit: str,
-                on_progress: ProgressCb) -> list:
-    """Fetch *commit* of *repo* into *staged*. Returns the files of the tree at
-    *installed* that it does not have. Raises :class:`PrepareError`."""
+@dataclass
+class _Source:
+    """A source tree that is replaced: its folder in the managed ComfyUI (with a ``/``, or
+    empty), where it came from and its files."""
+    folder: str
+    repo: str
+    commit: str
+    files: set
+
+
+def _stage_tree(installed: Path, staged: Path, repo: str, commit: str, was: str, folder: str,
+                out: Prepared, on_progress: ProgressCb) -> None:
+    """Fetch *commit* of *repo* into *staged*, to replace the tree at *installed*, which is
+    at the commit *was* and is *folder* of the managed ComfyUI. Adds to the sources of
+    *out* and the files it does not have to the removed ones. Raises
+    :class:`PrepareError`."""
     old_files = source_archive.tree_files(installed)
     if old_files is None:
         raise PrepareError(f"the files of the source tree at {installed} could not be read")
@@ -109,7 +123,8 @@ def _stage_tree(installed: Path, staged: Path, repo: str, commit: str,
     except (source_archive.ArchiveError, OSError) as e:
         raise PrepareError(str(e)) from e
     new_files = set(source_archive.tree_files(staged) or [])
-    return [f for f in old_files if f not in new_files]
+    out.sources.append(_Source(folder, repo, was, set(old_files)))
+    out.removed += [folder + f for f in old_files if f not in new_files]
 
 
 def _stage_patches(root: Path, staged: Path) -> list:
@@ -141,7 +156,7 @@ def prepare(place, root: Path, *, repo: str, target: str, version: Optional[str]
         if target != previous:
             say(f"Fetching ComfyUI {target[:12]} (from {previous[:12]}) from {repo} ...")
             staged.rmdir()
-            out.removed += _stage_tree(installed, staged, repo, target, on_progress)
+            _stage_tree(installed, staged, repo, target, previous, "", out, on_progress)
             out.deps_changed = _requirements_changed(installed, staged)
         else:
             say(f"Already at the pinned ComfyUI ({target[:12]}); re-verifying patches ...")
@@ -160,39 +175,60 @@ def prepare(place, root: Path, *, repo: str, target: str, version: Optional[str]
                 place, mc._venv_python_path(root), requirements, on_progress=on_progress,
                 say=say, run=_run)
         _update_marker(staged, target, version, previous, out.outcomes, installed=installed)
-        out.removed = _leave_to_user(installed, staged, out.removed)
+        _leave_to_user(place, installed, staged, out, say)
         steps.plan_staged(root, place.id, mover.TREE, remove=out.removed)
     except steps.STEP_ERRORS as e:
         raise PrepareError(f"Could not prepare the update: {e}") from e
     return out
 
 
-def _leave_to_user(installed: Path, staged: Path, removed: list) -> list:
+def _leave_to_user(place, installed: Path, staged: Path, out: Prepared, say) -> None:
     """Take out of *staged* what is not put into a folder of the user's: a folder of
-    *installed* that is a link or a mount. That is a file without content, one the
-    current source has too and the user's folder has not, and everything when the link
-    leads nowhere. Returns *removed* without what lies behind such a link."""
-    from localm.update_mechanism import steps
-    theirs: dict = {"": None}
-
-    def behind(rel: str) -> Optional[Path]:
-        """The folder of the user *rel* lies in, None for none."""
-        parent = rel.rpartition("/")[0]
-        if parent not in theirs:
-            path = installed / parent
-            theirs[parent] = behind(parent) or (
-                path if path.is_symlink() or path.is_junction() or os.path.ismount(path) else None)
-        return theirs[parent]
-
+    *installed* that is a link or a mount. That is a placeholder (a file without content
+    the source did not have, Python files excepted), a file of ComfyUI's source the user's
+    folder has no longer, one that is the same in the old and the new source, and
+    everything when the link leads nowhere; then nothing behind it is removed either."""
+    from localm.update_mechanism import mover, steps
+    area = mover.area(place.root, place.id, mover.TREE, 1)
     known = set(source_archive.tree_files(installed) or [])
+    had = known.union(*({s.folder + f for f in s.files} for s in out.sources))
+    differ: dict = {}
     for rel in steps.staged_files(staged):
-        folder = behind(rel)
-        if folder is not None and (
-                not folder.is_dir() or not (staged / rel).stat().st_size
-                or (rel in known and not (installed / rel).exists())):
+        folder = area.linked(rel)
+        if folder is None:
+            continue
+        new, now = staged / rel, installed / rel
+        placeholder = rel not in had and not rel.endswith(".py") and not new.stat().st_size
+        if not folder.is_dir() or placeholder or (rel in known and not now.exists()):
+            new.unlink()
+        elif now.is_file() and not filecmp.cmp(now, new, shallow=False):
+            source = max((s for s in out.sources if rel.startswith(s.folder)),
+                         key=lambda s: len(s.folder), default=None)
+            if source is not None and rel[len(source.folder):] in source.files:
+                differ.setdefault(source.folder, (source, []))[1].append(rel)
+    for source, rels in differ.values():
+        for rel in _same_in_source(place, source, staged, rels, say):
             (staged / rel).unlink()
-    gone = [rel for rel in removed if (f := behind(rel)) is not None and not f.is_dir()]
-    return [rel for rel in removed if rel not in gone]
+    out.removed = [rel for rel in out.removed
+                   if (folder := area.linked(rel)) is None or folder.is_dir()]
+
+
+def _same_in_source(place, source: _Source, staged: Path, rels: list, say) -> list:
+    """The files of *rels* that are the same in *staged* as in *source*, which is fetched;
+    none when it cannot be."""
+    from localm.update_mechanism import disk
+    was = place.path / "was"
+    try:
+        source_archive.fetch_tree(source.repo, source.commit, was)
+        old = {rel: disk.long_path(was / rel[len(source.folder):]) for rel in rels}
+        return [rel for rel in rels
+                if old[rel].is_file() and filecmp.cmp(old[rel], staged / rel, shallow=False)]
+    except (source_archive.ArchiveError, OSError) as e:
+        say(f"Files in a linked folder could not be compared with ComfyUI's old source ({e}); "
+            "each one the update replaces is kept.")
+        return []
+    finally:
+        disk.remove_tree(was)
 
 
 def _stage_nodes(root: Path, installed: Path, staged: Path, out: Prepared,
@@ -208,12 +244,11 @@ def _stage_nodes(root: Path, installed: Path, staged: Path, out: Prepared,
             continue
         say(f"Moving custom node {node.name} to {node.commit[:12]} (from {head[:12]}) ...")
         try:
-            gone = _stage_tree(installed / "custom_nodes" / node.name, staged / rel,
-                               node.repo, node.commit, on_progress)
+            _stage_tree(installed / "custom_nodes" / node.name, staged / rel, node.repo,
+                        node.commit, head, f"{rel}/", out, on_progress)
         except PrepareError as e:
             raise PrepareError(f"Updating a pinned custom node failed: custom node "
                                f"{node.name}: {e}") from e
-        out.removed += [f"{rel}/{f}" for f in gone]
 
 
 def stages(root: Path, update_id: str, removed: list, packages: bool) -> list:
@@ -352,10 +387,10 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
             if prepared.packages:
                 _say("Reinstalling ComfyUI requirements into the managed venv ...")
             try:
-                steps.change(work, stages(root, work.id, prepared.removed, prepared.packages),
-                             old=prev_commit, new=target,
-                             prove=lambda: why_unusable(prepared.packages),
-                             reinstall=_reinstall(root, _say))
+                done = steps.change(
+                    work, stages(root, work.id, prepared.removed, prepared.packages),
+                    old=prev_commit, new=target, prove=lambda: why_unusable(prepared.packages),
+                    reinstall=_reinstall(root, _say))
             except (steps.Failed, *steps.STEP_ERRORS) as e:
                 note = ""
                 if getattr(e, "errors", None):
@@ -378,6 +413,9 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
         if prepared.deps_changed and not reinstall_requirements:
             msg += (" ComfyUI's requirements.txt changed at this pin; if ComfyUI "
                     "misbehaves, re-run with --reinstall-requirements.")
+        for note in done.notes:
+            _say(note)
+            msg += f" {note}"
         return _result(True, status, msg)
     except Exception as e:
         logger.debug("update_managed_comfy failed", exc_info=True)
