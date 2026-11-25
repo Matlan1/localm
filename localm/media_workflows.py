@@ -358,7 +358,9 @@ def migrate_legacy_override(media: str) -> Optional[str]:
     workflow out of their working tree. (The migration logic itself is exercised
     directly via ``_migrate_one`` on temp paths.) Logs and returns the outcome
     note (None when nothing happened)."""
-    if "pytest" in sys.modules or os.environ.get("LOCALM_SKIP_LEGACY_WORKFLOW_MIGRATION"):
+    from localm.config import update_is_going
+    if ("pytest" in sys.modules or os.environ.get("LOCALM_SKIP_LEGACY_WORKFLOW_MIGRATION")
+            or update_is_going()):
         return None
     legacy = _LEGACY_OVERRIDES.get(media)
     if legacy is None:
