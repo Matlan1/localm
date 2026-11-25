@@ -99,8 +99,8 @@ def test_a_subscriber_whose_loop_is_closed_stops_nothing(mgr, monkeypatch):
     assert _wait(lambda: jobs[2].status == "cancelled")
     assert _wait(lambda: all(j.finished_at is not None for j in jobs))
     for job in jobs:
-        assert job.subscriber_count == 0
-        assert any("revoked" in e.get("text", "") for e in job._history)
+        assert _wait(lambda: job.subscriber_count == 0)
+        assert _wait(lambda: any("revoked" in e.get("text", "") for e in list(job._history)))
 
 
 def test_a_job_is_cancelled_before_its_subscribers_are_told(mgr, monkeypatch):
