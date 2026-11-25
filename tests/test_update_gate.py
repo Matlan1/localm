@@ -426,7 +426,7 @@ def test_a_batch_script_undoes_it_first_and_starts_anew(tmp_path, script, until)
 
 @posix_only
 @pytest.mark.parametrize("script,until", [
-    ("setup.sh", "#   --uninstall (or"), ("setup-gui.sh", "# The uv release"),
+    ("setup.sh", "say() {"), ("setup-gui.sh", "# The uv release"),
     ("localm.sh", "if [ ! -x"), ("localm-launcher.sh", "if [ ! -x"), ("rollback.sh", "# Prefer the")])
 def test_a_shell_script_undoes_it_first(tmp_path, script, until):
     inst = Install(tmp_path / "inst")
@@ -724,6 +724,7 @@ def test_setup_goes_on_when_an_old_file_is_lost(inst, version, over):
     for text in ("part.py: its old version is lost", "run setup in", "unzip it over"):
         assert text in done.err, done.err
     um.write(inst.root, over)
+    shutil.rmtree(inst.root / "localm" / "__pycache__", ignore_errors=True)   # written in the same second
     before = um.tree(inst.root)
     done = inst.gate(LOCALM_SETUP="1")
     assert done.code == 0 and f"LocaLM {version}" in done.err and inst.phase() == restoring.SETUP, done.err
@@ -874,7 +875,7 @@ def test_the_new_environment_ends_it_in_every_setup(inst, monkeypatch):
     gui = runpy.run_path(str(REPO / "installer" / "gui.py"), run_name="gui")
     made: list = []
     scope = gui["build_steps"].__globals__
-    scope.update(ROOT=inst.root, create_venv=lambda plan, emit: made.append((inst.root / ".venv").mkdir(
+    scope.update(ROOT=inst.root, uv_argv=lambda *a: list(a), create_venv=lambda plan, emit: made.append((inst.root / ".venv").mkdir(
         exist_ok=True)), _run=lambda *a, **k: made.append(inst.phase()))
     (inst.root / ".venv").mkdir()
     inst.record.write_text('{"id": "", "phase": "setup"}')
