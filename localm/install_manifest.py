@@ -1486,9 +1486,9 @@ def _kept_venv_folders(root: Path) -> list[Path]:
 
 
 def _update_items(root: Path, *, purge_data: bool) -> list:
-    """What updates and the record of running processes left in the clone at *root*, and
-    in its runtime package: removed, except files of the user that an update replaced,
-    which go with *purge_data* only. Those of the Python environment go with it."""
+    """What updates left in the clone at *root* and in its runtime package: removed,
+    except files of the user that an update replaced, which go with *purge_data* only.
+    Those of the Python environment go with it."""
     items = []
     for folder in (root / ".localm-update", root.joinpath(*_DEFAULT_LIB).parent / ".localm-update"):
         if _is_link(folder) or not folder.is_dir():
@@ -1503,8 +1503,6 @@ def _update_items(root: Path, *, purge_data: bool) -> list:
     if not _is_link(kept) and kept.is_dir() and any(kept.iterdir()):
         items.append(_Item(kept, "note", "note", "files of your own that an update replaced; "
                            "they are removed with the Python environment"))
-    if not _is_link(root / procs.FOLDER) and (root / procs.FOLDER).is_dir():
-        items.append(_Item(root / procs.FOLDER, "update", "remove"))
     return items
 
 

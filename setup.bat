@@ -16,20 +16,21 @@ rem  with no GPU.
 rem ===========================================================================
 cd /d "%~dp0"
 set "LOCALM_SETUP_ROOT=%CD%"
-set LOCALM_SETUP=1
+set "LOCALM_SETUP=1"
 
 rem ---- an update that is not finished --------------------------------------------
 rem  Undoing it may replace this file: the command ends in the new start or in exit.
-if not exist "%~dp0.localm-update\job.json" goto :update_gated
+if not exist ".localm-update\job.json" goto :update_gated
 if defined LOCALM_GATE goto :update_gated
 set "LOCALM_GATE=1"
-call "%~dp0scripts\update_gate.bat" && "%~dp0setup.bat" %* || (
+call scripts\update_gate.bat && "%~dp0setup.bat" %* || (
     pause
     exit /b 1
 )
 :update_gated
 set "LOCALM_GATE="
 setlocal EnableDelayedExpansion
+set LOCALM_SETUP=1
 title LocaLM setup
 set "HBSEQ=0"
 set "RUNTIME_OK=1"

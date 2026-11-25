@@ -42,7 +42,8 @@ rem  Undoing it may replace this file: the command ends in the new start or in e
 if not exist "%~dp0.localm-update\job.json" goto :update_gated
 if defined LOCALM_GATE goto :update_gated
 set "LOCALM_GATE=1"
-call "%~dp0scripts\update_gate.bat" && "%~dp0localm.bat" %* || (
+set "GATE=%~dp0scripts\update_gate.bat"
+call "%%GATE%%" && "%~dp0localm.bat" %* || (
     pause
     exit /b 1
 )

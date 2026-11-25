@@ -1433,3 +1433,43 @@ def test_killed_anywhere_and_changed_by_the_user_there_is_always_a_way_back(tmp_
             assert all(k.startswith(".venv") for k in changed) or action == "edit-release", (at, changed)
             assert uv.undo(work).state == "none" and uv.tree(work) == now
             shutil.rmtree(work)
+
+
+def test_the_file_by_which_python_finds_localm_is_never_absent(tmp_path, monkeypatch):
+    """A start of localm reaches the gate whenever the package step is interrupted."""
+    root = uv.installed(tmp_path / "inst")
+    link = root / ".venv" / uv.SITE / "_editable_impl_localm.pth"
+    uv.install(root / ".venv", ("localm", "1.0", {link.name: "here", "localm_x.py": "1"}))
+    uv.begun(root)
+    plan = uv.package_step(root, (uv.ALPHA2, ("localm", "2.0", {link.name: "there", "localm_x.py": "2"})),
+                            ("alpha", "localm"))
+    seen = []
+    for name in ("rename", "replace"):
+        real = getattr(os, name)
+        monkeypatch.setattr(os, name, lambda *a, real=real, **k: (real(*a, **k), seen.append(link.exists()))[0])
+    uv.forward(root, plan)
+    assert link.read_text() == "there" and len(seen) > 5
+    result = uv.undo(root)
+    assert result.errors == [] and link.read_text() == "here"
+    assert all(seen)
+
+
+def test_the_emptied_folder_of_a_package_is_not_called_a_file_of_the_user(tmp_path):
+    root = uv.installed(tmp_path / "inst")
+    uv.install(root / ".venv", ("alpha", "1.0", {**ALPHA1[2], "alpha-1.0.dist-info/licenses/L": "l"}))
+    before = uv.tree(root)
+    uv.begun(root)
+    plan = uv.package_step(root)
+    template = root.parent / "template"
+    shutil.copytree(root, template)
+    with uv.Points() as points:
+        uv.forward(root, plan)
+    for at in range(0, points.count, 3):
+        work = root.parent / f"k{at}"
+        shutil.copytree(template, work)
+        with uv.Points(at):
+            uv.forward(work, plan)
+        result = uv.undo(work)
+        assert result.errors == [] and uv.tree(work) == before, (at, result)
+        assert len(result.notes) == 1, (at, result.notes)
+        shutil.rmtree(work)

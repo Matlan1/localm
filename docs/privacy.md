@@ -276,7 +276,9 @@ number made from the ids of this machine and this folder, which is the same for 
 other folder; the file stays when the process ends and is deleted by a localm process
 that starts later, or that asks which processes run (one written by another machine or
 container, copied here with the folder, or, on a Linux system without a machine id,
-left from before a restart, stays).
+left from before a restart, stays). A process that waits while an update of localm is
+not finished has an empty file in `.localm-update/` named after its process id and start
+time until it goes on.
 
 ---
 

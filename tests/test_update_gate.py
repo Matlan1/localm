@@ -288,11 +288,13 @@ def test_the_data_folder_of_localm_home_cfg_is_found(inst, tmp_path, monkeypatch
 
 
 @nt_only
-def test_localm_bat(tmp_path):
-    inst = Install(make_windows_clone(tmp_path, "localm.bat"))
+@pytest.mark.parametrize("folder", ["install dir", "a&b'c!d%e^f (g)", "pct%y%PATH%"])
+def test_localm_bat(tmp_path, folder):
+    clone = make_windows_clone(tmp_path, "localm.bat")
+    inst = Install(clone.rename(clone.with_name(folder)))
     inst.go(job.STEPS)
-    done = subprocess.run(["cmd", "/d", "/c", "call", str(inst.root / "localm.bat"), "run", "a (b) & c", "!x!"],
-                          env=inst.env(), cwd=str(tmp_path), text=True, stdin=subprocess.DEVNULL,
+    done = subprocess.run(["cmd", "/d", "/c", r".\localm.bat", "run", "a (b) & c", "!x!"],
+                          env=inst.env(), cwd=str(inst.root), text=True, stdin=subprocess.DEVNULL,
                           capture_output=True, timeout=120, **HIDDEN)
     assert said(done.stdout)["argv"] == ["run", "a (b) & c", "!x!"], (done.stdout, done.stderr)
     assert done.returncode == 0 and said(done.stdout)["localm"] == "1" and inst.is_old()
