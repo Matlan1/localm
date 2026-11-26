@@ -800,7 +800,7 @@ def test_a_failing_check_keep_or_repair_answers_without_exception_text(
         return real(src, dst)
 
     monkeypatch.setattr(integrity.os, "replace", held)
-    monkeypatch.setattr(updater, "download", lambda aid, dest, opener=None:
+    monkeypatch.setattr(updater, "download", lambda aid, dest, opener=None, timeout=None:
                         release["opener"](None, None, None, dest))
     r = c.post("/api/integrity/repair", headers=owner)
     assert r.status_code == 200 and r.json()["repaired"] is True, r.text

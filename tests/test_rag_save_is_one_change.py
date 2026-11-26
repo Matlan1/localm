@@ -286,6 +286,61 @@ def test_a_file_another_program_holds_does_not_mix_the_save(
     assert {p.name for p in (base / "kb").iterdir()} == FILES
 
 
+_windows_share_modes = pytest.mark.skipif(
+    os.name != "nt", reason="file share modes are a Windows behaviour")
+
+
+def _hold(path, seconds):
+    """Another process that holds *path* open, sharing it with nobody, for
+    *seconds*: every open of *path* meanwhile is a sharing violation, as an
+    open is while another localm process replaces the file."""
+    code = ("import ctypes, sys, time\n"
+            "from ctypes import wintypes\n"
+            "k = ctypes.WinDLL('kernel32'); k.CreateFileW.restype = wintypes.HANDLE\n"
+            "k.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, "
+            "wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]\n"
+            "h = k.CreateFileW(sys.argv[1], 0x80000000, 0, None, 3, 0, None)\n"
+            "assert h != wintypes.HANDLE(-1).value\n"
+            "print('held', flush=True)\n"
+            f"time.sleep({seconds})\n")
+    p = subprocess.Popen([sys.executable, "-I", "-S", "-c", code, str(path)],
+                         stdout=subprocess.PIPE,
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    assert p.stdout is not None and p.stdout.readline().strip() == b"held"
+    return p
+
+
+def _let_go(p):
+    p.kill()
+    p.wait(timeout=60)
+    assert p.stdout is not None
+    p.stdout.close()
+
+
+@_windows_share_modes
+@pytest.mark.parametrize("held", sorted(FILES))
+def test_a_read_while_another_process_has_the_file_waits_for_it(base, docs, held):
+    _build(base, docs)
+    expected = _state(base)
+    holder = _hold(base / "kb" / held, 0.4)
+    try:
+        got = _state(base)
+    finally:
+        _let_go(holder)
+    assert got == expected
+
+
+@_windows_share_modes
+def test_a_file_held_past_the_wait_is_an_error_not_an_empty_collection(base, docs):
+    _build(base, docs)
+    holder = _hold(base / "kb" / "chunks.jsonl", 60)
+    try:
+        with pytest.raises(PermissionError):
+            Collection("kb", base=base, cache=False)
+    finally:
+        _let_go(holder)
+
+
 def test_an_interrupt_after_the_save_took_effect_keeps_it(base, docs, monkeypatch):
     _build(base, docs)
     _edit(Collection("kb", base=base), docs)
@@ -320,6 +375,20 @@ class TestWhileASaveIsPending:
             with pytest.raises(OSError):
                 Collection("kb", base=pending).remove_doc(str(docs / "a.txt"))
         assert _state(pending) == now
+
+    @_windows_share_modes
+    @pytest.mark.parametrize("held", sorted(FILES))
+    def test_a_read_while_another_process_has_a_staged_file_waits_for_it(
+            self, pending, held):
+        expected = _state(pending)
+        save = commit.pending_save(pending / "kb")
+        assert save is not None
+        holder = _hold(pending / "kb" / f"{held}.{save[0]}.next", 0.4)
+        try:
+            got = _state(pending)
+        finally:
+            _let_go(holder)
+        assert got == expected
 
     def test_the_meta_only_paths_do_not_answer_from_the_old_files(self, pending):
         assert Collection.peek_stats("kb", pending) is None

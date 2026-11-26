@@ -9,7 +9,9 @@
 #     level. What two peers both need lives in a lower tier.
 #   - localm/__init__.py (the package root) sits below every tier. It holds only
 #     __version__, which any unit may read, and the call that records this process
-#     (procs, which imports nothing of localm).
+#     (procs, which imports nothing of localm), and, when procs cannot be imported,
+#     the call of its repair (procs_repair) and, when that cannot be loaded, the debug
+#     log (debuglog); both import nothing of localm at module level.
 #   - Only an import statement that runs at module import time is seen. A
 #     function-local import (the way a genuine import cycle is broken, and it may
 #     point upward), an importlib.import_module or __import__ call, and a plugin
@@ -25,8 +27,8 @@
 
 [[tier]]
 name = "entry"
-role = "Process entry points. python -m localm resolves to the cli; nothing sits above this."
-units = ["__main__"]
+role = "Process entry points. python -m localm resolves to the cli; and the repair, at the start of any process, of a process record that cannot be imported, which the package root calls and which imports only from below, inside its functions. Nothing sits above this."
+units = ["__main__", "procs_repair"]
 
 [[tier]]
 name = "cli"
