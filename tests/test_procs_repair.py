@@ -47,9 +47,9 @@ def standin_updater(m):
     m._selection_request = selection
     real = m.download
     def download(asset_id, dest, *, timeout=120.0, opener=None):
-        with open(SPEC["seen"], "a", encoding="utf-8") as f:
-            f.write(json.dumps({"download_timeout": timeout}) + "\n")
         def serve(url, headers, t, d):
+            with open(SPEC["seen"], "a", encoding="utf-8") as f:
+                f.write(json.dumps({"download_timeout": t}) + "\n")
             d.parent.mkdir(parents=True, exist_ok=True)
             with open(SPEC["build"], "rb") as src:
                 d.write_bytes(src.read())
@@ -179,13 +179,13 @@ class Install:
                 "build": str(build), "seen": str(self.seen), "uv": str(uv),
                 "site": str(self.site), "package": PACKAGE}
 
-    def start(self, spec: dict):
+    def start(self, spec: dict, **more):
         env = {k: v for k, v in os.environ.items()
                if not k.startswith("LOCALM_") and k not in (
                    "PYTHONHOME", "VIRTUAL_ENV", "PYTHONDONTWRITEBYTECODE", "UV_HTTP_TIMEOUT")}
         env.update(PYTHONPATH=os.pathsep.join([str(self.root), str(self.site)]),
                    PYTHONNOUSERSITE="1", LOCALM_HOME=str(self.home),
-                   PROCS_REPAIR_TEST=json.dumps(spec))
+                   PROCS_REPAIR_TEST=json.dumps(spec), **more)
         proc = subprocess.run([sys.executable, "-c", _START], cwd=str(self.root), env=env,
                               stdin=subprocess.DEVNULL, capture_output=True, text=True,
                               timeout=180, **HIDDEN)
@@ -215,7 +215,7 @@ def _ran(done, inst) -> bool:
 def test_a_damaged_process_record_is_repaired_from_the_signed_release(tmp_path, damage, error):
     inst = Install(tmp_path)
     spec = inst.signed_build()
-    inst.procs.write_text(damage + inst.good.decode("utf-8"), encoding="utf-8")
+    inst.procs.write_bytes(damage.encode() + inst.good)
     done = inst.start(spec)
     assert _ran(done, inst), (done.out, done.err)
     assert done.said["record"] and inst.recorded(done.said["pid"]), done.err
@@ -242,7 +242,7 @@ def test_a_repair_that_cannot_run_says_why_and_the_start_goes_on(tmp_path, case,
         lock = inst.home / "updates" / "apply.lock"
         lock.mkdir(parents=True)
         (lock / "pid").write_text(str(os.getpid()), encoding="utf-8")
-    inst.procs.write_text(BROKEN + inst.good.decode("utf-8"), encoding="utf-8")
+    inst.procs.write_bytes(BROKEN.encode() + inst.good)
     done = inst.start(spec)
     assert _ran(done, inst) and done.said["record"] is False, (done.out, done.err)
     assert "No module named 'localm_no_such_module_for_the_gate'" in done.err
@@ -264,13 +264,13 @@ def test_without_a_release_statement_the_start_runs_and_says_why_and_the_fix(
     inst = Install(tmp_path, with_package=True)
     spec = inst.signed_build()
     (inst.root / update_package.NAME).unlink()
-    inst.procs.write_text(BROKEN + inst.good.decode("utf-8"), encoding="utf-8")
+    inst.procs.write_bytes(BROKEN.encode() + inst.good)
     done = inst.start(spec)
     assert _ran(done, inst), (done.out, done.err)
     assert done.said["record"] is False and not (inst.root / ".localm-run").exists()
     assert "ModuleNotFoundError: No module named 'localm_no_such_module_for_the_gate'" in done.err
     assert "this install has no list of its release's files" in done.err
-    assert "the installed parts are complete" in done.err
+    assert "the installed parts lack no package" in done.err
     assert "This start goes on without it" in done.err
     assert (f"to repair it: unzip the release of this version over {inst.root}; when the "
             "package localm_no_such_module_for_the_gate is missing: Settings > System > "
@@ -283,7 +283,7 @@ def test_a_git_clone_is_told_to_check_the_file_out(tmp_path, monkeypatch):
     spec = inst.signed_build()
     (inst.root / update_package.NAME).unlink()
     (inst.root / ".git").mkdir()
-    inst.procs.write_text(BROKEN + inst.good.decode("utf-8"), encoding="utf-8")
+    inst.procs.write_bytes(BROKEN.encode() + inst.good)
     done = inst.start(spec)
     assert _ran(done, inst) and done.said["record"] is False, (done.out, done.err)
     assert f"to repair it: 'git checkout -- localm/procs.py' in {inst.root};" in done.err
@@ -324,7 +324,8 @@ def test_the_repair_imports_without_the_process_record(tmp_path):
     """The modules the repair loads import while localm.procs cannot be imported."""
     code = ("import sys; sys.modules['localm.procs'] = None\n"
             "import localm.procs_repair, localm.integrity, localm.updater_parts, "
-            "localm.bugreport, localm.updater_runtime, localm.updater_components\n"
+            "localm.bugreport, localm.updater_runtime, localm.updater_components, "
+            "localm.install_manifest, localm.uv_tool\n"
             "print('IMPORTED')")
     env = {k: v for k, v in os.environ.items() if not k.startswith("LOCALM_")}
     env["LOCALM_HOME"] = str(tmp_path / "home")
@@ -354,10 +355,48 @@ def test_the_commands_that_repair_it_run_without_the_process_record(tmp_path, ar
 
 @pytest.mark.parametrize("error, files", [
     (ModuleNotFoundError("No module named 'localm.gone'", name="localm.gone"),
-     ["localm/gone.py", "localm/procs.py"]),
+     ["localm/gone.py", "localm/gone/__init__.py", "localm/procs.py"]),
     (ModuleNotFoundError("No module named 'yaml'", name="yaml"), ["localm/procs.py"]),
 ])
 def test_the_files_an_import_error_names(error, files):
     assert procs_repair.named_files(error, REPO) == files
     assert procs_repair.missing_package(error) == ("" if error.name.startswith("localm") else
                                                    "yaml")
+
+
+def test_a_kept_process_record_is_not_written_over(tmp_path):
+    """A localm/procs.py the user keeps as their own is named, not replaced."""
+    inst = Install(tmp_path, with_package=True)
+    spec = inst.signed_build()
+    inst.procs.write_bytes(BROKEN.encode() + inst.good)
+    (inst.home / "updates").mkdir()
+    (inst.home / "updates" / "integrity-kept.json").write_text(json.dumps(
+        {"localm/procs.py": inst.statement["files"]["localm/procs.py"]["sha256"]}),
+        encoding="utf-8")
+    done = inst.start(spec)
+    assert _ran(done, inst) and done.said["record"] is False, (done.out, done.err)
+    assert "localm/procs.py is kept as yours ('localm integrity --keep')" in done.err
+    assert done.err.endswith("to repair it: 'localm integrity --repair localm/procs.py'.\n")
+    assert inst.procs.read_bytes() != inst.good and inst.seen_lines() == []
+
+
+def test_the_missing_package_is_not_installed_during_an_update(tmp_path):
+    """Uninstall goes past the gate of an unfinished update; the repair of the
+    installed parts then refuses, as the repair of files does."""
+    from localm.update_mechanism import job
+    inst = Install(tmp_path, procs_imports=f"import {PACKAGE}\n")
+    spec = inst.signed_build()
+    record = job.record_path(inst.root)
+    record.parent.mkdir(parents=True)
+    record.write_text(json.dumps({"id": "0" * 32, "phase": "setup"}), encoding="utf-8")
+    done = inst.start(spec, LOCALM_UNINSTALL="1")
+    assert _ran(done, inst) and done.said["record"] is False, (done.out, done.err)
+    assert f"{PACKAGE} was not installed (an update of this install is in progress)" in done.err
+    assert not (inst.site / f"{PACKAGE}.py").exists() and inst.seen_lines() == []
+
+
+def test_the_release_request_waits_no_longer_than_the_other_network_waits():
+    import inspect
+
+    from localm import _proxy
+    assert inspect.signature(_proxy.request).parameters["timeout"].default == procs_repair.NET_S

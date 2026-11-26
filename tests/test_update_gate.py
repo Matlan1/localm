@@ -1260,14 +1260,16 @@ def test_the_gate_loads_the_standard_library_only():
 
 
 def test_the_files_of_a_start_are_never_absent_while_an_update_moves_them():
-    """The repair of the process record is loaded only after the gate let the start
-    through, inside a ``try`` whose failure is said and does not stop the start."""
+    """The repair of the process record, and the debug log that records when it cannot
+    be loaded, are loaded only after the gate let the start through, each inside a
+    ``try`` whose failure is said and does not stop the start."""
     text = _text("localm/__init__.py")
-    loaded = [a or b for a, b in re.findall(r"^\s+(?:from localm import (\w+)|import localm\.(\w+))",
-                                            text, re.M)]
-    assert "procs_repair" in loaded
+    loaded = [a or b for a, b in re.findall(
+        r"^\s+(?:from localm import (\w+)|(?:import|from) localm\.(\w+))", text, re.M)]
     assert re.search(r"^ +try:\n +from localm import procs_repair as _repair\n", text, re.M)
-    loaded.remove("procs_repair")
+    assert re.search(r"^ +try:\n +from localm\.debuglog import defer_log as _defer\n", text, re.M)
+    for later in ("procs_repair", "debuglog"):
+        loaded.remove(later)
     assert loaded and {"localm/__init__.py", *(f"localm/{n}.py" for n in loaded)} <= set(mover.GATE_FILES)
     callers = {p for p in (*REPO.glob("*.bat"), *REPO.glob("*.sh"), REPO / "launcher.pyw",
                            REPO / "installer" / "gui.py", REPO / "scripts" / "rollback_update.py")

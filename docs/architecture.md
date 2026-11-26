@@ -44,8 +44,8 @@ rule is small: a module-level import may target only a unit in a lower tier;
 units that share a tier are peers and never import each other at module
 level; the package root (`localm/__init__.py`: the version, the update gate
 and the record of the running process) sits below every tier and imports only
-`procs` and its repair `procs_repair`, which import nothing of localm at module
-level. Only import statements that run at module import
+`procs`, its repair `procs_repair` and the debug log `debuglog`, which import
+nothing of localm at module level. Only import statements that run at module import
 time are covered: a function-local import (how a genuine import cycle is
 broken), an `importlib` call, and a plugin loaded under its own module name
 are outside it, and so are tests and scripts.

@@ -23,10 +23,15 @@ import os
 import sys
 from pathlib import Path
 
-#: Seconds each network wait of a repair at a start may last: each read of the
-#: download of the signed build, and each request uv makes for a package
+#: Seconds each network wait of a repair at a start may last: the request that names
+#: the release (the update proxy's own timeout, ``_proxy.request``, which is this), each
+#: read of the download of the signed build, and each request uv makes for a package
 #: (``UV_HTTP_TIMEOUT``, when the environment does not set it).
 NET_S = 15
+
+#: How many repairs one start tries: each set of damaged files once, the installed
+#: parts once.
+_ROUNDS = 4
 
 _PROCS = "localm/procs.py"
 _PARTS = "Settings > System > Updates > Installed parts > Repair"
@@ -76,7 +81,7 @@ def named_files(error: BaseException, root: Path) -> list:
     out = []
     name = getattr(error, "name", None)
     if isinstance(error, ImportError) and isinstance(name, str) and name.startswith("localm."):
-        out.append(name.replace(".", "/") + ".py")
+        out += [name.replace(".", "/") + ".py", name.replace(".", "/") + "/__init__.py"]
     elif isinstance(error, SyntaxError):
         out += [_rel(root, error.filename)] if error.filename else []
     else:
@@ -96,14 +101,16 @@ def missing_package(error: BaseException) -> str:
 
 
 def _damaged(files: list, root: Path) -> tuple:
-    """``(damaged, reason)``: those of *files* the release states whose content in the
-    install is not the stated one, and None; or ``[]`` and why there is no release to
-    compare with."""
+    """``(damaged, kept, reason)``: those of *files* the release states whose content
+    in the install is not the stated one, apart from those the user keeps as their own
+    (``integrity.keep``), which are *kept*, and None; or ``[]``, ``[]`` and why there
+    is no release to compare with."""
     from localm import integrity, runtime_files
     manifest, reason = integrity.statement(root)
     if manifest is None:
-        return [], reason
-    out = []
+        return [], [], reason
+    mine = integrity.kept()
+    out, kept = [], []
     for rel in files:
         entry = manifest["files"].get(rel)
         if entry is None:
@@ -114,8 +121,8 @@ def _damaged(files: list, root: Path) -> tuple:
         except OSError:
             same = False
         if not same:
-            out.append(rel)
-    return out, None
+            (kept if mine.get(rel) == entry["sha256"] else out).append(rel)
+    return out, kept, None
 
 
 def _import_procs():
@@ -153,10 +160,24 @@ def _repair_files(files: list) -> str:
 
 
 def _repair_parts(package: str) -> str:
-    """Run the repair of the installed parts and return the line that says so.
-    Raises LocalmError with why nothing was repaired."""
+    """Run the repair of the installed parts when they lack a dependency, and return
+    the line that says so once *package* can be imported. Raises LocalmError with why
+    it was not installed: an update of the install in progress, parts that lack
+    nothing, or a repair that did not bring it."""
+    import importlib
+    import importlib.util
+
     from localm import updater_parts
     from localm.bugreport import LocalmError
+    from localm.update_mechanism import job
+    root = _root()
+    if job.record_path(root).exists() or job.locked(root):
+        raise LocalmError(f"{package} was not installed",
+                          reason="an update of this install is in progress")
+    parts = updater_parts.installed_parts(root)
+    if not parts["deps_problems"] and parts["install_record_matches"] is not False:
+        raise LocalmError(f"the installed parts lack no package, so {package} was not "
+                          "installed", reason="the dependencies of this localm do not name it")
     set_timeout = "UV_HTTP_TIMEOUT" not in os.environ
     if set_timeout:
         os.environ["UV_HTTP_TIMEOUT"] = str(NET_S)
@@ -165,9 +186,10 @@ def _repair_parts(package: str) -> str:
     finally:
         if set_timeout:
             os.environ.pop("UV_HTTP_TIMEOUT", None)
-    if not res["notes"]:
-        raise LocalmError(f"the installed parts are complete, so {package} was not installed",
-                          reason="the dependencies of this localm do not name it")
+    importlib.invalidate_caches()
+    if importlib.util.find_spec(package) is None:
+        raise LocalmError(f"the repair of the installed parts did not install {package}",
+                          reason="; ".join(res["notes"]) or "it changed nothing")
     return f"installed the missing package {package} ({'; '.join(res['notes'])})"
 
 
@@ -200,22 +222,27 @@ def repair_and_enter(error: BaseException):
     first, done, why = error, [], []
     tried: set = set()
     files: list = []
-    package, no_list, damaged = "", None, []
-    while True:
+    package, no_list, damaged, kept = "", None, [], []
+    for _round in range(_ROUNDS):
         files = list(dict.fromkeys([*files, *named_files(error, root)]))
         package = missing_package(error)
         try:
-            damaged, no_list = _damaged(files, root)
+            damaged, kept, no_list = _damaged(files, root)
         except Exception as e:
-            damaged, no_list = [], f"the files could not be compared with the release ({e})"
-        if damaged and "files" not in tried:
-            tried.add("files")
+            damaged, kept = [], []
+            no_list = f"the files could not be compared with the release ({e})"
+        if damaged and ("files", *damaged) not in tried:
+            tried.add(("files", *damaged))
             step, arg = _repair_files, damaged
-        elif package and not damaged and "parts" not in tried:
-            tried.add("parts")
+        elif package and not damaged and ("parts",) not in tried:
+            tried.add(("parts",))
             step, arg = _repair_parts, package
         else:
-            if no_list:
+            if kept:
+                why.append(f"{', '.join(kept)} is kept as yours ('localm integrity --keep'), "
+                           "so it was not written again")
+                damaged = kept
+            elif no_list:
                 why.append(f"the files cannot be repaired: {no_list}")
             elif not damaged and not package:
                 why.append("every file it names is the release's, and it is no missing "

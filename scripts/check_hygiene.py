@@ -1333,7 +1333,8 @@ def _child_process_console_print_violations() -> list[str]:
 # only a unit in a LOWER tier. Units that share a tier are peers and do not
 # import each other at module level. The package's own __init__ sits below every
 # tier; it may import only _ROOT_IMPORTS: procs, and procs_repair, which repairs
-# procs when it cannot be imported; each imports nothing of localm at module level.
+# procs when it cannot be imported, and debuglog, which logs when that repair cannot
+# be loaded; each imports nothing of localm at module level.
 # Function-local imports are not counted, as in check 7.
 #
 # A tier carries exactly the keys name, role and units. An unknown key, a
@@ -1342,7 +1343,7 @@ def _child_process_console_print_violations() -> list[str]:
 
 _LAYERING_MAP = "docs/layering.toml"
 _LAYERING_TIER_KEYS = {"name", "role", "units"}
-_ROOT_IMPORTS = ("procs", "procs_repair")
+_ROOT_IMPORTS = ("procs", "procs_repair", "debuglog")
 
 
 def _layering_tiers(text: str) -> tuple[list[tuple[str, list[str]]], list[str]]:

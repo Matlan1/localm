@@ -269,11 +269,17 @@ else:
             from localm import procs_repair as _repair
             _repair.repair_and_enter(_broken)
         except Exception as _e:
-            _say(f"localm: the list of running processes (localm/procs.py) cannot be imported: "
-                 f"{type(_broken).__name__}: {_broken}, and its repair failed: "
-                 f"{type(_e).__name__}: {_e}. This start goes on without it, and a command "
-                 f"that needs it stops with this error; to repair it: "
-                 f"'localm integrity --repair localm/procs.py'.")
+            _text = (f"the list of running processes (localm/procs.py) cannot be imported: "
+                     f"{type(_broken).__name__}: {_broken}, and its repair failed: "
+                     f"{type(_e).__name__}: {_e}. This start goes on without it, and a "
+                     f"command that needs it stops with this error; to repair it: 'localm "
+                     f"integrity --repair localm/procs.py localm/procs_repair.py'.")
+            _say(f"localm: {_text}")
+            try:
+                from localm.debuglog import defer_log as _defer
+                _defer(30, "procs repair: %s", _text)
+            except Exception as _e2:
+                _say(f"localm: the debug log cannot record this: {_e2!r}")
     if _again:
         # The files just put in place are read instead of the ones this began with, whose
         # compiled copies may have the same size and time.

@@ -10,8 +10,8 @@
 #   - localm/__init__.py (the package root) sits below every tier. It holds only
 #     __version__, which any unit may read, and the call that records this process
 #     (procs, which imports nothing of localm), and, when procs cannot be imported,
-#     the call of its repair (procs_repair, which imports nothing of localm at module
-#     level).
+#     the call of its repair (procs_repair) and, when that cannot be loaded, the debug
+#     log (debuglog); both import nothing of localm at module level.
 #   - Only an import statement that runs at module import time is seen. A
 #     function-local import (the way a genuine import cycle is broken, and it may
 #     point upward), an importlib.import_module or __import__ call, and a plugin
