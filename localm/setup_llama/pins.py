@@ -94,8 +94,8 @@ _PINNED_TAG = "b12676"
 # it could not test would carry the word "confirmed" without the evidence.
 #
 # The asymmetry is hardware: a GitHub runner has no
-# GPU, so CI can honestly generate on cpu only. vulkan is confirmed on the
-# maintainer's box. cuda, sycl, hip and metal need hardware nobody here has.
+# GPU, so CI can honestly generate on cpu only. vulkan and hip are confirmed on
+# the maintainer's box. cuda, sycl and metal need hardware nobody here has.
 #
 # What every entry DOES rest on, including the untested ones, is the byte-
 # identity above: the ABI/struct compatibility that broke in the incident this
@@ -115,7 +115,9 @@ _PIN_CONFIRMATION = {
     # Maintainer-run, occasional cadence.
     "cuda": "ABI only (shared llama library); generation NOT measured - no NVIDIA hardware",
     "sycl": "ABI only (shared llama library); generation NOT measured - no Intel GPU",
-    "hip": "ABI only (shared llama library); generation NOT measured - needs a system ROCm toolkit",
+    "hip": "load + generate, measured (Windows x64, AMD RX 6900 XT / gfx1030; the "
+           "runtime registered a ROCm0 GPU device, with AMD's ROCm libraries added by "
+           "setup)",
     "metal": "ABI only (shared llama library); generation NOT measured - no Apple Silicon",
     # Not an upstream tag at all: the lemonade-sdk build, pinned separately by
     # _ROCM_TAG, so this table's subject (_PINNED_TAG) does not describe it.
@@ -312,6 +314,52 @@ _ASSET_MATCH = {
     "darwin": {
         "cpu":    ["bin-macos-{arch}"],
         "metal":  ["bin-macos-arm64"],
+    },
+}
+
+
+# AMD's ROCm library wheels for the upstream Windows hip build. That build ships
+# ggml-hip.dll with the HIP runtime (amdhip64_7.dll, amd_comgr.dll, rocm_kpack.dll)
+# but not the BLAS libraries ggml-hip.dll links (hipblas.dll and its rocBLAS,
+# rocSOLVER, hipBLASLt and origami dependencies) nor their GPU kernels. This is
+# the index of the AMD wheels upstream builds that archive against
+# ("rocm[libraries,devel]" at the ROCm release its asset name carries).
+# localm/setup_llama/hip_libraries.py fetches rocm-sdk-libraries for the
+# libraries and one rocm-sdk-device-<gfx> wheel per GPU architecture for the
+# kernels.
+_HIP_SDK_INDEX = "https://stable.repo.amd.com/rocm/whl-next/"
+
+# The ROCm release ("major.minor" of the bundled amdhip64_7.dll's file version,
+# which is also the version in the upstream asset name, e.g. win-rocm-10.0) ->
+# the wheels of that release: (file name, size in bytes, sha256). The device
+# entries are the GPU architectures the build's ggml-hip.dll carries code for.
+_HIP_SDK_WHEELS = {
+    "10.0": {
+        "version": "10.0.0",
+        "libraries": ("rocm_sdk_libraries-10.0.0-py3-none-win_amd64.whl", 116831755,
+                      "bfc7a1bd3b6050fb4d36d8ac2eea80d3afd70c5604a29142463d6cb890fc73bf"),
+        "devices": {
+            "gfx1010": (47525108, "2b6da925376de9689ab9f22ce7cc55b6d476722d9458fbd1ec52d4aa066d3e6c"),
+            "gfx1011": (47190349, "1a6de3efe7bc92b1e55367a767eecf0468231b03d9319494d1e4b077571b6757"),
+            "gfx1012": (47187798, "51f2998d2f33164e4a14594107e6c33db54da1d9867fa6947ea993997c4ae06e"),
+            "gfx1030": (52153384, "19ada0359b499c19c1ecb1cba21b067fce89b4f0b0de6f0f7b76cbef85dcb85b"),
+            "gfx1031": (52179193, "ab7cbfb41e1ada00fb7254c974f7386303cdd1139a170fb022e84e6f10d9f5f2"),
+            "gfx1032": (52182885, "5d0581e077cc1a482e70430539c63e60c4b4d7b9b82be0ac0bab6d62c3feb4de"),
+            "gfx1033": (52186039, "46ba5b395bf75756f9c5f1154b2083dd576221dfbd15620b5fa597f498aad798"),
+            "gfx1034": (52183796, "8d527c2f127d42ecb098e0abc45c15ca28689b6317f01b99d455e6d3562a3b52"),
+            "gfx1035": (52181539, "c06479bad4963f4aecde4e0fe102eb39ae652e80da62546c3bd3fb0b9079a0a4"),
+            "gfx1036": (52183283, "655f343cd805f21bfd45244902f99afba9b7ada323288a1b9ba3336bd41c1ccc"),
+            "gfx1100": (189830160, "db39cbc5aae7a67c73d76692899a6a89bbc10eafc92f856f48e9c03247a91f8e"),
+            "gfx1101": (185030273, "7b8edd82943a11c29c80f84c95822e36ddd794b7024878e9660170d050a29243"),
+            "gfx1102": (183114327, "b9e0f3fa492f0a05a5c4f479b80915477911f8402956c0e2c593b593d6214531"),
+            "gfx1103": (55710049, "3de6ba204d78e0cb2a32cf064371c181d7a17d1ca8b25537b1a7f11eaa66fa17"),
+            "gfx1150": (134574199, "22c19fcee580102cdc2f9379edf056643843c86ac6312dcf34d8ed21964c2cc4"),
+            "gfx1151": (139346623, "1ab27ebfe61ea3c3fd2c5c1a0e780ae22ed9b662106ce0aefda0a30e3b11577f"),
+            "gfx1152": (134480596, "88db4e79f31bef68bf8cb321fb83704dda6d11ad6da8dcfbdc8660f077c7195c"),
+            "gfx1153": (134629087, "1fde64d87edd815403014743700000a016435f040c43114e764b5cc7b919413c"),
+            "gfx1200": (377648520, "f33226078932ee2200f5595c521895edf5d7abf3170975d8c6f72a2a3949f516"),
+            "gfx1201": (312303802, "c6e4c5a0da941230bed975765e644597570081c9a41654d5a052c277167f4576"),
+        },
     },
 }
 

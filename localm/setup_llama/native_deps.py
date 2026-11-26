@@ -175,14 +175,16 @@ def _bundle_missing_native_deps(target: Path) -> None:
     """After a backend is placed in *target*, provide any native dependency its
     libraries need but neither the archive nor this runtime dir supplies: on
     Windows, offer the Microsoft Visual C++ Redistributable
-    (:func:`offer_vc_runtime`); on Linux, ``libgomp.so.1`` (see the comment
-    above _LIBGOMP_SONAME). A no-op for every other missing dependency and on
-    macOS.
+    (:func:`offer_vc_runtime`), then add AMD's ROCm libraries an upstream hip
+    build links (:func:`localm.setup_llama.hip_libraries.supply_hip_libraries`);
+    on Linux, ``libgomp.so.1`` (see the comment above _LIBGOMP_SONAME). A no-op
+    for every other missing dependency and on macOS.
 
     Never raises, except ``click.Abort`` from the Visual C++ question. A
     failure is logged as a warning, never silently treated as success."""
     if sys.platform == "win32":
         _sl.offer_vc_runtime(target)
+        _sl.supply_hip_libraries(target)
         return
     if sys.platform == "darwin":
         return

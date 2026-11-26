@@ -19,7 +19,7 @@ from typing import Optional
 from localm import config, hwdetect, uv_tool
 from localm.debuglog import logger
 from localm.setup_llama._common import _net_allowed, console
-from localm.setup_llama.library_files import _BLAS_LIBRARY_DIRS
+from localm.setup_llama.library_files import RUNTIME_SUBDIRS
 import localm.setup_llama as _sl
 
 def _platform_key() -> str:
@@ -405,7 +405,7 @@ def _clearable_files(target: Path) -> list[Path]:
                 if f.name in _KEPT_ON_CLEAR:
                     continue
                 out.append(f)
-            elif f.is_dir() and f.name in _BLAS_LIBRARY_DIRS:
+            elif f.is_dir() and f.name in RUNTIME_SUBDIRS:
                 out.extend(p for p in f.rglob("*") if p.is_file())
     except OSError:
         pass
@@ -447,8 +447,9 @@ def _files_in_use(target: Path) -> list[Path]:
 def _clear_target(target: Path) -> list[Path]:
     """Remove library files left by an earlier provision so a re-provision (or
     a fallback to a different backend) never mixes DLLs from two builds. Only
-    touches files in the dir, plus the _BLAS_LIBRARY_DIRS subdirectories
-    _copy_blas_library_dirs may have created (never any OTHER subdirectory) -
+    touches files in the dir, plus the RUNTIME_SUBDIRS subdirectories
+    _copy_blas_library_dirs and the hip library supply may have created (never
+    any OTHER subdirectory) -
     and never _KEPT_ON_CLEAR (the tracked git sentinels and the choice
     record).
 
@@ -467,7 +468,7 @@ def _clear_target(target: Path) -> list[Path]:
                     f.unlink()
                 except OSError:
                     left.append(f)
-            elif f.is_dir() and f.name in _BLAS_LIBRARY_DIRS:
+            elif f.is_dir() and f.name in RUNTIME_SUBDIRS:
                 # ignore_errors keeps rmtree from raising part-way and stranding
                 # the rest of the sweep; whatever survives is reported instead.
                 shutil.rmtree(f, ignore_errors=True)

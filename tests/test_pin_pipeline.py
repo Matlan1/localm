@@ -28,6 +28,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -899,7 +900,10 @@ def test_reset_empties_the_worktree_temp_dir(monkeypatch, tmp_path):
 
 def _open_pr_with_fake_gh(monkeypatch, tmp_path, returncode=0):
     sleeps, calls = [], []
-    monkeypatch.setattr(pipeline.time, "sleep", lambda s: sleeps.append(s))
+    # Records only this test's own thread; a daemon thread another test started may sleep meanwhile.
+    me, real_sleep = threading.get_ident(), pipeline.time.sleep
+    monkeypatch.setattr(pipeline.time, "sleep",
+                        lambda s: sleeps.append(s) if threading.get_ident() == me else real_sleep(s))
     monkeypatch.setattr(pipeline.subprocess, "run",
                         lambda cmd, **k: calls.append(cmd) or _FakeCompleted(
                             returncode=returncode, stdout="https://x/pull/7", stderr="refused"))

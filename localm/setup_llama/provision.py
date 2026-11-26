@@ -289,6 +289,15 @@ def _sycl_backend_note() -> str:
     return "Intel oneAPI build (needs the oneAPI runtime present)"
 
 
+def _hip_backend_note() -> str:
+    """Describe the hip build's runtime dependency for the current OS: on
+    Windows setup adds AMD's ROCm libraries (hip_libraries.py); the Linux
+    build needs a system ROCm/HIP runtime."""
+    if sys.platform == "win32":
+        return "AMD ROCm build + ROCm libraries from AMD's packages"
+    return "AMD ROCm build (needs the ROCm/HIP runtime present)"
+
+
 # Backends that only make sense on their GPU: a build that loads but registers
 # no GPU device runs on the CPU, which counts as not loading.
 _GPU_REQUIRED_BACKENDS = frozenset({"cuda", "hip", "sycl", "amd-rocm"})
@@ -387,7 +396,7 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
         "amd-rocm": "self-contained AMD ROCm build (RX 6000 / 7000 / 9000)",
         "cuda": "NVIDIA CUDA build + self-contained runtime",
         "sycl": _sycl_backend_note(),
-        "hip": "AMD ROCm build (needs the ROCm/HIP runtime present)",
+        "hip": _hip_backend_note(),
         "cpu": "CPU-only build (no GPU)",
         "metal": "Apple Silicon (Metal) build",
     }
