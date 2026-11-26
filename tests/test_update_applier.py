@@ -328,8 +328,11 @@ def test_a_server_asked_to_restart_is_waited_for_and_runs_the_new_version_after_
         stranger, _ = _stay(update, "stranger")
         _waits(update, count=2)
         time.sleep(3)
-        assert json.loads(update.record.read_text(encoding="utf-8"))["phase"] == "ending", \
-            "a stranger's start was taken for the server that restarts"
+        try:
+            phase = json.loads(update.record.read_text(encoding="utf-8"))["phase"]
+        except FileNotFoundError:
+            phase = "over"
+        assert phase == "ending", "a stranger's start was taken for the server that restarts"
         assert server.poll() is None and update.version() == "1"
         again, _ = _stay(update, "again", LOCALM_RESTARTED_FROM=key)
         _waits(update, count=3)
