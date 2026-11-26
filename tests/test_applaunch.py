@@ -260,6 +260,14 @@ class TestForceRebuildFromRunningLauncher:
 
     def test_force_rebuild_from_running_launcher_succeeds(self, tmp_path):
         fake_launcher = self._build_fake_launcher(tmp_path)
+        real_base = Path(getattr(sys, "_base_executable", None) or sys.executable).resolve()
+        base_dlls = sorted(real_base.parent.glob("python3*.dll"))
+        assert base_dlls, "the base interpreter has no python3*.dll to copy"
+        # An old timestamp marks every DLL as the stale copy: a refresh copies the
+        # base's DLL over it (copy2 keeps the base's timestamp), one left alone keeps
+        # this one. The DLL the running launcher loads is among them.
+        for dll in fake_launcher.parent.glob("python3*.dll"):
+            os.utime(dll, (1_000_000_000, 1_000_000_000))
         repo_root = Path(__file__).resolve().parents[1]
         script = tmp_path / "run_make_launcher.py"
         script.write_text(
@@ -295,6 +303,78 @@ class TestForceRebuildFromRunningLauncher:
         assert "renamed the old copy aside to replace it" in result.stdout
         # The launcher file itself must have survived the rebuild.
         assert fake_launcher.is_file()
+        # The DLLs were refreshed too, the loaded python3*.dll included, so the
+        # launcher really runs the base interpreter's Python now.
+        for dll in base_dlls:
+            copied = fake_launcher.parent / dll.name
+            assert copied.stat().st_mtime_ns == dll.stat().st_mtime_ns, (
+                f"{dll.name} was not replaced\nstdout:\n{result.stdout}")
+            assert copied.stat().st_size == dll.stat().st_size
+        assert "could not replace" not in result.stdout
+        assert "still runs Python" not in result.stdout
+
+
+# ------------------------------------------------------------------ #
+#  A refresh that leaves the old Python in place is never "ready"     #
+# ------------------------------------------------------------------ #
+
+def _fake_windows_build(tmp_path, monkeypatch, *, versions, fail_dll=None):
+    """make_windows_launcher over files in *tmp_path*: *versions* maps "exe" and
+    "base" to the sys.version each reports (None: cannot be read); *fail_dll*
+    names a DLL whose copy raises OSError."""
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    base = base_dir / "python.exe"
+    base.write_bytes(b"MZbase")
+    (base_dir / "python312.dll").write_bytes(b"dll")
+    (base_dir / "vcruntime140.dll").write_bytes(b"vc")
+    dst = tmp_path / "venv" / "localm-app" / "LocaLM.exe"
+    real_copy = applaunch._copy_replacing_possibly_running_exe
+
+    def copy(src, target):
+        if src.name == fail_dll:
+            raise PermissionError(32, "The process cannot access the file", str(target))
+        return real_copy(src, target)
+
+    monkeypatch.setattr(applaunch, "_base_interpreter", lambda: base)
+    monkeypatch.setattr(applaunch, "windows_launcher_path", lambda: dst)
+    monkeypatch.setattr(applaunch, "_copy_replacing_possibly_running_exe", copy)
+    monkeypatch.setattr(applaunch, "_stamp_exe_icon", lambda exe, ico: True)
+    monkeypatch.setattr(applaunch, "_self_check", lambda exe: True)
+    monkeypatch.setattr(applaunch, "_ensure_bare_start", lambda notes, problems: None)
+    monkeypatch.setattr(applaunch, "_python_version_of",
+                        lambda exe: versions["exe" if exe == dst else "base"])
+    return applaunch.make_windows_launcher(force=True)
+
+
+_NEW = "3.12.16 (main, Nov 1 2026) [MSC v.1944 64 bit (AMD64)]"
+_OLD = "3.12.15 (main, Oct 1 2026) [MSC v.1944 64 bit (AMD64)]"
+
+
+def test_a_refresh_with_every_file_replaced_is_ready(tmp_path, monkeypatch):
+    res = _fake_windows_build(tmp_path, monkeypatch, versions={"exe": _NEW, "base": _NEW})
+    assert res.ok is True and res.problems == []
+    assert any("+ 2 runtime DLL(s)" in n for n in res.notes)
+
+
+def test_a_dll_that_could_not_be_replaced_is_reported(tmp_path, monkeypatch):
+    res = _fake_windows_build(tmp_path, monkeypatch, versions={"exe": _NEW, "base": _NEW},
+                              fail_dll="python312.dll")
+    assert res.ok is False
+    assert any("could not replace python312.dll" in p
+               and "localm make-launcher --force" in p for p in res.problems)
+
+
+def test_a_launcher_on_another_python_is_reported(tmp_path, monkeypatch):
+    res = _fake_windows_build(tmp_path, monkeypatch, versions={"exe": _OLD, "base": _NEW})
+    assert res.ok is False
+    assert any("still runs Python 3.12.15" in p and "3.12.16" in p for p in res.problems)
+
+
+def test_an_unreadable_version_is_reported(tmp_path, monkeypatch):
+    res = _fake_windows_build(tmp_path, monkeypatch, versions={"exe": None, "base": _NEW})
+    assert res.ok is False
+    assert any("could not read the Python version" in p for p in res.problems)
 
 
 # ------------------------------------------------------------------ #

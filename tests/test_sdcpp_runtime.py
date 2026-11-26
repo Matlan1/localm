@@ -281,6 +281,33 @@ def test_setup_sdcpp_reports_a_failure_and_exits_1(cli_runner, monkeypatch):
     assert "no build for this platform" in result.output
 
 
+def test_a_failed_install_is_not_also_a_console_warning(monkeypatch, caplog):
+    monkeypatch.setattr(runtime, "platform_key", lambda: "windows")
+    caplog.set_level("INFO", logger="localm")
+    with pytest.raises(runtime.ProvisionError, match="no 'metal' build"):
+        runtime.install("metal")
+    failed = [r for r in caplog.records if "installing the metal runtime failed" in r.message]
+    assert failed and all(r.levelname == "INFO" for r in failed)
+
+
+def test_setup_sdcpp_metal_prints_its_refusal_once(tmp_path):
+    import subprocess
+    import sys
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.json").write_text(json.dumps({
+        "update_url": "", "bugreport_upload_url": ""}), encoding="utf-8")
+    env = dict(os.environ, LOCALM_HOME=str(home))
+    env.pop("LOCALM_DEBUG", None)
+    r = subprocess.run([sys.executable, "-m", "localm", "setup-sdcpp", "--backend", "metal"],
+                       capture_output=True, text=True, timeout=180, env=env,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    both = r.stdout + r.stderr
+    assert r.returncode == 1, both
+    assert both.count("publishes no 'metal' build") == 1, both
+    assert "WARNING" not in both, both
+
+
 def test_setup_sdcpp_is_a_localm_command():
     from localm.cli import main
     assert "setup-sdcpp" in main.commands

@@ -947,6 +947,74 @@ def native_stderr_target() -> Optional[int]:
         return None
 
 
+class CapturedNativeStdio:
+    """Holder yielded by :func:`capture_native_stdio`; ``tail()`` reads whatever
+    native text landed on either stream while the block was open."""
+
+    def __init__(self, out_path: str, err_path: str) -> None:
+        self._out_path = out_path
+        self._err_path = err_path
+
+    def _read(self, path: str) -> str:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                return fh.read()
+        except OSError:
+            return ""
+
+    def tail(self, max_chars: int = 1500) -> str:
+        """The last *max_chars* of the captured stdout then stderr text, ""
+        when nothing was captured or the files cannot be read. The order of
+        lines between the two streams is not kept (they are separate files)."""
+        text = "\n".join(s for s in (self._read(self._out_path),
+                                      self._read(self._err_path)) if s).strip()
+        return text[-max_chars:] if len(text) > max_chars else text
+
+
+@contextlib.contextmanager
+def capture_native_stdio():
+    """Redirect fd 1 (stdout) and fd 2 (stderr) into temp files for the block,
+    for native output whose stream is not documented: the banner a ggml build
+    prints while its native library loads and registers its backends (device
+    and ``load_backend:`` lines). On exit the captured text is appended to the
+    debug log in debug mode (:func:`native_stderr_target`) and the temp files
+    are removed, so a caller that wants ``tail()`` reads it inside the block.
+
+    This only moves the OS-level descriptors. A logging record emitted in the
+    block reaches the debug-mode console mirror, which writes to its own
+    duplicate of stderr; pair it with :func:`suppress_console_mirror` to keep
+    those off the console too."""
+    import tempfile
+    out_fd, out_path = tempfile.mkstemp(prefix="localm_loadlib_", suffix=".out.log")
+    err_fd, err_path = tempfile.mkstemp(prefix="localm_loadlib_", suffix=".err.log")
+    saved_out = os.dup(1)
+    saved_err = os.dup(2)
+    os.dup2(out_fd, 1)
+    os.dup2(err_fd, 2)
+    os.close(out_fd)
+    os.close(err_fd)
+    try:
+        yield CapturedNativeStdio(out_path, err_path)
+    finally:
+        os.dup2(saved_out, 1)
+        os.dup2(saved_err, 2)
+        os.close(saved_out)
+        os.close(saved_err)
+        target_fd = native_stderr_target()
+        if target_fd is not None:
+            try:
+                for p in (out_path, err_path):
+                    with open(p, "rb") as src:
+                        os.write(target_fd, src.read())
+            except OSError:
+                pass
+            finally:
+                os.close(target_fd)
+        for p in (out_path, err_path):
+            with contextlib.suppress(OSError):
+                os.unlink(p)
+
+
 def record_native_line(text: str) -> None:
     """Append a (possibly already-grouped) native log line straight into the
     recent-activity ring buffer, so the GUI status window's live log tail

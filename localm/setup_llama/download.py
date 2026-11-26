@@ -9,6 +9,7 @@ import hashlib
 import socket
 import tarfile
 import tempfile
+import urllib.error
 import urllib.request
 import zipfile
 from dataclasses import dataclass
@@ -146,6 +147,10 @@ def _download(url: str, dest: Path) -> _DownloadResult:
             "or provision from a local build with 'localm setup-llama --from "
             "<build-dir>' / '--url <archive-url>'."
         ) from e
+    except urllib.error.HTTPError as e:
+        # BEFORE the OSError clause below (HTTPError is a URLError, an OSError):
+        # the server answered with an error status, so the connection worked.
+        raise ArtifactError(_http_error_message(url, e)) from e
     except OSError as e:
         # A live transport failure mid-stream (connection reset, broken pipe, a
         # proxy dropping the connection outright) - distinct from a download
@@ -164,6 +169,38 @@ def _download(url: str, dest: Path) -> _DownloadResult:
     console.print()
     return _DownloadResult(bytes_received=nread, content_length=total,
                            content_type=content_type, final_url=final_url)
+
+
+_LOCAL_BUILD_HINT = ("To install without this download, provision from a local build "
+                     "with 'localm setup-llama --from <build-dir>' or '--url "
+                     "<archive-url>'.")
+
+
+def _http_error_message(url: str, e: urllib.error.HTTPError) -> str:
+    """The failure text for an HTTP error status answering the download of
+    *url*, worded by what the status means."""
+    status = f"HTTP {e.code}: {e.reason}" if e.reason else f"HTTP {e.code}"
+    if e.code in (404, 410):
+        if "/releases/download/" in url:
+            what = ("the release tag or the archive named in it does not exist. "
+                    "Retrying will not help: check the tag you asked for against the "
+                    "project's published releases, or run 'localm setup-llama --tag "
+                    "default' for localm's confirmed build.")
+        else:
+            what = ("the file does not exist there (it may have been moved or "
+                    "removed), so retrying will not help.")
+        return f"the server has no file at {url} ({status}): {what} {_LOCAL_BUILD_HINT}"
+    if e.code in (401, 403, 407, 451):
+        return (f"the server, or a proxy on the way, refused the download of {url} "
+                f"({status}): access is denied, which a corporate network filter "
+                f"often causes, so retrying will not help until that changes. "
+                f"{_LOCAL_BUILD_HINT}")
+    if e.code == 429 or e.code >= 500:
+        return (f"the server could not serve {url} right now ({status}): this is on "
+                f"the server's side, not your connection. Retry in a while. "
+                f"{_LOCAL_BUILD_HINT}")
+    return (f"the server answered {status} for {url} instead of the archive. "
+            f"Check the address. {_LOCAL_BUILD_HINT}")
 
 
 def _sha256_file(path: Path) -> str:

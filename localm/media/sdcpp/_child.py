@@ -388,6 +388,25 @@ def _generation_failed(message: str) -> Exception:
     return _BudgetRefused(text) if _State.budget_refused else RuntimeError(text)
 
 
+def _off_the_console(fn, payload):
+    """``fn(payload)`` with what native code prints on stdout and stderr kept
+    off the console: the ggml device and ``load_backend:`` lines a runtime
+    prints while it loads and registers its backends. The captured text goes to
+    the debug log in debug mode (``debuglog.capture_native_stdio``); when *fn*
+    raises, its tail is added to the error."""
+    from localm.debuglog import capture_native_stdio
+    with capture_native_stdio() as captured:
+        try:
+            return fn(payload)
+        except Exception as e:
+            detail = captured.tail()
+            if detail:
+                extra = f"\n\nCaptured native output:\n{detail}"
+                e.args = ((f"{e.args[0]}{extra}",) + tuple(e.args[1:])
+                          if e.args else (extra,))
+            raise
+
+
 def _do_probe(payload):
     from . import _binding as b
     lib = _State.lib or _load_lib(payload)
@@ -1018,13 +1037,13 @@ def worker_main(req_q, resp_q, cancel_event, crash_trace_path=None) -> None:
             return
         try:
             if name in ("probe", "load", "upscale_image") and not callbacks_set:
-                lib = _State.lib or _load_lib(payload)
+                lib = _State.lib or _off_the_console(_load_lib, payload)
                 _State.lib = lib
                 lib.sd_set_log_callback(log_cb, None)
                 lib.sd_set_progress_callback(progress_cb, None)
                 callbacks_set = True
             if name == "probe":
-                resp_q.put(("ok", _do_probe(payload)))
+                resp_q.put(("ok", _off_the_console(_do_probe, payload)))
             elif name == "load":
                 resp_q.put(("ok", _do_load(payload)))
             elif name == "upscale_image":

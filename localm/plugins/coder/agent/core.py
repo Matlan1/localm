@@ -356,6 +356,8 @@ class Agent(
         self._abort_streak_tool: Optional[str] = None  # set when the circuit breaker trips
         self._global_error_streak: int = 0     # consecutive failed tool calls (ANY tool)
         self._abort_no_progress: bool = False  # set when the no-progress breaker trips
+        self._plan_refusals: dict[str, int] = {}  # tool_name -> plan-mode refusals in a row
+        self._abort_plan_refused: Optional[str] = None  # set when they reach the limit
         self._last_response_fp: str = ""       # last LLM response (repeated-scaffold breaker)
         self._repeat_response_count: int = 0   # consecutive near-identical responses
         self._recent_finals: list[str] = []    # bounded history the breaker compares against

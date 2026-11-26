@@ -156,3 +156,77 @@ def test_real_runtime_without_its_backend_modules_refuses_the_load(sd_runner, tm
     with pytest.raises(SdWorkerError, match="no compute device"):
         sd_runner.ensure_loaded(("m", model), copy, {"model_path": model},
                                 extra_dirs=extra)
+
+
+# --------------------------------------------------------------------------- #
+#  What the native library prints while it loads stays off the console         #
+# --------------------------------------------------------------------------- #
+
+class _QuietLib:
+    def sd_set_log_callback(self, cb, data):
+        pass
+
+    def sd_set_progress_callback(self, cb, data):
+        pass
+
+
+def _probe_in_process(monkeypatch, load_lib):
+    """Run one "probe" through _child.worker_main in this process (a thread),
+    with *load_lib* standing in for the library load, and return its reply."""
+    import queue
+    import threading
+
+    import localm._mp_spawn as spawn
+    import localm.debuglog as debuglog
+    from localm.media.sdcpp import _child
+
+    monkeypatch.setattr(_child._State, "lib", None)
+    monkeypatch.setattr(_child, "_arm_crash_trace", lambda path: None)
+    monkeypatch.setattr(_child, "_use_c_ctype_locale", lambda: None)
+    for name in ("install_parent_death_watchdog", "ignore_interrupt_signals",
+                 "suppress_native_error_dialogs"):
+        monkeypatch.setattr(spawn, name, lambda: None)
+    monkeypatch.setattr(debuglog, "attach_child_logging", lambda: None)
+    monkeypatch.setattr(_child, "_load_lib", load_lib)
+
+    def probe(payload):
+        os.write(2, b"ggml_vulkan: 0 = Test GPU (driver) | uma: 0\n")
+        return {"commit": "c", "devices": [("Vulkan0", "Test GPU")], "system_info": ""}
+
+    monkeypatch.setattr(_child, "_do_probe", probe)
+    req, resp = queue.Queue(), queue.Queue()
+    worker = threading.Thread(target=_child.worker_main, args=(req, resp, threading.Event()),
+                              daemon=True)
+    worker.start()
+    req.put(("probe", {"runtime_dir": "rt", "extra_dirs": []}))
+    reply = resp.get(timeout=30)
+    req.put(None)
+    worker.join(timeout=30)
+    return reply
+
+
+def test_the_probe_keeps_native_load_lines_off_the_console(monkeypatch, capfd):
+    def load_lib(payload):
+        os.write(2, b"ggml_vulkan: Found 1 Vulkan devices:\n")
+        os.write(1, b"load_backend: loaded Vulkan backend from staging\\ggml-vulkan.dll\n")
+        return _QuietLib()
+
+    reply = _probe_in_process(monkeypatch, load_lib)
+    out, err = capfd.readouterr()
+    assert reply[0] == "ok", reply
+    assert reply[1]["devices"] == [("Vulkan0", "Test GPU")]
+    assert "ggml_vulkan" not in out + err
+    assert "load_backend" not in out + err
+
+
+def test_a_load_failure_carries_the_captured_native_lines(monkeypatch, capfd):
+    def load_lib(payload):
+        os.write(2, b"ggml_vulkan: vkCreateInstance failed\n")
+        raise RuntimeError("could not load the stable-diffusion.cpp runtime from rt")
+
+    reply = _probe_in_process(monkeypatch, load_lib)
+    out, err = capfd.readouterr()
+    assert reply[0] == "error"
+    assert "could not load the stable-diffusion.cpp runtime from rt" in reply[1]
+    assert "ggml_vulkan: vkCreateInstance failed" in reply[1]
+    assert "ggml_vulkan" not in out + err

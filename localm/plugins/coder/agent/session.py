@@ -50,6 +50,8 @@ class _SessionMixin:
         self._consecutive_errors.clear()
         self._global_error_streak = 0
         self._abort_no_progress = False
+        self._plan_refusals = {}
+        self._abort_plan_refused = None
         self._last_response_fp = ""
         self._repeat_response_count = 0
         # Cleared with them: the similarity breaker compares against this history,

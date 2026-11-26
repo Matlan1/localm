@@ -1712,10 +1712,11 @@ def test_url_download_with_matching_sha256_does_not_warn(world):
 
 
 @pytest.mark.parametrize("serve, message", [
-    (None, "Refusing to install: the connection was interrupted after 0 of an unknown number of "
-           "bytes (HTTP Error 404: Not Found) - this looks like a dropped or flaky connection, "
-           "not a blocked download. Retry, or provision from a local build with 'localm "
-           "setup-llama --from <build-dir>' / '--url <archive-url>'. Provide a local build with "
+    (None, "Refusing to install: the server has no file at "
+           "https://mirror.example.invalid/llama-custom.zip (HTTP 404: Not Found): the file does "
+           "not exist there (it may have been moved or removed), so retrying will not help. To "
+           "install without this download, provision from a local build with 'localm "
+           "setup-llama --from <build-dir>' or '--url <archive-url>'. Provide a local build with "
            "--from instead, or a different --url (and --sha256 if you pin one)."),
     ("no-library",
      "The archive did not contain llama.dll. Try a different --url or use --from."),
@@ -1728,6 +1729,35 @@ def test_url_failures_exit_non_zero(world, serve, message):
     assert r.exit_code == 1
     assert message in r.text
     assert world.marker() is None
+
+
+def test_a_tag_that_does_not_exist_is_named_as_such(world):
+    world.seed_target("llama.dll", marker=f"vulkan {PIN}")
+    url = (f"https://github.com/{UPSTREAM}/releases/download/b99999/"
+           "llama-b99999-bin-win-vulkan-x64.zip")
+    r = world.invoke("--backend", "vulkan", "--tag", "b99999")
+    assert r.exit_code == 1
+    assert (f"Provisioning vulkan failed: the server has no file at {url} (HTTP 404: Not "
+            "Found): the release tag or the archive named in it does not exist. Retrying will "
+            "not help: check the tag you asked for against the project's published releases, "
+            "or run 'localm setup-llama --tag default' for localm's confirmed build.") in r.text
+    assert "flaky" not in r.text
+    assert world.marker() == f"vulkan {PIN}\n"
+
+
+@pytest.mark.parametrize("status, fragment", [
+    (403, "(HTTP 403: Forbidden): access is denied"),
+    (503, "(HTTP 503: Service Unavailable): this is on the server's side, not your "
+          "connection. Retry in a while."),
+])
+def test_other_http_statuses_are_worded_by_meaning(world, status, fragment):
+    url, _ = _upstream_win_vulkan(world)
+    reason = {403: "Forbidden", 503: "Service Unavailable"}[status]
+    world.serve(url, urllib.error.HTTPError(url, status, reason, hdrs=None, fp=None))
+    r = world.invoke("--backend", "vulkan")
+    assert r.exit_code == 1
+    assert fragment in r.text
+    assert "flaky" not in r.text
 
 
 @pytest.mark.parametrize("owner, message", [

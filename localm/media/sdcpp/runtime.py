@@ -412,7 +412,7 @@ def install(backend: str, *, force: bool = False,
     try:
         return _install(backend, force=force, say=say, probe=probe, ask=ask, into=into)
     except ProvisionError as e:
-        logger.warning("sdcpp runtime: installing the %s runtime failed: %s", backend, e)
+        logger.info("sdcpp runtime: installing the %s runtime failed: %s", backend, e)
         raise
 
 
