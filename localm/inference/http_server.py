@@ -6022,8 +6022,7 @@ def _mark_fds_noninheritable() -> None:
 
 
 @_media_runs_again()
-def _do_restart(*, update_watchdog: Optional[dict] = None,
-                port: Optional[int] = None,
+def _do_restart(*, port: Optional[int] = None,
                 instance_id: Optional[str] = None, update=None) -> None:
     """Restart this server IN PLACE. Unload the model FIRST (clean native
     teardown, like _do_shutdown - a hard re-exec while it is loaded can segfault),
@@ -6041,17 +6040,6 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     *port* is the port this instance is actually bound to (app.state.instance_port,
     set by advertise()); it is pinned into the re-exec command line so "comes back
     on the same port" is TRUE rather than merely intended - see _restart_argv.
-
-    *update_watchdog*, when given (only by the post-update restart path - see
-    routes/admin.py's /api/update/apply), is a
-    ``{host, port, scheme, expect_version}`` dict describing this instance. A
-    DETACHED health-check watchdog is spawned right before the re-exec; it
-    polls the restarted instance's own /whoami and auto-rolls back if the
-    expected version never comes up healthy within its timeout. It is not spawned
-    when this restart's update steps rolled the update back: the previous version
-    starts instead, and it would be rolled back again under the running server. The
-    plain "restart the server" button (/v1/server/restart) calls this with no
-    update_watchdog, so it is entirely unaffected.
 
     *update*, an ``updater_handoff.Prepared``, is handed over to the program the build
     ships as the last act before the re-exec (:func:`_hand_off_update`); the re-exec'd
@@ -6237,7 +6225,8 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     # the update steps out at its own start (cli._core._update_steps_at_start).
     from localm import updater as _updater
     deferred = _updater.newer_version_installed()
-    rolled_back = False if deferred else _finish_pending_runtime_update()
+    if not deferred:
+        _finish_pending_runtime_update()
 
     try:
         from localm import bugreport
@@ -6282,31 +6271,6 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
 
     _mark_fds_noninheritable()
     _set_restart_env()
-
-    if update_watchdog and rolled_back:
-        from localm.debuglog import logger as _dbg
-        _dbg.info("update health check not started: the update to %s was rolled back during "
-                  "this restart", update_watchdog.get("expect_version"))
-    elif update_watchdog:
-        # Spawned as the LAST step before execv: the watchdog's own timeout
-        # clock starts when its process begins executing, so spawning as late as
-        # possible keeps that clock closest to the actual restart moment.
-        try:
-            from localm import updater
-            updater.spawn_health_watchdog(
-                host=update_watchdog["host"], port=update_watchdog["port"],
-                scheme=update_watchdog.get("scheme", "http"),
-                expect_version=update_watchdog["expect_version"],
-                relaunch_argv=_restart_argv(port))
-        except Exception as e:
-            # spawn_health_watchdog() already never raises; this is
-            # belt-and-suspenders so even a malformed dict here can never block
-            # the restart itself. Logged rather than silenced.
-            try:
-                from localm.debuglog import logger as _dbg
-                _dbg.warning("update watchdog not started: %s", e)
-            except Exception:
-                pass
 
     if update is not None:
         _hand_off_update(update, port)
@@ -6504,20 +6468,18 @@ def _execv_restart(port: Optional[int], instance_id: Optional[str], *,
         raise
 
 
-def _request_restart(delay: float = 0.25, *, update_watchdog: Optional[dict] = None,
-                     port: Optional[int] = None,
+def _request_restart(delay: float = 0.25, *, port: Optional[int] = None,
                      instance_id: Optional[str] = None, update=None) -> None:
     """Run _do_restart shortly after returning, so the 200 response flushes to the
-    client before the process re-execs (mirrors _request_shutdown). *update_watchdog*,
-    *port*, *instance_id* and *update* are forwarded to _do_restart unchanged - see its
+    client before the process re-execs (mirrors _request_shutdown). *port*,
+    *instance_id* and *update* are forwarded to _do_restart unchanged - see its
     docstring."""
     import threading
     import time as _t
 
     def _run():
         _t.sleep(delay)
-        _do_restart(update_watchdog=update_watchdog, port=port,
-                   instance_id=instance_id, update=update)
+        _do_restart(port=port, instance_id=instance_id, update=update)
 
     threading.Thread(target=_run, daemon=True).start()
 

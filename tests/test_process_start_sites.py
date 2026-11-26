@@ -103,8 +103,6 @@ STARTED = {
     "localm/plugins/coder/background.py": 1,
     "localm/plugins/coder/mcp.py": 1,
     "localm/portmux.py": 1,
-    "localm/updater.py": 1,
-    "localm/updater_finish.py": 1,
     "localm/updater_handoff.py": 1,
 }
 DETACHED = ("start_new_session", "process_group", "preexec_fn", "CREATE_NEW_PROCESS_GROUP",

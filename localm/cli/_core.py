@@ -645,6 +645,7 @@ def _update_steps_at_start(command) -> None:
     carried through an older build's restart and does not count."""
     import os
     from localm import _version
+    _log_applied_update(command)
     done = os.environ.pop("LOCALM_UPDATE_STEPS_DONE", None)
     if done and done == _version.read_version():
         _old_client_checks(command)
@@ -656,6 +657,18 @@ def _update_steps_at_start(command) -> None:
     _finish_pending_runtime_update(command)
     _finish_pending_component_update(command)
     _old_client_checks(command)
+
+
+def _log_applied_update(command) -> None:
+    """Record the last update in the management log once the version it installed runs
+    (``updater.log_applied_update``), except in a process an update started
+    (``LOCALM_UPDATE_ID``) and in localm's hidden commands."""
+    import os
+    if "LOCALM_UPDATE_ID" in os.environ or str(command or "").startswith("_"):
+        return
+    from localm import updater
+    from localm.config import home_dir
+    updater.log_applied_update(home_dir())
 
 
 def _old_client_checks(command) -> None:

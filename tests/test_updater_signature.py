@@ -9,6 +9,7 @@ the whole update verifies. Every key here is a real Ed25519 key made in the test
 import io
 import json
 import zipfile
+from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives import serialization as _ser
@@ -402,15 +403,15 @@ def apply_cfg(monkeypatch, home):
 
 
 def _apply(inst, data, sig):
-    return updater.apply(5, installed=inst, signature=sig,
-                         download_opener=_opener_for(data), runner=lambda c: 0)
+    from tests._update_install import install_build
+    return install_build(inst, data, sig)
 
 
 def test_apply_installs_a_release_signed_build(tmp_path, trust, apply_cfg, home):
     inst = _fake_install(tmp_path)
     data = _build_zip_bytes("0.2.0")
     res = _apply(inst, data, envelope(data, [trust.r]))
-    assert res["applied"] and (inst / "VERSION").read_text().strip() == "0.2.0"
+    assert res.verified and (inst / "VERSION").read_text().strip() == "0.2.0"
     assert not _trust_file(home).exists()
 
 
@@ -494,8 +495,12 @@ def test_failed_keyset_save_refuses_the_update(tmp_path, trust, apply_cfg, home,
     inst = _fake_install(tmp_path)
     data = _build_zip_bytes("0.2.0")
 
+    real = os.replace
+
     def no_replace(src, dst):
-        raise OSError("disk full")
+        if Path(dst).name == "trust.json":
+            raise OSError("disk full")
+        return real(src, dst)
     monkeypatch.setattr(os, "replace", no_replace)
     with pytest.raises(LocalmError) as ei:
         _apply(inst, data, envelope(data, [r2], keyset=ks))

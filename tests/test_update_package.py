@@ -4,10 +4,8 @@ check at update time, the exact set of entries an update replaces, and the
 refusal with nothing changed of a package that is cut off, damaged, unsigned or
 does not fit on the disk, and the rollback of a swap the disk fills during."""
 
-import errno
 import io
 import json
-import shutil
 import zipfile
 from pathlib import Path
 
@@ -285,19 +283,6 @@ def test_parse_refuses_duplicate_fields():
 
 # ------------------------------- disk space -----------------------------------
 
-def test_space_counts_new_files_and_backup_on_one_drive(tmp_path):
-    root, target, backup = tmp_path / "r", tmp_path / "t", tmp_path / "b"
-    for d in (root / "localm", target / "localm", backup):
-        d.mkdir(parents=True)
-    (root / "localm" / "a.bin").write_bytes(b"x" * 3000)
-    (target / "localm" / "a.bin").write_bytes(b"x" * 2000)
-    assert au.space_needed(root, target, ["localm"]) == (3000, 2000)
-    exact = au.SPACE_MARGIN + 5000
-    au.check_space(root, target, ["localm"], backup, free=lambda p: exact)
-    with pytest.raises(au.NoSpace):
-        au.check_space(root, target, ["localm"], backup, free=lambda p: exact - 1)
-
-
 # ------------------------------- apply ----------------------------------------
 
 @pytest.fixture
@@ -343,57 +328,37 @@ def _snapshot(root: Path) -> dict:
             for p in sorted(root.rglob("*")) if p.is_file()}
 
 
-def _apply(inst, data):
-    return updater.apply(4, signature=envelope(data, [_PRIV]), installed=inst,
-                         download_opener=_download(data))
+def _apply(inst, data, signed=None):
+    from tests._update_install import install_build
+    return install_build(inst, data, envelope(signed or data, [_PRIV]), asset_id=4)
 
 
-def test_apply_replaces_exactly_the_stated_entries(env):
-    _home, inst = env
-    data = _build(extra={".github/workflow.yml": "x"})
-    res = _apply(inst, data)
-    assert res["applied"] is True and res["version"] == "0.4.0"
-    assert (inst / "localm" / "new.py").read_text(encoding="utf-8") == "new"
-    assert not (inst / "localm" / "old_only.py").exists()
-    assert (inst / "mine" / "notes.txt").read_text(encoding="utf-8") == "kept"
-    assert not (inst / ".github").exists()
-    assert json.loads((inst / update_package.NAME).read_text(encoding="utf-8")) == _statement(data)
-
-
-def test_apply_refuses_a_build_without_a_statement_and_changes_nothing(env):
-    _home, inst = env
-    before = _snapshot(inst)
-    data = _zip({"VERSION": "0.4.0", "pyproject.toml": '[project]\nname = "localm"\n',
-                 "localm/__init__.py": "# 0.4.0"})
-    with pytest.raises(LocalmError) as ei:
-        _apply(inst, data)
-    assert "does not state" in ei.value.summary
-    assert _snapshot(inst) == before
+def _files(root: Path) -> dict:
+    """The files of the install *root*, without the folder an update works in."""
+    return {k: v for k, v in _snapshot(root).items() if not k.startswith(".localm-update/")}
 
 
 def test_apply_refuses_a_dropped_download_and_changes_nothing(env):
     _home, inst = env
-    before = _snapshot(inst)
+    before = _files(inst)
     data = _build()
     with pytest.raises(LocalmError):
-        updater.apply(4, signature=envelope(data, [_PRIV]), installed=inst,
-                      download_opener=_download(data[: len(data) // 2]))
-    assert _snapshot(inst) == before
+        _apply(inst, data[: len(data) // 2], signed=data)
+    assert _files(inst) == before
 
 
 def test_apply_refuses_a_signature_mismatch_and_changes_nothing(env):
     _home, inst = env
-    before = _snapshot(inst)
+    before = _files(inst)
     data = _build()
     with pytest.raises(LocalmError):
-        updater.apply(4, signature=envelope(_build("0.4.1"), [_PRIV]), installed=inst,
-                      download_opener=_download(data))
-    assert _snapshot(inst) == before
+        _apply(inst, data, signed=_build("0.4.1"))
+    assert _files(inst) == before
 
 
 def test_apply_refuses_a_signed_package_with_a_cut_off_file_and_changes_nothing(env):
     _home, inst = env
-    before = _snapshot(inst)
+    before = _files(inst)
     damaged = io.BytesIO()
     with zipfile.ZipFile(io.BytesIO(_build())) as zin, zipfile.ZipFile(damaged, "w") as zout:
         for item in zin.infolist():
@@ -404,43 +369,6 @@ def test_apply_refuses_a_signed_package_with_a_cut_off_file_and_changes_nothing(
     with pytest.raises(LocalmError) as ei:
         _apply(inst, damaged.getvalue())
     assert "localm/new.py" in ei.value.reason
-    assert _snapshot(inst) == before
+    assert _files(inst) == before
 
 
-def test_apply_refuses_an_update_the_disk_cannot_hold_and_changes_nothing(env, monkeypatch):
-    _home, inst = env
-    before = _snapshot(inst)
-    real = shutil.disk_usage
-
-    def tiny(path):
-        u = real(path)
-        return type(u)(u.total, u.total - 1024, 1024)
-    monkeypatch.setattr(shutil, "disk_usage", tiny)
-    with pytest.raises(LocalmError) as ei:
-        _apply(inst, _build())
-    assert "not enough free disk space" in ei.value.summary
-    monkeypatch.setattr(shutil, "disk_usage", real)
-    assert _snapshot(inst) == before
-
-
-def test_a_disk_full_during_the_swap_rolls_everything_back(env, monkeypatch):
-    _home, inst = env
-    before = _snapshot(inst)
-    real = shutil.copytree
-    fired = []
-
-    def full(src, dst, *a, **k):
-        if Path(dst).parent == inst and not fired:
-            fired.append(Path(dst))
-            raise OSError(errno.ENOSPC, "No space left on device")
-        return real(src, dst, *a, **k)
-    monkeypatch.setattr(shutil, "copytree", full)
-    with pytest.raises(LocalmError) as ei:
-        _apply(inst, _build())
-    assert ei.value.summary == ("the update could not replace the installed files, so it "
-                                "was rolled back")
-    assert f"[Errno {errno.ENOSPC}] No space left on device" in ei.value.reason
-    assert fired == [inst / "localm"]
-    monkeypatch.setattr(shutil, "copytree", real)
-    assert _snapshot(inst) == before
-    assert not (inst / update_package.NAME).exists()

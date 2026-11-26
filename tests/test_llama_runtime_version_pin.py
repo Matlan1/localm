@@ -739,7 +739,7 @@ def test_update_reprovision_honours_the_pin(monkeypatch, tmp_path, cli_runner):
 
 def test_update_reprovision_actually_reprovisions_when_backend_matches(
         monkeypatch, tmp_path, cli_runner):
-    """`updater.classify()` only escalates to the "runtime" class when the release
+    """An older localm's updater only escalates to the "runtime" class when the release
     manifest DECLARES the native binaries need re-provisioning, so once the
     updater's re-invocation runs at all it must actually replace the build - not
     keep whatever is already on disk because the backend string happens to match.

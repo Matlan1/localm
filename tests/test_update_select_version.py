@@ -53,13 +53,15 @@ def _download(data):
     return opener
 
 
-@pytest.fixture(autouse=True)
-def _builds_without_an_applier(monkeypatch):
-    """The builds these tests install ship no program of their own, so the routes and
-    commands install them with ``updater.apply`` (``updater_handoff.Prepared.legacy``)."""
-    from localm import updater_handoff
-    monkeypatch.setattr(updater_handoff, "prepare", lambda *_a, **_k: updater_handoff.Prepared(
-        Path("."), "0" * 32, "", "", None, True, None, False, None, legacy=True))
+def _install(asset_id, **kw):
+    """Install a test build as an update prepares and hands it over
+    (``tests._update_install.install``)."""
+    from tests._update_install import install
+    return install(asset_id, **kw)
+
+
+def _data_backups(home) -> list:
+    return sorted((home / "updates").glob("data-before-*"))
 
 
 @pytest.fixture
@@ -184,31 +186,29 @@ def test_downgrade_backup_covers_keys_sessions_jobs_and_rag(env):
 def test_selected_older_version_installs_and_backs_up_data(env):
     home, inst = env
     data = _zip("0.2.0")
-    res = updater.apply(2, signature=envelope(data, [_PRIV]), target_version="v0.2.0",
+    res = _install(2, signature=envelope(data, [_PRIV]), target_version="v0.2.0",
                         installed=inst, download_opener=_download(data))
     assert _installed(inst) == "0.2.0"
-    assert res["applied"] and res["downgrade"] is True and res["verified"] is True
-    from pathlib import Path
-    backup = Path(res["data_backup"])
-    assert backup.parent == home / "updates"
+    assert res.downgrade is True and res.verified is True
+    (backup,) = _data_backups(home)
     assert json.loads((backup / "config.json").read_text(encoding="utf-8")) == {
         "kv_cache_type": "q8_0"}
 
 
 def test_selected_newer_version_installs_without_data_backup(env):
-    _home, inst = env
+    home, inst = env
     data = _zip("0.4.0")
-    res = updater.apply(4, signature=envelope(data, [_PRIV]), target_version="0.4.0",
+    res = _install(4, signature=envelope(data, [_PRIV]), target_version="0.4.0",
                         installed=inst, download_opener=_download(data))
     assert _installed(inst) == "0.4.0"
-    assert res["downgrade"] is False and res["data_backup"] is None
+    assert res.downgrade is False and _data_backups(home) == []
 
 
 def test_plain_update_still_refuses_a_downgrade(env):
     _home, inst = env
     data = _zip("0.2.0")
     with pytest.raises(LocalmError) as ei:
-        updater.apply(2, signature=envelope(data, [_PRIV]), installed=inst,
+        _install(2, signature=envelope(data, [_PRIV]), installed=inst,
                       download_opener=_download(data))
     assert "not newer" in ei.value.summary
     assert _installed(inst) == "0.3.0"
@@ -218,7 +218,7 @@ def test_plain_update_still_refuses_an_unverified_build(env):
     _home, inst = env
     data = _zip("0.4.0")
     with pytest.raises(LocalmError):
-        updater.apply(4, signature=envelope(b"other bytes", [_PRIV]), installed=inst,
+        _install(4, signature=envelope(b"other bytes", [_PRIV]), installed=inst,
                       download_opener=_download(data))
     assert _installed(inst) == "0.3.0"
 
@@ -227,7 +227,7 @@ def test_selected_version_mismatch_is_refused(env):
     _home, inst = env
     data = _zip("0.1.9")
     with pytest.raises(LocalmError) as ei:
-        updater.apply(2, signature=envelope(data, [_PRIV]), target_version="0.2.0",
+        _install(2, signature=envelope(data, [_PRIV]), target_version="0.2.0",
                       installed=inst, download_opener=_download(data))
     assert "it is 0.1.9" in ei.value.summary
     assert _installed(inst) == "0.3.0"
@@ -238,21 +238,10 @@ def test_selected_mismatch_is_refused_even_when_unverified_is_allowed(env):
     data = _zip("0.1.9")
     import hashlib
     with pytest.raises(LocalmError):
-        updater.apply(2, signature=None, target_version="0.2.0", installed=inst,
+        _install(2, signature=None, target_version="0.2.0", installed=inst,
                       allow_unverified=True, expect_sha256=hashlib.sha256(data).hexdigest(),
                       download_opener=_download(data))
     assert _installed(inst) == "0.3.0"
-
-
-def test_rollback_after_a_selected_downgrade_returns_to_the_previous_version(env):
-    _home, inst = env
-    data = _zip("0.2.0")
-    updater.apply(2, signature=envelope(data, [_PRIV]), target_version="0.2.0",
-                  installed=inst, download_opener=_download(data))
-    assert _installed(inst) == "0.2.0"
-    updater.rollback_last(installed=inst)
-    assert _installed(inst) == "0.3.0"
-    assert (inst / "localm" / "__init__.py").read_text(encoding="utf-8") == "# 0.3.0"
 
 
 # ---------------------- a build that does not verify ----------------------
@@ -262,17 +251,17 @@ def test_tampered_build_warns_with_reason_then_installs_on_consent(env):
     data = _zip("0.2.0")
     sig = envelope(b"the bytes that were really signed", [_PRIV])
     with pytest.raises(updater.UnverifiedBuild) as ei:
-        updater.apply(2, signature=sig, target_version="0.2.0", installed=inst,
+        _install(2, signature=sig, target_version="0.2.0", installed=inst,
                       download_opener=_download(data))
     assert _installed(inst) == "0.3.0", "nothing is installed before the user agrees"
     assert "altered" in ei.value.reason
     import hashlib
     assert ei.value.sha256 == hashlib.sha256(data).hexdigest()
-    res = updater.apply(2, signature=sig, target_version="0.2.0", installed=inst,
+    res = _install(2, signature=sig, target_version="0.2.0", installed=inst,
                         allow_unverified=True, expect_sha256=ei.value.sha256,
                         download_opener=_download(data))
     assert _installed(inst) == "0.2.0"
-    assert res["verified"] is False and "altered" in res["verify_reason"]
+    assert res.verified is False and "altered" in res.verify_reason
     assert not (home / "updates" / "trust.json").exists()
 
 
@@ -280,7 +269,7 @@ def test_consent_is_bound_to_the_confirmed_build(env):
     _home, inst = env
     data = _zip("0.2.0")
     with pytest.raises(LocalmError) as ei:
-        updater.apply(2, signature=None, target_version="0.2.0", installed=inst,
+        _install(2, signature=None, target_version="0.2.0", installed=inst,
                       allow_unverified=True, expect_sha256="0" * 64,
                       download_opener=_download(data))
     assert "differs from the one you confirmed" in ei.value.summary
@@ -291,7 +280,7 @@ def test_allow_unverified_needs_the_sha256(env):
     _home, inst = env
     data = _zip("0.2.0")
     with pytest.raises(LocalmError):
-        updater.apply(2, signature=None, target_version="0.2.0", installed=inst,
+        _install(2, signature=None, target_version="0.2.0", installed=inst,
                       allow_unverified=True, download_opener=_download(data))
     assert _installed(inst) == "0.3.0"
 
@@ -300,7 +289,7 @@ def test_unsigned_build_reason(env):
     _home, inst = env
     data = _zip("0.2.0")
     with pytest.raises(updater.UnverifiedBuild) as ei:
-        updater.apply(2, signature=None, target_version="0.2.0", installed=inst,
+        _install(2, signature=None, target_version="0.2.0", installed=inst,
                       download_opener=_download(data))
     assert "no signature" in ei.value.reason
 
@@ -310,7 +299,7 @@ def test_a_legacy_bare_signature_is_reported_and_never_trusted(env):
     data = _zip("0.2.0")
     bare = base64.b64encode(Ed25519PrivateKey.generate().sign(data)).decode("ascii")
     with pytest.raises(updater.UnverifiedBuild) as ei:
-        updater.apply(2, signature=bare, target_version="0.2.0", installed=inst,
+        _install(2, signature=bare, target_version="0.2.0", installed=inst,
                       download_opener=_download(data))
     assert "0.2.0 or earlier" in ei.value.reason
     with pytest.raises(LocalmError):
@@ -326,10 +315,10 @@ def test_selected_install_never_moves_the_key_set_back(env):
     old = keyset(1, [_PRIV], _RECOVERY, signers=_RECOVERY[:2])
     sig = envelope(data, [_PRIV], keyset=old)
     with pytest.raises(updater.UnverifiedBuild) as ei:
-        updater.apply(2, signature=sig, target_version="0.2.0", installed=inst,
+        _install(2, signature=sig, target_version="0.2.0", installed=inst,
                       download_opener=_download(data))
     assert "older than the trusted key set 2" in ei.value.reason
-    updater.apply(2, signature=sig, target_version="0.2.0", installed=inst,
+    _install(2, signature=sig, target_version="0.2.0", installed=inst,
                   allow_unverified=True, expect_sha256=ei.value.sha256,
                   download_opener=_download(data))
     saved = json.loads((home / "updates" / "trust.json").read_text(encoding="utf-8"))
@@ -342,9 +331,9 @@ def test_unverified_build_never_installs_its_key_set(env):
     offered = keyset(2, [_PRIV], _RECOVERY, signers=_RECOVERY[:2])
     sig = envelope(b"not these bytes", [_PRIV], keyset=offered)
     with pytest.raises(updater.UnverifiedBuild) as ei:
-        updater.apply(2, signature=sig, target_version="0.2.0", installed=inst,
+        _install(2, signature=sig, target_version="0.2.0", installed=inst,
                       download_opener=_download(data))
-    updater.apply(2, signature=sig, target_version="0.2.0", installed=inst,
+    _install(2, signature=sig, target_version="0.2.0", installed=inst,
                   allow_unverified=True, expect_sha256=ei.value.sha256,
                   download_opener=_download(data))
     assert not (home / "updates" / "trust.json").exists()
@@ -381,9 +370,9 @@ def test_older_build_gets_a_trust_bridge_and_verifies_newer_releases(env, monkey
     data = _zip("0.2.0", files={"localm/updater.py": _OLD_UPDATER})
     sig = base64.b64encode(Ed25519PrivateKey.generate().sign(data)).decode("ascii")
     with pytest.raises(updater.UnverifiedBuild) as ei:
-        updater.apply(2, signature=sig, target_version="0.2.0", installed=inst,
+        _install(2, signature=sig, target_version="0.2.0", installed=inst,
                       download_opener=_download(data))
-    updater.apply(2, signature=sig, target_version="0.2.0", installed=inst,
+    _install(2, signature=sig, target_version="0.2.0", installed=inst,
                   allow_unverified=True, expect_sha256=ei.value.sha256,
                   download_opener=_download(data))
     assert _installed(inst) == "0.2.0"
@@ -418,7 +407,7 @@ def test_older_build_runs_its_dependency_step_with_the_found_uv(env, monkeypatch
     data = _zip("0.2.0", files={"localm/updater.py": _OLD_UPDATER,
                                 "localm/_apply_update.py": _OLD_APPLY_UPDATE})
     sig = envelope(data, [_PRIV])
-    updater.apply(2, signature=sig, target_version="0.2.0", installed=inst,
+    _install(2, signature=sig, target_version="0.2.0", installed=inst,
                   download_opener=_download(data))
     assert found == [inst]
     probe = ("import sys; sys.path.insert(0, sys.argv[1]); import localm.updater; "
@@ -438,7 +427,7 @@ def test_a_build_that_needs_no_uv_bridge_gets_none(env, monkeypatch):
     current = "def post_swap_command(klass, backend=None, uv=None):\n    return [uv]\n"
     data = _zip("0.2.0", files={"localm/_apply_update.py": current,
                                 "localm/updater.py": _OLD_UPDATER})
-    updater.apply(2, signature=envelope(data, [_PRIV]), target_version="0.2.0",
+    _install(2, signature=envelope(data, [_PRIV]), target_version="0.2.0",
                   installed=inst, download_opener=_download(data))
     assert "_localm_bridged_post_swap_command" not in (
         inst / "localm" / "updater.py").read_text(encoding="utf-8")
@@ -460,7 +449,7 @@ def check_build(data, signature):
 def test_a_031_build_gets_the_bridge_and_refuses_the_revoked_key(env, monkeypatch):
     home, inst = env
     data = _zip("0.3.1", files={"localm/updater.py": _OLD_031_UPDATER})
-    updater.apply(2, signature=envelope(data, [_PRIV]), target_version="0.3.1",
+    _install(2, signature=envelope(data, [_PRIV]), target_version="0.3.1",
                   installed=inst, download_opener=_download(data))
     assert (inst / "localm" / "_update_trust_bridge.py").is_file()
     old = _load_installed_old_updater(inst, monkeypatch)
@@ -478,6 +467,7 @@ def test_a_031_build_gets_the_bridge_and_refuses_the_revoked_key(env, monkeypatc
     saved = keyset(2, [_PRIV], _RECOVERY)
     saved["release"]["keys"].append(revoked)
     saved["signatures"] = []
+    (home / "updates").mkdir(exist_ok=True)
     (home / "updates" / "trust.json").write_text(json.dumps(saved), encoding="utf-8")
     with pytest.raises(LocalmError) as ei:
         old.check_build(newer, envelope(newer, [_PRIV]))
@@ -487,7 +477,7 @@ def test_a_031_build_gets_the_bridge_and_refuses_the_revoked_key(env, monkeypatc
 def test_a_bridged_031_build_takes_a_trusted_argument_and_still_uses_its_own_keys(env, monkeypatch):
     _home, inst = env
     data = _zip("0.3.1", files={"localm/updater.py": _OLD_031_UPDATER})
-    updater.apply(2, signature=envelope(data, [_PRIV]), target_version="0.3.1",
+    _install(2, signature=envelope(data, [_PRIV]), target_version="0.3.1",
                   installed=inst, download_opener=_download(data))
     old = _load_installed_old_updater(inst, monkeypatch)
     newer = _zip("0.4.0")
@@ -501,7 +491,7 @@ def test_a_build_that_already_verifies_envelopes_gets_no_bridge(env):
     _home, inst = env
     data = _zip("0.2.0", files={
         "localm/updater.py": '_SIG_FORMAT = "localm-update-sig/2"\n_REVOKED_KEYS = frozenset()\n'})
-    updater.apply(2, signature=envelope(data, [_PRIV]), target_version="0.2.0",
+    _install(2, signature=envelope(data, [_PRIV]), target_version="0.2.0",
                   installed=inst, download_opener=_download(data))
     assert not (inst / "localm" / "_update_trust_bridge.py").exists()
 
@@ -510,45 +500,13 @@ def test_a_downgrade_carries_a_newer_trusted_key_set_into_the_data_dir(env, monk
     home, inst = env
     monkeypatch.setattr(updater, "_PINNED_KEYSET", keyset(2, [_PRIV], _RECOVERY))
     data = _zip("0.2.0")
-    updater.apply(2, signature=envelope(data, [_PRIV]), target_version="0.2.0",
+    _install(2, signature=envelope(data, [_PRIV]), target_version="0.2.0",
                   installed=inst, download_opener=_download(data))
     saved = json.loads((home / "updates" / "trust.json").read_text(encoding="utf-8"))
     assert saved["seq"] == 2
 
 
 # ---------------------------- native runtime -------------------------------
-
-def test_a_different_llama_pin_reprovisions_the_runtime(env, monkeypatch):
-    _home, inst = env
-    (inst / "localm" / "setup_llama").mkdir()
-    (inst / "localm" / "setup_llama" / "pins.py").write_text(
-        '_PINNED_TAG = "b11757"\n', encoding="utf-8")
-    lib = inst / "runtime" / "localm_llama_runtime" / "lib"
-    lib.mkdir(parents=True)
-    (lib / ".localm-backend").write_text("vulkan b11757", encoding="utf-8")
-    data = _zip("0.2.0", files={"localm/setup_llama/pins.py": '_PINNED_TAG = "b11541"\n'})
-    ran = []
-
-    def setup_llama(cmd):
-        ran.append(cmd)
-        (lib / ".localm-backend").write_text("vulkan b11541", encoding="utf-8")
-        return 0
-    res = updater.apply(2, signature=envelope(data, [_PRIV]), target_version="0.2.0",
-                        installed=inst, download_opener=_download(data), runner=setup_llama)
-    assert res["klass"] == "runtime"
-    assert res["runtime"]["state"] == "updated"
-    assert ran and "setup-llama" in ran[0]
-    assert "--keep-choice" not in ran[0], "that build's setup-llama has no such flag"
-
-
-def test_the_same_llama_pin_keeps_the_runtime(env):
-    _home, inst = env
-    data = _zip("0.2.0")
-    res = updater.apply(2, signature=envelope(data, [_PRIV]), target_version="0.2.0",
-                        installed=inst, download_opener=_download(data),
-                        runner=lambda c: pytest.fail(f"unexpected post step {c}"))
-    assert res["klass"] == "reboot"
-
 
 # ------------------------------ HTTP routes --------------------------------
 
@@ -558,7 +516,8 @@ OWNER_KEY = "owner-admin-key-select-version-abc123"
 @pytest.fixture
 def routes(tmp_path, monkeypatch):
     """Protected mode with an owner key and a scoped config:read/write key; the
-    updater's proxy calls and apply are stubbed and recorded."""
+    updater's proxy calls and ``updater_handoff.prepare`` are stubbed and recorded, and no
+    restart really happens."""
     from fastapi.testclient import TestClient
 
     import localm.config as cfg
@@ -578,14 +537,17 @@ def routes(tmp_path, monkeypatch):
     monkeypatch.setattr(updater, "available", lambda: True)
     monkeypatch.setattr(updater, "fetch_release", lambda v: {
         "version": "v" + v.lstrip("v"), "asset": {"id": 7}, "signature": "SIG"})
+    from localm import updater_handoff
 
-    def fake_apply(asset_id, **kw):
+    def fake_prepare(asset_id, **kw):
         applied.append((asset_id, kw))
         if kw.get("signature") == "SIG" and not kw.get("allow_unverified"):
             raise updater.UnverifiedBuild(kw["target_version"], "it is unsigned", "a" * 64)
-        return {"applied": True, "version": kw["target_version"].lstrip("v"),
-                "klass": "reboot", "verified": False}
-    monkeypatch.setattr(updater, "apply", fake_apply)
+        return updater_handoff.Prepared(Path("."), "0" * 32, "0.3.0",
+                                        kw["target_version"].lstrip("v"),
+                                        kw["target_version"], False, "it is unsigned", True,
+                                        None)
+    monkeypatch.setattr(updater_handoff, "prepare", fake_prepare)
     monkeypatch.setattr(updater, "list_versions", lambda: {
         "current": "0.3.0", "releases": [{"version": "v0.2.0", "direction": "older"}]})
     scoped = auth.create_key(
@@ -652,7 +614,9 @@ def test_cli_check_with_to_never_installs(monkeypatch):
     from localm.cli import main
     monkeypatch.setattr(updater, "available", lambda: True)
     monkeypatch.setattr(updater, "fetch_release", lambda v: pytest.fail("--check looked up a release"))
-    monkeypatch.setattr(updater, "apply", lambda *a, **k: pytest.fail("--check installed a build"))
+    from localm import updater_handoff
+    monkeypatch.setattr(updater_handoff, "prepare",
+                        lambda *a, **k: pytest.fail("--check installed a build"))
     r = CliRunner().invoke(main, ["update", "--check", "--to", "0.2.0", "--yes"])
     assert r.exit_code == 2, r.output
     assert "only one of" in r.output

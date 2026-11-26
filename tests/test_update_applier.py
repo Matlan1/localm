@@ -1155,7 +1155,7 @@ class _Prepared:
         self.processes = [{"key": k, "pid": i, "purpose": p, "restarts": k in servers}
                           for i, (k, p) in enumerate(processes, 1)]
         self.servers = {k: {} for k in servers}
-        self.legacy, self.edited, self.discarded = False, [], 0
+        self.edited, self.discarded = [], 0
 
     def ended(self):
         return [p for p in self.processes if p["key"] not in self.servers]
@@ -1557,8 +1557,7 @@ def test_prepare_downloads_checks_extracts_and_runs_the_check_of_the_new_build(
                                        installed=update.root, say=said.append)
     work = update.root / ".localm-update" / prepared.id
     try:
-        assert (prepared.old, prepared.new, prepared.verified, prepared.legacy) == (
-            "1", "2", True, False)
+        assert (prepared.old, prepared.new, prepared.verified) == ("1", "2", True)
         assert (work / "new" / "VERSION").read_text(encoding="utf-8") == "2"
         assert (work / "applier" / "update_mechanism" / "applier.py").is_file()
         assert json.loads((work / "check.json").read_text(encoding="utf-8"))["refused"] is None

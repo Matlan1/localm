@@ -223,7 +223,7 @@ def test_survives_after_launcher_process_exits(tmp_path):
     """The watchdog must be a genuinely DETACHED OS process, not tied to its
     immediate launcher's lifetime: it has to survive a server that crashes right
     after spawning it. A throwaway launcher spawns the watchdog with the exact
-    same detachment flags updater.spawn_health_watchdog() uses, then exits
+    same detachment flags an older localm's spawn_health_watchdog() uses, then exits
     immediately; the watchdog must keep running (and finish) afterward."""
     held, closed_port = _held_port()   # reserved, never listening for this test
     try:

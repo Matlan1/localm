@@ -22,10 +22,10 @@ from localm import _apply_update as au
 from localm import _version, updater, updater_components as uc, updater_finish, updater_runtime, uv_tool
 from localm.bugreport import LocalmError
 from tests._exe_stub import write_exe_stub
+from tests._old_client_update import old_client_update
 from tests._net_config import set_config
 from tests._update_signing import envelope, keyset
 
-_REAL_RUN = subprocess.run
 _PROGRAM = Path(sys.executable).read_bytes() if os.name == "nt" else b"trampoline"
 _PRIV = Ed25519PrivateKey.generate()
 _RECOVERY = [Ed25519PrivateKey.generate() for _ in range(3)]
@@ -196,109 +196,7 @@ def _assert_venv_is_031(site: Path) -> None:
 
 # --------------------------- failures inside apply ---------------------------
 
-def test_a_failed_deps_step_puts_the_venv_and_install_record_back(install):
-    inst, site = install
-    data, sig = _release_032(sd=None)
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=_deps_step(site, rc=1))
-    assert _state(site) == {"localm": "0.3.1", "click": "8.0"}, "venv rolled back"
-    _assert_venv_is_031(site)
-    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
-    assert ei.value.summary == "the post-update step failed; rolled back"
-
-
 _RETRY_CMD = "localm.bat" if sys.platform == "win32" else "./localm.sh"
-
-
-def test_a_failed_deps_step_says_how_to_try_again(install):
-    inst, site = install
-    files = _files("0.3.2", ["click", "rich"])
-    files.update({"localm.bat": "@echo off\r\n", "localm.sh": "#!/bin/sh\n"})
-    data, sig = _release(files)
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=_deps_step(site, rc=2))
-    _assert_venv_is_031(site)
-    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
-    assert ei.value.summary == "the post-update step failed; rolled back"
-    assert ei.value.reason.endswith(
-        f"exited 2. To try again, close localm and run {_RETRY_CMD} update in the localm "
-        "install folder")
-
-
-def _release_with_launchers():
-    files = _files("0.3.2", ["click", "rich"])
-    files.update({"localm.bat": "@echo off\r\n", "localm.sh": "#!/bin/sh\n"})
-    return _release(files)
-
-
-def test_a_deps_step_that_cannot_start_says_how_to_try_again(install):
-    inst, site = install
-    data, sig = _release_with_launchers()
-
-    def run(cmd):
-        raise OSError("no such program")
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=run)
-    _assert_venv_is_031(site)
-    assert ei.value.summary == "the post-update step crashed; rolled back"
-    assert ei.value.reason.endswith(
-        f"no such program. To try again, close localm and run {_RETRY_CMD} update in the "
-        "localm install folder")
-
-
-def test_a_failed_rollback_after_the_deps_step_asks_for_no_retry(install, monkeypatch):
-    inst, site = install
-    data, sig = _release_with_launchers()
-
-    def broken(*a, **k):
-        raise OSError("disk gone")
-    monkeypatch.setattr(updater, "_restore_all", broken)
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=_deps_step(site, rc=2))
-    assert ei.value.summary == "the post-update step failed AND rollback failed - manual recovery needed"
-    assert "disk gone" in ei.value.reason
-    assert "To try again" not in ei.value.reason
-
-
-def test_a_failed_deps_step_without_a_launcher_script_names_only_the_failure(install):
-    inst, site = install
-    data, sig = _release_032(sd=None)
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=_deps_step(site, rc=2))
-    assert ei.value.reason.endswith("exited 2")
-    assert "To try again" not in ei.value.reason
-
-
-def test_a_failed_component_after_the_deps_step_puts_the_venv_back(install, home):
-    inst, site = install
-    data, sig = _release_032()
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=_children(home, site, sd_rc=1))
-    _assert_venv_is_031(site)
-    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
-    assert "a component could not be updated, so the update was rolled back" == ei.value.summary
-
-
-def test_a_failed_runtime_after_the_deps_step_puts_the_venv_back(install, home, monkeypatch):
-    inst, site = install
-    data, sig = _release_032(sd=None)
-    monkeypatch.setattr(updater_runtime, "plan", lambda staged, target: {
-        "reprovision": True, "backend": "vulkan", "current": "b1", "target": "b2",
-        "source": "release", "pins": {}, "note": "re-provisions the runtime"})
-    monkeypatch.setattr(updater_runtime, "stop_own_holders", lambda *a, **k: [])
-    monkeypatch.setattr(updater_runtime, "finish_pending",
-                        lambda **kw: {"state": "failed", "note": "setup-llama exited 1"})
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=_deps_step(site))
-    _assert_venv_is_031(site)
-    assert "native runtime could not be updated" in ei.value.summary
 
 
 # ------------------------------- rollback_last -------------------------------
@@ -306,8 +204,7 @@ def test_a_failed_runtime_after_the_deps_step_puts_the_venv_back(install, home, 
 def test_rollback_last_puts_the_venv_back_and_records_the_rollback(install, home):
     inst, site = install
     data, sig = _release_032()
-    res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                        runner=_children(home, site))
+    res = old_client_update(inst, data, runner=_children(home, site))
     assert res["components"]["state"] == "updated"
     assert _state(site) == {"localm": "0.3.2", "click": "8.1", "rich": "13.0"}
     updater.rollback_last(installed=inst)
@@ -320,8 +217,7 @@ def test_rollback_last_puts_the_venv_back_and_records_the_rollback(install, home
 def test_the_restart_rollback_puts_every_part_back(install, home, monkeypatch):
     inst, site = install
     data, sig = _release_032()
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site), defer_runtime=True)
+    old_client_update(inst, data, runner=_deps_step(site), defer=True)
     assert _state(site)["localm"] == "0.3.2"
     import localm.inference.http_server as hs
     monkeypatch.setattr(updater, "repo_root", lambda: inst)
@@ -335,15 +231,6 @@ def test_the_restart_rollback_puts_every_part_back(install, home, monkeypatch):
     status = uc.last_status()
     assert status["state"] == "rolled_back"
     assert "setup-sdcpp exited 1" in status["note"], "the reason stays named"
-
-
-def test_a_failure_inside_apply_keeps_the_failed_status(install, home):
-    inst, site = install
-    data, sig = _release_032()
-    with pytest.raises(LocalmError):
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=_children(home, site, sd_rc=1))
-    assert uc.last_status()["state"] == "failed"
 
 
 def test_a_rollback_undoes_the_pytorch_step_and_the_deps_step_in_order(install, tmp_path):
@@ -442,8 +329,7 @@ def test_a_file_two_changed_distributions_share_is_restored(install, tmp_path):
 def test_a_rollback_keeps_packages_installed_after_the_update(install, home):
     inst, site = install
     data, sig = _release_032(sd=None)
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site))
+    old_client_update(inst, data, runner=_deps_step(site))
     state = json.loads((uc.snapshot_dir(updater._backup_dir()) / uc.STATE_FILE)
                        .read_text(encoding="utf-8"))
     assert sorted(state["components"][uc.DEPS]["dists"]) == ["click", "localm", "rich"]
@@ -455,8 +341,7 @@ def test_a_rollback_keeps_packages_installed_after_the_update(install, home):
 def test_a_backup_an_older_build_replaced_does_not_restore_what_was_kept(install, home):
     inst, site = install
     data, sig = _release_032(sd=None)
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site))
+    old_client_update(inst, data, runner=_deps_step(site))
     backup = updater._backup_dir()
     (backup / "VERSION").write_text("0.1.5", encoding="utf-8")
     updater.rollback_last(installed=inst)
@@ -467,8 +352,7 @@ def test_a_backup_an_older_build_replaced_does_not_restore_what_was_kept(install
 def test_the_standalone_rollback_skips_a_venv_kept_for_another_backup(install, home, monkeypatch):
     inst, site = install
     data, sig = _release_032(sd=None)
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site))
+    old_client_update(inst, data, runner=_deps_step(site))
     (updater._backup_dir() / "VERSION").write_text("0.1.5", encoding="utf-8")
     monkeypatch.setenv("LOCALM_HOME", str(home))
     rb = _load_script("rollback_update")
@@ -479,8 +363,7 @@ def test_the_standalone_rollback_skips_a_venv_kept_for_another_backup(install, h
 def test_a_corrupt_snapshot_refuses_the_rollback_with_nothing_changed(install, home):
     inst, site = install
     data, sig = _release_032(sd=None)
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site))
+    old_client_update(inst, data, runner=_deps_step(site))
     (uc.snapshot_dir(updater._backup_dir()) / uc.STATE_FILE).write_text("{not json",
                                                                          encoding="utf-8")
     with pytest.raises(LocalmError) as ei:
@@ -490,22 +373,6 @@ def test_a_corrupt_snapshot_refuses_the_rollback_with_nothing_changed(install, h
     assert _state(site)["localm"] == "0.3.2"
 
 
-def test_an_update_that_keeps_the_dependencies_leaves_the_parts_consistent(
-        install, home, monkeypatch):
-    from localm import updater_parts
-    inst, site = install
-    data, sig = _release(_files("0.3.2", ["click"], sd="master-1999-bbbbbbb"))
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=lambda c: pytest.fail(f"no step runs: {c}"))
-    monkeypatch.setattr(_version, "read_version", lambda: "0.3.2")
-    parts = updater_parts.installed_parts(inst)
-    assert parts["install_record"] == "0.3.1" and parts["install_record_matches"] is False
-    assert not [p for p in parts["problems"] if "record" in p or "dependencies" in p]
-    updater.rollback_last(installed=inst)
-    monkeypatch.setattr(_version, "read_version", lambda: "0.3.1")
-    assert not [p for p in updater_parts.installed_parts(inst)["problems"] if "record" in p]
-
-
 def test_a_kept_record_survives_a_later_update_that_is_rolled_back(install, home, monkeypatch):
     from localm import updater_parts
     inst, site = install
@@ -513,8 +380,7 @@ def test_a_kept_record_survives_a_later_update_that_is_rolled_back(install, home
     assert updater_parts._kept_records() == {"0.3.2": "0.3.1"}
     monkeypatch.setattr(_version, "read_version", lambda: "0.3.2")
     data, sig = _release(_files("0.3.3", ["click", "rich"]))
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site))
+    old_client_update(inst, data, runner=_deps_step(site))
     updater.rollback_last(installed=inst)
     assert _state(site)["localm"] == "0.3.1"
     assert not [p for p in updater_parts.installed_parts(inst)["problems"] if "record" in p]
@@ -595,28 +461,16 @@ def test_an_old_failure_is_not_named_as_the_reason(install, home):
     status = json.loads((updater._updates_dir() / uc.STATUS_FILE).read_text(encoding="utf-8"))
     status["at"] = 1.0
     (updater._updates_dir() / uc.STATUS_FILE).write_text(json.dumps(status), encoding="utf-8")
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site))
+    old_client_update(inst, data, runner=_deps_step(site))
     updater.rollback_last(installed=inst)
     assert "an old failure" not in uc.last_status()["note"]
-
-
-def test_a_runtime_that_was_undone_does_not_stay_reported_as_updated(install, home, monkeypatch):
-    inst, site = install
-    data, sig = _release_032(sd=None)
-    updater_runtime._write_status({"state": "updated", "note": "re-provisioned a -> b"})
-    with pytest.raises(LocalmError):
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=_deps_step(site, rc=1))
-    assert updater_runtime.last_status()["state"] == "rolled_back"
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="an open file blocks a move on Windows only")
 def test_a_rollback_refused_by_a_held_file_changes_nothing(install, home):
     inst, site = install
     data, sig = _release_032(sd=None)
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site))
+    old_client_update(inst, data, runner=_deps_step(site))
     with open(site / "rich" / "__init__.py", "rb"):
         with pytest.raises(LocalmError) as ei:
             updater.rollback_last(installed=inst)
@@ -656,10 +510,9 @@ def test_the_update_routes_hold_the_torch_probes(monkeypatch):
              if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "to_thread"]
     held = {ast.unparse(c.args[1]) for c in calls
             if ast.unparse(c.args[0]) == "_probes_held"}
-    assert held == {"updater.apply", "updater_parts.repair", "updater.rollback_last",
-                    "updater_handoff.prepare"}
+    assert held == {"updater_parts.repair", "updater.rollback_last", "updater_handoff.prepare"}
     assert not [c for c in calls if ast.unparse(c.args[0]) in (
-        "updater.apply", "updater_parts.repair", "updater.rollback_last")]
+        "updater_parts.repair", "updater.rollback_last", "updater_handoff.prepare")]
 
 
 def test_a_venv_without_localm_is_a_problem_and_repair_reinstalls(install):
@@ -696,23 +549,6 @@ def test_pinned_imports_load_the_running_code_not_the_swapped_in_files(tmp_path)
         sys.modules.pop("localm._pin_probe_top", None)
         sys.modules.pop("localm.plugins._pin_probe_sub", None)
     assert Path(list(localm.plugins.__path__)[0]) == live / "plugins"
-
-
-def test_apply_pins_imports_to_the_running_code(install, monkeypatch):
-    inst, site = install
-    calls, undone = [], []
-    monkeypatch.setattr(au, "pin_imports",
-                        lambda code, live: calls.append((code, live)) or (lambda: undone.append(1)))
-    data, sig = _release_032(sd=None)
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site))
-    assert calls == [(updater._backup_dir() / "localm", inst / "localm")]
-    assert undone == [], "a successful update stays pinned until the restart"
-    data2, sig2 = _release(_files("0.3.3", ["click", "attrs"]))
-    with pytest.raises(LocalmError):
-        updater.apply(1, signature=sig2, installed=inst, download_opener=_download(data2),
-                      runner=_deps_step(site, rc=1))
-    assert len(calls) == 2 and undone == [1], "a rolled-back update unpins"
 
 
 def test_keep_running_code_copies_and_pins_only_when_this_process_runs_from_there(
@@ -1118,8 +954,7 @@ def _load_script(name):
 def test_the_standalone_rollback_puts_the_venv_back_too(install, home, monkeypatch):
     inst, site = install
     data, sig = _release_032(sd=None)
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site))
+    old_client_update(inst, data, runner=_deps_step(site))
     assert _state(site)["localm"] == "0.3.2"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     repo = Path(__file__).resolve().parents[1]
@@ -1140,8 +975,7 @@ def test_the_standalone_rollback_puts_the_packages_back_when_the_code_fails(
         install, home, monkeypatch, capsys):
     inst, site = install
     data, sig = _release_032(sd=None)
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site))
+    old_client_update(inst, data, runner=_deps_step(site))
     _add_a_name_every_rollback_refuses()
     monkeypatch.setenv("LOCALM_HOME", str(home))
     repo = Path(__file__).resolve().parents[1]
@@ -1180,8 +1014,7 @@ def test_the_standalone_rollback_runs_when_localm_cannot_be_imported(
         install, home, flags, env):
     inst, site = install
     data, sig = _release_032(sd=None)
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site))
+    old_client_update(inst, data, runner=_deps_step(site))
     _stage_standalone_tools(inst)
     (inst / "localm" / "__init__.py").write_text("raise RuntimeError('broken build')\n",
                                                  encoding="utf-8")
@@ -1197,8 +1030,7 @@ def test_the_standalone_rollback_runs_when_localm_cannot_be_imported(
 def test_the_watchdog_rolls_back_when_localm_cannot_be_imported(install, home):
     inst, site = install
     data, sig = _release_032(sd=None)
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site))
+    old_client_update(inst, data, runner=_deps_step(site))
     _stage_standalone_tools(inst)
     out = _run_script(inst, home, "update_watchdog.py", "--host", "127.0.0.1", "--port", "9",
                       "--expect-version", "0.3.2", "--install-root", str(inst),
@@ -1218,8 +1050,7 @@ def test_the_long_path_form_in_the_standalone_helper_matches_the_shared_one(tmp_
 def test_an_unexpected_failure_of_the_package_helper_changes_nothing_and_says_so(install, home):
     inst, site = install
     data, sig = _release_032(sd=None)
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site))
+    old_client_update(inst, data, runner=_deps_step(site))
     _stage_standalone_tools(inst)
     helper = inst / "localm" / "updater_components.py"
     helper.write_text(helper.read_text(encoding="utf-8") + (
@@ -1237,8 +1068,7 @@ def test_an_unexpected_failure_of_the_package_helper_changes_nothing_and_says_so
 def test_a_failure_while_restoring_the_packages_puts_them_back_and_says_so(install, home):
     inst, site = install
     data, sig = _release_032(sd=None)
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site))
+    old_client_update(inst, data, runner=_deps_step(site))
     _stage_standalone_tools(inst)
     helper = inst / "localm" / "updater_components.py"
     helper.write_text(helper.read_text(encoding="utf-8").replace(
@@ -1257,8 +1087,7 @@ def test_a_failure_while_restoring_the_packages_puts_them_back_and_says_so(insta
 def test_a_failed_undo_of_the_packages_is_reported_without_a_traceback(install, home):
     inst, site = install
     data, sig = _release_032(sd=None)
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site))
+    old_client_update(inst, data, runner=_deps_step(site))
     _stage_standalone_tools(inst)
     helper = inst / "localm" / "updater_components.py"
     helper.write_text(helper.read_text(encoding="utf-8") + (
@@ -1289,8 +1118,7 @@ def test_the_standalone_rollback_says_which_parts_it_leaves_and_records_itself(i
     from localm import updater_parts
     inst, site = install
     data, sig = _release_032(sd=None)
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site))
+    old_client_update(inst, data, runner=_deps_step(site))
     _add_kept_parts()
     updater_runtime._write_status({"state": "updated", "note": "re-provisioned the runtime",
                                    "version": "0.3.2"})
@@ -1313,8 +1141,7 @@ def test_the_standalone_rollback_says_which_parts_it_leaves_and_records_itself(i
 def test_the_standalone_rollback_names_no_part_the_update_did_not_keep(install, home):
     inst, site = install
     data, sig = _release_032(sd=None)
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site))
+    old_client_update(inst, data, runner=_deps_step(site))
     _stage_standalone_tools(inst)
     out = _run_script(inst, home, "rollback_update.py", "--yes")
     assert out.returncode == 0, (out.stdout, out.stderr)
@@ -1325,8 +1152,7 @@ def test_the_standalone_rollback_names_no_part_the_update_did_not_keep(install, 
 def test_the_standalone_rollback_ignores_parts_kept_for_another_backup(install, home):
     inst, site = install
     data, sig = _release_032(sd=None)
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site))
+    old_client_update(inst, data, runner=_deps_step(site))
     _add_kept_parts()
     (updater._backup_dir() / "VERSION").write_text("0.1.5", encoding="utf-8")
     _stage_standalone_tools(inst)
@@ -1349,8 +1175,7 @@ def test_the_next_start_brings_uv_back_after_a_standalone_rollback(install, home
     files = _files("0.3.2", ["click", "rich"])
     files[script] = pin("0.13.6")
     data, sig = _release(files)
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site))
+    old_client_update(inst, data, runner=_deps_step(site))
     _add_kept_parts(("uv",))
     uc._mark_checked(inst, "0.3.2")
     _stage_standalone_tools(inst)
@@ -1391,8 +1216,7 @@ def test_the_runtime_step_result_names_its_version(install, monkeypatch):
 def test_a_rollback_records_the_version_it_returned_to(install, home):
     inst, site = install
     data, sig = _release_032(sd=None)
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site))
+    old_client_update(inst, data, runner=_deps_step(site))
     updater.rollback_last(installed=inst)
     assert updater_runtime.last_status()["version"] == "0.3.1"
 
@@ -1406,159 +1230,6 @@ _WINDOWS_HOLDS = pytest.mark.skipif(sys.platform != "win32",
 def _files_of(root: Path) -> dict:
     return {p.relative_to(root).as_posix(): p.read_bytes()
             for p in sorted(root.rglob("*")) if p.is_file()}
-
-
-def _second_update_ready(install, home, monkeypatch):
-    """0.3.1 updated to 0.3.2 (dependency step included), and the signed 0.3.3."""
-    inst, site = install
-    data, sig = _release_032(sd=None)
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site))
-    monkeypatch.setattr(_version, "read_version", lambda: "0.3.2")
-    return _release(_files("0.3.3", ["click", "rich", "tomli"]))
-
-
-@_WINDOWS_HOLDS
-def test_a_backup_that_cannot_be_replaced_rolls_the_update_back_and_stays_whole(
-        install, home, monkeypatch):
-    from tests._held_file import held
-    inst, site = install
-    data, sig = _second_update_ready(install, home, monkeypatch)
-    backup = updater._backup_dir()
-    kept, runtime_kept = _files_of(backup), au.runtime_snapshot_dir(backup)
-    runtime_kept.mkdir()
-    (runtime_kept / "marker").write_text("runtime of 0.3.1", encoding="utf-8")
-    manifest = updater._updates_dir() / "applied_names.json"
-    recorded = manifest.read_text(encoding="utf-8")
-    ran = []
-    raised = None
-    with held(backup / "localm" / "__init__.py"):
-        try:
-            updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                          runner=lambda c: ran.append(c) or 1)
-        except LocalmError as e:
-            raised = e
-    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.2", "the update is undone"
-    assert (inst / "localm" / "__init__.py").read_text(encoding="utf-8") == "# 0.3.2"
-    assert _files_of(backup) == kept, "the backup of the earlier update is whole"
-    assert (runtime_kept / "marker").exists(), "and so is what it keeps beside it"
-    assert uc.snapshot_dir(backup).is_dir()
-    assert manifest.read_text(encoding="utf-8") == recorded
-    assert ran == [], "no step of the update ran"
-    assert not any((updater._updates_dir() / "runs").iterdir())
-    assert raised is not None and "so it was rolled back" in raised.summary
-    assert str(backup) in raised.reason
-
-    res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                        runner=lambda c: 0)
-    assert res["version"] == "0.3.3"
-    assert (backup / "VERSION").read_text(encoding="utf-8") == "0.3.2"
-    assert not runtime_kept.exists()
-    assert not list(updater._updates_dir().glob("backup-replaced-*"))
-    updater.rollback_last(installed=inst)
-    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.2", "the right version"
-
-
-@_WINDOWS_HOLDS
-def test_a_later_rollback_after_a_refused_move_lands_on_the_version_before(
-        install, home, monkeypatch):
-    from tests._held_file import held
-    inst, site = install
-    data, sig = _second_update_ready(install, home, monkeypatch)
-    backup = updater._backup_dir()
-    with held(backup / "localm" / "__init__.py"):
-        with pytest.raises(LocalmError):
-            updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                          runner=lambda c: 0)
-    updater.rollback_last(installed=inst)
-    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
-    _assert_venv_is_031(site)
-
-
-@_WINDOWS_HOLDS
-def test_a_run_backup_a_scanner_holds_is_still_promoted(install, home, monkeypatch):
-    """A program that has one new file of this run's backup open stops the rename; the
-    backup is copied into place instead."""
-    from tests._held_file import held
-    inst, site = install
-    data, sig = _release_032(sd=None)
-    real = au.swap_with_backup
-    holds = []
-
-    def swap_then_hold(root, target, run_backup, *a, **kw):
-        names = real(root, target, run_backup, *a, **kw)
-        holds.append(held(run_backup / "localm" / "__init__.py"))
-        holds[0].__enter__()
-        return names
-
-    monkeypatch.setattr(au, "swap_with_backup", swap_then_hold)
-    monkeypatch.setattr(updater, "_BACKUP_MOVE_WAIT_S", 0.01)
-    try:
-        res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                            runner=_deps_step(site))
-    finally:
-        holds[0].__exit__(None, None, None)
-    assert res["version"] == "0.3.2"
-    backup = updater._backup_dir()
-    assert (backup / "VERSION").read_text(encoding="utf-8") == "0.3.1"
-    assert (backup / "localm" / "__init__.py").read_text(encoding="utf-8") == "# 0.3.1"
-    updater.rollback_last(installed=inst)
-    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
-
-
-@_WINDOWS_HOLDS
-def test_a_run_backup_that_cannot_be_moved_puts_the_earlier_backup_back(install, home, monkeypatch):
-    from tests._held_file import held
-    inst, site = install
-    data, sig = _second_update_ready(install, home, monkeypatch)
-    backup = updater._backup_dir()
-    kept = _files_of(backup)
-    real = au.swap_with_backup
-    holds = []
-
-    def swap_then_hold(root, target, run_backup, *a, **kw):
-        names = real(root, target, run_backup, *a, **kw)
-        holds.append(held(run_backup / "localm" / "__init__.py", exclusive=True))
-        holds[0].__enter__()
-        return names
-
-    monkeypatch.setattr(au, "swap_with_backup", swap_then_hold)
-    monkeypatch.setattr(updater, "_BACKUP_MOVE_WAIT_S", 0.01)
-    raised = None
-    try:
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=lambda c: 0)
-    except LocalmError as e:
-        raised = e
-    finally:
-        holds[0].__exit__(None, None, None)
-    assert _files_of(backup) == kept
-    assert not list(updater._updates_dir().glob("backup-replaced-*"))
-    assert raised is not None and "could not move this update's backup" in raised.reason
-    runs = list((updater._updates_dir() / "runs").glob("*/backup"))
-    assert len(runs) == 1, "the recovery could not read the held file, so this copy stays"
-    assert (runs[0] / "VERSION").read_text(encoding="utf-8") == "0.3.2"
-
-
-@_WINDOWS_HOLDS
-def test_a_failed_recovery_after_a_refused_move_keeps_the_good_backup(install, home, monkeypatch):
-    from tests._held_file import held
-    inst, site = install
-    data, sig = _second_update_ready(install, home, monkeypatch)
-    backup = updater._backup_dir()
-    monkeypatch.setattr(au, "rollback",
-                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("restore boom")))
-    raised = None
-    with held(backup / "localm" / "__init__.py"):
-        try:
-            updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                          runner=lambda c: 0)
-        except LocalmError as e:
-            raised = e
-    runs = list((updater._updates_dir() / "runs").glob("*/backup"))
-    assert len(runs) == 1 and (runs[0] / "VERSION").read_text(encoding="utf-8") == "0.3.2"
-    assert raised is not None and "manual recovery needed" in raised.summary
-    assert str(runs[0]) in raised.reason
 
 
 # ------------------------ a backup that is not whole ---------------------------
@@ -1587,8 +1258,7 @@ def _updated_install(install, *, files=None):
     """The install updated to 0.3.2 with the standalone tools in place."""
     inst, site = install
     data, sig = _release(files or _files("0.3.2", ["click", "rich"]))
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site))
+    old_client_update(inst, data, runner=_deps_step(site))
     _stage_standalone_tools(inst)
     return inst, site
 
@@ -1674,75 +1344,6 @@ def test_an_older_builds_whole_backup_still_rolls_back(install, home, roll_back)
     assert not (inst / "brand_new").exists(), "named by the manifest"
 
 
-def test_the_backup_list_leaves_out_compiled_files(tmp_path):
-    (tmp_path / "inst" / "localm" / "__pycache__").mkdir(parents=True)
-    (tmp_path / "inst" / "localm" / "a.py").write_text("a", encoding="utf-8")
-    (tmp_path / "inst" / "localm" / "__pycache__" / "a.pyc").write_text("c", encoding="utf-8")
-    au.backup(tmp_path / "inst", ["localm", "added"], tmp_path / "b")
-    assert json.loads((tmp_path / "b" / au.BACKUP_RECORD).read_text(encoding="utf-8")) == {
-        "names": ["added", "localm"], "files": ["localm/a.py"]}
-
-
-@_WINDOWS_HOLDS
-def test_a_partial_copy_that_cannot_be_removed_stays_away_from_the_backup_path(
-        install, home, monkeypatch):
-    """The rename of this run's backup and the copy fallback both fail, and a second
-    program holds a file of what the copy wrote."""
-    import shutil
-    from tests._held_file import held
-    inst, site = install
-    data, sig = _second_update_ready(install, home, monkeypatch)
-    backup = updater._backup_dir()
-    kept = _files_of(backup)
-    real_swap, real_copy = au.swap_with_backup, shutil.copytree
-    source_hold, copy_hold = [], []
-
-    def swap_then_hold(root, target, run_backup, *a, **kw):
-        names = real_swap(root, target, run_backup, *a, **kw)
-        source_hold.append(held(run_backup / "localm" / "__init__.py", exclusive=True))
-        source_hold[0].__enter__()
-        return names
-
-    def copy_then_hold(src, dst, *a, **kw):
-        try:
-            return real_copy(src, dst, *a, **kw)
-        except shutil.Error:
-            if source_hold and Path(src).name == "backup":
-                copy_hold.append(held(Path(dst) / "VERSION", exclusive=True))
-                copy_hold[0].__enter__()
-                source_hold[0].__exit__(None, None, None)
-                source_hold.clear()
-            raise
-
-    monkeypatch.setattr(au, "swap_with_backup", swap_then_hold)
-    monkeypatch.setattr(shutil, "copytree", copy_then_hold)
-    monkeypatch.setattr(updater, "_BACKUP_MOVE_WAIT_S", 0.01)
-    raised = None
-    try:
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=lambda c: 0)
-    except LocalmError as e:
-        raised = e
-    finally:
-        monkeypatch.setattr(au, "swap_with_backup", real_swap)
-        monkeypatch.setattr(shutil, "copytree", real_copy)
-    assert copy_hold, "the copy failed and left a file that could not be removed"
-    try:
-        assert _files_of(backup) == kept, "the earlier backup is back and whole"
-        assert raised is not None and "could not move this update's backup" in raised.reason
-        left = list(updater._updates_dir().glob("backup-partial-*"))
-        assert len(left) == 1 and (left[0] / "VERSION").exists()
-        assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.2", "the update is undone"
-    finally:
-        copy_hold[0].__exit__(None, None, None)
-    res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                        runner=lambda c: 0)
-    assert res["version"] == "0.3.3"
-    assert not list(updater._updates_dir().glob("backup-partial-*")), "the next update removes it"
-    updater.rollback_last(installed=inst)
-    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.2"
-
-
 # ---------------------- a rollback over a stale update manifest ------------------
 
 def test_a_folder_the_rollback_did_not_remove_is_not_merged_over(tmp_path):
@@ -1767,229 +1368,9 @@ def test_a_folder_with_a_held_file_is_still_restored_around_it(tmp_path):
     assert (inst / "pkg" / "z.py").read_text(encoding="utf-8") == "old"
 
 
-class _Killed(BaseException):
-    pass
-
-
-@_BOTH_ROLLBACKS
-def test_a_kill_right_after_the_backup_moved_still_rolls_back_this_update(
-        install, home, monkeypatch, roll_back):
-    """The process dies with the new backup in place and the manifest still that of
-    the update before, which does not name the folder this update replaced."""
-    inst, site = install
-    _write_tree(inst, {"pkg/old.py": "old"})
-    data, sig = _second_update_ready(install, home, monkeypatch)
-    manifest = updater._updates_dir() / "applied_names.json"
-    previous = manifest.read_text(encoding="utf-8")
-    assert "pkg" not in previous
-    next_data, next_sig = _release({**_files("0.3.3", ["click", "rich"]), "pkg/new_only.py": "new"})
-
-    def die(run_dir):
-        raise _Killed
-
-    monkeypatch.setattr(updater, "_drop_run_dir", die)
-    with pytest.raises(_Killed):
-        updater.apply(1, signature=next_sig, installed=inst, download_opener=_download(next_data),
-                      runner=lambda c: 0)
-    assert manifest.read_text(encoding="utf-8") == previous, "the state of the crash window"
-    assert (inst / "pkg" / "new_only.py").exists()
-    _stage_standalone_tools(inst)
-    done, said = roll_back(inst, home)
-    assert done, said
-    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.2"
-    assert _files_of(inst / "pkg") == {"old.py": b"old"}, "no mixed folder"
-
-
 # --------------------- the failure a terminal update keeps ----------------------
 
-def test_a_failed_component_step_stays_visible_after_the_update_is_undone(install, home):
-    from localm import updater_parts
-    inst, site = install
-    data, sig = _release_032()
-    with pytest.raises(LocalmError):
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=_children(home, site, sd_rc=1))
-    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
-    steps = updater_parts.installed_parts(inst)["last_steps"]
-    assert [(s["part"], s["state"]) for s in steps if s["state"] == "failed"] == [
-        ("components", "failed")]
-    assert any("setup-sdcpp exited 1" in s["note"] for s in steps)
-    assert uc.last_status()["version"] == "0.3.1"
-
-
-def test_a_failed_runtime_step_stays_visible_after_the_update_is_undone(install, home, monkeypatch):
-    from localm import updater_parts
-    inst, site = install
-    data, sig = _release_032(sd=None)
-    monkeypatch.setattr(updater_runtime, "plan", lambda staged, target: {
-        "reprovision": True, "backend": "vulkan", "current": "b1", "target": "b2",
-        "source": "release", "pins": {}, "note": "re-provisions the runtime"})
-    monkeypatch.setattr(updater_runtime, "stop_own_holders", lambda *a, **k: [])
-
-    def fail(**kw):
-        status = {"state": "failed", "note": "setup-llama exited 1", "version": "0.3.2"}
-        updater_runtime._write_status(status)
-        return status
-
-    monkeypatch.setattr(updater_runtime, "finish_pending", fail)
-    with pytest.raises(LocalmError):
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=_deps_step(site))
-    steps = updater_parts.installed_parts(inst)["last_steps"]
-    assert [(s["part"], s["state"]) for s in steps] == [("runtime", "failed")]
-    assert "setup-llama exited 1" in steps[0]["note"]
-    assert "rolled back to localm 0.3.1" in steps[0]["note"]
-
-
 # ------------------- a rollback during the restart and the watchdog --------------
-
-class _Whoami:
-    """A stand-in for the restarted server's own ``/whoami``, answering *version*."""
-
-    def __init__(self, version: str):
-        import http.server
-        import threading
-
-        class Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):
-                body = json.dumps({"version": version}).encode()
-                self.send_response(200)
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-            def log_message(self, *a):
-                pass
-
-        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.port = self.server.server_address[1]
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-
-    def __enter__(self):
-        self.thread.start()
-        return self
-
-    def __exit__(self, *exc):
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join(timeout=10)
-
-
-def _restart_with_real_watchdog(monkeypatch, *, port, expect, after_steps=None):
-    """Run the real ``_do_restart`` up to its re-exec, with *after_steps* called once its
-    update steps are over. The health watchdog it spawns is the real script, run to its end
-    with a short timeout. Returns the finished watchdog runs."""
-    import localm.inference.backends.llamacpp._loader as loader
-    import localm.inference.http_server as hs
-    from localm import instances
-    monkeypatch.setattr(loader, "stop_probe_daemon", lambda *a, **k: None)
-    monkeypatch.setattr(hs, "_engine", None)
-    monkeypatch.setattr(instances, "unregister_own", lambda iid: None)
-    monkeypatch.setattr(instances, "restore_own", lambda removed: None)
-    for var in ("LOCALM_RESTART_IN_PROGRESS", "LOCALM_UPDATE_STEPS_DONE"):
-        monkeypatch.setenv(var, "1")
-        monkeypatch.delenv(var)
-    ran = []
-    real_spawn = updater.spawn_health_watchdog
-
-    def run_to_the_end(argv, **kw):
-        ran.append(_REAL_RUN(argv, env=kw["env"], capture_output=True, text=True,
-                             timeout=120, **_NO_WINDOW))
-
-    def spawn(**kw):
-        return real_spawn(timeout=1.0, poll_interval=0.2, request_timeout=1.0,
-                          popen=run_to_the_end, **kw)
-
-    monkeypatch.setattr(updater, "spawn_health_watchdog", spawn)
-    real_finish = hs._finish_pending_runtime_update
-
-    def finish():
-        result = real_finish()
-        if after_steps:
-            after_steps()
-        return result
-
-    monkeypatch.setattr(hs, "_finish_pending_runtime_update", finish)
-
-    def stop_here(*_a):
-        raise SystemExit(0)
-
-    monkeypatch.setattr(os, "execve", stop_here)
-    with pytest.raises(SystemExit):
-        hs._do_restart(update_watchdog={"host": "127.0.0.1", "port": port, "scheme": "http",
-                                        "expect_version": expect})
-    return ran
-
-
-def _update_with_steps_left_for_the_restart(install, home, monkeypatch, *, sd_rc):
-    """0.3.1 updated to 0.3.2 with its sd.cpp step left for the restart, which then fails
-    (*sd_rc* 1) or works (0)."""
-    inst, site = install
-    data, sig = _release_032()
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site), defer_runtime=True)
-    monkeypatch.setattr(updater, "repo_root", lambda: inst)
-    run = _children(home, site, sd_rc=sd_rc)
-    monkeypatch.setattr(subprocess, "run",
-                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, run(cmd)))
-    return inst, site
-
-
-def test_a_rollback_during_the_restart_is_not_rolled_back_again(install, home, monkeypatch, caplog):
-    import logging
-    inst, site = _update_with_steps_left_for_the_restart(install, home, monkeypatch, sd_rc=1)
-    sentinel = inst / "localm" / "written_by_the_running_server.txt"
-    with _Whoami("0.3.1") as stub, caplog.at_level(logging.INFO, logger="localm"):
-        ran = _restart_with_real_watchdog(
-            monkeypatch, port=stub.port, expect="0.3.2",
-            after_steps=lambda: sentinel.write_text("x", encoding="utf-8"))
-    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1", "the first rollback ran"
-    _assert_venv_is_031(site)
-    assert sentinel.exists(), "nothing touches the tree the server now runs from"
-    assert ran == [], "no health check waits for a version this restart does not start"
-    assert "health check not started" in caplog.text
-
-
-def test_the_health_check_still_rolls_back_a_build_that_never_answers_its_version(
-        install, home, monkeypatch):
-    inst, site = _update_with_steps_left_for_the_restart(install, home, monkeypatch, sd_rc=0)
-    sentinel = inst / "localm" / "written_by_the_running_server.txt"
-    with _Whoami("0.3.1") as stub:
-        ran = _restart_with_real_watchdog(
-            monkeypatch, port=stub.port, expect="0.3.2",
-            after_steps=lambda: sentinel.write_text("x", encoding="utf-8"))
-    assert [r.returncode for r in ran] == [1], [(r.stdout, r.stderr) for r in ran]
-    assert not sentinel.exists()
-    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
-    assert "something already answers on" in ran[0].stdout, (
-        "with a server answering on the port, the previous version is not started again")
-
-
-def test_a_restart_whose_steps_worked_gets_its_health_check(install, home, monkeypatch):
-    inst, site = _update_with_steps_left_for_the_restart(install, home, monkeypatch, sd_rc=0)
-    sentinel = inst / "localm" / "written_by_the_running_server.txt"
-    with _Whoami("0.3.2") as stub:
-        ran = _restart_with_real_watchdog(
-            monkeypatch, port=stub.port, expect="0.3.2",
-            after_steps=lambda: sentinel.write_text("x", encoding="utf-8"))
-    assert [r.returncode for r in ran] == [0], [(r.stdout, r.stderr) for r in ran]
-    assert sentinel.exists()
-    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.2"
-
-
-@pytest.mark.parametrize("failure", [
-    LocalmError("nothing was rolled back", reason="a holder"),
-    RuntimeError("rollback incomplete"),
-], ids=["refused", "incomplete"])
-def test_a_rollback_that_did_not_finish_keeps_the_health_check(
-        install, home, monkeypatch, failure):
-    inst, site = _update_with_steps_left_for_the_restart(install, home, monkeypatch, sd_rc=1)
-    monkeypatch.setattr(updater, "rollback_last",
-                        lambda **kw: (_ for _ in ()).throw(failure))
-    with _Whoami("0.3.2") as stub:
-        ran = _restart_with_real_watchdog(monkeypatch, port=stub.port, expect="0.3.2")
-    assert [r.returncode for r in ran] == [0], [(r.stdout, r.stderr) for r in ran]
-
 
 def test_the_watchdog_runs_the_rollback_of_the_code_root(tmp_path, monkeypatch):
     wd = _load_script("update_watchdog")
@@ -2003,22 +1384,6 @@ def test_the_watchdog_runs_the_rollback_of_the_code_root(tmp_path, monkeypatch):
     inst.mkdir()
     assert wd._invoke_rollback(inst, None, code) == wd.EXIT_ROLLED_BACK
     assert (inst / "ran").read_text() == str(code)
-
-
-def test_the_watchdog_of_a_pinned_process_is_the_backups(install, monkeypatch, tmp_path):
-    inst, _site = install
-    backup = tmp_path / "bk"
-    (backup / "scripts").mkdir(parents=True)
-    (backup / "scripts" / "update_watchdog.py").write_text("", encoding="utf-8")
-    monkeypatch.setattr(au, "running_code_dir", lambda: backup / "localm")
-    monkeypatch.setattr(updater, "repo_root", lambda: inst)
-    seen = []
-    assert updater.spawn_health_watchdog(host="127.0.0.1", port=1, scheme="http",
-                                         expect_version="0.3.2",
-                                         popen=lambda argv, **kw: seen.append(argv))
-    argv = seen[0]
-    assert argv[1] == str(backup / "scripts" / "update_watchdog.py")
-    assert argv[argv.index("--code-root") + 1] == str(backup)
 
 
 def test_doctor_lists_the_parts_that_differ(monkeypatch):
@@ -2040,396 +1405,6 @@ def test_doctor_lists_the_parts_that_differ(monkeypatch):
 
 
 # ------------------------- the build's own finishing step ---------------------
-
-_FINISH_OK = """
-import json, os, sys
-old, new, klass, result = sys.argv[1:]
-print("finishing", old, "to", new, klass)
-with open(os.path.join("site-marker.json"), "w") as f:
-    json.dump({"argv": sys.argv[1:], "cwd": os.getcwd(), "isolated": sys.flags.isolated,
-               "utf8": sys.flags.utf8_mode}, f)
-with open(result, "w") as f:
-    json.dump({"took_over": %s}, f)
-"""
-
-_FINISH_CHANGES_THE_VENV_THEN = """
-import pathlib, shutil, sys
-site = pathlib.Path(%r)
-shutil.rmtree(site / "click")
-shutil.rmtree(site / "click-8.0.dist-info")
-print("removed click")
-%s
-"""
-
-
-def _finish_release(module: str, *, sd=None, version="0.3.2", deps=("click", "rich")):
-    return _release({**_files(version, list(deps), sd=sd), updater_finish.MODULE: module})
-
-
-def _forbid_deps_step(calls):
-    def run(cmd):
-        calls.append(cmd)
-        return 0
-    return run
-
-
-def _alive(pid: int) -> bool:
-    if sys.platform != "win32":
-        try:
-            os.kill(pid, 0)
-        except OSError:
-            return False
-        return True
-    import ctypes
-    kernel32 = ctypes.windll.kernel32
-    handle = kernel32.OpenProcess(0x1000, False, pid)
-    if not handle:
-        return False
-    try:
-        code = ctypes.c_ulong()
-        kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
-        return code.value == 259
-    finally:
-        kernel32.CloseHandle(handle)
-
-
-def test_a_finishing_step_that_takes_over_the_dependencies_replaces_the_built_in_step(
-        install, monkeypatch):
-    inst, site = install
-    data, sig = _finish_release(_FINISH_OK % '["dependencies"]')
-    uv_lookups = []
-    monkeypatch.setattr(updater, "_uv_for_deps", lambda t: uv_lookups.append(t) or "uv")
-    ran, said = [], []
-    res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                        runner=_forbid_deps_step(ran), say=said.append)
-    assert res["applied"] and res["version"] == "0.3.2"
-    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.2"
-    assert ran == [], "the built-in dependency step did not run"
-    assert uv_lookups == [], "no uv is looked for when the step is taken over"
-    marker = json.loads((inst / "site-marker.json").read_text(encoding="utf-8"))
-    assert marker["argv"][:3] == ["0.3.1", "0.3.2", "deps"]
-    assert Path(marker["cwd"]).resolve() == inst.resolve()
-    assert marker["isolated"] == 1 and marker["utf8"] == 1
-    assert "finishing 0.3.1 to 0.3.2 deps" in said
-    assert not Path(marker["argv"][3]).exists(), "the result file is removed"
-    assert any("took over: dependencies" in s for s in said)
-
-
-def test_a_finishing_step_that_names_nothing_leaves_the_built_in_step(install, monkeypatch):
-    inst, site = install
-    data, sig = _finish_release(_FINISH_OK % "[]")
-    res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                        runner=_deps_step(site))
-    assert res["applied"]
-    assert _state(site)["rich"] == "13.0", "the built-in dependency step ran"
-
-
-def test_the_built_in_step_finds_no_uv_after_a_finishing_step_and_rolls_back(install, monkeypatch):
-    inst, site = install
-    data, sig = _finish_release(_FINISH_OK % "[]")
-
-    def no_uv(target):
-        raise LocalmError("this update needs uv", reason="looked nowhere")
-    monkeypatch.setattr(updater, "_uv_for_deps", no_uv)
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=_deps_step(site))
-    assert ei.value.summary == "this update needs uv" and ei.value.reason == "looked nowhere"
-    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
-
-
-@pytest.mark.parametrize("ending, reason", [
-    ("print('the disk is full'); sys.exit(3)", "the disk is full"),
-    ("raise RuntimeError('it broke')", "RuntimeError: it broke"),
-    ("sys.exit(7)", "removed click"),
-])
-def test_a_failing_finishing_step_puts_every_part_back(install, ending, reason):
-    inst, site = install
-    assert (site / "click").is_dir()
-    data, sig = _finish_release(_FINISH_CHANGES_THE_VENV_THEN % (str(site), ending))
-    ran = []
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=_forbid_deps_step(ran))
-    _assert_venv_is_031(site)
-    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
-    assert not (inst / updater_finish.MODULE).exists()
-    assert ran == []
-    assert ei.value.summary == "the update's finishing step failed, so the update was rolled back"
-    assert ei.value.reason == reason
-
-
-def test_an_install_without_a_venv_runs_and_rolls_back_a_finishing_step(install, monkeypatch):
-    inst, _site = install
-    shutil.rmtree(inst / ".venv")
-    warned = []
-    monkeypatch.setattr(updater, "_apply_warn", lambda msg, *args: warned.append(msg % args))
-    data, sig = _finish_release("import sys; print('no'); sys.exit(1)")
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=_forbid_deps_step([]))
-    assert ei.value.summary == "the update's finishing step failed, so the update was rolled back"
-    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
-    data, sig = _finish_release(_FINISH_OK % '["dependencies"]')
-    assert updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                         runner=_forbid_deps_step([]))["applied"]
-    assert warned == []
-
-
-def test_a_failing_finishing_step_with_no_output_says_how_it_exited(install):
-    inst, _site = install
-    data, sig = _finish_release("import sys; sys.exit(9)")
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=_forbid_deps_step([]))
-    assert ei.value.reason == "the finishing step exited 9"
-
-
-def test_a_failing_finishing_step_puts_the_native_runtime_back(install):
-    inst, _site = install
-    lib = inst / au.RUNTIME_LIB
-    lib.mkdir(parents=True)
-    (lib / "marker.json").write_text("old", encoding="utf-8")
-    data, sig = _finish_release(
-        "import sys\n"
-        f"open(r'{lib / 'marker.json'}', 'w').write('new')\n"
-        "sys.exit(1)\n")
-    with pytest.raises(LocalmError):
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=_forbid_deps_step([]))
-    assert (lib / "marker.json").read_text(encoding="utf-8") == "old"
-
-
-def test_a_hanging_finishing_step_is_stopped_with_its_children(install, tmp_path, monkeypatch):
-    inst, site = install
-    monkeypatch.setattr(updater_finish, "SILENCE_LIMIT_S", 3.0)
-    pids = tmp_path / "pids.json"
-    data, sig = _finish_release(
-        "import json, os, subprocess, sys, time\n"
-        "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'],\n"
-        "                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
-        f"json.dump([os.getpid(), kid.pid], open(r'{pids}', 'w'))\n"
-        "print('working')\n"
-        "time.sleep(600)\n")
-    ran = []
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=_forbid_deps_step(ran))
-    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
-    _assert_venv_is_031(site)
-    assert "printed nothing for 3 s" in ei.value.reason
-    assert ran == []
-    own, kid = json.loads(pids.read_text(encoding="utf-8"))
-    assert not _alive(own) and not _alive(kid)
-
-
-def test_a_finishing_step_that_keeps_printing_stops_at_the_total_limit(install, monkeypatch):
-    inst, _site = install
-    monkeypatch.setattr(updater_finish, "TOTAL_LIMIT_S", 3.0)
-    data, sig = _finish_release(
-        "import time\n"
-        "while True:\n"
-        "    print('still here')\n"
-        "    time.sleep(0.5)\n")
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=_forbid_deps_step([]))
-    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
-    assert "still running after 3 s" in ei.value.reason
-
-
-def test_an_interrupted_finishing_step_rolls_back(install):
-    inst, _site = install
-    data, sig = _finish_release("print('a line'); import time; time.sleep(600)")
-
-    def interrupt(line):
-        if line == "a line":
-            raise KeyboardInterrupt
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=_forbid_deps_step([]), say=interrupt)
-    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
-    assert ei.value.reason == "the finishing step was interrupted"
-
-
-@pytest.mark.parametrize("content", [
-    "b'{not json'", "b'\\xff\\xfe\\x00'", "b'[1, 2]'", "b'{}'",
-    "b'{\"took_over\": \"dependencies\"}'", "b'{\"took_over\": [1]}'",
-    "b'[' * 100000",
-])
-def test_an_unreadable_result_takes_nothing_over(install, content):
-    inst, site = install
-    data, sig = _finish_release(f"import sys\nopen(sys.argv[4], 'wb').write({content})\n")
-    said = []
-    res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                        runner=_deps_step(site), say=said.append)
-    assert res["applied"]
-    assert _state(site)["rich"] == "13.0", "the built-in dependency step ran"
-    assert any("cannot be read" in s for s in said)
-
-
-def test_an_unreadable_result_leaves_the_failure_of_the_built_in_step(install):
-    inst, site = install
-    data, sig = _finish_release("import sys\nopen(sys.argv[4], 'w').write('{broken')\n")
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=_deps_step(site, rc=2))
-    _assert_venv_is_031(site)
-    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
-    assert ei.value.summary == "the post-update step failed; rolled back"
-
-
-def test_a_result_left_by_an_earlier_run_is_not_read(install, home):
-    inst, site = install
-    updates = home / "updates"
-    updates.mkdir(exist_ok=True)
-    (updates / updater_finish.RESULT_FILE).write_text('{"took_over": ["dependencies"]}',
-                                                      encoding="utf-8")
-    data, sig = _finish_release("print('wrote no result')")
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site))
-    assert _state(site)["rich"] == "13.0", "the built-in dependency step ran"
-
-
-def test_a_step_name_it_does_not_know_takes_nothing_over(install):
-    inst, site = install
-    data, sig = _finish_release(_FINISH_OK % '["everything"]')
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_deps_step(site))
-    assert _state(site)["rich"] == "13.0", "the built-in dependency step ran"
-
-
-def _reprovision_plan(monkeypatch):
-    monkeypatch.setattr(updater_runtime, "plan", lambda staged, target: {
-        "reprovision": True, "backend": "vulkan", "current": "b1", "target": "b2",
-        "source": "release", "pins": {}, "note": "re-provisions the runtime"})
-    monkeypatch.setattr(updater_runtime, "stop_own_holders", lambda *a, **k: [])
-
-
-def test_a_finishing_step_that_takes_over_the_runtime_replaces_its_step(install, monkeypatch):
-    inst, _site = install
-    _reprovision_plan(monkeypatch)
-    finished = []
-    monkeypatch.setattr(updater_runtime, "finish_pending", lambda **kw: finished.append(kw))
-    data, sig = _finish_release(_FINISH_OK % '["dependencies", "runtime"]')
-    res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                        runner=_forbid_deps_step([]))
-    assert res["applied"] and finished == []
-    assert updater_runtime.read_pending() is None
-
-
-def test_a_finishing_step_that_does_not_name_the_runtime_leaves_its_step(install, monkeypatch):
-    inst, _site = install
-    _reprovision_plan(monkeypatch)
-    finished = []
-    monkeypatch.setattr(updater_runtime, "finish_pending",
-                        lambda **kw: finished.append(kw) or {"state": "updated", "note": "done"})
-    data, sig = _finish_release(_FINISH_OK % '["dependencies"]')
-    res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                        runner=_forbid_deps_step([]))
-    assert res["applied"] and len(finished) == 1
-
-
-def test_a_finishing_step_that_takes_over_the_components_replaces_their_step(install, home):
-    inst, site = install
-    data, sig = _finish_release(_FINISH_OK % '["dependencies", "components"]',
-                                sd="master-2000-aaaaaaa")
-    ran = []
-    res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                        runner=_forbid_deps_step(ran))
-    assert res["applied"] and ran == [], "no setup-sdcpp, no dependency step"
-    assert res["components"] is None
-    assert uc.read_pending() is None
-
-
-def test_a_finishing_step_that_does_not_name_the_components_leaves_their_step(install, home):
-    inst, site = install
-    data, sig = _finish_release(_FINISH_OK % '["dependencies"]', sd="master-2000-aaaaaaa")
-    res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                        runner=_children(home, site))
-    assert res["components"]["state"] == "updated"
-
-
-def test_a_failed_component_after_a_finishing_step_puts_every_part_back(install, home):
-    inst, site = install
-    data, sig = _finish_release(_FINISH_OK % '["dependencies"]', sd="master-2000-aaaaaaa")
-    with pytest.raises(LocalmError):
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=_children(home, site, sd_rc=1))
-    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
-    _assert_venv_is_031(site)
-
-
-def test_a_build_without_a_finishing_step_runs_the_built_in_steps_only(install, monkeypatch):
-    inst, site = install
-    called = []
-    monkeypatch.setattr(updater_finish, "run", lambda *a, **k: called.append(a) or frozenset())
-    data, sig = _release_032(sd=None)
-    res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                        runner=_deps_step(site))
-    assert res["applied"] and called == []
-    assert _state(site)["rich"] == "13.0"
-    assert sorted(res) == sorted(
-        ["applied", "version", "klass", "backup", "restart_needed", "verified", "verify_reason",
-         "downgrade", "data_backup", "runtime", "runtime_note", "components", "components_note",
-         "kept_for_updates", "git_clone"])
-
-
-def test_finishing_step_output_goes_to_stdout_without_a_say(install, capfd):
-    inst, _site = install
-    data, sig = _finish_release(_FINISH_OK % '["dependencies"]')
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_forbid_deps_step([]))
-    assert "finishing 0.3.1 to 0.3.2 deps" in capfd.readouterr().out
-
-
-def test_the_finishing_step_runs_by_full_path_from_the_install_with_no_window(install, monkeypatch):
-    inst, _site = install
-    seen = []
-    real = subprocess.Popen
-
-    def spy(cmd, **kw):
-        if updater_finish.MODULE.split("/")[-1] in " ".join(map(str, cmd)):
-            seen.append((cmd, kw))
-        return real(cmd, **kw)
-    monkeypatch.setattr(subprocess, "Popen", spy)
-    data, sig = _finish_release(_FINISH_OK % '["dependencies"]')
-    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                  runner=_forbid_deps_step([]))
-    (cmd, kw), = seen
-    assert Path(cmd[0]).is_absolute()
-    assert cmd[1:2] == ["-I"]
-    assert Path(cmd[cmd.index("-u") + 1]).resolve() == (inst / updater_finish.MODULE).resolve()
-    assert Path(kw["cwd"]).resolve() == inst.resolve()
-    assert kw["stdin"] == subprocess.DEVNULL
-    if sys.platform == "win32":
-        assert kw["creationflags"] & subprocess.CREATE_NO_WINDOW
-    else:
-        assert kw["start_new_session"] is True
-
-
-def test_a_failing_finishing_step_puts_back_the_components_this_update_changes(
-        install, home, monkeypatch):
-    inst, _site = install
-    kept, restored = [], []
-    real_snapshot, real_restore = uc.snapshot, updater._restore_all
-
-    def snapshot(names, dest, **kw):
-        kept.append(list(names))
-        return real_snapshot(names, dest, **kw)
-
-    def restore_all(*a, **kw):
-        restored.append(kw["components"])
-        return real_restore(*a, **kw)
-    monkeypatch.setattr(uc, "snapshot", snapshot)
-    monkeypatch.setattr(updater, "_restore_all", restore_all)
-    data, sig = _finish_release("import sys; sys.exit(1)", sd="master-2000-aaaaaaa")
-    with pytest.raises(LocalmError):
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=_forbid_deps_step([]))
-    assert [uc.DEPS, "sdcpp"] in kept
-    assert restored == [None], "every part kept is restored"
-
 
 def test_the_install_python_comes_before_the_running_one(tmp_path):
     assert updater_finish.interpreter(tmp_path) == sys.executable
