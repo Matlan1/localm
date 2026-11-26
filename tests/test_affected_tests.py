@@ -15,7 +15,10 @@ imported under another name. The command line's output shape and its
 wide-selection exit status are pinned too. The last section binds the selector
 to the real tree: a change to the route whose dropped field motivated it
 selects the test that reads that route, the real dependency files parse, and a
-locked uvicorn bump selects the tests that reach it and stays targeted.
+locked uvicorn bump selects the tests that reach it and stays targeted. A
+change to localm/config.py that only adds DEFAULT_CONFIG keys selects the tests
+that read the table and the ones naming a new key, and any other change to it,
+a key addition beside a changed default included, selects every importer.
 """
 
 import importlib.util
@@ -1114,3 +1117,213 @@ def test_real_tree_a_version_bump_is_a_targeted_selection(monkeypatch):
     assert "tests/test_updater.py" in selected
     assert "tests/test_changelog_endpoint.py" in selected
     assert 0 < len(selected) <= 0.25 * len(graph.test_files)
+
+
+# --------------------------------------------------------------------------- #
+#  localm/config.py: a change that only adds DEFAULT_CONFIG keys              #
+# --------------------------------------------------------------------------- #
+
+_CONFIG = (
+    '"""Config."""\n'
+    "import os\n\n"
+    "DEFAULT_CONFIG: dict = {\n"
+    "    # The first key.\n"
+    '    "alpha": 1,\n'
+    '    "beta": [\n'
+    "        1,\n"
+    "        2,\n"
+    "    ],\n"
+    '    "gamma": "x",\n'
+    "}\n\n\n"
+    "def load():\n"
+    "    return dict(DEFAULT_CONFIG)\n")
+_CONFIG_FILES = {
+    "localm/config.py": _CONFIG,
+    "localm/user.py": "from localm import config\n",
+    "tests/test_config_table.py": "def test_table():\n    assert True\n",
+    "tests/test_settings_form.py": "def test_form():\n    assert True\n",
+    "tests/test_uses_validator.py": (
+        "def test_validator(monkeypatch):\n"
+        "    monkeypatch.setattr('localm.x.validate_update', None)\n"),
+    "tests/test_names_schema.py": "def test_schema():\n    assert 'localm.settings_schema'\n",
+    "tests/test_reads_defaults.py": (
+        "from localm.config import DEFAULT_CONFIG\n\n\n"
+        "def test_defaults():\n    assert DEFAULT_CONFIG\n"),
+    "tests/test_names_new_key.py": "def test_key():\n    assert {'brand_new_key': 1}\n",
+    "tests/test_names_longer_key.py": "def test_key():\n    assert {'brand_new_key_extra': 1}\n",
+    "tests/test_imports_config.py": "import localm.config\n\n\ndef test_c():\n    assert localm.config\n",
+    "tests/test_user.py": "import localm.user\n\n\ndef test_u():\n    assert localm.user\n",
+}
+_CONFIG_READERS = {
+    "tests/test_config_table.py", "tests/test_settings_form.py", "tests/test_uses_validator.py",
+    "tests/test_names_schema.py", "tests/test_reads_defaults.py",
+}
+_ADD_KEY = ('    "alpha": 1,\n', '    "alpha": 1,\n    # A new key.\n    "brand_new_key": True,\n')
+
+
+@pytest.fixture
+def config_repo(repo):
+    """The base checkout plus a localm/config.py with a DEFAULT_CONFIG table, a
+    module importing it, and tests that read the table, name a key, or only
+    import the module."""
+    mod, root = repo
+    for rel, src in _CONFIG_FILES.items():
+        (root / rel).write_text(src, encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "config")
+    return mod, root
+
+
+def _module_wide(selected):
+    return ("imports localm.config" in selected.get("tests/test_imports_config.py", [])
+            and not any("adds DEFAULT_CONFIG keys only" in why
+                        for whys in selected.values() for why in whys))
+
+
+def test_a_config_key_addition_selects_the_table_readers_and_the_tests_naming_the_key(config_repo):
+    mod, root = config_repo
+    _edit(root, "localm/config.py", *_ADD_KEY)
+    for depth in (0, 1):
+        selected = _select(mod, ["localm/config.py"], depth=depth)
+        assert set(selected) == _CONFIG_READERS | {"tests/test_names_new_key.py"}, depth
+    assert selected["tests/test_names_new_key.py"] == [
+        "names the new key brand_new_key: localm/config.py adds DEFAULT_CONFIG keys only"]
+    assert selected["tests/test_reads_defaults.py"] == [
+        "names DEFAULT_CONFIG: localm/config.py adds DEFAULT_CONFIG keys only"]
+    assert selected["tests/test_config_table.py"] == [
+        "a config or settings test: localm/config.py adds DEFAULT_CONFIG keys only"]
+
+
+def test_a_changed_config_default_selects_every_importer(config_repo):
+    mod, root = config_repo
+    _edit(root, "localm/config.py", '"alpha": 1,', '"alpha": 2,')
+    selected = _select(mod, ["localm/config.py"], depth=1)
+    assert _module_wide(selected)
+    assert "tests/test_user.py" in selected
+
+
+def test_a_removed_config_key_selects_every_importer(config_repo):
+    mod, root = config_repo
+    _edit(root, "localm/config.py", '    "gamma": "x",\n', "")
+    assert _module_wide(_select(mod, ["localm/config.py"]))
+    _edit(root, "localm/config.py", *_ADD_KEY)
+    assert _module_wide(_select(mod, ["localm/config.py"]))
+
+
+def test_a_code_change_in_the_config_module_selects_every_importer(config_repo):
+    mod, root = config_repo
+    _edit(root, "localm/config.py", "return dict(DEFAULT_CONFIG)", "return DEFAULT_CONFIG")
+    assert _module_wide(_select(mod, ["localm/config.py"]))
+    _edit(root, "localm/config.py", *_ADD_KEY)
+    assert _module_wide(_select(mod, ["localm/config.py"]))
+
+
+def test_a_config_key_added_beside_a_changed_default_selects_every_importer(config_repo):
+    mod, root = config_repo
+    _edit(root, "localm/config.py", *_ADD_KEY)
+    _edit(root, "localm/config.py", '"gamma": "x",', '"gamma": "y",')
+    assert _module_wide(_select(mod, ["localm/config.py"]))
+
+
+def test_a_config_key_addition_beside_another_change_keeps_that_changes_selection(config_repo):
+    mod, root = config_repo
+    _edit(root, "localm/config.py", *_ADD_KEY)
+    _edit(root, "localm/b.py", "return 1", "return 2")
+    selected = _select(mod, ["localm/config.py", "localm/b.py"])
+    assert set(selected) == _CONFIG_READERS | {"tests/test_names_new_key.py", "tests/test_b.py",
+                                               "tests/test_patch.py"}
+
+
+def test_the_config_readers_never_make_max_share_leave_out_another_changes_importer(config_repo):
+    mod, root = config_repo
+    _edit(root, "localm/config.py", *_ADD_KEY)
+    _edit(root, "localm/b.py", "return 1", "return 2")
+    graph = mod.Graph()
+    assert len(graph.test_files) == 19
+    held = {}
+    selected = mod.select(["localm/config.py", "localm/b.py"], graph, depth=1, max_share=0.45, held=held)
+    assert selected["tests/test_a.py"] == ["imports localm.a (1 hop(s) from a change)"]
+    assert held == {}
+    assert _CONFIG_READERS <= set(selected)
+
+
+def test_a_config_key_addition_already_committed_is_seen_from_its_base(config_repo):
+    mod, root = config_repo
+    base = _git(root, "rev-parse", "HEAD").strip()
+    _edit(root, "localm/config.py", *_ADD_KEY)
+    _git(root, "commit", "-qam", "key")
+    selected = _select(mod, ["localm/config.py"], base_ref=base)
+    assert "tests/test_names_new_key.py" in selected
+    assert "tests/test_imports_config.py" not in selected
+    assert _module_wide(_select(mod, ["localm/config.py"]))
+
+
+_ADDED_INSIDE = _CONFIG.replace('    "gamma": "x",\n', '    "gamma": "x",\n    # New.\n    "delta": 0,\n')
+
+
+@pytest.mark.parametrize(("old", "new", "expected"), [
+    (_CONFIG, _ADDED_INSIDE, {"delta"}),
+    (_CONFIG, _CONFIG.replace("    # The first key.\n", '    "zeta": None,\n    # The first key.\n'),
+     {"zeta"}),
+    (_CONFIG, _CONFIG.replace("}\n", '    "delta": 0,\n    "eps": {\n        "a": 1,\n    },\n}\n'),
+     {"delta", "eps"}),
+    (_CONFIG, _CONFIG, None),
+    (_CONFIG, _CONFIG.replace("    # The first key.\n", "    # The first key.\n    # More.\n"), None),
+    (_CONFIG, _CONFIG.replace("# The first key.", "# The first setting."), None),
+    (_CONFIG, _CONFIG.replace('"""Config."""', '"""Config module."""'), None),
+    (_CONFIG, _CONFIG.replace("import os\n", "import os\n# A comment.\n"), None),
+    (_CONFIG, _ADDED_INSIDE.replace("import os\n", "import os\nimport re\n"), None),
+    (_CONFIG, _ADDED_INSIDE.replace("# The first key.", "# The first setting."), None),
+    (_CONFIG, _ADDED_INSIDE.replace("import os\n", "import os\n# A comment.\n"), None),
+    (_CONFIG, _ADDED_INSIDE.replace("def load():", "def load():  # Reads the table."), None),
+    (_CONFIG, _CONFIG.replace("        2,\n", "        2,\n        3,\n"), None),
+    (_CONFIG, _CONFIG.replace("}\n", '    "alpha": 5,\n}\n'), None),
+    (_CONFIG, _CONFIG.replace('    "gamma": "x",\n', '    "delta": 0,\n    "gamma": "x",\n'), {"delta"}),
+    (_CONFIG, _CONFIG.replace('    "alpha": 1,\n', "").replace('    "gamma": "x",\n',
+                                                                '    "gamma": "x",\n    "alpha": 1,\n'),
+     None),
+    (_CONFIG, _CONFIG.replace("}\n", '    **OTHER,\n    "delta": 0,\n}\n'), None),
+    (_CONFIG, _CONFIG.replace("}\n", '    "delta": 0,\n}\nDEFAULT_CONFIG = {}\n'), None),
+    (_CONFIG, _CONFIG.replace('    "gamma": "x",\n', '    "gamma": "x",\n    "delta": 0,\n}\nX = 1\nY = {\n'),
+     None),
+    (_CONFIG, _CONFIG.replace("}\n", '    "delta": (\n'), None),
+    (_CONFIG, _CONFIG.replace("}\n", '    "delta": {"a": [1, -2.5, None, (True, "x")]},\n}\n'),
+     {"delta"}),
+    (_CONFIG, _CONFIG.replace("}\n", '    "delta": (OTHER := ()),\n}\n'), None),
+    (_CONFIG, _CONFIG.replace("}\n", '    "delta": os.getcwd(),\n}\n'), None),
+    (_CONFIG, _CONFIG.replace("}\n", '    "delta": OTHER,\n}\n'), None),
+    (_CONFIG, _CONFIG.replace("}\n", '    "delta": [OTHER],\n}\n'), None),
+    (_CONFIG, _CONFIG.replace("}\n", '    "delta": lambda: 0,\n}\n'), None),
+    ("", _ADDED_INSIDE, None),
+    (_CONFIG.replace("DEFAULT_CONFIG: dict = {", "DEFAULT_CONFIG = dict({").replace("}\n\n\n", "})\n\n\n"),
+     _ADDED_INSIDE.replace("DEFAULT_CONFIG: dict = {", "DEFAULT_CONFIG = dict({").replace("}\n\n\n", "})\n\n\n"),
+     None),
+])
+def test_config_key_additions_reports_only_a_pure_key_addition(old, new, expected):
+    assert _load().config_key_additions(old, new) == expected
+
+
+def test_config_key_additions_reads_crlf_and_lf_texts_alike():
+    crlf = _ADDED_INSIDE.replace("\n", "\r\n")
+    assert _load().config_key_additions(_CONFIG, crlf) == {"delta"}
+
+
+def test_real_tree_a_config_key_addition_is_a_targeted_selection(monkeypatch):
+    mod = _load()
+    real_read, real_read_at = mod._read, mod._read_at
+    anchor = '    "plugins_enabled": [],\n'
+    source = real_read("localm/config.py")
+    assert source.count(anchor) == 1
+    added = source.replace(anchor, anchor + "    # A new key.\n    \"selector_probe_key\": False,\n")
+    monkeypatch.setattr(mod, "_read", lambda rel: added if rel == "localm/config.py" else real_read(rel))
+    monkeypatch.setattr(mod, "_read_at", lambda ref, rel: real_read_at("HEAD", rel))
+    graph = mod.Graph()
+    selected = mod.select(["localm/config.py"], graph, depth=1, base_ref="HEAD", max_share=0.25)
+    assert "tests/test_settings_schema.py" in selected
+    assert "tests/test_config_validation.py" in selected
+    assert "tests/test_config_schema_endpoint.py" in selected
+    assert "tests/test_check_hygiene.py" in selected
+    assert 0 < len(selected) <= 0.25 * len(graph.test_files)
+    changed = source.replace('"plugins_enabled": [],', '"plugins_enabled": ["chat"],')
+    monkeypatch.setattr(mod, "_read", lambda rel: changed if rel == "localm/config.py" else real_read(rel))
+    assert len(mod.select(["localm/config.py"], graph)) > 0.25 * len(graph.test_files)

@@ -197,12 +197,13 @@ class TestInterpreterForLocalmChildren:
         venv_py = scripts / "python.exe"
         venv_py.write_bytes(b"")
 
-        monkeypatch.setattr(sys, "platform", "win32")
-        monkeypatch.setattr(sys, "prefix", str(tmp_path / "base"))
-        monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "base"))
-        monkeypatch.setattr(sys, "path", [str(sp)])
-
-        assert _mp_spawn.interpreter_for_localm_children() == str(venv_py)
+        with monkeypatch.context() as m:
+            m.setattr(sys, "platform", "win32")
+            m.setattr(sys, "prefix", str(tmp_path / "base"))
+            m.setattr(sys, "base_prefix", str(tmp_path / "base"))
+            m.setattr(sys, "path", [str(sp)])
+            found = _mp_spawn.interpreter_for_localm_children()
+        assert found == str(venv_py)
 
     def test_worker_state_finds_venv_python_from_sys_path_posix(
             self, monkeypatch, tmp_path):
@@ -215,12 +216,13 @@ class TestInterpreterForLocalmChildren:
         venv_py = bindir / "python"
         venv_py.write_bytes(b"")
 
-        monkeypatch.setattr(sys, "platform", "linux")
-        monkeypatch.setattr(sys, "prefix", str(tmp_path / "base"))
-        monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "base"))
-        monkeypatch.setattr(sys, "path", [str(sp)])
-
-        assert _mp_spawn.interpreter_for_localm_children() == str(venv_py)
+        with monkeypatch.context() as m:
+            m.setattr(sys, "platform", "linux")
+            m.setattr(sys, "prefix", str(tmp_path / "base"))
+            m.setattr(sys, "base_prefix", str(tmp_path / "base"))
+            m.setattr(sys, "path", [str(sp)])
+            found = _mp_spawn.interpreter_for_localm_children()
+        assert found == str(venv_py)
 
     def test_venv_without_an_interpreter_falls_through_to_the_next(
             self, monkeypatch, tmp_path):
@@ -239,22 +241,25 @@ class TestInterpreterForLocalmChildren:
         venv_py = scripts / "python.exe"
         venv_py.write_bytes(b"")
 
-        monkeypatch.setattr(sys, "platform", "win32")
-        monkeypatch.setattr(sys, "prefix", str(tmp_path / "base"))
-        monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "base"))
-        monkeypatch.setattr(sys, "path", [str(broken_sp), str(sp)])
-
-        assert _mp_spawn.interpreter_for_localm_children() == str(venv_py)
+        with monkeypatch.context() as m:
+            m.setattr(sys, "platform", "win32")
+            m.setattr(sys, "prefix", str(tmp_path / "base"))
+            m.setattr(sys, "base_prefix", str(tmp_path / "base"))
+            m.setattr(sys, "path", [str(broken_sp), str(sp)])
+            found = _mp_spawn.interpreter_for_localm_children()
+        assert found == str(venv_py)
 
     def test_no_venv_on_sys_path_falls_back_to_sys_executable(
             self, monkeypatch, tmp_path):
         """A genuinely venv-less setup (system python + PYTHONPATH): keep
         today's behavior. sys.path is replaced for the call window so the REAL
         test venv's site-packages cannot leak in and satisfy the walk."""
-        monkeypatch.setattr(sys, "prefix", str(tmp_path / "base"))
-        monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "base"))
-        monkeypatch.setattr(sys, "path", [str(tmp_path / "plain-dir")])
-        assert _mp_spawn.interpreter_for_localm_children() == sys.executable
+        with monkeypatch.context() as m:
+            m.setattr(sys, "prefix", str(tmp_path / "base"))
+            m.setattr(sys, "base_prefix", str(tmp_path / "base"))
+            m.setattr(sys, "path", [str(tmp_path / "plain-dir")])
+            found = _mp_spawn.interpreter_for_localm_children()
+        assert found == sys.executable
 
     def test_site_packages_without_pyvenv_cfg_is_not_a_venv(
             self, monkeypatch, tmp_path):
@@ -262,7 +267,9 @@ class TestInterpreterForLocalmChildren:
         that) must not be mistaken for a venv."""
         sp = tmp_path / "somewhere" / "site-packages"
         sp.mkdir(parents=True)
-        monkeypatch.setattr(sys, "prefix", str(tmp_path / "base"))
-        monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "base"))
-        monkeypatch.setattr(sys, "path", [str(sp)])
-        assert _mp_spawn.interpreter_for_localm_children() == sys.executable
+        with monkeypatch.context() as m:
+            m.setattr(sys, "prefix", str(tmp_path / "base"))
+            m.setattr(sys, "base_prefix", str(tmp_path / "base"))
+            m.setattr(sys, "path", [str(sp)])
+            found = _mp_spawn.interpreter_for_localm_children()
+        assert found == sys.executable

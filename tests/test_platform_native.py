@@ -10,6 +10,9 @@ import sys
 
 import pytest
 
+from localm import config, setup_llama
+from localm.inference.backends.llamacpp import _loader
+
 
 @pytest.mark.parametrize("plat,expected", [
     ("win32", "llama.dll"),
@@ -17,7 +20,6 @@ import pytest
     ("darwin", "libllama.dylib"),
 ])
 def test_loader_lib_filename(monkeypatch, plat, expected):
-    from localm.inference.backends.llamacpp import _loader
     monkeypatch.setattr(sys, "platform", plat)
     assert _loader.lib_filename() == expected
 
@@ -28,7 +30,6 @@ def test_loader_lib_filename(monkeypatch, plat, expected):
     ("darwin", "libggml*.dylib"),
 ])
 def test_loader_ggml_glob(monkeypatch, plat, expected):
-    from localm.inference.backends.llamacpp import _loader
     monkeypatch.setattr(sys, "platform", plat)
     assert _loader._ggml_glob() == expected
 
@@ -39,7 +40,6 @@ def test_loader_ggml_glob(monkeypatch, plat, expected):
     ("darwin", ("libllama.dylib",)),
 ])
 def test_config_loadable_lib_names(monkeypatch, plat, expected):
-    from localm import config
     monkeypatch.setattr(sys, "platform", plat)
     assert config._loadable_lib_names() == expected
 
@@ -50,13 +50,11 @@ def test_config_loadable_lib_names(monkeypatch, plat, expected):
     ("darwin", "libllama.dylib"),
 ])
 def test_setup_llama_lib_name(monkeypatch, plat, expected):
-    from localm import setup_llama
     monkeypatch.setattr(sys, "platform", plat)
     assert setup_llama._lib_name() == expected
 
 
 def test_setup_llama_is_wanted_linux(monkeypatch, tmp_path):
-    from localm import setup_llama
     monkeypatch.setattr(sys, "platform", "linux")
     assert setup_llama._is_wanted(tmp_path / "libllama.so")
     assert setup_llama._is_wanted(tmp_path / "libggml-base.so")
@@ -66,7 +64,6 @@ def test_setup_llama_is_wanted_linux(monkeypatch, tmp_path):
 
 
 def test_setup_llama_is_wanted_windows(monkeypatch, tmp_path):
-    from localm import setup_llama
     monkeypatch.setattr(sys, "platform", "win32")
     assert setup_llama._is_wanted(tmp_path / "llama.dll")
     assert setup_llama._is_wanted(tmp_path / "ggml-hip.dll")
@@ -85,12 +82,7 @@ def test_setup_llama_never_ships_an_executable(monkeypatch, tmp_path, name):
     darwin and Linux match libraries only, so those installs carry no bundled
     executable at all; the assertion below pins that asymmetry."""
     monkeypatch.setattr(sys, "platform", "win32")
-    assert not setup_llama_mod()._is_wanted(tmp_path / name)
-
-
-def setup_llama_mod():
-    from localm import setup_llama
-    return setup_llama
+    assert not setup_llama._is_wanted(tmp_path / name)
 
 
 @pytest.mark.parametrize("plat,exe", [
@@ -102,11 +94,10 @@ def test_no_platform_ships_executables(monkeypatch, tmp_path, plat, exe):
     darwin already satisfied this by construction; this pins it so a future
     'just add .exe back' cannot pass unnoticed."""
     monkeypatch.setattr(sys, "platform", plat)
-    assert not setup_llama_mod()._is_wanted(tmp_path / exe)
+    assert not setup_llama._is_wanted(tmp_path / exe)
 
 
 def test_find_binary_dir_detects_linux_so(monkeypatch, tmp_path):
-    from localm import config
     monkeypatch.setattr(sys, "platform", "linux")
     (tmp_path / "libllama.so").write_bytes(b"\x00")
     monkeypatch.setattr(config, "load_config", lambda: {"binary_dir": str(tmp_path)})
@@ -114,7 +105,6 @@ def test_find_binary_dir_detects_linux_so(monkeypatch, tmp_path):
 
 
 def test_find_binary_dir_none_when_lib_absent(monkeypatch, tmp_path):
-    from localm import config
     monkeypatch.setattr(sys, "platform", "linux")
     # a Windows llama.dll must NOT satisfy Linux detection
     (tmp_path / "llama.dll").write_bytes(b"\x00")
@@ -131,7 +121,6 @@ def test_add_to_search_path_covers_pypi_fetched_cuda_runtime_libs(monkeypatch, t
     individually findable via dlopen (that needs a real Linux+CUDA box); it pins
     the one thing verifiable here, that the directory they were fetched into is
     unconditionally added to the search path."""
-    from localm.inference.backends.llamacpp import _loader
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
 
