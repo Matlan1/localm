@@ -202,7 +202,7 @@ def test_do_shutdown_reaps_the_pinned_embedder_worker(pinned, monkeypatch):
 
 def test_do_restart_reaps_the_pinned_embedder_worker(pinned, monkeypatch):
     runner, reset_calls = pinned
-    monkeypatch.setattr(os, "execv", lambda exe, argv: (_ for _ in ()).throw(SystemExit(0)))
+    monkeypatch.setattr(os, "execve", lambda exe, argv, env=None: (_ for _ in ()).throw(SystemExit(0)))
 
     with pytest.raises(SystemExit):
         hs._do_restart()

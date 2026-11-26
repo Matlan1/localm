@@ -6,8 +6,8 @@ this install runs, and hand the update over to that program (``update_mechanism.
 :func:`prepare` changes nothing of the install. :func:`hand_off` is the last act of the
 process that starts the update: the applier holds the update from then on, and this
 process restarts (a server) or exits (``localm update``). A build that ships no applier
-(an older release) is installed by :func:`localm.updater.apply` instead
-(``Prepared.legacy``).
+(an older release) is installed by a copy of this build's applier
+(``update_mechanism.applier.is_older``).
 """
 
 from __future__ import annotations
@@ -52,6 +52,7 @@ class Prepared:
     verify_reason: Optional[str]
     downgrade: bool
     keyset: Optional[dict]
+    #: Install with :func:`localm.updater.apply` instead; :func:`prepare` never sets it.
     legacy: bool = False
     #: The other processes of this install, ``{"key", "pid", "purpose"}``.
     processes: list = field(default_factory=list)
@@ -154,11 +155,13 @@ def prepare(asset_id, *, signature=None, target_version=None, allow_unverified=F
         old_version = _version.read_version()
         out = Prepared(root, update_id, old_version, new_version, target_version, verified,
                        reason, _version.is_newer(old_version, new_version), keyset, _work=work)
-        if not (new_folder / APPLIER).is_file():
-            out.legacy = True
-            return out
+        older = not (new_folder / APPLIER).is_file()
+        if older:
+            out.notes += _ready_older(root, new_folder, new_version, target_version)
         try:
-            program = shared.copy_applier(new_folder / "localm", work.path / "applier")
+            program = shared.copy_applier(
+                Path(__file__).resolve().parent if older else new_folder / "localm",
+                work.path / "applier")
         except OSError as e:
             raise LocalmError("the update was not started; nothing was changed",
                               reason=f"the program of the new version could not be copied: {e}"
@@ -173,11 +176,59 @@ def prepare(asset_id, *, signature=None, target_version=None, allow_unverified=F
         if code != 0 or found.get("refused"):
             raise LocalmError("the update was not started; nothing was changed",
                               reason=str(found.get("refused") or f"its check ended with {code}"))
-        out.edited, out.notes = list(found.get("edited") or ()), list(found.get("notes") or ())
+        out.edited = list(found.get("edited") or ())
+        out.notes += list(found.get("notes") or ())
         return look_around(out)
     except BaseException:
         work.__exit__(None, None, None)
         raise
+
+
+def _ready_older(root: Path, new_folder: Path, new_version: str, target_version) -> list:
+    """Make the extracted release *new_folder*, which ships no update program, ready for
+    this build's: a release chosen by version (*target_version*) from before 0.3.2 gets
+    this build's signature check and one from 0.3.1 or earlier the uv this install uses
+    (``updater._install_trust_bridge``, ``updater._install_uv_bridge``), as
+    :func:`localm.updater.apply` gives them; and a release without the list of its files
+    (``update_package.NAME``), or one a bridge changed, gets that list made from its
+    verified files. A list the release ships is checked against it first
+    (``update_package.check``), as :func:`localm.updater.apply` checks it. Returns the notes
+    for the user. Raises LocalmError."""
+    from localm import update_package, updater
+    from localm.bugreport import LocalmError
+    from localm.update_mechanism import shared
+    notes: list = []
+    bridged = False
+    statement = new_folder / update_package.NAME
+    if statement.is_file():
+        try:
+            update_package.check(new_folder, new_version,
+                                 shared.updater_components.stated_components)
+        except update_package.PackageError as e:
+            raise LocalmError("the update package does not match what it states, so nothing "
+                              "was updated", reason=str(e)) from None
+    if target_version is not None:
+        if updater._needs_trust_bridge(new_folder):
+            updater._install_trust_bridge(new_folder)
+            notes.append(f"localm {new_version} keeps this version's update signature check "
+                         "and trusted keys, so that it can install later releases.")
+            bridged = True
+        if updater._needs_uv_bridge(new_folder):
+            updater._install_uv_bridge(new_folder, updater._uv_for_deps(root), root)
+            notes.append(f"localm {new_version} keeps the uv this version uses to apply "
+                         "later updates.")
+            bridged = True
+    if bridged or not statement.is_file():
+        try:
+            listed = {"format": update_package.FORMAT, "version": new_version,
+                      "files": update_package.files(new_folder),
+                      "components": shared.updater_components.stated_components(new_folder)}
+            statement.write_text(json.dumps(listed, indent=1, sort_keys=True), encoding="utf-8")
+        except (OSError, KeyError, ValueError) as e:
+            raise LocalmError("the update was not started; nothing was changed",
+                              reason=f"the list of the files of localm {new_version} could "
+                                     f"not be made: {e}") from None
+    return notes
 
 
 def look_around(prepared: Prepared) -> Prepared:
@@ -403,7 +454,8 @@ def hand_off(prepared: Prepared, *, mode: str, confirmed: list, watch: Optional[
         handoff = {"mode": mode, "starter": _key(me), "confirmed": list(confirmed),
                    "home": str(config.HOME_DIR), "old": prepared.old, "new": prepared.new,
                    "watch": watch, "restarting": prepared.restarting(),
-                   "ancestors": ancestors(prepared.root), "ask": bool(ask)}
+                   "ancestors": ancestors(prepared.root), "ask": bool(ask),
+                   **({"downgrade": True} if prepared.downgrade else {})}
         program = prepared.root / ".localm-update" / prepared.id / "applier" / shared._PACKAGE.name
         flags = _hidden() if mode == "server" else (
             {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"

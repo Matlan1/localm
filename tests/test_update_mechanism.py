@@ -329,6 +329,9 @@ def test_a_held_file_takes_everything_back_and_names_the_holder(root, rel, share
             mover.forward(root, ID, plan, wait_s=0.3)
         assert Path(rel).name in str(e.value)
         assert f"pid {os.getpid()}" in str(e.value)
+        # The path in the form the user knows, not the long form the mover works with.
+        assert "\\\\?\\" not in str(e.value)
+        assert disk.short_path(disk.real_folder(root)) in str(e.value)
         assert e.value.errors == [] or share == 0
     assert um.tree(root) == before
     assert mover.back(root, ID, plan) == mover.Outcome()

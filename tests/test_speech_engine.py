@@ -460,7 +460,7 @@ class TestServerLifecycle:
 
     def test_restart_releases_the_speech_worker_without_the_lock(self, monkeypatch):
         released = self._spy(monkeypatch)
-        monkeypatch.setattr(os, "execv", lambda exe, argv: (_ for _ in ()).throw(SystemExit(0)))
+        monkeypatch.setattr(os, "execve", lambda exe, argv, env=None: (_ for _ in ()).throw(SystemExit(0)))
         with pytest.raises(SystemExit):
             hs._do_restart()
         assert released == [1]

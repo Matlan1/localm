@@ -27,12 +27,17 @@ _REASON_CHARS = 600
 
 
 def probe(python, root, *, version: str, home, env: Mapping, update_id: str = "",
-          limit_s: float = LIMIT_S) -> Optional[str]:
+          limit_s: float = LIMIT_S, older: bool = False) -> Optional[str]:
     """Start the app of the install at *root* with *python* and ask it which version it
     is. None when it answers *version* within *limit_s* seconds, else why not, for the
-    user."""
+    user. *older*: the release has no ``_update-probe`` (``steps_update.prepare``);
+    its command line is started instead (``localm --version``) and must name
+    *version*."""
     flags: dict = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
     child_env = steps_update.child_env(env, root, home, update_id)
+    if older:
+        return _version_of(python, root, version=version, env=child_env, flags=flags,
+                           limit_s=limit_s)
     try:
         proc = subprocess.Popen([str(python), "-m", "localm", "_update-probe"], cwd=str(root),
                                 env=child_env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -75,6 +80,33 @@ def probe(python, root, *, version: str, home, env: Mapping, update_id: str = ""
     finally:
         _end(proc)
         reader.join(timeout=5)
+
+
+def _version_of(python, root, *, version: str, env: Mapping, flags: dict,
+                limit_s: float) -> Optional[str]:
+    """:func:`probe` of a release without ``_update-probe``."""
+    try:
+        done = subprocess.run([str(python), "-m", "localm", "--version"], cwd=str(root),
+                              env=dict(env), stdin=subprocess.DEVNULL, capture_output=True,
+                              text=True, encoding="utf-8", errors="replace",
+                              timeout=limit_s, **flags)
+    except OSError as e:
+        return f"localm {version} could not be started: {e}"
+    except subprocess.TimeoutExpired:
+        return f"localm {version} did not start within {limit_s:.0f} seconds"
+    lines = [line.rstrip() for line in (done.stdout + done.stderr).splitlines() if line.strip()]
+    if done.returncode != 0:
+        return f"localm {version} does not start{_tail(lines[-40:])}"
+    # The version line click's version option prints on standard output.
+    said = [m[1] for m in map(_VERSION_LINE.search, done.stdout.splitlines()) if m]
+    if said != [version]:
+        shown = said[0] if said else (lines[-1] if lines else "")
+        return f"localm {version} could not be checked: it said {shown[:200]!r}"
+    return None
+
+
+#: The line ``localm --version`` prints: ``localm, version <version>``.
+_VERSION_LINE = re.compile(r"^localm, version (\S+)\s*$")
 
 
 def _ask(port: int, deadline: float) -> Optional[str]:

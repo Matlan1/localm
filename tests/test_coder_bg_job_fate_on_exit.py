@@ -121,8 +121,8 @@ class TestRealChildIsKilled:
             self, tmp_path, _sleeper, monkeypatch):
         monkeypatch.setattr(hs, "_engine", None)
         pid = _spawn_background_job(tmp_path, _sleeper)
-        monkeypatch.setattr(os, "execv",
-                            lambda exe, argv: (_ for _ in ()).throw(SystemExit(0)))
+        monkeypatch.setattr(os, "execve",
+                            lambda exe, argv, env=None: (_ for _ in ()).throw(SystemExit(0)))
         try:
             with pytest.raises(SystemExit):
                 hs._do_restart()
@@ -155,8 +155,8 @@ class TestExitPathsInvokeIt:
 
     def test_do_restart_calls_it(self, monkeypatch, _spy):
         monkeypatch.setattr(hs, "_engine", None)
-        monkeypatch.setattr(os, "execv",
-                            lambda exe, argv: (_ for _ in ()).throw(SystemExit(0)))
+        monkeypatch.setattr(os, "execve",
+                            lambda exe, argv, env=None: (_ for _ in ()).throw(SystemExit(0)))
         with pytest.raises(SystemExit):
             hs._do_restart()
         assert _spy, "restart never called terminate_all_for_exit"

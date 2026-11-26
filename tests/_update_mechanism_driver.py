@@ -6,7 +6,10 @@
 Every call the update mechanism makes to a function of ``os`` in :data:`CALLS` to
 ``json.dump`` and to its own write-through rename is one point; the process is killed right before the call number *kill at* (from 0; -1
 never). With -1 the number of points is printed as ``POINTS <n>``. ``FINISH`` is
-printed when the update starts to end as done. Exit status 0: the job ran through.
+printed when the update starts to end as done. With ``gate_last`` in the job (an update
+into a release without the gate) the gate files go in a plan of their own after the
+steps, and ``GATE <n>`` is printed when its first point is next. Exit status 0: the job
+ran through.
 """
 
 import importlib.util
@@ -53,9 +56,11 @@ def _update(um, spec):
     with um.job.Lock(root) as lock:
         um.job.start(lock, update_id, old="1", new="2")
         um.job.advance(lock, um.job.MOVING)
+        gate_last = spec.get("gate_last", False)
         if spec.get("new_files"):
             plan = um.mover.plan_files(root, update_id, spec["new_files"], spec["old_files"],
-                                       swap=spec["swap"], protect=["mydata"])
+                                       swap=spec["swap"], protect=["mydata"],
+                                       among=um.mover.is_not_gate if gate_last else None)
             um.mover.write_plan(root, update_id, plan)
             um.mover.forward(root, update_id, plan)
         um.job.advance(lock, um.job.STEPS)
@@ -64,6 +69,15 @@ def _update(um, spec):
             plan = um.packages.plan_packages(root, update_id)
             um.mover.write_plan(root, update_id, plan)
             um.packages.forward(root, update_id, plan, spec["uv"], env=spec["env"])
+        if gate_last:
+            # The gate files of a release without the gate, as the applier moves them.
+            print(f"GATE {count}", flush=True)
+            for part in range(len(um.mover.GATE_PLANS)):
+                plan = um.mover.plan_gate(root, update_id, part, spec["new_files"],
+                                          spec["old_files"], protect=["mydata"])
+                if plan.ops:
+                    um.mover.write_plan(root, update_id, plan)
+                    um.mover.forward(root, update_id, plan)
         um.job.advance(lock, um.job.STARTING)
         print("FINISH", flush=True)
         um.job.finish(lock)

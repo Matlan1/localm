@@ -181,7 +181,7 @@ class TestRealChildIsKilled:
             cc._remember_spawned("http://127.0.0.1:8188", proc)
             assert proc.poll() is None, "the helper child did not start"
             monkeypatch.setattr(
-                os, "execv", lambda exe, argv: (_ for _ in ()).throw(SystemExit(0)))
+                os, "execve", lambda exe, argv, env=None: (_ for _ in ()).throw(SystemExit(0)))
             with pytest.raises(SystemExit):
                 hs._do_restart()
             assert _dead(proc), (
@@ -256,8 +256,8 @@ class TestExitPathsInvokeIt:
             "atexit, so nothing else reaps it")
 
     def test_do_restart_stops_the_spawned_comfy(self, a_spawned_instance, monkeypatch):
-        monkeypatch.setattr(os, "execv",
-                            lambda exe, argv: (_ for _ in ()).throw(SystemExit(0)))
+        monkeypatch.setattr(os, "execve",
+                            lambda exe, argv, env=None: (_ for _ in ()).throw(SystemExit(0)))
         with pytest.raises(SystemExit):
             hs._do_restart()
         assert a_spawned_instance == [321], (

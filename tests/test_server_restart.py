@@ -114,12 +114,12 @@ def test_do_restart_unloads_before_relaunch(monkeypatch):
         def unload(self):
             order.append("unload")
 
-    def _fake_relaunch(exe, argv):
+    def _fake_relaunch(exe, argv, env=None):
         order.append(("relaunch", exe, tuple(argv)))
         raise SystemExit(0)   # stop _do_restart here instead of replacing pytest
 
     monkeypatch.setattr(http_server, "_engine", _FakeEngine())
-    monkeypatch.setattr(os, "execv", _fake_relaunch)
+    monkeypatch.setattr(os, "execve", _fake_relaunch)
 
     try:
         http_server._do_restart()
@@ -145,11 +145,11 @@ def test_do_restart_sets_restart_in_progress_flag_before_relaunch(monkeypatch):
     monkeypatch.setattr(http_server, "_engine", None)
     seen = {}
 
-    def _fake_relaunch(exe, argv):
+    def _fake_relaunch(exe, argv, env=None):
         seen["flag"] = os.environ.get("LOCALM_RESTART_IN_PROGRESS")
         raise SystemExit(0)
 
-    monkeypatch.setattr(os, "execv", _fake_relaunch)
+    monkeypatch.setattr(os, "execve", _fake_relaunch)
     os.environ.pop("LOCALM_RESTART_IN_PROGRESS", None)
     try:
         try:
@@ -181,11 +181,11 @@ def test_do_restart_hands_the_recorded_gui_surface_to_the_relaunch(
     http_server.set_restart_ui(recorded)
     seen = {}
 
-    def _fake_relaunch(exe, argv):
+    def _fake_relaunch(exe, argv, env=None):
         seen["flag"] = os.environ.get("LOCALM_RESTART_IN_PROGRESS")
         raise SystemExit(0)
 
-    monkeypatch.setattr(os, "execv", _fake_relaunch)
+    monkeypatch.setattr(os, "execve", _fake_relaunch)
     try:
         http_server._do_restart()
     except SystemExit:
@@ -212,11 +212,11 @@ def test_hang_restart_forced_fallback_hands_the_recorded_gui_surface_over(
                         lambda port=None: ["python", "-m", "localm"])
     seen = {}
 
-    def _fake_execv(exe, argv):
+    def _fake_execv(exe, argv, env=None):
         seen["flag"] = os.environ.get("LOCALM_RESTART_IN_PROGRESS")
         raise SystemExit(0)
 
-    monkeypatch.setattr(os, "execv", _fake_execv)
+    monkeypatch.setattr(os, "execve", _fake_execv)
     app = SimpleNamespace(state=SimpleNamespace(instance_port=None,
                                                 instance_id=None))
     try:
@@ -292,11 +292,11 @@ def test_do_restart_hands_a_live_gui_mount_to_the_relaunch(monkeypatch, tmp_path
     _clear_gui_mounted_env(monkeypatch)
     seen = {}
 
-    def _fake_relaunch(exe, argv):
+    def _fake_relaunch(exe, argv, env=None):
         seen["gui_flag"] = os.environ.get(GUI_MOUNTED_ENV)
         raise SystemExit(0)
 
-    monkeypatch.setattr(os, "execv", _fake_relaunch)
+    monkeypatch.setattr(os, "execve", _fake_relaunch)
     try:
         http_server._do_restart()
     except SystemExit:
@@ -313,11 +313,11 @@ def test_do_restart_without_a_live_gui_mount_hands_no_flag_over(monkeypatch):
     monkeypatch.setenv(GUI_MOUNTED_ENV, "1")
     seen = {}
 
-    def _fake_relaunch(exe, argv):
+    def _fake_relaunch(exe, argv, env=None):
         seen["gui_flag"] = os.environ.get(GUI_MOUNTED_ENV)
         raise SystemExit(0)
 
-    monkeypatch.setattr(os, "execv", _fake_relaunch)
+    monkeypatch.setattr(os, "execve", _fake_relaunch)
     try:
         http_server._do_restart()
     except SystemExit:
@@ -344,11 +344,11 @@ def test_hang_restart_forced_fallback_hands_a_live_gui_mount_over(
                         lambda port=None: ["python", "-m", "localm"])
     seen = {}
 
-    def _fake_execv(exe, argv):
+    def _fake_execv(exe, argv, env=None):
         seen["gui_flag"] = os.environ.get(GUI_MOUNTED_ENV)
         raise SystemExit(0)
 
-    monkeypatch.setattr(os, "execv", _fake_execv)
+    monkeypatch.setattr(os, "execve", _fake_execv)
     app = SimpleNamespace(state=SimpleNamespace(instance_port=None,
                                                 instance_id=None))
     try:
@@ -438,12 +438,12 @@ def test_a_restarted_api_instance_comes_back_with_its_live_gui(monkeypatch, tmp_
     _clear_gui_mounted_env(monkeypatch)
     handed = {}
 
-    def _fake_relaunch(exe, argv):
+    def _fake_relaunch(exe, argv, env=None):
         handed.update({k: v for k, v in os.environ.items()
                        if k.startswith("LOCALM_RESTART_")})
         raise SystemExit(0)
 
-    monkeypatch.setattr(os, "execv", _fake_relaunch)
+    monkeypatch.setattr(os, "execve", _fake_relaunch)
     try:
         http_server._do_restart()
     except SystemExit:
@@ -462,11 +462,11 @@ def test_a_restarted_api_instance_comes_back_with_its_live_gui(monkeypatch, tmp_
     _clear_gui_mounted_env(monkeypatch)
     handed_again = {}
 
-    def _fake_relaunch_again(exe, argv):
+    def _fake_relaunch_again(exe, argv, env=None):
         handed_again["gui_flag"] = os.environ.get(GUI_MOUNTED_ENV)
         raise SystemExit(0)
 
-    monkeypatch.setattr(os, "execv", _fake_relaunch_again)
+    monkeypatch.setattr(os, "execve", _fake_relaunch_again)
     try:
         http_server._do_restart()
     except SystemExit:
@@ -484,13 +484,13 @@ def test_do_restart_releases_embedder(monkeypatch):
     restart issued mid-load blocks there and never reaches the teardown."""
     from localm.inference import embedder as emb
 
-    def _fake_relaunch(exe, argv):
+    def _fake_relaunch(exe, argv, env=None):
         raise SystemExit(0)
 
     calls = []
     monkeypatch.setattr(emb, "release_for_exit", lambda: (calls.append(1), True)[1])
     monkeypatch.setattr(http_server, "_engine", None)
-    monkeypatch.setattr(os, "execv", _fake_relaunch)
+    monkeypatch.setattr(os, "execve", _fake_relaunch)
     # release_for_exit() returning True makes _do_restart's own VRAM-release wait
     # fire - unmeasurable here so it skips immediately instead of hitting the
     # real GPU probe.
@@ -516,7 +516,7 @@ def test_do_restart_disarms_crash_guard_before_relaunch(monkeypatch):
     import localm.bugreport as bugreport
     monkeypatch.setattr(bugreport, "disarm_crash_guard",
                         lambda instance_id=None: disarmed.append(True))
-    monkeypatch.setattr(os, "execv", _boom)
+    monkeypatch.setattr(os, "execve", _boom)
     try:
         http_server._do_restart()
     except SystemExit:
@@ -547,7 +547,7 @@ def test_do_restart_spawns_watchdog_when_given(monkeypatch):
     def _stop_here(*_a):
         raise SystemExit(0)
 
-    monkeypatch.setattr(os, "execv", _stop_here)
+    monkeypatch.setattr(os, "execve", _stop_here)
 
     watchdog = {"host": "127.0.0.1", "port": 8642, "scheme": "http",
                "expect_version": "0.2.0"}
@@ -577,7 +577,7 @@ def test_do_restart_no_watchdog_by_default(monkeypatch):
     def _stop_here(*_a):
         raise SystemExit(0)
 
-    monkeypatch.setattr(os, "execv", _stop_here)
+    monkeypatch.setattr(os, "execve", _stop_here)
     try:
         http_server._do_restart()
     except SystemExit:
@@ -596,11 +596,11 @@ def test_do_restart_watchdog_spawn_exception_does_not_block_execv(monkeypatch):
     monkeypatch.setattr(http_server, "_engine", None)
     reached = []
 
-    def _fake_execv(exe, argv):
+    def _fake_execv(exe, argv, env=None):
         reached.append(True)
         raise SystemExit(0)
 
-    monkeypatch.setattr(os, "execv", _fake_execv)
+    monkeypatch.setattr(os, "execve", _fake_execv)
     try:
         http_server._do_restart(update_watchdog={
             "host": "127.0.0.1", "port": 1, "scheme": "http", "expect_version": "x"})
@@ -645,13 +645,13 @@ def test_do_restart_waits_for_vram_release_when_engines_present(monkeypatch):
         def unload(self):
             order.append("unload")
 
-    def _fake_relaunch(exe, argv):
+    def _fake_relaunch(exe, argv, env=None):
         order.append("relaunch")
         raise SystemExit(0)
 
     monkeypatch.setattr(http_server, "_engines", {"model-a": _FakeEngine()})
     monkeypatch.setattr(http_server, "_engine", None)
-    monkeypatch.setattr(os, "execv", _fake_relaunch)
+    monkeypatch.setattr(os, "execve", _fake_relaunch)
 
     import localm.discover as discover
     import localm.vram as vram
@@ -701,10 +701,10 @@ def test_do_restart_skips_vram_wait_when_nothing_was_loaded(monkeypatch):
     monkeypatch.setattr(http_server, "_engine", None)
     _no_shared_model_resident(monkeypatch)
 
-    def _fake_relaunch(exe, argv):
+    def _fake_relaunch(exe, argv, env=None):
         raise SystemExit(0)
 
-    monkeypatch.setattr(os, "execv", _fake_relaunch)
+    monkeypatch.setattr(os, "execve", _fake_relaunch)
 
     import localm.discover as discover
     import localm.vram as vram
@@ -744,10 +744,10 @@ def test_do_restart_skips_vram_wait_for_a_stale_unloaded_engine_entry(monkeypatc
     monkeypatch.setattr(http_server, "_engine", None)
     _no_shared_model_resident(monkeypatch)
 
-    def _fake_relaunch(exe, argv):
+    def _fake_relaunch(exe, argv, env=None):
         raise SystemExit(0)
 
-    monkeypatch.setattr(os, "execv", _fake_relaunch)
+    monkeypatch.setattr(os, "execve", _fake_relaunch)
 
     import localm.discover as discover
     import localm.vram as vram
@@ -784,10 +784,10 @@ def test_do_restart_skips_vram_wait_when_unmeasurable(monkeypatch):
     monkeypatch.setattr(http_server, "_engines", {"model-a": _FakeEngine()})
     monkeypatch.setattr(http_server, "_engine", None)
 
-    def _fake_relaunch(exe, argv):
+    def _fake_relaunch(exe, argv, env=None):
         raise SystemExit(0)
 
-    monkeypatch.setattr(os, "execv", _fake_relaunch)
+    monkeypatch.setattr(os, "execve", _fake_relaunch)
 
     import localm.discover as discover
     import localm.vram as vram
@@ -822,11 +822,11 @@ def test_do_restart_vram_wait_failure_does_not_block_restart(monkeypatch):
 
     reached = []
 
-    def _fake_relaunch(exe, argv):
+    def _fake_relaunch(exe, argv, env=None):
         reached.append(True)
         raise SystemExit(0)
 
-    monkeypatch.setattr(os, "execv", _fake_relaunch)
+    monkeypatch.setattr(os, "execve", _fake_relaunch)
 
     import localm.discover as discover
     import localm.vram as vram
@@ -857,10 +857,10 @@ def test_do_restart_waits_for_vram_release_when_only_embedder_was_loaded(monkeyp
     monkeypatch.setattr(http_server, "_engines", {})
     monkeypatch.setattr(http_server, "_engine", None)
 
-    def _fake_relaunch(exe, argv):
+    def _fake_relaunch(exe, argv, env=None):
         raise SystemExit(0)
 
-    monkeypatch.setattr(os, "execv", _fake_relaunch)
+    monkeypatch.setattr(os, "execve", _fake_relaunch)
 
     from localm.inference import embedder as emb
     monkeypatch.setattr(emb, "loaded_path", lambda: "fake-embedder-model")
@@ -902,10 +902,10 @@ def test_do_restart_probes_free_vram_when_engines_present(monkeypatch):
     from localm.inference import embedder as emb
     monkeypatch.setattr(emb, "loaded_path", lambda: None)
 
-    def _fake_relaunch(exe, argv):
+    def _fake_relaunch(exe, argv, env=None):
         raise SystemExit(0)
 
-    monkeypatch.setattr(os, "execv", _fake_relaunch)
+    monkeypatch.setattr(os, "execve", _fake_relaunch)
 
     import localm.discover as discover
     import localm.vram as vram
@@ -937,10 +937,10 @@ def test_do_restart_probes_free_vram_when_only_embedder_present(monkeypatch):
     monkeypatch.setattr(emb, "loaded_path", lambda: "/fake/embedder/model.gguf")
     monkeypatch.setattr(emb, "release_for_exit", lambda: True)
 
-    def _fake_relaunch(exe, argv):
+    def _fake_relaunch(exe, argv, env=None):
         raise SystemExit(0)
 
-    monkeypatch.setattr(os, "execv", _fake_relaunch)
+    monkeypatch.setattr(os, "execve", _fake_relaunch)
 
     import localm.discover as discover
     import localm.vram as vram

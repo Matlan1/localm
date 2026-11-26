@@ -138,7 +138,7 @@ class Update(Install):
         return (self.root / "VERSION").read_text(encoding="utf-8")
 
     def apply(self, *, confirmed=(), starter: str = "0-0", restarting=(), ancestors=(),
-              mode: str = applier.COMMAND, watch=None, relaunch=None,
+              mode: str = applier.COMMAND, watch=None, relaunch=None, downgrade=False,
               **env) -> subprocess.Popen:
         """Start the applier with its hand-off and return it once it holds the update."""
         program = self.root / ".localm-update" / ID / "applier" / "update_mechanism"
@@ -152,7 +152,7 @@ class Update(Install):
             "mode": mode, "starter": starter, "confirmed": list(confirmed),
             "home": str(self.root / "home"), "old": "1", "new": "2", "watch": watch,
             "restarting": list(restarting),
-            "ancestors": list(ancestors)}) + "\n")
+            "ancestors": list(ancestors), **({"downgrade": True} if downgrade else {})}) + "\n")
         proc.stdin.close()
         proc.stdin = None   # communicate flushes an open stdin on POSIX
         assert proc.stdout.readline().strip() == "ready", proc.stderr.read()
@@ -195,6 +195,21 @@ def test_an_update_runs_through_and_the_new_version_starts(update):
     started = next(json.loads(ln[8:]) for ln in out.splitlines() if ln.startswith("STARTED "))
     assert {started[k] for k in ("localm", "part", "VERSION")} == {"2"}
     assert update.result()["state"] == "new"
+
+
+@pytest.mark.parametrize("downgrade, said", [(False, "Updated to localm 2."),
+                                             (True, "Went back to localm 2.")])
+def test_the_outcome_is_said_once_and_a_downgrade_says_it_went_back(update, downgrade, said):
+    """The console and the result say the outcome in one line, once; an update to an
+    older release says that it went back to it."""
+    proc = update.apply(downgrade=downgrade)
+    waiting = update.waiter()
+    (_, err), _ = _end(proc, waiting)
+    assert proc.returncode == 0, err
+    assert update.result()["note"] == said
+    lines = err.splitlines()
+    assert lines.count(said) == 1, lines
+    assert not [ln for ln in lines if ln != said and ("Updated to" in ln or "Went back" in ln)]
 
 
 def test_a_new_version_that_does_not_start_is_undone_and_says_why(tmp_path):
@@ -351,7 +366,9 @@ def test_a_server_asked_to_restart_is_waited_for_and_runs_the_new_version_after_
 
 def test_a_restart_names_the_server_it_restarts_from_for_the_next_process_only(monkeypatch):
     """``_execv_restart`` hands ``<pid>-<start>`` of this server to its re-exec
-    (``LOCALM_RESTARTED_FROM``) and takes it back when os.execv raises."""
+    (``LOCALM_RESTARTED_FROM``) in the environment it passes to os.execve, and never
+    puts it into this process's environment, where a child that another thread starts
+    meanwhile would inherit it."""
     import localm.inference.http_server as hs
     from localm import instances, procs
     monkeypatch.delenv("LOCALM_RESTARTED_FROM", raising=False)
@@ -359,14 +376,14 @@ def test_a_restart_names_the_server_it_restarts_from_for_the_next_process_only(m
     monkeypatch.setattr(instances, "restore_own", lambda removed: None)
     seen = []
 
-    def execv(exe, argv):
-        seen.append(os.environ.get("LOCALM_RESTARTED_FROM"))
+    def execv(exe, argv, env=None):
+        seen.append((os.environ.get("LOCALM_RESTARTED_FROM"), env.get("LOCALM_RESTARTED_FROM")))
         raise OSError("not in a test")
-    monkeypatch.setattr(os, "execv", execv)
+    monkeypatch.setattr(os, "execve", execv)
     with pytest.raises(OSError):
         hs._execv_restart(None, None)
     me = procs.current()
-    assert me is not None and seen == [f"{me.pid}-{me.start}"]
+    assert me is not None and seen == [(None, f"{me.pid}-{me.start}")]
     assert "LOCALM_RESTARTED_FROM" not in os.environ
 
 

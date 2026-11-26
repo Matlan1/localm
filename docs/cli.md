@@ -1352,7 +1352,11 @@ Updates are signed: localm verifies an Ed25519 signature from its release key
 before applying anything, and refuses a build that is not newer. The keys are
 pinned in its own source and can be replaced by a signed update.
 See [security.md](security.md) for the update trust model. The GUI Models page
-has an "Update now" button for the same flow.
+has an "Update now" button for the same flow. While an update started there runs, a small
+window shows its progress and, when another program holds a file of localm or a process
+does not end, asks you to close it with Try again and Cancel; a question nobody answers
+within 30 minutes counts as Cancel. It closes itself at the end. Where no window can be
+shown (no desktop), the update goes on without it.
 
 `--to VERSION` installs the release you name, including an older one. It says when
 that is a downgrade and asks first; before a downgrade it copies your settings, model
@@ -1363,7 +1367,13 @@ back into the data directory.
 The build must be the version you named. When its signature does not verify (for
 example a release from before 0.3.0, signed with a retired key), localm says why and
 installs it only if you confirm; with `-y`, add `--allow-unverified`. A version you go
-back to this way can still update to newer releases. Settings > System > Updates > Choose a
+back to this way can still update to newer releases. A release that ships no update
+program of its own (0.3.4b4 and earlier) is installed by the update program of the
+version you have: its files and Python packages during the update. From 0.3.2 on, that
+release brings its native runtime and components to what it pins when it starts; 0.3.1
+and earlier leave them as they are, and the update says so: run `localm setup-llama
+--force` after it for the llama.cpp runtime, and that release's setup for the rest.
+Settings > System > Updates > Choose a
 version does the same in the GUI.
 
 An update and `--rollback` move every part of the install together: the code, the

@@ -18,6 +18,16 @@ The installed version extracts the release into ``<id>/new``, copies this packag
   :data:`RESULT` in the data folder's ``updates`` folder. Exit status 0 when the new
   version runs, 1 when the old one does or the install could not be put back, 3 when
   another process is updating the install.
+
+In mode ``server`` the progress shows in a small window (:mod:`.window`), which also asks
+"Try again" or "Cancel" about a held file or a process that does not end; where no window
+can be shown the update goes on without it and says so in its log.
+
+A release that ships no update program of its own (an older one, chosen with ``localm
+update --to``) is installed by this program, copied there by the installed version
+(:func:`is_older`): its files by its own list, its Python packages from its own lock, and
+the rest by that release when it starts, where it does (``steps_update.prepare``
+*older*).
 """
 
 from __future__ import annotations
@@ -31,7 +41,8 @@ import urllib.request
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import disk, job, mover, restoring, shared, steps, steps_data, steps_probe, steps_update
+from . import (disk, job, mover, restoring, shared, steps, steps_data, steps_probe, steps_update,
+               window)
 
 #: In the update's folder: what ``check`` found.
 CHECK = "check.json"
@@ -55,7 +66,8 @@ HANDOFF_KEYS = frozenset({"mode", "starter", "confirmed", "home", "old", "new", 
 #: user agreed, like every other process.
 #: ``ask``: true when, in mode ``command``, the user is at the terminal of ``localm
 #: update`` and is asked "Try again" or "Cancel" about what is in the way.
-MORE_KEYS = frozenset({"restarting", "ancestors", "ask"})
+#: ``downgrade``: true when *new* is older than *old*; the outcome then says "Went back to".
+MORE_KEYS = frozenset({"restarting", "ancestors", "ask", "downgrade"})
 SERVER, COMMAND = "server", "command"
 #: The purpose of the process that shows the window of the app.
 LAUNCHER = "launcher"
@@ -89,6 +101,13 @@ def _procs():
 
 # --------------------------------------------------------------------- check
 
+def is_older(root, update_id: str) -> bool:
+    """Whether the release extracted for the update *update_id* ships no update program
+    of its own, so that this one, a copy of the installed version's, carries it out."""
+    new = mover.work_folder(Path(root), update_id) / "new"
+    return not (new / "localm" / "update_mechanism" / "applier.py").is_file()
+
+
 def check(root, update_id: str, say: Callable[[str], None]) -> int:
     """``check``: see the module. Returns the exit status."""
     root = Path(root)
@@ -107,7 +126,8 @@ def check(root, update_id: str, say: Callable[[str], None]) -> int:
             raise mover.Refused("the uv of this install cannot be found; run setup again")
         spec = steps_update.prepare(steps.Place(root, update_id), uv=uv,
                                     home=restoring.data_folder(root),
-                                    env=restoring.environment(root), say=say)
+                                    env=restoring.environment(root), say=say,
+                                    older=is_older(root, update_id))
         out["notes"] = [str(n) for n in spec["notes"]]
     except (*steps.STEP_ERRORS, ValueError, LookupError) as e:
         out["refused"] = str(e)
@@ -150,10 +170,20 @@ class Applier:
         self.proot = disk.short_path(disk.real_folder(self.root))
         self.primary: Optional[str] = None
         self.let_through = False
+        self.older = is_older(self.root, update_id)
+        self.window: Optional[window.Window] = None
         #: Asks the user about what is in the way (a held file, a process that does not
         #: end): True to try again, False to cancel. None: nobody is asked.
         self.ask: Optional[Callable[[str], bool]] = (
             terminal_ask() if handoff.get("ask") and handoff["mode"] == COMMAND else None)
+        #: :attr:`ask` while the old version is put back, where closing the window is
+        #: no answer; None: :attr:`ask` itself.
+        self.ask_back: Optional[Callable[[str], bool]] = None
+
+    def _installed(self) -> str:
+        """The outcome of an update that installed the new version."""
+        verb = "Went back to" if self.h.get("downgrade") else "Updated to"
+        return f"{verb} localm {self.h['new']}."
 
     def _held(self, held) -> bool:
         return self.ask is not None and self.ask(f"{held}. Close that program, then try again.")
@@ -161,13 +191,35 @@ class Applier:
     def _held_back(self, held) -> bool:
         """:meth:`_held` while the old version is put back: cancel then leaves the
         install neither old nor new, which the question says with the ways out."""
-        return self.ask is not None and self.ask(
+        ask = self.ask_back or self.ask
+        return ask is not None and ask(
             f"{held}. Close that program, then try again. Cancel leaves localm "
             f"{self.h['old']} not put back completely: " + " ".join(restoring.ways_out(self.root)))
 
     def say(self, text: str) -> None:
         self.lines = [*self.lines, text][-_LINES:]
         restoring.say(text)
+        if self.window is not None:
+            self.window.say(text)
+
+    def show_window(self, program=None) -> None:
+        """Show the progress in the small update window (*program*: :mod:`.window` when
+        None), which from then on asks about what is in the way. Without a window the
+        update goes on as before; the reason is said."""
+        self.window = window.Window.start(restoring.say, program)
+        if self.window is None:
+            return
+        shown = self.window
+        self.ask = shown.ask
+        self.ask_back = lambda text: shown.ask(text, closing=None)
+        for line in self.lines:
+            self.window.say(line)
+
+    def close_window(self, text: str) -> None:
+        """Show *text* in the window as the outcome; it then closes itself."""
+        shown, self.window = self.window, None
+        if shown is not None:
+            shown.end(text)
 
     # ------------------------------------------------------------- the phases
 
@@ -199,19 +251,29 @@ class Applier:
             old = _statement(self.root)
             if new is None:
                 raise mover.Refused("the new version carries no list of its files")
-            plan = mover.plan_files(self.root, self.id, new["files"],
-                                    old["files"] if old else None, protect=_protect(self.root))
-            mover.write_plan(self.root, self.id, plan)
             ask = self._held if self.ask is not None else None
+            files = (new["files"], old["files"] if old else None)
+            # Into a release without the gate, the gate files go in a plan of their own
+            # after every other step (mover.GATE_FILES_LAST).
+            plan = mover.plan_files(self.root, self.id, *files, protect=_protect(self.root),
+                                    **({"swap": (), "among": mover.is_not_gate}
+                                       if self.older else {}))
+            mover.write_plan(self.root, self.id, plan)
             mover.forward(self.root, self.id, plan, ask=ask)
             job.advance(lock, job.STEPS)
             carried = steps_update.run(lock, self.id, uv=uv, home=self.home, env=self.env,
                                        say=self.say, ask=ask)
+            for part in range(len(mover.GATE_PLANS)) if self.older else ():
+                gate = mover.plan_gate(self.root, self.id, part, *files,
+                                       protect=_protect(self.root))
+                if gate.ops:
+                    mover.write_plan(self.root, self.id, gate)
+                    mover.forward(self.root, self.id, gate, ask=ask)
             job.advance(lock, job.STARTING)
             self.say(f"Starting localm {h['new']}...")
             why = steps_probe.probe(steps_update.steps_packages.python_in(self.root / ".venv"),
                                     self.root, version=h["new"], home=self.home, env=self.env,
-                                    update_id=self.id)
+                                    update_id=self.id, older=self.older)
             if why is None and h["mode"] == SERVER:
                 why = self._let_primary_through()
             if why:
@@ -225,10 +287,10 @@ class Applier:
         try:
             why = steps_update.record(self.root, old=h["old"], new=h["new"],
                                       kept=carried.kept, home=self.home, env=self.env,
-                                      say=self.say)
+                                      say=self.say, older=self.older)
         except (*steps.STEP_ERRORS, ValueError) as e:
             why = f"The record of what this update installed could not be written: {e}"
-        return self._result("new", f"Updated to localm {h['new']}.",
+        return self._result("new", self._installed(),
                             notes=[*carried.notes, *done.notes, *([why] if why else [])])
 
     def _back(self, lock: job.Lock, uv, reason: str) -> dict:
@@ -246,7 +308,7 @@ class Applier:
             back = job.Result("failed", [str(e)])
         steps_update.discard(self.root, self.id)
         if back.state == "new":
-            return self._result("new", f"Updated to localm {h['new']}.", notes=back.notes)
+            return self._result("new", self._installed(), notes=back.notes)
         if back.errors or back.state != "old":
             errors = back.errors or [f"the way back ended as {back.state!r}"]
             return self._result(
@@ -488,7 +550,11 @@ class Applier:
         result = {"state": state, "from": h["old"], "to": h["new"],
                   "version": h["new"] if state == "new" else h["old"], "note": text,
                   "notes": [str(n) for n in notes or ()], "lines": self.lines, "at": time.time()}
-        for line in [text, *result["notes"]]:
+        # The window shows the outcome as its heading (close_window), not as a line.
+        shown, self.window = self.window, None
+        self.say(text)
+        self.window = shown
+        for line in result["notes"]:
             self.say(line)
         places = [(self.home / "updates" / RESULT, result)]
         if h["mode"] == COMMAND:
@@ -500,6 +566,7 @@ class Applier:
                 disk.write_json(path, value)
             except (OSError, disk.Unsafe, disk.Held) as e:
                 restoring.say(f"The result of the update could not be written to {path}: {e}")
+        self.close_window(text)
         return result
 
 
@@ -579,6 +646,7 @@ def read_handoff(stream) -> dict:
             or not all(isinstance(raw[v], str) and _VERSION.fullmatch(raw[v])
                        for v in ("old", "new")) \
             or not isinstance(raw["home"], str) or not isinstance(raw.get("ask", False), bool) \
+            or not isinstance(raw.get("downgrade", False), bool) \
             or not (watch is None or (isinstance(watch, dict) and all(
                 isinstance(watch.get(k), t) or watch.get(k) is None
                 for k, t in (("host", str), ("port", int), ("scheme", str))))):
@@ -599,7 +667,13 @@ def apply(root, update_id: str, relaunch=()) -> int:
             print("ready", flush=True)
             sys.stdout.close()
             sys.stdout = None   # type: ignore[assignment]
-            result = Applier(root, update_id, handoff, relaunch).run(lock)
+            update = Applier(root, update_id, handoff, relaunch)
+            if handoff["mode"] == SERVER:
+                update.show_window()
+            try:
+                result = update.run(lock)
+            finally:
+                update.close_window("The update of localm ended.")
     except job.Busy as e:
         restoring.say(f"The update cannot be made: {e}")
         return restoring.BUSY

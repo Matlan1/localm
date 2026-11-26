@@ -93,7 +93,8 @@ class Install:
         um.write(root / ".localm-update" / ID / "new",
                  {**NEW, "update-package.json": _statement(NEW, "2")})
         if applier:
-            shared.copy_applier(REPO / "localm", root / ".localm-update" / ID / "applier")
+            um.no_window(shared.copy_applier(REPO / "localm",
+                                             root / ".localm-update" / ID / "applier"))
 
     @property
     def record(self) -> Path:
@@ -185,6 +186,18 @@ def inst(tmp_path):
 def test_without_a_record_the_gate_does_nothing(inst):
     done = inst.localm()
     assert ran(done, "1") and done.err == "" and not done.said["subprocess"]
+
+
+def test_a_process_record_that_cannot_be_imported_stops_the_start(inst):
+    """Only a ``localm/procs.py`` that is not there, or one without ``enter`` and
+    ``current`` (an older release's, put in place by an update), lets the gate go on
+    without the process record; any other failure to import it stops the start, loudly."""
+    procs = inst.root / "localm" / "procs.py"
+    procs.write_text("import localm_no_such_module_for_the_gate\n" + procs.read_text(encoding="utf-8"),
+                     encoding="utf-8")
+    done = inst.localm()
+    assert done.code != 0 and not done.said, done.out
+    assert "ModuleNotFoundError" in done.err and "localm_no_such_module_for_the_gate" in done.err
 
 
 @pytest.mark.parametrize("phase", [job.ENDING, job.MOVING, job.STEPS, job.STARTING])
@@ -639,6 +652,46 @@ def test_what_an_interrupted_update_started_is_ended_and_a_waiting_start_is_not(
         out, err = waiting.communicate(timeout=60)
         assert said(out) and said(out)["part"] == "1", err
         assert (left.poll() is not None) == ended
+    finally:
+        left.kill()
+        left.communicate()
+
+
+#: The way back's ending of what still runs (``restoring._end_running``) in a process of
+#: its own, beside the one it ends, on a clock that moves 1.1 s at each reading: a process
+#: first seen as arriving is past its arrival time at the next reading.
+_SLOW_PASS = """\
+import json, sys, time, types
+from localm.update_mechanism import job, restoring
+now = [time.monotonic()]
+
+def monotonic():
+    now[0] += 1.1
+    return now[0]
+
+restoring.time = types.SimpleNamespace(monotonic=monotonic, sleep=time.sleep)
+with job.Lock(sys.argv[1]) as lock:
+    print(json.dumps(restoring._end_running(lock)), flush=True)
+"""
+
+
+def test_a_process_spared_as_arriving_is_ended_however_long_the_pass_took(inst):
+    """A process of localm first seen while the way back runs is spared for its arrival
+    time; when one pass of ending and listing takes longer than that, it is still ended
+    in the next pass, not reported as one that still runs."""
+    left = inst.popen("-c", "import localm, time; print('UP', flush=True); time.sleep(60)")
+    assert left.stdout.readline().strip() == "UP"
+    try:
+        with job.Lock(inst.root) as lock:
+            inst.start(lock, job.STARTING)
+        env = {k: v for k, v in os.environ.items() if not k.startswith("LOCALM_")}
+        done = subprocess.run(
+            [sys.executable, "-c", _SLOW_PASS, str(inst.root)], cwd=str(REPO), text=True,
+            capture_output=True, timeout=120, stdin=subprocess.DEVNULL, **HIDDEN,
+            env={**env, "PYTHONPATH": str(REPO), "LOCALM_HOME": str(inst.root / "home")})
+        assert done.returncode == 0, done.stderr
+        assert json.loads(done.stdout.splitlines()[-1]) == [], done.stdout
+        left.wait(timeout=30)
     finally:
         left.kill()
         left.communicate()
@@ -1204,7 +1257,8 @@ def test_the_gate_loads_the_standard_library_only():
 
 
 def test_the_files_of_a_start_are_never_absent_while_an_update_moves_them():
-    loaded = re.findall(r"^\s+from localm import (\w+)", _text("localm/__init__.py"), re.M)
+    loaded = [a or b for a, b in re.findall(r"^\s+(?:from localm import (\w+)|import localm\.(\w+))",
+                                            _text("localm/__init__.py"), re.M)]
     assert loaded and {"localm/__init__.py", *(f"localm/{n}.py" for n in loaded)} <= set(mover.GATE_FILES)
     callers = {p for p in (*REPO.glob("*.bat"), *REPO.glob("*.sh"), REPO / "launcher.pyw",
                            REPO / "installer" / "gui.py", REPO / "scripts" / "rollback_update.py")
