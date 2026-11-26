@@ -1217,7 +1217,8 @@ def test_the_gate_loads_the_standard_library_only():
 
 
 def test_the_files_of_a_start_are_never_absent_while_an_update_moves_them():
-    loaded = re.findall(r"^\s+from localm import (\w+)", _text("localm/__init__.py"), re.M)
+    loaded = [a or b for a, b in re.findall(r"^\s+(?:from localm import (\w+)|import localm\.(\w+))",
+                                            _text("localm/__init__.py"), re.M)]
     assert loaded and {"localm/__init__.py", *(f"localm/{n}.py" for n in loaded)} <= set(mover.GATE_FILES)
     callers = {p for p in (*REPO.glob("*.bat"), *REPO.glob("*.sh"), REPO / "launcher.pyw",
                            REPO / "installer" / "gui.py", REPO / "scripts" / "rollback_update.py")
