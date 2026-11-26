@@ -2732,6 +2732,156 @@ export async function updateRepair() {
 }
 if ($("update-repair")) $("update-repair").onclick = updateRepair;
 
+// Integrity: the GUI form of `localm integrity`. Shows the last result of this
+// server, lists each differing file, and offers Repair and Keep my changes.
+export function renderIntegrity(state) {
+  const status = $("integrity-status"), list = $("integrity-list");
+  if (!status) return;
+  const r = state && state.result;
+  const item = (text) => {
+    const li = document.createElement("li");
+    li.textContent = text;
+    return li;
+  };
+  const items = [];
+  let differs = false;
+  if (state && state.running) {
+    status.textContent = t("settings.integrity.running");
+  } else if (!r) {
+    status.textContent = t(state && state.pending ? "settings.integrity.pending" : "settings.integrity.notChecked");
+  } else if (!r.available) {
+    status.textContent = t("settings.integrity.unavailable", { reason: r.reason || "" });
+  } else {
+    const rt = r.runtime || {};
+    differs = r.count > 0;
+    status.textContent = differs
+      ? t("settings.integrity.differ", { count: r.count, version: r.version })
+      : (r.kept || []).length
+        ? t("settings.integrity.allMatchKept", { version: r.version, kept: r.kept.length })
+        : t("settings.integrity.allMatch", { version: r.version });
+    for (const path of r.differ || []) items.push(t("settings.integrity.itemDiffer", { path }));
+    for (const path of r.missing || []) items.push(t("settings.integrity.itemMissing", { path }));
+    for (const path of [...(rt.differ || []), ...(rt.missing || [])]) {
+      items.push(t("settings.integrity.itemRuntime", { path }));
+    }
+    for (const path of r.kept || []) items.push(t("settings.integrity.itemKept", { path }));
+    if (rt.present && !rt.listed) items.push(t("settings.integrity.runtimeUnlisted"));
+    if ((rt.differ || []).length || (rt.missing || []).length) items.push(t("settings.integrity.runtimeHint"));
+  }
+  if (list) list.replaceChildren(...items.map(item));
+  const releaseFiles = r && r.available && ((r.differ || []).length + (r.missing || []).length) > 0;
+  if ($("integrity-repair")) $("integrity-repair").hidden = !releaseFiles;
+  if ($("integrity-keep")) $("integrity-keep").hidden = !releaseFiles;
+  return differs;
+}
+
+async function _integrityState() {
+  const r = await fetch("/api/integrity", { headers: authHeaders() });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.detail || r.statusText);
+  return d;
+}
+
+// Seconds between reads of the startup check's result while it has not run yet.
+const INTEGRITY_POLL_MS = 15000;
+const INTEGRITY_POLL_MAX = 40;
+let _integrityPolling = false;
+
+// Read the check's state for Settings, and once the startup check has a result that
+// finds differing files, show the notice (when its setting is on) once per result.
+export async function integrityCheckState(polls = 0) {
+  if (!$("integrity-status")) return;
+  let state;
+  try {
+    state = await _integrityState();
+  } catch (e) {
+    console.warn("could not read the integrity check:", e);
+    return;
+  }
+  const differs = renderIntegrity(state);
+  if ((state.pending || state.running) && polls < INTEGRITY_POLL_MAX) {
+    if (polls === 0 && _integrityPolling) return;
+    _integrityPolling = true;
+    setTimeout(() => integrityCheckState(polls + 1), INTEGRITY_POLL_MS);
+    return;
+  }
+  _integrityPolling = false;
+  if (differs && state.notice) {
+    const key = "localm.integrityNoticeShown";
+    const seen = String(state.result.at);
+    let shown = null;
+    try { shown = sessionStorage.getItem(key); } catch { /* no storage: show it */ }
+    if (shown !== seen) {
+      toast(t("settings.integrity.notice", { count: state.result.count, version: state.result.version }));
+      try { sessionStorage.setItem(key, seen); } catch { /* shown again next load */ }
+    }
+  }
+}
+window.__localmIntegrityCheck = integrityCheckState;
+
+async function _integrityPost(path, body, out, busyText) {
+  if (out) { out.hidden = false; out.textContent = busyText; }
+  const r = await fetch(path, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.detail || r.statusText);
+  return d;
+}
+
+export async function integrityRun(full) {
+  const out = $("integrity-action-status");
+  const buttons = ["integrity-check", "integrity-full"].map((id) => $(id)).filter(Boolean);
+  buttons.forEach((b) => (b.disabled = true));
+  try {
+    renderIntegrity({ running: true });
+    const result = await _integrityPost("/api/integrity/check", { full }, null, "");
+    renderIntegrity({ result });
+    if (out) out.hidden = true;
+  } catch (e) {
+    showInlineError(out, t("settings.integrity.failed", { message: e.message }));
+  } finally {
+    buttons.forEach((b) => (b.disabled = false));
+  }
+}
+if ($("integrity-check")) $("integrity-check").onclick = () => integrityRun(false);
+if ($("integrity-full")) $("integrity-full").onclick = () => integrityRun(true);
+
+export async function integrityRepair() {
+  const out = $("integrity-action-status"), btn = $("integrity-repair");
+  if (btn) btn.disabled = true;
+  try {
+    const d = await _integrityPost("/api/integrity/repair", {}, out, t("settings.integrity.repairing"));
+    if (!d.repaired) throw new Error(d.error || t("settings.integrity.notRepairedAny"));
+    const lines = [t("settings.integrity.repaired", { count: (d.files || []).length })];
+    for (const f of d.failed || []) lines.push(t("settings.integrity.notRepaired", { path: f.path, reason: f.reason }));
+    if (out) out.textContent = lines.join(" ");
+    renderIntegrity({ result: d.result });
+  } catch (e) {
+    showInlineError(out, t("settings.integrity.failed", { message: e.message }));
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+if ($("integrity-repair")) $("integrity-repair").onclick = integrityRepair;
+
+export async function integrityKeep() {
+  const out = $("integrity-action-status"), btn = $("integrity-keep");
+  if (btn) btn.disabled = true;
+  try {
+    const d = await _integrityPost("/api/integrity/keep", {}, out, t("settings.integrity.keeping"));
+    if (out) out.textContent = t("settings.integrity.kept", { count: (d.kept || []).length });
+    renderIntegrity({ result: d.result });
+  } catch (e) {
+    showInlineError(out, t("settings.integrity.failed", { message: e.message }));
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+if ($("integrity-keep")) $("integrity-keep").onclick = integrityKeep;
+
 // The GUI form of `localm make-launcher --force`. Always passes force=true, so a
 // launcher already on disk is rebuilt rather than returning an idempotent no-op.
 // A single blocking POST: make_launcher() runs in seconds and reports a

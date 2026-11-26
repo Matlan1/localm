@@ -688,6 +688,99 @@ def register(app: FastAPI, ctx) -> None:
         return out
 
     # -----------------------------------------------------------------------
+    #  Integrity: localm's files against the installed release
+    # -----------------------------------------------------------------------
+
+    def _integrity_paths(body):
+        paths = body.get("paths") if isinstance(body, dict) else None
+        if paths is None:
+            return None
+        if not (isinstance(paths, list) and len(paths) <= 10000
+                and all(isinstance(p, str) and 0 < len(p) <= 1024 for p in paths)):
+            raise HTTPException(400, "paths must be a list of file paths.")
+        return paths
+
+    async def _integrity_body(request: Request) -> dict:
+        import json as _json
+        raw = await request.body()
+        if not raw.strip():
+            return {}
+        try:
+            body = _json.loads(raw)
+        except (ValueError, RecursionError):
+            raise HTTPException(400, "The request body is not valid JSON.") from None
+        if not isinstance(body, dict):
+            raise HTTPException(400, "The request body must be a JSON object.")
+        return body
+
+    def _integrity_owner(request: Request, what: str) -> None:
+        if not _hs.caller_is_operator(request):
+            raise HTTPException(403, f"{what} requires an owner (admin) key: it changes "
+                                "which of localm's files count as the release's.")
+
+    @app.get("/api/integrity", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
+    async def integrity_ep(request: Request):
+        """The integrity check's settings and the last result in this server:
+        ``{at_start, notice, pending, running, result}`` (``integrity.state``).
+        Read-only; ``result`` is None until a check ran."""
+        from localm import integrity
+        out = await asyncio.to_thread(integrity.state)
+        if out["result"] is not None and out["result"].get("reason"):
+            out["result"] = {**out["result"],
+                             "reason": _hs.path_formatter(request)(out["result"]["reason"])}
+        return out
+
+    @app.post("/api/integrity/check",
+              dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    async def integrity_check_ep(request: Request):
+        """Run the integrity check now; the JSON body ``{full}`` reads every file in
+        full. Returns the result (``integrity.check``)."""
+        from localm import integrity
+        body = await _integrity_body(request)
+        res = await asyncio.to_thread(integrity.run, full=body.get("full") is True)
+        if res.get("reason"):
+            res = {**res, "reason": _hs.path_formatter(request)(res["reason"])}
+        return res
+
+    @app.post("/api/integrity/keep",
+              dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    async def integrity_keep_ep(request: Request):
+        """Keep the differing files ``{paths}`` (default every differing one) as the
+        user's own. OWNER-only. Returns ``{kept, result}``."""
+        from localm import integrity
+        _integrity_owner(request, "Keeping changed files")
+        paths = _integrity_paths(await _integrity_body(request))
+        if paths is None:
+            found = await asyncio.to_thread(integrity.check)
+            paths = found["differ"] + found["missing"]
+        try:
+            done = await asyncio.to_thread(integrity.keep, paths)
+        except integrity.IntegrityError as e:
+            raise HTTPException(400, _hs.path_formatter(request)(str(e))) from None
+        return {"kept": done, "result": await asyncio.to_thread(integrity.run)}
+
+    @app.post("/api/integrity/repair",
+              dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    async def integrity_repair_ep(request: Request):
+        """Write the differing files ``{paths}`` (default every differing one) again
+        from the signed build of the installed version. OWNER-only. Returns
+        ``{repaired: true, files, failed, result}`` or ``{repaired: false, error}``."""
+        from localm import integrity
+        from localm.bugreport import LocalmError
+        _integrity_owner(request, "Repairing files")
+        paths = _integrity_paths(await _integrity_body(request))
+        fmt = _hs.path_formatter(request)
+        try:
+            res = await asyncio.to_thread(integrity.repair, paths)
+        except integrity.IntegrityError as e:
+            return {"repaired": False, "error": fmt(str(e))}
+        except LocalmError as e:
+            return {"repaired": False, "error": fmt(format_localm_error(e))}
+        failed = [{"path": f["path"], "reason": fmt(f["reason"])} for f in res["failed"]]
+        return {"repaired": True, "files": res["repaired"], "failed": failed,
+                "result": await asyncio.to_thread(integrity.run)}
+
+    # -----------------------------------------------------------------------
     #  Update rollback: restore the previous build (owner-only)
     # -----------------------------------------------------------------------
     # Both routes are gated on the same owner check as the admin_only settings in

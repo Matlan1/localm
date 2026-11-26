@@ -183,7 +183,24 @@ def collect_diagnostics(context: Optional[dict] = None) -> dict:
     diag["config_subset"] = _safe_config_subset()
     diag["config_unreadable"] = _config_unreadable()
     diag["dependencies"] = _dependency_versions()
+    diag["files_differing"] = _integrity_counts()
     return diag
+
+
+# How many of localm's files differ from the installed release, from the last
+# integrity check of this process (counts only, set by ``integrity``).
+_integrity: dict = {"checked": False}
+
+
+def note_integrity(counts: dict) -> None:
+    """Record the counts of the last integrity check for the next report."""
+    global _integrity
+    _integrity = dict(counts)
+
+
+def _integrity_counts() -> dict:
+    """The counts :func:`note_integrity` recorded, ``{"checked": False}`` before."""
+    return dict(_integrity)
 
 
 # Config keys SAFE to echo into a report and useful for debugging a setup. An
