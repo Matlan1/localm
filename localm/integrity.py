@@ -119,7 +119,9 @@ def statement(root=None) -> tuple:
     try:
         manifest = update_package.parse(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, update_package.PackageError) as e:
-        return None, f"the list of the release's files cannot be read: {e}"
+        from localm.debuglog import logger
+        logger.warning("integrity: %s cannot be read: %s", path, e)
+        return None, "the list of the release's files cannot be read (the log says why)"
     try:
         version = (root / "VERSION").read_text(encoding="utf-8").strip()
     except OSError:
@@ -260,20 +262,37 @@ def summary(result: Optional[dict]) -> str:
 
 # ---------------------------------------------------------------- keep, state
 
+def refusal(paths, root=None, *, repairing: bool = False) -> Optional[str]:
+    """Why the files *paths* cannot be kept or (with *repairing*) repaired, or None:
+    no list to compare with, a path the release does not state, and for a repair an
+    update of the install in progress."""
+    manifest, reason = statement(root)
+    if manifest is None:
+        return reason
+    for rel in paths or ():
+        if not isinstance(rel, str) or rel not in manifest["files"] or _skipped(rel):
+            return f"{str(rel)[:200]} is not a file of the release"
+    if repairing:
+        from localm.update_mechanism import job
+        root = _root(root)
+        if job.record_path(root).exists() or job.locked(root):
+            return ("an update of this install is in progress; repair it once the update "
+                    "has finished")
+    return None
+
+
 def keep(paths, root=None) -> list:
     """Record the differing files *paths* as the user's own, so the check lists them
     apart while the release states the same content for them. Returns the paths
-    kept. Raises IntegrityError for a path the release does not state."""
-    manifest, reason = statement(root)
-    if manifest is None:
-        raise IntegrityError(reason)
+    kept. Raises IntegrityError with :func:`refusal`'s reason."""
+    why = refusal(paths, root)
+    if why:
+        raise IntegrityError(why)
+    manifest, _reason = statement(root)
     mine = kept()
     done = []
     for rel in paths:
-        entry = manifest["files"].get(rel)
-        if entry is None:
-            raise IntegrityError(f"{rel} is not a file of the release")
-        mine[rel] = entry["sha256"]
+        mine[rel] = manifest["files"][rel]["sha256"]
         done.append(rel)
     _write_json(_updates(True) / KEPT, mine)
     return done
@@ -401,7 +420,6 @@ def repair(paths=None, *, root=None, say: Optional[Callable] = None,
     fetched or does not verify. *opener* is the updater's download opener."""
     from localm import update_package, updater
     from localm.bugreport import LocalmError
-    from localm.update_mechanism import job
     say = say or (lambda _m: None)
     root = _root(root)
     manifest, reason = statement(root)
@@ -412,14 +430,11 @@ def repair(paths=None, *, root=None, say: Optional[Callable] = None,
         found = check(root)
         paths = found["differ"] + found["missing"]
     paths = list(dict.fromkeys(paths))
-    for rel in paths:
-        if rel not in manifest["files"] or _skipped(rel):
-            raise IntegrityError(f"{rel} is not a file of the release")
     if not paths:
         return {"version": version, "repaired": [], "failed": []}
-    if job.record_path(root).exists() or job.locked(root):
-        raise IntegrityError("an update of this install is in progress; repair it once "
-                             "the update has finished")
+    why = refusal(paths, root, repairing=True)
+    if why:
+        raise IntegrityError(why)
     scratch = _updates(True) / "integrity-repair"
     with updater._apply_lock("repair"):
         say(f"Fetching the signed build of localm {version}...")
@@ -459,7 +474,10 @@ def repair(paths=None, *, root=None, say: Optional[Callable] = None,
                     try:
                         _replace(_path(root, rel), content)
                     except OSError as e:
-                        failed.append({"path": rel, "reason": f"could not be written: {e}"})
+                        from localm.debuglog import logger
+                        logger.warning("integrity: %s could not be written: %s", rel, e)
+                        failed.append({"path": rel, "reason": "it could not be written (another "
+                                       "program may hold it; the log says why)"})
                         continue
                     repaired.append(rel)
                     say(f"Repaired {rel}")

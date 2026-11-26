@@ -753,10 +753,16 @@ def register(app: FastAPI, ctx) -> None:
         if paths is None:
             found = await asyncio.to_thread(integrity.check)
             paths = found["differ"] + found["missing"]
+        why = await asyncio.to_thread(integrity.refusal, paths)
+        if why:
+            raise HTTPException(400, _hs.path_formatter(request)(why))
         try:
             done = await asyncio.to_thread(integrity.keep, paths)
-        except integrity.IntegrityError as e:
-            raise HTTPException(400, _hs.path_formatter(request)(str(e))) from None
+        except (integrity.IntegrityError, OSError) as e:
+            from localm.debuglog import logger
+            logger.warning("integrity: keeping %d file(s) failed: %s", len(paths), e)
+            raise HTTPException(500, "Your changes could not be recorded; the log says "
+                                "why.") from None
         return {"kept": done, "result": await asyncio.to_thread(integrity.run)}
 
     @app.post("/api/integrity/repair",
@@ -770,10 +776,15 @@ def register(app: FastAPI, ctx) -> None:
         _integrity_owner(request, "Repairing files")
         paths = _integrity_paths(await _integrity_body(request))
         fmt = _hs.path_formatter(request)
+        why = await asyncio.to_thread(integrity.refusal, paths, repairing=True)
+        if why:
+            return {"repaired": False, "error": fmt(why)}
         try:
             res = await asyncio.to_thread(integrity.repair, paths)
         except integrity.IntegrityError as e:
-            return {"repaired": False, "error": fmt(str(e))}
+            from localm.debuglog import logger
+            logger.warning("integrity: the repair was refused: %s", e)
+            return {"repaired": False, "error": "Nothing was repaired; the log says why."}
         except LocalmError as e:
             return {"repaired": False, "error": fmt(format_localm_error(e))}
         failed = [{"path": f["path"], "reason": fmt(f["reason"])} for f in res["failed"]]

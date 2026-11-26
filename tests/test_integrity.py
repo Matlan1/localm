@@ -491,6 +491,38 @@ def test_the_routes_check_and_keep_for_the_owner_only(install, client):
     assert r.status_code == 400
 
 
+def test_a_failing_check_keep_or_repair_answers_without_exception_text(
+        install, client, release, monkeypatch):
+    c, _scoped = client
+    owner = {"Authorization": f"Bearer {OWNER_KEY}"}
+    secret = "SECRET-DETAIL-4711"
+    statement = (install / update_package.NAME).read_bytes()
+    (install / update_package.NAME).write_bytes(b'{"format": "' + secret.encode() + b'"')
+    for r in (c.post("/api/integrity/check", headers=owner),
+              c.post("/api/integrity/repair", headers=owner),
+              c.post("/api/integrity/keep", headers=owner, json={"paths": ["localm/a.py"]})):
+        assert secret not in r.text and "Traceback" not in r.text, r.text
+        assert "PackageError" not in r.text and "Error(" not in r.text, r.text
+        assert "cannot be read" in r.text, r.text
+    (install / update_package.NAME).write_bytes(statement)
+    (install / "localm" / "a.py").write_bytes(b"A = 9\n")
+    monkeypatch.setattr(integrity, "_HELD_S", 0.0)
+    real = os.replace
+
+    def held(src, dst):
+        if str(dst).endswith("a.py"):
+            raise PermissionError(f"[WinError 32] {secret}")
+        return real(src, dst)
+
+    monkeypatch.setattr(integrity.os, "replace", held)
+    monkeypatch.setattr(updater, "download", lambda aid, dest, opener=None:
+                        release["opener"](None, None, None, dest))
+    r = c.post("/api/integrity/repair", headers=owner)
+    assert r.status_code == 200 and r.json()["repaired"] is True, r.text
+    assert r.json()["failed"][0]["path"] == "localm/a.py"
+    assert secret not in r.text and "WinError" not in r.text, r.text
+
+
 def test_the_repair_route_says_why_nothing_was_repaired(install, client):
     c, _scoped = client
     (install / update_package.NAME).unlink()
