@@ -128,20 +128,30 @@ def _end_running(lock: job.Lock) -> list:
     def arrives(e) -> bool:
         return time.monotonic() - seen.setdefault(e.key, time.monotonic()) < _ARRIVE_S
 
+    # The processes end_others spared in this pass because they had just arrived.
+    arrived: set = set()
+
     def spared(running) -> set:
         found = _waiting(lock.root, running)
         for e in running:
-            if arrives(e) if e.recorded else e.parent and e.parent[0] in found:
+            if e.recorded:
+                if arrives(e):
+                    found.add(e.pid)
+                    arrived.add(e.key)
+            elif e.parent and e.parent[0] in found:
                 found.add(e.pid)
         return found
 
     try:
         while True:
+            arrived.clear()
             left = procs.end_others(root, spare=spared, holders=holders)
             running = procs.list(root, holders=holders)
             waiting = _waiting(lock.root, running)
             left = left or [e for e in running if e.recorded and e.pid not in waiting]
-            if not any([arrives(e) for e in left]):
+            # One spared as arriving in this pass is ended in the next, however long the
+            # pass took.
+            if not any([e.key in arrived or arrives(e) for e in left]):
                 break
             time.sleep(0.1)
     except OSError as e:

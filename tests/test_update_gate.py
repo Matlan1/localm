@@ -657,6 +657,46 @@ def test_what_an_interrupted_update_started_is_ended_and_a_waiting_start_is_not(
         left.communicate()
 
 
+#: The way back's ending of what still runs (``restoring._end_running``) in a process of
+#: its own, beside the one it ends, on a clock that moves 1.1 s at each reading: a process
+#: first seen as arriving is past its arrival time at the next reading.
+_SLOW_PASS = """\
+import json, sys, time, types
+from localm.update_mechanism import job, restoring
+now = [time.monotonic()]
+
+def monotonic():
+    now[0] += 1.1
+    return now[0]
+
+restoring.time = types.SimpleNamespace(monotonic=monotonic, sleep=time.sleep)
+with job.Lock(sys.argv[1]) as lock:
+    print(json.dumps(restoring._end_running(lock)), flush=True)
+"""
+
+
+def test_a_process_spared_as_arriving_is_ended_however_long_the_pass_took(inst):
+    """A process of localm first seen while the way back runs is spared for its arrival
+    time; when one pass of ending and listing takes longer than that, it is still ended
+    in the next pass, not reported as one that still runs."""
+    left = inst.popen("-c", "import localm, time; print('UP', flush=True); time.sleep(60)")
+    assert left.stdout.readline().strip() == "UP"
+    try:
+        with job.Lock(inst.root) as lock:
+            inst.start(lock, job.STARTING)
+        env = {k: v for k, v in os.environ.items() if not k.startswith("LOCALM_")}
+        done = subprocess.run(
+            [sys.executable, "-c", _SLOW_PASS, str(inst.root)], cwd=str(REPO), text=True,
+            capture_output=True, timeout=120, stdin=subprocess.DEVNULL, **HIDDEN,
+            env={**env, "PYTHONPATH": str(REPO), "LOCALM_HOME": str(inst.root / "home")})
+        assert done.returncode == 0, done.stderr
+        assert json.loads(done.stdout.splitlines()[-1]) == [], done.stdout
+        left.wait(timeout=30)
+    finally:
+        left.kill()
+        left.communicate()
+
+
 def test_what_still_runs_is_named(inst, monkeypatch):
     inst.go(job.STEPS)
     entry = procs.Entry(4711, "1", "gui")
