@@ -318,6 +318,13 @@ def test_a_set_without_its_marker_is_added_again_and_not_loaded(tmp_path, monkey
     assert _loader.hip_library_dirs(target) == [hip_bin]
 
 
+def test_a_marker_too_deeply_nested_to_parse_counts_as_missing(tmp_path):
+    target = _build(tmp_path)
+    _complete_set(target)
+    (target / ROCM / sl.HIP_LIBRARIES_MARKER).write_text("[" * 100000, encoding="utf-8")
+    assert hip_libraries.recorded_archs(target) is None
+
+
 @pytest.mark.parametrize("detected, needed", [
     (["gfx1030"], False),
     (["gfx1030", "gfx906"], False),

@@ -70,7 +70,7 @@ def recorded_archs(target: Path) -> Optional[list[str]]:
         if not (folder / "bin" / _HIPBLAS).is_file():
             return None
         record = json.loads((folder / HIP_LIBRARIES_MARKER).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     archs = record.get("archs") if isinstance(record, dict) else None
     if not isinstance(archs, list):
