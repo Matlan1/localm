@@ -220,7 +220,7 @@ def test_prepare_gives_an_older_build_this_program_and_the_list_of_its_files(
                                        installed=update.root, say=lambda _t: None)
     work = update.root / ".localm-update" / prepared.id
     try:
-        assert not prepared.legacy and prepared.new == "2"
+        assert prepared.new == "2"
         assert applier.is_older(update.root, prepared.id)
         own = work / "applier" / "update_mechanism"
         assert (own / "applier.py").read_bytes() \

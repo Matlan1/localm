@@ -19,8 +19,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from localm import _apply_update as au
 from localm import _version, updater, updater_components as uc, updater_runtime, uv_tool
-from localm.bugreport import LocalmError
 from localm.media import source_archive
+from tests._old_client_update import old_client_update
 from tests._source_archives import FakeGitHub
 from localm.media.sdcpp.runtime import platform_key
 from tests._net_config import set_config
@@ -280,89 +280,14 @@ def test_kobold_installs_each_installed_build_with_its_setup_backend(tmp_path, i
 
 # --------------------------------- apply end to end ---------------------------
 
-def test_update_installs_sdcpp_and_kobold_at_the_new_pins(tmp_path, install, home):
-    old_sd = _sd_runtime(home, "master-1999-bbbbbbb", "vulkan")
-    _kobold_runtime(home, "v1.123", "nocuda")
-    data, sig = _release(_files("0.3.2", sd="master-2000-aaaaaaa", kobold="v1.123.1"))
-    calls = []
-    res = updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                        runner=_fake_children(home, calls=calls))
-    assert [c[3] for c in calls] == ["setup-sdcpp", "setup-music"]
-    assert calls[0] == [sys.executable, "-m", "localm", "setup-sdcpp", "--backend", "vulkan",
-                        "--yes"]
-    assert res["components"]["state"] == "updated"
-    assert "stable-diffusion.cpp image runtime: master-1999-bbbbbbb -> master-2000-aaaaaaa" \
-        in res["components_note"]
-    assert (home / "runtimes" / "sdcpp" / "master-2000-aaaaaaa-vulkan").is_dir()
-    assert old_sd.is_dir(), "the old runtime directory stays for a rollback"
-    assert uc.read_pending() is None
-    updater.rollback_last(installed=install)
-    assert _v(install) == "0.3.1" and old_sd.is_dir()
-
-
-def test_a_failed_component_rolls_back_the_code_and_removes_what_it_created(
-        tmp_path, install, home):
-    old_sd = _sd_runtime(home, "master-1999-bbbbbbb", "vulkan")
-    data, sig = _release(_files("0.3.2", sd="master-2000-aaaaaaa"))
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                      runner=_fake_children(home, rc=1))
-    assert "rolled back" in ei.value.summary
-    assert "setup-sdcpp" in ei.value.reason and "put back" in ei.value.reason
-    assert _v(install) == "0.3.1"
-    assert old_sd.is_dir()
-    assert not (home / "runtimes" / "sdcpp" / "master-2000-aaaaaaa-vulkan").exists(), \
-        "a failed attempt leaves nothing that would mark the backend as failed here"
-    assert uc.last_status()["state"] == "failed"
-    assert uc.read_pending() is None
-
-
-def test_a_child_that_exits_0_but_installs_nothing_counts_as_failed(tmp_path, install, home):
-    _sd_runtime(home, "master-1999-bbbbbbb", "vulkan")
-    data, sig = _release(_files("0.3.2", sd="master-2000-aaaaaaa"))
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                      runner=lambda c: 0)
-    assert "vulkan not installed at master-2000-aaaaaaa" in ei.value.reason
-    assert _v(install) == "0.3.1"
-
-
-def test_the_runtime_and_the_components_are_rolled_back_together(tmp_path, home):
-    inst = _write_tree(tmp_path / "inst", _files("0.3.1", sd="master-1999-bbbbbbb") | {
-        "localm/setup_llama/pins.py": '_ROCM_TAG = "b1"\n_PINNED_TAG = "b11757"\n'})
-    lib = inst / au.RUNTIME_LIB
-    lib.mkdir(parents=True)
-    (lib / "llama.dll").write_bytes(b"old" * 30000)
-    (lib / ".localm-backend").write_text("vulkan b11757", encoding="utf-8")
-    _sd_runtime(home, "master-1999-bbbbbbb", "vulkan")
-    data, sig = _release(_files("0.3.2", sd="master-2000-aaaaaaa"))
-    children = _fake_children(home, rc=0)
-
-    def run(cmd):
-        if "setup-llama" in cmd:
-            (lib / "llama.dll").unlink()
-            (lib / "llama.dll").write_bytes(b"new" * 30000)
-            (lib / ".localm-backend").write_text("vulkan b11928", encoding="utf-8")
-            return 0
-        if "setup-sdcpp" in cmd:
-            return 1
-        return children(cmd)
-    with pytest.raises(LocalmError):
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=run)
-    assert (lib / ".localm-backend").read_text(encoding="utf-8") == "vulkan b11757"
-    assert (lib / "llama.dll").read_bytes().startswith(b"old")
-    assert _v(inst) == "0.3.1"
-
-
 def test_the_server_defers_the_components_to_its_restart(tmp_path, install, home,
                                                          monkeypatch):
     _sd_runtime(home, "master-1999-bbbbbbb", "vulkan")
     data, sig = _release(_files("0.3.2", sd="master-2000-aaaaaaa"))
-    res = updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                        runner=lambda c: pytest.fail(f"nothing runs before the restart: {c}"),
-                        defer_runtime=True)
-    assert res["components"] is None and res["components_note"].endswith("while localm restarts")
+    res = old_client_update(
+        install, data, runner=lambda c: pytest.fail(f"nothing runs before the restart: {c}"),
+        defer=True)
+    assert res["components"] is None
     assert uc.read_pending()["components"] == ["sdcpp"]
     import localm.inference.http_server as hs
     monkeypatch.setattr(updater, "repo_root", lambda: install)
@@ -378,8 +303,7 @@ def test_a_failure_during_the_restart_rolls_the_update_back(tmp_path, install, h
                                                             monkeypatch):
     _sd_runtime(home, "master-1999-bbbbbbb", "vulkan")
     data, sig = _release(_files("0.3.2", sd="master-2000-aaaaaaa"))
-    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                  defer_runtime=True)
+    old_client_update(install, data, defer=True)
     import localm.inference.http_server as hs
     monkeypatch.setattr(updater, "repo_root", lambda: install)
     monkeypatch.setattr(updater, "rollback_last",
@@ -418,8 +342,7 @@ def test_first_start_catches_up_a_component_an_old_updater_left_behind(tmp_path,
 def test_a_pending_update_of_a_rolled_back_version_is_dropped(tmp_path, install, home):
     _sd_runtime(home, "master-1999-bbbbbbb", "vulkan")
     data, sig = _release(_files("0.3.2", sd="master-2000-aaaaaaa"))
-    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                  defer_runtime=True)
+    old_client_update(install, data, defer=True)
     updater.rollback_last(installed=install)
     assert uc.read_pending() is None
     uc.write_pending([{"name": "sdcpp", "update": True}], root=install, version="0.3.2")
@@ -463,67 +386,12 @@ def test_the_uv_inside_the_install_is_updated_and_rolled_back(tmp_path, home,
     assert (p["update"], p["current"], p["target"]) == (True, "0.13.4", "0.13.6")
     monkeypatch.setattr(uv_tool, "bootstrap_uv", _bootstrap())
     data, sig = _release(_files("0.3.2", uv="0.13.6"))
-    res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                        runner=lambda c: 0)
+    res = old_client_update(inst, data, runner=lambda c: 0)
     assert res["components"]["state"] == "updated"
     assert (inst / ".uv" / uv_tool.UV_NAME).read_text(encoding="utf-8") == "0.13.6"
     assert not (inst / ".uv-update").exists() and not (inst / ".uv-previous").exists()
     updater.rollback_last(installed=inst)
     assert (inst / ".uv" / uv_tool.UV_NAME).read_text(encoding="utf-8") == "0.13.4"
-
-
-def test_a_uv_that_cannot_be_installed_leaves_the_old_one_and_the_code(tmp_path, home,
-                                                                       fake_uv_version,
-                                                                       monkeypatch):
-    inst = _write_tree(tmp_path / "inst", _files("0.3.1", uv="0.13.4"))
-    _contained_uv(inst, "0.13.4")
-    monkeypatch.setattr(uv_tool, "bootstrap_uv", _bootstrap(fail=True))
-    data, sig = _release(_files("0.3.2", uv="0.13.6"))
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=lambda c: 0)
-    assert "the download failed" in ei.value.reason
-    assert (inst / ".uv" / uv_tool.UV_NAME).read_text(encoding="utf-8") == "0.13.4"
-    assert _v(inst) == "0.3.1"
-
-
-def test_a_uv_swap_that_is_refused_keeps_the_installed_uv(tmp_path, home,
-                                                          fake_uv_version, monkeypatch):
-    inst = _write_tree(tmp_path / "inst", _files("0.3.1", uv="0.13.4"))
-    _contained_uv(inst, "0.13.4")
-    monkeypatch.setattr(uv_tool, "bootstrap_uv", _bootstrap())
-    real = os.rename
-    refused = []
-
-    def rename(src, dst):
-        if f"{os.sep}uv{os.sep}new{os.sep}" in str(src):
-            refused.append(str(dst))
-            raise OSError(28, "No space left on device")
-        real(src, dst)
-    monkeypatch.setattr(os, "rename", rename)
-    data, sig = _release(_files("0.3.2", uv="0.13.6"))
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=lambda c: 0)
-    assert refused
-    assert "could not swap in the new uv" in ei.value.reason
-    assert (inst / ".uv" / uv_tool.UV_NAME).read_text(encoding="utf-8") == "0.13.4"
-    assert [d.name for d in (inst / ".localm-update").iterdir()] == ["lock"]
-
-
-def test_a_running_uv_refuses_the_update_with_nothing_changed(tmp_path, home,
-                                                              fake_uv_version, monkeypatch):
-    inst = _write_tree(tmp_path / "inst", _files("0.3.1", uv="0.13.4"))
-    _contained_uv(inst, "0.13.4")
-    monkeypatch.setattr(uc, "_running_in",
-                        lambda folder: [(4242, str(folder / "uv.exe"))]
-                        if folder.name == ".uv" else [])
-    data, sig = _release(_files("0.3.2", uv="0.13.6"))
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=lambda c: pytest.fail(f"nothing runs: {c}"))
-    assert "nothing was updated" in ei.value.summary and "pid 4242" in ei.value.reason
-    assert _v(inst) == "0.3.1"
 
 
 def test_a_uv_the_user_installed_elsewhere_is_kept_and_named(tmp_path, home, monkeypatch):
@@ -629,8 +497,7 @@ def test_pytorch_update_and_rollback_through_apply(tmp_path, torch_install):
     data, sig = _release(_files("0.3.2", pyproject=_PYPROJECT_032))
     calls = []
     fake = _fake_uv_pip(site)
-    res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                        runner=lambda c: calls.append(c) or fake(c))
+    res = old_client_update(inst, data, runner=lambda c: calls.append(c) or fake(c))
     uv = str(_fake_uv_exe(tmp_path))
     assert [uv, "pip", "install", "-p", ".venv", "-r", "pyproject.toml",
             "--extra", "gpu", "--extra", "audio"] in calls
@@ -640,18 +507,6 @@ def test_pytorch_update_and_rollback_through_apply(tmp_path, torch_install):
     assert uc.dists(site)["transformers"]["version"] == "5.15.1"
     assert (site / "transformers" / "__init__.py").read_bytes() == b"tf 5.15.1"
     assert not list(site.glob("transformers-5.20.2.dist-info"))
-
-
-def test_a_failed_pytorch_step_puts_the_old_packages_back(tmp_path, torch_install):
-    inst, site = torch_install
-    data, sig = _release(_files("0.3.2", pyproject=_PYPROJECT_032))
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=_fake_uv_pip(site, rc=2))
-    assert "PyTorch stack was not updated" in ei.value.reason
-    assert uc.dists(site)["transformers"]["version"] == "5.15.1"
-    assert (site / "transformers" / "__init__.py").read_bytes() == b"tf 5.15.1"
-    assert _v(inst) == "0.3.1"
 
 
 def test_no_pytorch_is_ever_installed_where_there_was_none(tmp_path, home, monkeypatch):
@@ -780,8 +635,7 @@ def test_managed_comfy_is_updated_and_rolled_back_with_its_edits_and_venv(
     data, sig = _release(_files("0.3.2", comfy=(new, "v0.43.0")))
     calls = []
     child = _comfy_update_child(root, new, site)
-    res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                        runner=lambda c: calls.append(c) or child(c))
+    res = old_client_update(inst, data, runner=lambda c: calls.append(c) or child(c))
     assert [sys.executable, "-m", "localm", "comfy", "update",
             "--reinstall-requirements"] in calls
     assert stopped, "the managed ComfyUI is stopped before it is replaced"
@@ -794,21 +648,6 @@ def test_managed_comfy_is_updated_and_rolled_back_with_its_edits_and_venv(
     assert marker["comfyui_version"] == "v0.42.1"
     assert uc.dists(site)["torch"]["version"] == "2.9.1+rocm7.13.0"
     assert (site / "torch" / "__init__.py").read_bytes() == b"t291"
-
-
-def test_a_failed_comfy_update_puts_it_back_and_rolls_back_the_code(tmp_path, home,
-                                                                    monkeypatch):
-    root, old, new, site = _comfy(home)
-    inst = _write_tree(tmp_path / "inst", _files("0.3.1", comfy=(old, "v0.42.1")))
-    monkeypatch.setattr(uc, "comfy_info", lambda tree: {"torch": [], "nodes": []})
-    data, sig = _release(_files("0.3.2", comfy=(new, "v0.43.0")))
-    with pytest.raises(LocalmError):
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=_comfy_update_child(root, new, site, rc=1))
-    assert source_archive.tree_commit(root) == old
-    assert (root / "main.py").read_text(encoding="utf-8") == "v1 patched\n"
-    assert uc.dists(site)["torch"]["version"] == "2.9.1+rocm7.13.0"
-    assert _v(inst) == "0.3.1"
 
 
 def test_a_dropped_comfy_snapshot_leaves_nothing_and_is_never_restored(tmp_path, home):
@@ -1121,38 +960,3 @@ def test_a_pending_update_of_another_install_is_dropped_and_this_one_checked(
     assert uc.read_pending() is None
 
 
-def test_a_pytorch_step_the_network_policy_refuses_runs_nothing(tmp_path, torch_install,
-                                                               monkeypatch):
-    """net_mode = off: the update's own dependency step runs with the update
-    exemption, the PyTorch step's package install is refused and rolled back."""
-    inst, site = torch_install
-    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w",
-                                     "update_ignore_net_policy": True})
-    monkeypatch.setenv("LOCALM_NET_MODE", "off")
-    data, sig = _release(_files("0.3.2", pyproject=_PYPROJECT_032))
-    calls = []
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
-                      runner=lambda c: calls.append(c) or 0)
-    assert "PyTorch stack was not updated" in ei.value.reason
-    assert "net_mode=off" in ei.value.reason
-    assert not any("gpu" in c for c in calls)
-    assert uc.dists(site)["transformers"]["version"] == "5.15.1"
-    assert _v(inst) == "0.3.1"
-
-
-def test_a_missing_visual_cpp_runtime_skips_the_image_runtime_without_a_rollback(
-        tmp_path, install, home):
-    from localm.setup_spec import VC_RUNTIME_ABSENT_EXIT
-    old_sd = _sd_runtime(home, "master-1999-bbbbbbb", "vulkan")
-    _kobold_runtime(home, "v1.123", "nocuda")
-    data, sig = _release(_files("0.3.2", sd="master-2000-aaaaaaa", kobold="v1.123.1"))
-    res = updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                        runner=_fake_children(home, also=lambda c: (
-                            VC_RUNTIME_ABSENT_EXIT if "setup-sdcpp" in c else None)))
-    assert _v(install) == "0.3.2"
-    assert res["components"]["state"] == "updated"
-    assert "Microsoft Visual C++ Redistributable" in res["components_note"]
-    assert "master-1999-bbbbbbb -> master-2000-aaaaaaa" not in res["components_note"]
-    assert old_sd.is_dir()
-    assert not (home / "runtimes" / "sdcpp" / "master-2000-aaaaaaa-vulkan").exists()

@@ -114,7 +114,7 @@ Pair with an AI agent on code tasks. Point it at a project directory and give it
 
 **In-session commands:** Type `/` to open the coder command menu: `/undo`, `/files`, `/model`, `/compact`, `/export`, `/log`, `/stop`, `/end`, `/help`.
 
-**Circuit breaker:** If a tool fails 4 times in a row the agent stops with a circuit-breaker message instead of burning turns; the conversation stays intact so you can adjust and continue.
+**Circuit breaker:** If a tool fails 4 times in a row the agent stops with a circuit-breaker message instead of burning turns; the conversation stays intact so you can adjust and continue. A tool that plan mode refuses never ran, so it does not count as a failure; when the model asks for the same refused tool 4 times in one run, the agent stops with a message that says so.
 
 ## Other pages
 

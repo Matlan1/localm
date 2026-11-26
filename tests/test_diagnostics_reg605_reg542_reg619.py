@@ -249,11 +249,10 @@ def _port_from_argv(argv):
 
 @pytest.fixture()
 def restart_harness(tmp_path, monkeypatch):
-    """Capture what _do_restart hands to the watchdog and to execv, without
+    """Capture what _do_restart hands to execv, without
     re-execing or spawning anything."""
     import localm.config as cfg
     import localm.inference.http_server as hs
-    from localm import updater
     from localm.inference import embedder as emb
 
     monkeypatch.setattr(cfg, "HOME_DIR", tmp_path)
@@ -264,8 +263,6 @@ def restart_harness(tmp_path, monkeypatch):
     monkeypatch.setattr(emb, "active_requests", lambda: 1)   # skip embedder teardown
 
     seen = {}
-    monkeypatch.setattr(updater, "spawn_health_watchdog",
-                        lambda **kw: (seen.__setitem__("watchdog", kw), True)[1])
     monkeypatch.setattr(
         os, "execve",
         lambda exe, argv, env=None: (seen.__setitem__("argv", argv),
@@ -291,15 +288,12 @@ def test_restart_pins_the_port_the_watchdog_will_probe(restart_harness, monkeypa
     monkeypatch.setattr(sys, "argv", ["localm", "gui", "--no-browser"])
     bound = 8643                                   # what THIS instance is on
     with pytest.raises(SystemExit):
-        hs._do_restart(port=bound, update_watchdog={
-            "host": "127.0.0.1", "port": bound, "scheme": "http",
-            "expect_version": "9.9.9"})
+        hs._do_restart(port=bound)
 
     argv = restart_harness["argv"]
     assert _port_from_argv(argv) == bound, (
         f"the restart argv {argv} carries no port, so the new process re-runs "
         "pick_port() and can bind a different port than the watchdog probes")
-    assert restart_harness["watchdog"]["port"] == bound
 
 
 def test_restarted_process_binds_exactly_the_probed_port(restart_harness, monkeypatch):
@@ -319,16 +313,13 @@ def test_restarted_process_binds_exactly_the_probed_port(restart_harness, monkey
     bound = free_loopback_port()
     assert not PORT_RANGE[0] <= bound <= PORT_RANGE[1]
     with pytest.raises(SystemExit):
-        hs._do_restart(port=bound, update_watchdog={
-            "host": "127.0.0.1", "port": bound, "scheme": "http",
-            "expect_version": "9.9.9"})
+        hs._do_restart(port=bound)
 
     requested = _port_from_argv(restart_harness["argv"])
     new_port, _busy = pick_port(requested, host="127.0.0.1")
-    assert new_port == restart_harness["watchdog"]["port"], (
-        f"the restarted process binds {new_port} but the watchdog probes "
-        f"{restart_harness['watchdog']['port']} - it will never answer, and a "
-        "healthy update gets auto-rolled back")
+    assert new_port == bound, (
+        f"the restarted process binds {new_port}, not the port {bound} the update "
+        "program asks for the new version")
 
 
 # NEGATIVE CASES ------------------------------------------------------------ #
@@ -344,9 +335,7 @@ def test_an_explicit_user_port_is_not_duplicated_or_contradicted(restart_harness
 
     monkeypatch.setattr(sys, "argv", ["localm", "serve", "mymodel", "-p", "9000"])
     with pytest.raises(SystemExit):
-        hs._do_restart(port=9000, update_watchdog={
-            "host": "127.0.0.1", "port": 9000, "scheme": "http",
-            "expect_version": "9.9.9"})
+        hs._do_restart(port=9000)
     argv = restart_harness["argv"]
     assert _port_from_argv(argv) == 9000
     assert argv[:5] == [sys.executable, "-m", "localm", "serve", "mymodel"], (

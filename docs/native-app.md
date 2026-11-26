@@ -137,7 +137,10 @@ Two Windows details make it robust:
 
 `make-launcher` self-checks the result and refuses to leave a launcher that does
 not start. If it cannot build one, `localm gui` still works (Task Manager may then
-show `python.exe`).
+show `python.exe`). It also checks that the launcher runs the same Python as the
+venv. `make-launcher --force` works from a running `LocaLM.exe` too; if a file is
+held by another running LocaLM and cannot be replaced, it says so and exits 1:
+close every LocaLM window and run `localm make-launcher --force` again.
 
 ## Linux caveat
 

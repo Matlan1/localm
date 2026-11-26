@@ -903,6 +903,8 @@ class _LoopMixin:
                                            # the session-wide flag, set in the finally.
         self._last_verify_state = None     # per-run: this run is unverified until
                                            # its own gate says otherwise
+        self._plan_refusals = {}           # per-run: plan-mode refusals per tool
+        self._abort_plan_refused = None
         self._refused_quotations = []
         self._denied_unconfirmed = []      # per-run: see Agent.denied_unconfirmed
         self._reply_limit = None           # per-run: see _raise_reply_limit
@@ -2412,6 +2414,17 @@ class _LoopMixin:
         """After a tool batch, return a circuit-breaker message (and mark the run
         not-ok + emit it) if a breaker tripped, else None. Split out of _loop."""
         print_warning = _agent.print_warning  # live: honour a patched agent.print_warning
+        # Plan mode refused one tool PLAN_REFUSAL_LIMIT times (planmode.py).
+        if self._abort_plan_refused:
+            tool = self._abort_plan_refused
+            self._abort_plan_refused = None
+            from .planmode import plan_refusal_stop_message
+            final_response = plan_refusal_stop_message(tool, self._plan_refusals.get(tool, 0))
+            print_warning(final_response)
+            self._emit("info", text=final_response)
+            self._last_run_ok = False
+            return final_response
+
         # Circuit breaker: a tool that keeps failing identically wastes
         # the whole turn budget - stop and hand control back instead.
         if self._abort_streak_tool:

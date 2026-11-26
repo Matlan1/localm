@@ -115,6 +115,15 @@ def test_a_marker_for_another_tag_is_not_installed(fake_release):
     assert runtime.installed("nocuda") is None
 
 
+def test_a_failed_install_is_not_also_a_console_warning(monkeypatch, caplog):
+    monkeypatch.setattr(runtime, "platform_key", lambda: "windows")
+    caplog.set_level("INFO", logger="localm")
+    with pytest.raises(runtime.ProvisionError, match="no 'metal' build"):
+        runtime.install("metal")
+    failed = [r for r in caplog.records if "installing the metal build failed" in r.message]
+    assert failed and all(r.levelname == "INFO" for r in failed)
+
+
 def test_net_mode_off_refuses_before_any_connection(monkeypatch):
     monkeypatch.setattr(runtime, "platform_key", lambda: "windows")
     monkeypatch.setenv("LOCALM_NET_MODE", "off")

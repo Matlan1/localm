@@ -588,14 +588,72 @@ def test_calls_after_exit_plan_mode_in_the_same_reply_wait_for_the_verdict(
     assert not agent.plan_mode
 
 
-def test_repeated_plan_mode_refusals_arm_the_failure_breaker(tmp_path):
+@pytest.mark.parametrize("name, args", [
+    ("write_file", {"path": "a.txt", "content": "x"}),
+    ("run_tests", {}),
+])
+def test_repeated_plan_mode_refusals_stop_the_run_without_calling_them_failures(
+        tmp_path, name, args):
     agent = _agent(tmp_path)
     agent.set_plan_mode(True)
+    outputs = []
     for _ in range(4):
-        r = agent._execute_tool(_call("write_file", path="a.txt", content="x"),
-                                interactive=False)
-    assert "failed 4 times" in r.output
-    assert agent._abort_streak_tool == "write_file"
+        r = agent._execute_tool(_call(name, **args), interactive=False)
+        outputs.append(str(r.output))
+    assert all("failed" not in o for o in outputs), outputs
+    assert f"Plan mode has refused '{name}' 2 times" in outputs[1]
+    assert agent._consecutive_errors == {}
+    assert agent._global_error_streak == 0
+    assert agent._abort_streak_tool is None
+    assert agent._abort_plan_refused == name
+    message = agent._check_post_batch_breakers()
+    assert message.startswith(f"[stopped: plan mode refused {name} 4 times in this run, so it "
+                              "never ran")
+    assert "failed" not in message
+    assert agent._last_run_ok is False
+
+
+def test_a_task_that_keeps_asking_for_run_tests_in_plan_mode_stops_on_the_refusals(
+        tmp_path, capsys):
+    agent = _agent(tmp_path)
+    agent.set_plan_mode(True)
+    replies = iter([_tc("run_tests")] * 6 + ["Done."])
+    with patch.object(agent, "_call_llm", side_effect=lambda *a, **k: next(replies)):
+        final = agent.chat("run the tests")
+    shown = capsys.readouterr()
+    assert final.startswith("[stopped: plan mode refused run_tests 4 times in this run")
+    assert "failed" not in final
+    assert "failed 4 times" not in shown.out + shown.err
+    assert "circuit breaker" not in shown.out + shown.err
+    assert agent._last_run_ok is False
+
+
+def test_the_next_task_after_a_refusal_stop_starts_counting_again(tmp_path):
+    agent = _agent(tmp_path)
+    agent.set_plan_mode(True)
+    replies = iter([_tc("run_tests")] * 4
+                   + [_tc("run_tests", path="tests"), "I will propose a plan."])
+    with patch.object(agent, "_call_llm", side_effect=lambda *a, **k: next(replies)):
+        first = agent.chat("run the tests")
+        second = agent.chat("continue")
+    assert first.startswith("[stopped: plan mode refused run_tests 4 times")
+    assert "I will propose a plan." in second
+    assert "[stopped" not in second
+    history = " ".join(str(m.get("content")) for m in agent._messages)
+    assert "Plan mode has refused 'run_tests' 4 times" in history
+    assert "Plan mode has refused 'run_tests' 5 times" not in history
+
+
+def test_leaving_plan_mode_starts_the_refusal_count_again(tmp_path):
+    agent = _agent(tmp_path)
+    agent.set_plan_mode(True)
+    for _ in range(3):
+        agent._execute_tool(_call("run_tests"), interactive=False)
+    agent.set_plan_mode(False)
+    agent.set_plan_mode(True)
+    r = agent._execute_tool(_call("run_tests"), interactive=False)
+    assert "Plan mode has refused" not in str(r.output)
+    assert agent._abort_plan_refused is None
 
 
 def test_an_active_skill_does_not_block_the_interaction_tools(tmp_path, monkeypatch):

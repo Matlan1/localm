@@ -478,7 +478,7 @@ def _replace(path: Path, data: bytes, *, executable: bool) -> None:
 
 
 def repair(paths=None, *, root=None, say: Optional[Callable] = None,
-           opener=None) -> dict:
+           opener=None, timeout: float = 120.0) -> dict:
     """Write the release files *paths* (default every differing and missing one, kept
     ones aside) again from the signed build of the installed version: the build is
     downloaded through the updater, its signature checked, and each file is taken
@@ -488,7 +488,8 @@ def repair(paths=None, *, root=None, say: Optional[Callable] = None,
     (``failed``: ``[{"path", "reason"}]``). Raises IntegrityError when nothing can be
     repaired (no statement, a path the release does not state, an update in
     progress) and LocalmError when the build cannot be fetched, read or does not
-    verify. *opener* is the updater's download opener."""
+    verify. *opener* is the updater's download opener; *timeout* the seconds each
+    wait of the download may last."""
     from localm import updater
     from localm.bugreport import LocalmError
     say = say or (lambda _m: None)
@@ -517,7 +518,7 @@ def repair(paths=None, *, root=None, say: Optional[Callable] = None,
         try:
             scratch.mkdir(parents=True, exist_ok=True)
             zip_path = scratch / "build.zip"
-            updater.download(asset["id"], zip_path, opener=opener)
+            updater.download(asset["id"], zip_path, opener=opener, timeout=timeout)
             data = zip_path.read_bytes()
             updater.verify_signature(data, meta.get("signature"))
             planned, failed = _from_build(data, version, manifest, paths)

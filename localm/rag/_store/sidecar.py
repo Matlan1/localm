@@ -4,9 +4,8 @@ as ``vectors.json.rejected[.N]``."""
 
 from __future__ import annotations
 
-import os
-
 from localm.debuglog import logger as _log
+from localm.storekit import replace_atomic
 
 
 # Where a vectors.json that _load() REFUSED is set aside when the chunks it was
@@ -64,7 +63,7 @@ class _CollectionSidecar:
                 "files by hand.", self.name, _REJECTED_VECTORS, self.name)
             return
         try:
-            os.replace(src, dest)
+            replace_atomic(src, dest)
         except OSError as e:
             # Best-effort; the failure is logged and the file is left in place.
             _log.warning("RAG collection %r: could not set the unusable "

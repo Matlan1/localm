@@ -3,11 +3,11 @@
 """Post-restart health watchdog: verify a just-applied localm update actually came
 back up, and roll it back automatically if it did not.
 
-``localm/updater.py``'s ``spawn_health_watchdog()`` launches this DETACHED right
-before the server re-execs into a freshly swapped build (``_do_restart`` in
-``localm/inference/http_server.py``). By the time it runs, the file swap has
-ALREADY happened, so this script executes from the NEW (possibly broken) build's
-copy on disk. It is stdlib-only, with ZERO ``localm`` package imports, so a
+An older localm (0.3.2 to 0.3.4b4), whose own updater swaps a build in, launches
+this DETACHED right before its server re-execs into the freshly swapped build
+(``spawn_health_watchdog()`` of that version's ``localm/updater.py``). By the time
+it runs, the file swap has ALREADY happened, so this script executes from the NEW
+(possibly broken) build's copy on disk. It is stdlib-only, with ZERO ``localm`` package imports, so a
 broken new build cannot break the thing meant to detect it.
 
 It polls the restarted instance's own unauthenticated ``GET /whoami`` (never

@@ -27,8 +27,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from localm import procs
-
 from . import pins
 
 MARKER = "localm-koboldcpp.json"
@@ -277,6 +275,7 @@ def _unpack(binary: Path, staging: Path, tmp: Path,
     """Run the verified release binary's own ``--unpack`` into *staging*."""
     _make_executable(binary)
     log = tmp / "unpack.log"
+    from localm import procs
     kwargs = {}
     if sys.platform != "win32":
         kwargs["start_new_session"] = True
@@ -429,7 +428,7 @@ def install(build: str, *, force: bool = False,
         logger.info("koboldcpp runtime: installing the %s build was cancelled", build)
         raise
     except ProvisionError as e:
-        logger.warning("koboldcpp runtime: installing the %s build failed: %s", build, e)
+        logger.info("koboldcpp runtime: installing the %s build failed: %s", build, e)
         raise
 
 

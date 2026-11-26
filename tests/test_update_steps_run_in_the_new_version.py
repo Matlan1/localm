@@ -1,76 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The runtime and component steps of an update are carried out by the installed
-(new) version at its own start, never by the process that applied the update
-(a terminal downgrade, whose older version's start may not, carries them out
-itself): every ``updater.apply`` call site defers them, a server restart in a
-process older than the installed version hands them to the re-executed version,
-and a failure of those steps at the new version's start rolls the update back."""
+(new) version at its own start, never by the process that applied the update: a
+server restart in a process older than the installed version hands them to the
+re-executed version, and a failure of those steps at the new version's start rolls the update back."""
 
 from __future__ import annotations
 
-import ast
-from pathlib import Path
 
 import pytest
 
 from localm import _version, updater, updater_components, updater_runtime
 from localm.cli import _core
 
-ROOT = Path(__file__).resolve().parent.parent
-
-
-def _is_updater_apply(node) -> bool:
-    return (isinstance(node, ast.Attribute) and node.attr == "apply"
-            and isinstance(node.value, ast.Name) and node.value.id in ("updater", "_updater"))
-
-
-def _apply_calls():
-    """Every call of ``updater.apply``, directly or passed as an argument to
-    another call (``asyncio.to_thread(_probes_held, updater.apply, ...)``), with
-    the call whose keywords reach apply."""
-    for path in sorted((ROOT / "localm").rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            if _is_updater_apply(node.func) or any(_is_updater_apply(a) for a in node.args):
-                yield path.relative_to(ROOT).as_posix(), node
-
-
-def test_every_update_path_leaves_the_runtime_and_components_to_the_new_version():
-    calls = list(_apply_calls())
-    where = sorted({w for w, _ in calls})
-    assert len(calls) >= 4 and "localm/inference/routes/admin.py" in where \
-        and "localm/cli/maintenance.py" in where, [(w, n.lineno) for w, n in calls]
-    for where, node in calls:
-        kw = {k.arg: k.value for k in node.keywords}
-        assert "defer_runtime" in kw, f"{where}:{node.lineno} does not defer the update steps"
-        value = kw["defer_runtime"]
-        assert (isinstance(value, ast.Constant) and value.value is True) or (
-            isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
-            and value.func.id == "_defer_update_steps"), f"{where}:{node.lineno}"
-
-
-@pytest.mark.parametrize("target, running, deferred", [
-    ("0.3.5", "0.3.4", True),
-    ("0.3.4", "0.3.4", True),
-    ("0.3.3", "0.3.4", False),
-    ("nightly", "0.3.4", True),
-])
-def test_a_terminal_downgrade_carries_its_steps_out_itself(monkeypatch, target, running,
-                                                          deferred):
-    from localm.cli import maintenance
-    monkeypatch.setattr(_version, "read_version", lambda: running)
-    assert maintenance._defer_update_steps(target) is deferred
-
-
-def test_the_scan_sees_an_apply_passed_as_an_argument():
-    tree = ast.parse("asyncio.to_thread(_probes_held, updater.apply, 1, defer_runtime=True)\n"
-                     "updater.apply(2)\n"
-                     "updater.check()\n")
-    found = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and (
-        _is_updater_apply(n.func) or any(_is_updater_apply(a) for a in n.args))]
-    assert [n.lineno for n in found] == [1, 2]
 
 
 @pytest.mark.parametrize("installed, running, newer", [
@@ -213,15 +154,6 @@ def test_a_rollback_that_cannot_be_done_still_stops_the_command(at_start, monkey
     with pytest.raises(SystemExit) as exc:
         _core._roll_back_update_at_start("the runtime failed")
     assert exc.value.code == 1
-
-
-def test_a_deferred_component_update_says_when_it_happens(updates_dir):
-    status, note = updater._apply_components(
-        [{"name": "sdcpp", "update": True, "note": "sd.cpp master-1 -> master-2"}], True,
-        klass="code", target=Path("."), version="9.9.9", defer=True, runner=None,
-        say=None, roll_back=None, when="at the next start of localm")
-    assert status is None and note.endswith("at the next start of localm")
-    assert updater_components.read_pending() is not None
 
 
 def test_a_catch_up_at_start_is_a_repair_and_never_rolls_an_update_back(at_start,

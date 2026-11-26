@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Absolute paths in the update and key-listing response bodies.
 
-``GET /api/update/rollback`` (``backup``), ``POST /api/update/apply`` (``backup``
+``GET /api/update/rollback`` (``backup``), ``POST /api/update/apply`` (its ``notes``
 and an ``error`` text) and ``GET /v1/keys`` (``owner_key_warning``) name files
 under the data dir. A caller who is not the local operator (a scoped key) gets
 them through ``path_formatter``; the operator (open mode or an owner key) keeps
@@ -82,14 +82,8 @@ def test_rollback_probe_without_a_backup_reports_none_for_both(home):
 
 @pytest.fixture
 def applying(home, monkeypatch):
-    """An updater that reports a newer release; apply() is stubbed per test. The build
-    ships no program of its own, so the route installs it with ``updater.apply``
-    (``updater_handoff.Prepared.legacy``)."""
-    from pathlib import Path
-
-    from localm import updater_handoff
-    monkeypatch.setattr(updater_handoff, "prepare", lambda *_a, **_k: updater_handoff.Prepared(
-        Path("."), "0" * 32, "", "", None, True, None, False, None, legacy=True))
+    """An updater that reports a newer release; what ``updater_handoff.prepare`` answers is
+    set per test, and no restart really happens."""
     monkeypatch.setattr(updater, "available", lambda: True)
     monkeypatch.setattr(updater, "check", lambda: {
         "newer": True, "current": "0.1.0", "asset": {"id": "a1"}, "signature": None})
@@ -97,34 +91,48 @@ def applying(home, monkeypatch):
     return home
 
 
-def test_apply_scrubs_backup_for_a_scoped_key_not_for_the_owner(applying, monkeypatch):
-    backup = str(applying / "updates" / "backup")
-    monkeypatch.setattr(updater, "apply", lambda *a, **k: {
-        "applied": True, "version": "0.2.0", "klass": "setup", "backup": backup})
-    scoped = auth.create_key("dev", [scopes.CONFIG_WRITE], allow_privileged=True)["key"]
+def _apply_as(key) -> dict:
+    """``POST /api/update/apply`` with *key*, on an app of its own (one update at a time
+    per app)."""
     with TestClient(create_app(_engine())) as c:
-        owner = c.post("/api/update/apply", headers=_bearer(OWNER_KEY)).json()
-        theirs = c.post("/api/update/apply", headers=_bearer(scoped)).json()
-    assert owner["backup"] == backup
+        return c.post("/api/update/apply", headers=_bearer(key)).json()
+
+
+def test_apply_scrubs_the_notes_for_a_scoped_key_not_for_the_owner(applying, monkeypatch):
+    from pathlib import Path
+
+    from localm import updater_handoff
+    kept = str(applying / "updates" / "data-before-0.2.0")
+
+    def prepare(*_a, **_k):
+        out = updater_handoff.Prepared(Path("."), "0" * 32, "0.1.0", "0.2.0", None, True,
+                                       None, False, None)
+        out.notes = [f"your data is copied to {kept}"]
+        return out
+
+    monkeypatch.setattr(updater_handoff, "prepare", prepare)
+    scoped = auth.create_key("dev", [scopes.CONFIG_WRITE], allow_privileged=True)["key"]
+    owner, theirs = _apply_as(OWNER_KEY), _apply_as(scoped)
+    assert owner["notes"] == [f"your data is copied to {kept}"]
     assert theirs["applied"] is True
-    assert str(applying) not in theirs["backup"], theirs["backup"]
+    assert str(applying) not in theirs["notes"][0], theirs["notes"]
 
 
 def test_apply_failure_text_is_scrubbed_for_a_scoped_key_not_for_the_owner(
         applying, monkeypatch):
-    backup = str(applying / "updates" / "backup")
+    from localm import updater_handoff
+    folder = str(applying / "updates" / "new")
 
     def fail(*a, **k):
-        raise LocalmError("update swap failed", reason=f"restore from {backup}")
+        raise LocalmError("the update was not started; nothing was changed",
+                          reason=f"{folder} could not be written")
 
-    monkeypatch.setattr(updater, "apply", fail)
+    monkeypatch.setattr(updater_handoff, "prepare", fail)
     scoped = auth.create_key("dev", [scopes.CONFIG_WRITE], allow_privileged=True)["key"]
-    with TestClient(create_app(_engine())) as c:
-        owner = c.post("/api/update/apply", headers=_bearer(OWNER_KEY)).json()
-        theirs = c.post("/api/update/apply", headers=_bearer(scoped)).json()
-    assert owner["applied"] is False and backup in owner["error"]
+    owner, theirs = _apply_as(OWNER_KEY), _apply_as(scoped)
+    assert owner["applied"] is False and folder in owner["error"]
     assert theirs["applied"] is False
-    assert "update swap failed" in theirs["error"]
+    assert "the update was not started" in theirs["error"]
     assert str(applying) not in theirs["error"], theirs["error"]
 
 

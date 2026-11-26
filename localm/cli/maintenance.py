@@ -523,34 +523,26 @@ def _update_list(updater) -> None:
     console.print("[dim]Install one with: localm update --to <version>[/dim]")
 
 
-def _defer_update_steps(version) -> bool:
-    """Whether a terminal update to *version* leaves its runtime and component
-    steps to that version's next start: True unless *version* is older than the
-    running localm (a downgrade), whose steps the update carries out itself."""
-    from localm import _version, updater
-    return updater._direction(str(version or ""), _version.read_version()) != "older"
-
-
 def _install_with_applier(asset_id, signature, *, yes: bool, target_version=None,
                           allow_unverified: bool = False, expect=None) -> None:
-    """Install the build *asset_id* through the program it ships, when it ships one and a
-    waiting ``localm update`` started this process (``localm._update_parent``): prepares
-    and checks it, asks about the other processes of localm it ends, hands it over and
-    exits with ``HANDED_OFF``. Returns when the build ships no such program. Raises
-    LocalmError or ``updater.UnverifiedBuild``."""
+    """Install the build *asset_id* through its update program
+    (``localm.updater_handoff``): prepares and checks it, asks about the other processes
+    of localm it ends, hands it over and exits with ``HANDED_OFF`` to the waiting
+    ``localm update`` that started this process (``localm._update_parent``). Raises
+    LocalmError, with nothing changed when no such ``localm update`` started this
+    process, or ``updater.UnverifiedBuild``."""
     import os
 
     from localm import _update_parent, updater_handoff
+    from localm.bugreport import LocalmError
     from rich.markup import escape
     if os.environ.get(_update_parent.WORK) != "1":
-        return
+        raise LocalmError("the update was not started; nothing was changed",
+                          reason="start it with the localm command: localm update")
     prepared = updater_handoff.prepare(asset_id, signature=signature,
                                        target_version=target_version,
                                        allow_unverified=allow_unverified, expect_sha256=expect,
                                        say=_say_step)
-    if prepared.legacy:
-        prepared.discard()
-        return
     try:
         if prepared.processes:
             named = updater_handoff.describe(prepared.processes)
@@ -626,12 +618,7 @@ def _update_to(updater, version: str, *, yes: bool, allow_unverified: bool) -> N
             _install_with_applier(asset["id"], rel.get("signature"), yes=yes,
                                   target_version=rel["version"], allow_unverified=accept,
                                   expect=expect)
-            res = updater.apply(asset["id"], signature=rel.get("signature"),
-                                target_version=rel["version"], allow_unverified=accept,
-                                expect_sha256=expect,
-                                defer_runtime=_defer_update_steps(rel["version"]),
-                                steps_when="at the next start of localm", say=_say_step)
-            break
+            return
         except updater.UnverifiedBuild as e:
             console.print(f"[bold yellow]Warning: the signature of {escape(rel['version'])} "
                           f"does not verify:[/bold yellow] {escape(e.reason)}.")
@@ -653,21 +640,6 @@ def _update_to(updater, version: str, *, yes: bool, allow_unverified: bool) -> N
             console.print(f"[red]Install failed:[/red] {escape(e.summary)} "
                           f"({escape(e.reason)}).")
             sys.exit(1)
-    console.print(f"[green]Installed {escape(res['version'])}[/green] "
-                  f"({updater.class_summary(res['klass'])}).")
-    if not res.get("verified", True):
-        console.print("[yellow]Installed without a verified signature.[/yellow]")
-    _print_update_extras(res)
-    if res.get("data_backup"):
-        console.print(f"[dim]Your data from before the downgrade: "
-                      f"{escape(res['data_backup'])} (to restore it, copy those files back "
-                      "into the data folder while localm is stopped)[/dim]")
-    if res["klass"] == "setup":
-        console.print(f"[yellow]This version needs {updater.setup_script()} re-run (a "
-                      "Python/venv change) before it will start.[/yellow]")
-    else:
-        console.print("[bold]Restart localm to load it.[/bold]  "
-                      "[dim](undo: localm update --rollback)[/dim]")
 
 
 def _catch_up_after_rollback() -> None:
@@ -712,32 +684,6 @@ def _say_step(text: str) -> None:
     """Print one step of an update or rollback."""
     from rich.markup import escape
     console.print(f"[dim]{escape(text)}[/dim]")
-
-
-def _print_update_extras(res: dict) -> None:
-    """Print what an applied update did to the native runtime and the other
-    components, on a selected install which parts of the current version the
-    installed one keeps, and on a git clone that git lists the replaced files."""
-    from rich.markup import escape
-
-    from localm import updater
-    note = res.get("runtime_note")
-    status = res.get("runtime") or {}
-    if note:
-        failed = status.get("state") in ("failed", "waiting") or " NOT " in note
-        style = "yellow" if failed else "dim"
-        console.print(f"[{style}]Native runtime: {escape(note)}[/{style}]")
-    cnote = res.get("components_note")
-    if cnote:
-        cstate = (res.get("components") or {}).get("state")
-        style = "yellow" if cstate in ("failed", "waiting") or "NOT done" in cnote else "dim"
-        console.print(f"[{style}]Components: {escape(cnote)}[/{style}]")
-    for part in res.get("kept_for_updates") or []:
-        console.print(f"[dim]Kept from the version you had, so this one can update "
-                      f"again: {escape(part)}[/dim]")
-    if res.get("git_clone"):
-        note = updater.GIT_CLONE_NOTE
-        console.print(f"[dim]{note[0].upper()}{escape(note[1:])}.[/dim]")
 
 
 @main.command("update")
@@ -869,25 +815,9 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool, list_only: bool,
     console.print(f"[dim]Downloading and applying {escape(latest)} ...[/dim]")
     try:
         _install_with_applier(asset["id"], info.get("signature"), yes=yes)
-        res = updater.apply(asset["id"], signature=info.get("signature"),
-                            defer_runtime=_defer_update_steps(latest),
-                            steps_when="at the next start of localm", say=_say_step)
     except LocalmError as e:
-        # The error says whether apply() changed nothing, rolled back, or needs a manual restore.
         console.print(f"[red]Update failed:[/red] {escape(e.summary)} ({escape(e.reason)}).")
         sys.exit(1)
-    console.print(f"[green]Updated to {escape(res['version'])}[/green] "
-                  f"({updater.class_summary(res['klass'])}).")
-    _print_update_extras(res)
-    if res["klass"] == "setup":
-        console.print(f"[yellow]This update needs {updater.setup_script()} re-run (a "
-                      "Python/venv change) before it will start.[/yellow]")
-    else:
-        console.print("[bold]Restart localm to load the new version.[/bold]  "
-                      "[dim](undo: localm update --rollback)[/dim]")
-        console.print("[dim]If the new version will not start, run the rollback script "
-                      "in the install folder (rollback.bat / rollback.sh) to restore "
-                      "this one.[/dim]")
 
 
 

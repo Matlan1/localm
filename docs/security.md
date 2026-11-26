@@ -573,11 +573,12 @@ update`, or the GUI "Update now" button). The client is signature-verifying:
   installed with a warning that it is unverified (pass `--sha256` to pin one). The
   stable-diffusion.cpp, KoboldCpp and uv downloads and the embedding models are checked
   against pinned SHA-256 values.
-- **Your data is never in the swap.** The file swap never touches the venv (an
-  update that changes dependencies reinstalls the packages there afterwards), `.git`,
-  your data directory (models, config, sessions), or `.localcoder`; provisioned
-  native binaries (the llama.cpp runtime) are preserved across the swap. It backs
-  up first and rolls back on failure rather than leaving a half-applied tree.
+- **Your data is never in the update.** An update replaces the files of the release
+  and the packages its lock changes; it never touches `.git`, your data directory
+  (models, config, sessions), or `.localcoder`, and a new native runtime (the llama.cpp
+  runtime) is installed into a folder of its own and load-tested before it is moved
+  in. Every file it replaces is moved aside first, and a failure or an interruption
+  puts the previous version back rather than leaving a half-applied tree.
 
 Honest limits: until an install receives an update that replaces a key, a build
 signed with that key is still accepted. A replacement set of keys is kept in the
@@ -592,22 +593,21 @@ Builds signed for localm 0.2.0 and earlier use a single-key format that 0.3.0 an
 later refuse. 0.2.0 updates to 0.3.0 as before; an install still on 0.2.0 when a
 later release is published cannot verify that release and needs a fresh install
 (an install that went back to 0.2.0 through `localm update --to` is the exception
-described above). The GUI "Update now" button's restart (the only
-transition that happens with nobody watching) is followed by a detached watchdog
-that polls the relaunched build's `/whoami` for the expected version and
-auto-rolls-back if it does not come up healthy within 90 seconds. `localm update`
-from the CLI applies the same way but does not restart for you - you relaunch by
-hand, so a build that misbehaves after that manual restart has no automatic
-watchdog and is recovered with `localm update --rollback` (or by restoring the
-backup directory the update left behind). The GUI has the same rollback as a
-button (Settings > System > Updates), backed by `GET`/`POST /api/update/rollback`: the
-GET is a read-only check for whether a backup exists and which build it would
-restore; the POST requires the `admin` scope specifically (not merely
-`config:write`) and restores the previous build's files from the local backup
-with **no signature check and no network request** - it is not a download, so
-the signing model above does not apply to it. It restores every part the update replaced: the files,
-the virtual environment as it was before the update's dependency step, the
-native runtime and the components.
+described above). An update, from the GUI "Update now" button or
+`localm update`, is carried out by the update program the verified build ships. It
+checks that the new version starts (a restarted server must answer `/whoami` with the
+new version within 180 seconds) and puts the previous version back when it does not.
+An update that finished keeps no backup: `localm update --rollback` and the rollback
+button (Settings > System > Updates) install the version it replaced as a chosen
+release, through the verified path above. An update that an older localm (0.3.2 to
+0.3.4b4) carried out with its own updater leaves a backup in the data directory, and
+`GET`/`POST /api/update/rollback` restore that one: the GET is a read-only check for
+whether a backup exists and which build it would restore; the POST requires the
+`admin` scope specifically (not merely `config:write`) and restores the previous
+build's files from the local backup with **no signature check and no network
+request** - it is not a download, so the signing model above does not apply to it.
+It restores every part that update replaced: the files, the virtual environment as it
+was before its dependency step, the native runtime and the components.
 
 **A first-time (non-updater) install can be verified too.** `scripts/verify_release.py`
 checks a downloaded release Asset (`localm-<version>.zip` plus its signature envelope,
