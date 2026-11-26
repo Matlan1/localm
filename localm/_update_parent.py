@@ -58,6 +58,10 @@ def wait() -> int:
     if update:
         os.environ["LOCALM_UPDATE_PRIMARY"] = update
         localm._gate(procs.current())
+        import time
+        deadline = time.monotonic() + 600
+        while localm._held(folder) and time.monotonic() < deadline:
+            time.sleep(0.2)
     path = os.path.join(folder, f"result-{update}.json")
     try:
         with open(path, encoding="utf-8") as f:

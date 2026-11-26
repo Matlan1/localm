@@ -250,7 +250,7 @@ class Applier:
             return found | {e.pid for e in entries
                             if e.parent and e.parent[0] in found and not e.recorded}
 
-        others = [e for e in running if e.recorded and e.pid not in waiting]
+        others = [e for e in running if e.recorded and e.pid not in waiting and e.pid != os.getpid()]
         refused = [e for e in others if not agreed_to(e)]
         if refused:
             raise Abandoned("these processes of localm run and nobody agreed to end them: "

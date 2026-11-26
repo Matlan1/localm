@@ -47,6 +47,7 @@ if args[:1] == ['_update-probe']:
     sys.stdin.read()
     sys.exit(0)
 if args[:1] == ['_update-record']:
+    __import__('time').sleep(3)
     sys.exit(0)
 if args[:1] == ['update']:
     from localm import _update_parent, procs
