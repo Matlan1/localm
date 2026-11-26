@@ -301,43 +301,66 @@ def watchdogs(root) -> Optional[list]:
     """The pids of the update watchdogs of the install at *root* that run: an old
     client's ``scripts/update_watchdog.py`` whose ``--install-root`` is *root*. None
     when that cannot be told: the processes cannot be listed, or the command line of
-    one this user can open (one whose program can be read) cannot be read or parsed.
-    On a system without ``/proc`` (macOS) only processes whose program is a Python are
-    read, from ``ps`` (:func:`_ps_command_line`)."""
+    one this user can open (one whose program can be read) cannot be read or parsed
+    while it still runs: one that ended between the listing and the read is listed
+    again, and left out when it is gone. On a system without ``/proc`` (macOS) only
+    processes whose program is a Python are read, from ``ps``
+    (:func:`_ps_command_line`)."""
     from localm import install_manifest
     rows = install_manifest.list_processes()
     if rows is None:
         return None
     own = os.getpid()
-    unknown, found = False, []
-    by_ps = _by_ps()
+    found, unread = [], []
     for row in rows:
-        pid, exe = row[0], row[2]
-        if pid == own:
+        if row[0] == own:
             continue
-        if by_ps:
-            if not (exe and "python" in os.path.basename(exe).lower()):
-                continue
-            line = _ps_command_line(pid)
-            if line is None:
-                unknown = True
-                continue
-            if _WATCHDOG not in line:
-                continue
-            named = _option_in_line(line, "--install-root")
-        else:
-            argv = _argv(pid)
-            if argv is None:
-                unknown = unknown or bool(exe)
-                continue
-            if not any(os.path.basename(a) == _WATCHDOG for a in argv):
-                continue
-            named = _option(argv, "--install-root")
-        if named is None:
-            unknown = True
-        elif _same_folder(named, root):
-            found.append(pid)
-    return None if unknown else found
+        seen = _watchdog_of(row, root)
+        if seen is None:
+            unread.append(row)
+        elif seen:
+            found.append(row[0])
+    if not unread:
+        return found
+    again = install_manifest.list_processes()
+    if again is None:
+        return None
+    now = {row[0]: row for row in again}
+    for row in unread:
+        still = now.get(row[0])
+        if still is None or still[3] != row[3]:
+            continue
+        seen = _watchdog_of(still, root)
+        if seen is None:
+            return None
+        if seen:
+            found.append(row[0])
+    return found
+
+
+def _watchdog_of(row, root) -> Optional[bool]:
+    """Whether the process of the :func:`install_manifest.list_processes` *row* is an
+    update watchdog of the install at *root*; None when that cannot be told."""
+    pid, exe = row[0], row[2]
+    if _by_ps():
+        if not (exe and "python" in os.path.basename(exe).lower()):
+            return False
+        line = _ps_command_line(pid)
+        if line is None:
+            return None
+        if _WATCHDOG not in line:
+            return False
+        named = _option_in_line(line, "--install-root")
+    else:
+        argv = _argv(pid)
+        if argv is None:
+            return None if exe else False
+        if not any(os.path.basename(a) == _WATCHDOG for a in argv):
+            return False
+        named = _option(argv, "--install-root")
+    if named is None:
+        return None
+    return _same_folder(named, root)
 
 
 def _by_ps() -> bool:

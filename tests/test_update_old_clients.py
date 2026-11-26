@@ -342,6 +342,23 @@ def test_an_unreadable_command_line_means_a_watchdog_may_run(monkeypatch, tmp_pa
     assert oc.watchdogs(root) is None
 
 
+def test_a_process_that_ended_before_its_command_line_was_read_is_left_out(monkeypatch,
+                                                                          tmp_path):
+    """A busy computer starts and ends processes all the time; one that ended between
+    the listing and the read says nothing about a watchdog. One that still runs under
+    the same start time does."""
+    root = tmp_path / "install"
+    monkeypatch.setattr(oc, "_by_ps", lambda: False)
+    listings = [[(42, 1, "/x/git.exe", 100)], []]
+    monkeypatch.setattr(install_manifest, "list_processes", lambda: listings.pop(0))
+    monkeypatch.setattr(oc, "_argv", lambda pid: None)
+    assert oc.watchdogs(root) == []
+    listings[:] = [[(42, 1, "/x/git.exe", 100)], [(42, 1, "/x/other.exe", 200)]]
+    assert oc.watchdogs(root) == []
+    listings[:] = [[(42, 1, "/x/python.exe", 100)], [(42, 1, "/x/python.exe", 100)]]
+    assert oc.watchdogs(root) is None
+
+
 def test_the_command_lines_ps_shows_are_read_on_a_system_without_proc(monkeypatch, tmp_path):
     root = tmp_path / "my install"
     monkeypatch.setattr(oc, "_by_ps", lambda: True)
