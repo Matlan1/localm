@@ -565,7 +565,20 @@ class TestEngineCacheMultiResidency:
                    return_value=("models/b.gguf", "b")),                 patch("localm.inference.engine.create_backend",
                       return_value=sized) as made:
             assert cache._backend_need_bytes("b") == 9 * GB
-        made.assert_called_once_with("models/b.gguf")
+        made.assert_called_once_with("models/b.gguf", mmproj_path=None)
+
+    def test_backend_need_sizes_the_load_with_its_projector(self):
+        from types import SimpleNamespace
+        cache = _resident_cache()
+        sized = SimpleNamespace(full_offload_vram_bytes=lambda: 9 * GB)
+        with patch("localm.model_manager.get_model_info",
+                   return_value=("models/b.gguf", "b")), \
+                patch("localm.model_manager.get_model_mmproj",
+                      return_value="models/mmproj-b.gguf"), \
+                patch("localm.inference.engine.create_backend",
+                      return_value=sized) as made:
+            assert cache._backend_need_bytes("b") == 9 * GB
+        made.assert_called_once_with("models/b.gguf", mmproj_path="models/mmproj-b.gguf")
 
     @pytest.mark.parametrize("backend,info", [
         (object(), ("models/b", "b")),
