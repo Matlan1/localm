@@ -524,7 +524,7 @@ def test_files_that_cannot_be_read_now_leave_the_checks_to_the_next_start(setup,
 
     def held(_root, **_k):
         tries.append(1)
-        raise disk.Held("localm/x.py is open in another program")
+        raise disk.Held(root / "localm" / "x.py", "it is open in another program")
     monkeypatch.setattr(restoring, "stated_differences", held)
     monkeypatch.setattr(oc.time, "sleep", lambda s: None)
     note, _said, warned = _start(root, home)

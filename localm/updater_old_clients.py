@@ -264,6 +264,7 @@ def _files(root, version: str) -> Optional[str]:
     read, is tried again :data:`_FILES_TRIES` times a second apart; then
     :class:`Later` is raised."""
     from localm.update_mechanism import disk, restoring
+    stated, differ = "", []
     for attempt in range(_FILES_TRIES):
         try:
             stated, differ = restoring.stated_differences(root)
@@ -398,7 +399,10 @@ def _option_in_line(line: str, name: str) -> Optional[str]:
 
 
 def _split_windows(line: str) -> Optional[list]:
-    """*line* split into arguments by ``CommandLineToArgvW``; None when it fails."""
+    """*line* split into arguments by ``CommandLineToArgvW``; None when it fails or on
+    any other platform than Windows."""
+    if sys.platform != "win32":
+        return None
     import ctypes
     from ctypes import wintypes
     shell32 = ctypes.WinDLL("shell32", use_last_error=True)
@@ -666,16 +670,22 @@ def at_start(*, root, home, version: str, say: Say, warn: Say, server: bool) -> 
         with _checking(root) as held:
             if not held:
                 return None
-            return _check(root, home, version, identity, say=say, warn=warn, server=server)
+            note, wait = _check(root, home, version, identity, say=say, warn=warn,
+                                server=server)
     except OSError as e:
         warn(f"The checks of the update to localm {version} could not start ({e}); they run "
              "at the next start.")
         return None
+    if wait:
+        _later(root, home, version, warn=warn)
+    return note
 
 
 def _check(root, home, version: str, identity: dict, *, say: Say, warn: Say,
-           server: bool) -> Optional[str]:
-    """:func:`at_start` with the checks due for the backup *identity* and the lock held."""
+           server: bool) -> tuple:
+    """:func:`at_start` with the checks due for the backup *identity* and the lock held:
+    ``(note, wait)``, *wait* True when a server is to finish the checks once the old
+    update watchdog has ended (:func:`_later`)."""
     updates_dir = Path(home) / "updates"
     old = identity["version"]
     checked = read_checked(root)
@@ -683,7 +693,7 @@ def _check(root, home, version: str, identity: dict, *, say: Say, warn: Say,
         say(f"Putting localm {old} back, which an earlier start began ...")
         return _put_back(root, home, identity, old=old, new=version,
                          failed=[tuple(r) for r in checked.get("reasons") or []],
-                         tries=int(checked.get("tries") or 0), say=say, warn=warn)
+                         tries=int(checked.get("tries") or 0), say=say, warn=warn), False
     say(f"localm {old} installed localm {version}; checking the update ...")
     since = _since(checked) if checked.get("backup") == identity else time.time()
     watched = _may_run(root, since)
@@ -692,7 +702,7 @@ def _check(root, home, version: str, identity: dict, *, say: Say, warn: Say,
     except Later as e:
         warn(f"The checks of the update to localm {version} could not finish ({e}); they "
              "run at the next start.")
-        return None
+        return None, False
     owned = mine(root, updates_dir)
     if watched:
         _keep_record(root, version, identity, warn, passed=None, reasons=failed, mine=owned)
@@ -703,21 +713,19 @@ def _check(root, home, version: str, identity: dict, *, say: Say, warn: Say,
                     "next start of localm does.")
             _write_result(home, root, warn, state="failed", old=old, new=version,
                           version=version, note=note)
-            return note
+            return note, False
         say(f"The files and packages are those of localm {version}; the update watchdog of "
             f"localm {old} checks that it answers, and the update is complete once it "
             "has ended.")
-        if server:
-            _later(root, home, version, warn=warn)
-        return None
+        return None, server
     if not failed:
         _keep_record(root, version, identity, warn, passed=True, reasons=[], mine=owned)
         say(f"The update from localm {old} to {version} is complete.")
         _tidy_now_or_later(root, home, version, warn=warn, server=server)
-        return None
+        return None, False
     if owned:
         return _put_back(root, home, identity, old=old, new=version, failed=failed, tries=0,
-                         say=say, warn=warn)
+                         say=say, warn=warn), False
     why = "; ".join(reason for _kind, reason in failed)
     _keep_record(root, version, identity, warn, passed=False, reasons=failed, mine=False)
     note = (f"The update to localm {version} failed its checks: {why}. The backup of "
@@ -725,11 +733,9 @@ def _check(root, home, version: str, identity: dict, *, say: Say, warn: Say,
             f"{version} made of this install, so nothing was put back. "
             + _how_to_repair(failed, version))
     warn(note)
-    try:
-        _result(home, root, state="failed", old=old, new=version, version=version, note=note)
-    except OSError as e:
-        warn(f"Could not record the result of the checks: {e}")
-    return None
+    _write_result(home, root, warn, state="failed", old=old, new=version, version=version,
+                  note=note)
+    return None, False
 
 
 def _keep_record(root, version, identity, warn: Say, **fields) -> None:
