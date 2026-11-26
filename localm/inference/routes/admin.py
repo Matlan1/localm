@@ -446,14 +446,18 @@ def register(app: FastAPI, ctx) -> None:
         needs_confirmation: "processes", processes, error}`` naming them and keeps the
         prepared update; the owner's second press for the same build within
         :data:`_CONFIRM_S` that finds the same processes is the agreement to end them,
-        and uses what was prepared. Anyone else gets 403. Returns None when the build
+        and uses what was prepared. Anyone else gets 403, and the owner's first press
+        stays armed: only an owner's press uses or discards it. Returns None when the build
         ships no such program (``updater.apply`` installs it then). Raises LocalmError or
         ``updater.UnverifiedBuild``."""
         import time as _time
 
         from localm import updater_handoff
         target = (asset_id, kwargs.get("target_version"))
-        asked, app.state.update_confirm = getattr(app.state, "update_confirm", None), None
+        owner = _hs.caller_is_operator(request)
+        asked = getattr(app.state, "update_confirm", None) if owner else None
+        if owner:
+            app.state.update_confirm = None
         prepared = None
         if asked and asked[1] == target and _time.monotonic() - asked[2] < _CONFIRM_S:
             prepared = await asyncio.to_thread(updater_handoff.look_around, asked[3])
@@ -467,7 +471,7 @@ def register(app: FastAPI, ctx) -> None:
             return None
         keys = sorted(p["key"] for p in prepared.processes)
         if keys:
-            if not _hs.caller_is_operator(request):
+            if not owner:
                 prepared.discard()
                 raise HTTPException(403, "Ending the other processes of localm for an update "
                                          "requires an owner (admin) key.")
@@ -486,6 +490,10 @@ def register(app: FastAPI, ctx) -> None:
                           "port": port,
                           "scheme": getattr(app.state, "instance_scheme", None) or "http"}
         app.state.update_handed_off = True
+        kept = getattr(app.state, "update_confirm", None)
+        if kept is not None and kept[3] is not prepared:
+            app.state.update_confirm = None
+            kept[3].discard()
         _request_restart(port=port, instance_id=getattr(app.state, "instance_id", None),
                          update=prepared)
         return {"applied": True, "version": prepared.new, "restarting": True,
@@ -685,7 +693,11 @@ def register(app: FastAPI, ctx) -> None:
         """Restore the previous build from the last update backup, then restart in
         place so the restored code loads. Without a backup, after an update the program of
         its build carried out, the version it replaced is installed again as a chosen
-        release (``updater.rollback_info``'s ``reinstall``). Needs an owner (admin) key (403
+        release (``updater.rollback_info``'s ``reinstall``), answered as ``/api/update/apply``
+        with a version answers (``needs_confirmation`` "processes" or "unverified"); the
+        optional JSON body ``{allow_unverified, sha256}`` of that form confirms an
+        unverified build. A reply that restored or installed it says ``applied: true``.
+        Needs an owner (admin) key (403
         otherwise). Restores every part the update replaced, the same as the CLI:
         the files, the virtual environment as it was before the update's
         dependency step, the native runtime and the components. The reply,
@@ -704,7 +716,17 @@ def register(app: FastAPI, ctx) -> None:
         # back. rollback_info() is read-only and never calls rollback_last.
         back = await asyncio.to_thread(updater.rollback_info)
         if back.get("reinstall"):
-            res = await _apply_selected(request, {"version": back["version"]})
+            import json as _json
+            raw = await request.body()
+            try:
+                body = _json.loads(raw) if raw.strip() else {}
+            except (ValueError, RecursionError):
+                raise HTTPException(400, "The request body is not valid JSON.") from None
+            if not isinstance(body, dict):
+                raise HTTPException(400, "The request body must be a JSON object.")
+            res = await _apply_selected(request, {
+                "version": back["version"],
+                **{k: body[k] for k in ("allow_unverified", "sha256") if k in body}})
             if not res.get("applied") and not res.get("needs_confirmation"):
                 raise HTTPException(500, res.get("error") or res.get("reason")
                                     or f"{back['version']} could not be installed")
@@ -743,5 +765,6 @@ def register(app: FastAPI, ctx) -> None:
         _request_restart(port=getattr(app.state, "instance_port", None),
                          instance_id=getattr(app.state, "instance_id", None))
         res["restarting"] = True
+        res["applied"] = True
         res["version"] = target_version
         return res

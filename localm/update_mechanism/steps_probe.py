@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -106,6 +107,15 @@ def _end(proc: subprocess.Popen) -> None:
         proc.wait()
 
 
+#: The line of a traceback that names the exception, ``Name: text`` or ``Name``.
+_EXCEPTION = re.compile(r"[A-Za-z_][\w.]*(?:Error|Exception|Exit|Interrupt|Warning)(?::.*)?")
+
+
 def _tail(lines: list) -> str:
-    text = " ".join(line.strip() for line in lines[-3:])[-_REASON_CHARS:]
+    """``": <reason>"`` from what the new version said: the last line that names an
+    exception when it printed a traceback, else its last line; empty for nothing."""
+    said = [line.strip() for line in lines if line.strip()]
+    if any(line.startswith("Traceback (most recent call last)") for line in said):
+        said = [line for line in said if _EXCEPTION.fullmatch(line)] or said
+    text = said[-1][-_REASON_CHARS:] if said else ""
     return f": {text}" if text else ""

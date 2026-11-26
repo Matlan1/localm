@@ -2621,6 +2621,34 @@ export async function updateRollbackCheck() {
 }
 window.__localmRollbackCheck = updateRollbackCheck;
 
+// One POST of the rollback, with the confirmations an install of the version the last
+// update replaced asks for (processes it ends, a build that does not verify), as
+// _postSelectedVersion asks them. The reply, or null when the user declined.
+async function _postRollback(out, extra) {
+  const r = await fetch("/api/update/rollback", {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify(extra),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.detail || r.statusText);
+  if (d.needs_confirmation === "unverified" && !extra.allow_unverified) {
+    const version = d.version || "";
+    if (out) out.textContent = t("settings.update.unverifiedStatus", { version, reason: d.reason || "" });
+    const ok = await confirmDangerAsync(
+      t("settings.update.unverifiedTitle", { version }),
+      t("settings.update.unverifiedBody", { reason: d.reason || "" }),
+      t("settings.update.unverifiedConfirm"));
+    if (!ok) { if (out) out.textContent = t("settings.update.notInstalled"); return null; }
+    return await _postRollback(out, { allow_unverified: true, sha256: d.sha256 });
+  }
+  if (d.needs_confirmation === "processes") {
+    if (!(await _agreeToProcesses(d, out))) return null;
+    return await _postRollback(out, extra);
+  }
+  return d;
+}
+
 export async function updateRollback() {
   const out = $("update-rollback-status"), btn = $("update-rollback");
   confirmDanger(t("settings.rollback.confirmTitle"), t("settings.rollback.confirmBody"),
@@ -2628,15 +2656,11 @@ export async function updateRollback() {
       if (btn) btn.disabled = true;
       if (out) { out.hidden = false; out.textContent = t("settings.rollback.rollingBack"); }
       try {
-        let r = await fetch("/api/update/rollback",
-                            { method: "POST", headers: authHeaders() });
-        let d = await r.json().catch(() => ({}));
-        if (r.ok && d.needs_confirmation === "processes") {
-          if (!(await _agreeToProcesses(d, out))) { if (btn) btn.disabled = false; return; }
-          r = await fetch("/api/update/rollback", { method: "POST", headers: authHeaders() });
-          d = await r.json().catch(() => ({}));
+        const d = await _postRollback(out, {});
+        if (!d) { if (btn) btn.disabled = false; return; }
+        if (!d.applied && !d.rolled_back) {
+          throw new Error(d.error || d.reason || t("settings.update.notInstalled"));
         }
-        if (!r.ok) throw new Error(d.detail || r.statusText);
         if (out) {
           out.textContent = t("settings.rollback.rolledBackTo",
             { version: d.version || t("settings.rollback.unknownBuild") });

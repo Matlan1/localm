@@ -49,6 +49,13 @@ if args[:1] == ['_update-probe']:
 if args[:1] == ['_update-record']:
     __import__('time').sleep(3)
     sys.exit(0)
+if args[:1] == ['_update-prepare']:
+    work = os.path.join(args[args.index('--root') + 1], '.localm-update',
+                        args[args.index('--id') + 1])
+    with open(os.path.join(work, 'prepared.json'), 'w') as f:
+        json.dump({'format': 'localm-update-steps/1', 'torch': [], 'uv': None, 'parts': [],
+                   'kept': [], 'notes': ['prepared by 2']}, f)
+    sys.exit(0)
 if args[:1] == ['update']:
     from localm import _update_parent, updater_handoff
     if os.environ.get(_update_parent.WORK) != '1':
@@ -304,8 +311,11 @@ def _started(out: str) -> dict:
 
 def test_a_server_asked_to_restart_is_waited_for_and_runs_the_new_version_after_it(update):
     """The other server (here a start that the test restarts by hand, 3 s after the
-    update began) is neither ended nor counted as a process nobody agreed to end: its
-    successor waits at the gate and runs the new version."""
+    update began) is neither ended at once nor counted as a process nobody agreed to
+    end: its successor, a process of its purpose started after the hand-off and not by
+    it (as on Windows, where the old server is not its parent), waits at the gate and is
+    taken for it at once; the old process, still running, is ended; the successor runs
+    the new version."""
     server, entry = _stay(update)
     key = f"{entry.pid}-{entry.start}"
     proc = update.apply(confirmed=[key], restarting=[[key, entry.purpose]])
@@ -317,13 +327,37 @@ def test_a_server_asked_to_restart_is_waited_for_and_runs_the_new_version_after_
         assert update.version() == "1"
         again, _ = _stay(update, "again")
         _waits(update, count=2)
+        (_, err), _, (out, _) = _end(proc, waiting, again)
+        ended = server.wait(timeout=30) is not None
     finally:
         server.stdin.close()
         _end(server)
-    (_, err), _, (out, _) = _end(proc, waiting, again)
     assert proc.returncode == 0, err
-    assert update.version() == "2" and "did not restart" not in err
+    assert update.version() == "2" and "did not restart" not in err, err
+    assert ended, "the old server that went on was not ended"
     assert {_started(out)[k] for k in ("localm", "part", "VERSION")} == {"2"}, (out, err)
+
+
+def test_a_server_that_refused_to_restart_is_not_waited_for(update, monkeypatch):
+    """A server the hand-off could not ask to restart (``applier.NOT_RESTARTING``) is
+    ended with the rest at once, without the wait for its restart."""
+    from localm import procs
+    monkeypatch.setattr(applier, "RESTART_S", 20.0)
+    mid, entry = _orphan(update)
+    key = f"{entry.pid}-{entry.start}"
+    (update.root / ".localm-update" / ID / applier.NOT_RESTARTING).write_text(
+        json.dumps([key]), encoding="utf-8")
+    begun = time.monotonic()
+    try:
+        result, _ = _in_process(update, monkeypatch, confirmed=[key],
+                                restarting=[[key, entry.purpose]])
+        took = time.monotonic() - begun
+        ended = not procs.alive(entry)
+    finally:
+        assert mid.stdin is not None
+        mid.stdin.close()
+    assert result["state"] == "new" and ended, result
+    assert took < 15, f"the update waited {took:.0f} s for a server that refused"
 
 
 def test_a_start_during_the_update_waits_and_runs_only_the_new_version(update):
@@ -352,11 +386,12 @@ def test_the_other_servers_of_this_install_are_asked_to_restart(tmp_path, monkey
 
     from localm import config, instances, updater_handoff
     asked: list = []
+    status = [200]
 
     class Answer(BaseHTTPRequestHandler):
         def do_POST(self):
             asked.append(self.path)
-            self.send_response(200)
+            self.send_response(status[0])
             self.send_header("Content-Length", "2")
             self.end_headers()
             self.wfile.write(b"{}")
@@ -381,8 +416,10 @@ def test_the_other_servers_of_this_install_are_asked_to_restart(tmp_path, monkey
                                             servers=servers)
         assert prepared.restarting() == [["me", "server"]]
         assert [p["key"] for p in prepared.ended()] == ["chat"]
-        updater_handoff.restart_servers(prepared, say=lambda _t: None)
+        assert updater_handoff.restart_servers(prepared, say=lambda _t: None) == []
         assert asked == ["/v1/server/restart"]
+        status[0] = 503
+        assert updater_handoff.restart_servers(prepared, say=lambda _t: None) == ["me"]
         entry = json.loads(Path(path).read_text(encoding="utf-8"))
         Path(path).write_text(json.dumps({**entry, "start_identity": {"x": 1}}),
                               encoding="utf-8")
@@ -490,19 +527,47 @@ def test_a_server_that_is_gone_before_it_is_started_leaves_the_new_version(updat
     assert "the next start of localm runs it" in err
 
 
-def test_a_process_above_the_starter_goes_on_and_does_not_stop_the_update(update):
+def _launcher(update):
+    """A launcher of *update* (``launcher.pyw``, purpose ``launcher``) that runs until
+    its input ends, and its entry."""
+    from localm import procs
+    (update.root / "launcher.pyw").write_text(
+        "import sys\nimport localm\nprint('STARTED', flush=True)\nsys.stdin.read()\n",
+        encoding="utf-8")
+    proc = subprocess.Popen([sys.executable, str(update.root / "launcher.pyw")],
+                            cwd=str(update.root), env=update.env(), stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **HIDDEN)
+    assert proc.stdout is not None and proc.stdout.readline().startswith("STARTED")
+    entry = next(e for e in procs.list(str(update.root)) if e.recorded and (
+        e.pid == proc.pid or (e.parent and e.parent[0] == proc.pid)))
+    return proc, entry
+
+
+@pytest.mark.parametrize("launcher", [True, False])
+def test_a_launcher_above_the_starter_goes_on_and_any_other_one_needs_an_agreement(
+        update, launcher):
     """A launcher above the process that started the update (it shows the window of the
-    app) is neither ended nor a process nobody agreed to end."""
-    launcher, entry = _stay(update)
+    app) is neither ended nor a process nobody agreed to end. Any other process the
+    hand-off names above the starter (a ``localm coder`` that ran ``localm update``) is
+    one nobody agreed to end: the update is not started and names it."""
+    from localm import procs
+    above, entry = _launcher(update) if launcher else _stay(update)
+    assert (entry.purpose == applier.LAUNCHER) is launcher
     proc = update.apply(ancestors=[f"{entry.pid}-{entry.start}"])
     waiting = update.waiter()
     try:
         (_, err), _ = _end(proc, waiting)
-        assert proc.returncode == 0, err
-        assert update.version() == "2" and launcher.poll() is None
+        if launcher:
+            assert proc.returncode == 0, err
+            assert update.version() == "2" and above.poll() is None
+        else:
+            assert proc.returncode == 1, err
+            assert update.is_old() and procs.alive(entry)
+            assert f"pid {entry.pid}" in update.result()["note"]
     finally:
-        launcher.stdin.close()
-        _end(launcher)
+        assert above.stdin is not None
+        above.stdin.close()
+        _end(above)
 
 
 def test_only_an_owner_confirms_and_the_second_press_uses_what_the_first_prepared(
@@ -544,16 +609,19 @@ def test_only_an_owner_confirms_and_the_second_press_uses_what_the_first_prepare
     app = hs.create_app(engine)
     replies = []
     with TestClient(app) as client:
-        for who in (False, True, True, True):
+        for who in (False, True, False, True, True):
             owner[0] = who
             replies.append(client.post("/api/update/apply", headers={
                 "Authorization": f"Bearer {app.state.shell_token}"}))
-    assert replies[0].status_code == 403 and gone == [made[0]]
+    assert replies[0].status_code == 403
     assert replies[1].json()["needs_confirmation"] == "processes"
-    assert replies[2].json()["applied"] is True
-    assert len(made) == 2 and handed == [made[1]] and gone == [made[0]]
+    # A press without an owner between the owner's two: refused, with only what it
+    # prepared itself discarded; the owner's first press stays armed.
+    assert replies[2].status_code == 403
+    assert replies[3].json()["applied"] is True
+    assert len(made) == 3 and handed == [made[1]] and gone == [made[0], made[2]]
     # One update at a time: a press after the hand-off prepares nothing.
-    assert replies[3].status_code == 409 and len(made) == 2
+    assert replies[4].status_code == 409 and len(made) == 3
 
 
 def test_a_scoped_caller_sees_the_reply_of_an_update_without_host_paths(monkeypatch):
@@ -585,7 +653,9 @@ def test_a_scoped_caller_sees_the_reply_of_an_update_without_host_paths(monkeypa
         reply = client.post("/api/update/apply", headers={
             "Authorization": f"Bearer {app.state.shell_token}"}).json()
     assert reply["applied"] is True
-    assert str(config.HOME_DIR) not in json.dumps(reply) and "mine.txt" in json.dumps(reply)
+    shown = [*reply["notes"], *reply["edited"]]
+    assert len(shown) == 2 and all("mine.txt" in v for v in shown), shown
+    assert not any(str(config.HOME_DIR) in v for v in shown), shown
 
 
 def test_the_hand_off_must_be_complete():
@@ -733,26 +803,34 @@ def test_only_a_terminal_command_mode_hand_off_asks(update, monkeypatch):
     assert applier.Applier(update.root, ID, {**h, "ask": True, "mode": applier.SERVER}).ask is None
 
 
-def test_a_server_that_does_not_restart_within_its_time_is_ended(update, monkeypatch):
-    """Another server asked to restart for the update that never waits at the gate:
-    after :data:`applier.RESTART_S` it is named and ended, and the update goes on."""
+def _orphan(update):
+    """A start of localm in *update* that runs until the input of the returned process
+    ends, started through a process that ends at once: the applier of this test process
+    spares what this process started, the applier of a real update did not start it.
+    Returns ``(that process, the entry)``."""
     from localm import procs
-    monkeypatch.setattr(applier, "RESTART_S", 1.0)
-    # Started through a process that ends at once: the applier of this test process
-    # spares what this process started, the applier of a real update did not start it.
     mid = subprocess.Popen(
         [sys.executable, "-c", "import subprocess, sys\n"
          "subprocess.Popen([sys.executable, '-m', 'localm', 'stay'], "
          "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"],
         cwd=str(update.root), env=update.env(), stdin=subprocess.PIPE, **HIDDEN)
+    mid.wait(timeout=60)
+    deadline = time.monotonic() + 60
+    entry = None
+    while entry is None:
+        assert time.monotonic() < deadline, "the server did not start"
+        entry = next((e for e in procs.list(str(update.root)) if e.recorded), None)
+        time.sleep(0.1)
+    return mid, entry
+
+
+def test_a_server_that_does_not_restart_within_its_time_is_ended(update, monkeypatch):
+    """Another server asked to restart for the update that never waits at the gate:
+    after :data:`applier.RESTART_S` it is named and ended, and the update goes on."""
+    from localm import procs
+    monkeypatch.setattr(applier, "RESTART_S", 1.0)
+    mid, entry = _orphan(update)
     try:
-        mid.wait(timeout=60)
-        deadline = time.monotonic() + 60
-        entry = None
-        while entry is None:
-            assert time.monotonic() < deadline, "the server did not start"
-            entry = next((e for e in procs.list(str(update.root)) if e.recorded), None)
-            time.sleep(0.1)
         key = f"{entry.pid}-{entry.start}"
         said: list = []
         monkeypatch.setattr(applier.restoring, "say", said.append)
@@ -824,10 +902,12 @@ def test_a_hand_off_whose_program_does_not_take_over_discards_the_update(
     assert gone == [True] and update.is_old()
 
 
-def test_other_processes_lists_what_the_update_ends_and_spares_above_and_below(update):
+@pytest.mark.parametrize("top", ["launcher.pyw", "coder.py"])
+def test_other_processes_lists_what_the_update_ends_and_spares_above_and_below(update, top):
     """From a process of the install started by a launcher of it, which itself started a
     child: the update lists another start of localm, never the launcher above
-    (``ancestors``) or the child below."""
+    (``ancestors``) or the child below. A process above that is no launcher (``coder.py``,
+    purpose ``script``) is listed and is not among the ``ancestors``."""
     starter = update.root.parent / "starter.py"
     starter.write_text("\n".join([
         "import json, subprocess, sys",
@@ -841,25 +921,32 @@ def test_other_processes_lists_what_the_update_ends_and_spares_above_and_below(u
         "      flush=True)",
         "child.stdin.close()",
         "child.wait()"]), encoding="utf-8")
-    launcher = update.root.parent / "launcher.py"
+    launcher = update.root.parent / top
     launcher.write_text("import subprocess, sys\nimport localm\n"
                         "sys.exit(subprocess.call([sys.executable, *sys.argv[1:]]))\n",
                         encoding="utf-8")
     other, entry = _stay(update)
     try:
-        top = subprocess.Popen([sys.executable, str(launcher), str(starter), str(update.root)],
-                               cwd=str(update.root), env=update.env(), stdin=subprocess.DEVNULL,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                               **HIDDEN)
-        (out, err), = _end(top)
+        above = subprocess.Popen([sys.executable, str(launcher), str(starter),
+                                  str(update.root)],
+                                 cwd=str(update.root), env=update.env(),
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True, **HIDDEN)
+        (out, err), = _end(above)
     finally:
         other.stdin.close()
         _end(other)
     said = json.loads(out.strip().splitlines()[-1])
-    assert [p["key"] for p in said["others"]] == [f"{entry.pid}-{entry.start}"], err
-    assert said["others"][0]["purpose"] == entry.purpose
-    assert said["above"], "the launcher above was not found"
-    assert all(k != f"{entry.pid}-{entry.start}" for k in said["above"])
+    other = f"{entry.pid}-{entry.start}"
+    listed = {p["key"]: p["purpose"] for p in said["others"]}
+    if top == "launcher.pyw":
+        assert listed == {other: entry.purpose}, err
+        assert said["above"], "the launcher above was not found"
+    else:
+        tops = [k for k, purpose in listed.items() if purpose == "script"]
+        assert set(listed) == {other, *tops} and len(tops) == 1, (said, err)
+        assert tops[0] not in said["above"]
+    assert other not in said["above"]
 
 
 # --------------------------------------------- localm update: -y and the terminal
@@ -874,6 +961,10 @@ class _Prepared:
     def ended(self):
         return [p for p in self.processes if p["key"] not in self.servers]
 
+    def lost(self):
+        from localm import updater_handoff
+        return updater_handoff.Prepared.lost(self)   # type: ignore[arg-type]
+
     def discard(self):
         self.discarded += 1
 
@@ -882,6 +973,8 @@ class _Prepared:
     ([("a-1", "chat")], (), False, 1),
     ([("s-1", "server")], ("s-1",), False, 75),
     ([("s-1", "server"), ("a-1", "chat")], ("s-1",), False, 1),
+    ([("m-1", "mcp"), ("m-2", "mcp server")], (), False, 75),
+    ([("m-1", "mcp"), ("a-1", "chat")], (), False, 1),
     ([], (), True, 75)])
 def test_localm_update_yes_restarts_the_servers_and_refuses_when_anything_else_runs(
         monkeypatch, processes, servers, tty, code):
@@ -905,18 +998,21 @@ def test_localm_update_yes_restarts_the_servers_and_refuses_when_anything_else_r
         assert not handed and prepared.discarded >= 1
 
 
-def test_localm_update_at_a_terminal_asks_about_what_is_in_the_way(monkeypatch):
+@pytest.mark.parametrize("stdin, stderr", [(True, True), (False, True), (True, False)])
+def test_localm_update_at_a_terminal_asks_about_what_is_in_the_way(monkeypatch, stdin, stderr):
+    """Without -y the user is asked "Try again" or "Cancel" only when both the input and
+    the error output of ``localm update`` are a terminal."""
     from localm import _update_parent, updater_handoff
     from localm.cli import maintenance
     monkeypatch.setenv(_update_parent.WORK, "1")
     handed: list = []
     monkeypatch.setattr(updater_handoff, "prepare", lambda *_a, **_k: _Prepared([]))
     monkeypatch.setattr(updater_handoff, "hand_off", lambda p, **k: handed.append(k))
-    monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
-    monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: stdin, raising=False)
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: stderr, raising=False)
     with pytest.raises(SystemExit):
         maintenance._install_with_applier(3, None, yes=False)
-    assert handed[0]["ask"] is True
+    assert handed[0]["ask"] is (stdin and stderr)
 
 
 def test_localm_update_stopped_by_ctrl_c_says_the_update_goes_on(monkeypatch, capsys):
@@ -928,7 +1024,11 @@ def test_localm_update_stopped_by_ctrl_c_says_the_update_goes_on(monkeypatch, ca
         raise KeyboardInterrupt
 
     monkeypatch.setattr(_update_parent, "wait", stop)
-    assert _update_parent.run(["localm", "update"]) == 130
+    try:
+        code = _update_parent.run(["localm", "update"])
+    except KeyboardInterrupt:
+        pytest.fail("the Ctrl+C reached the caller of localm update")
+    assert code == 130
     assert "The update goes on" in capsys.readouterr().err
 
 
@@ -1089,3 +1189,182 @@ def test_a_desktop_gui_that_goes_on_with_the_update_never_opens_the_update_windo
         finally:
             job.restore(lock)
     assert f"WINDOW {not primary}" in out, (out, err)
+
+
+# ------------------------------------------------------ what the user is told
+
+def test_a_rolled_back_update_says_its_outcome_once_with_the_last_error_line(
+        update, monkeypatch):
+    """The reason is the last line of the error the new version printed, once, and the
+    outcome is one sentence (no second "was undone ... is in place"), in the result and
+    in Settings. A file held while the old version is put back is asked about with what
+    cancel leaves and the ways out."""
+    from localm import updater, updater_parts
+    from localm.update_mechanism import steps_probe
+    traceback = ["Traceback (most recent call last):",
+                 '  File "x.py", line 1, in <module>',
+                 '    raise RuntimeError("the runtime is missing")',
+                 "RuntimeError: the runtime is missing",
+                 "RuntimeError: the runtime is missing"]
+    monkeypatch.setattr(applier.steps_probe, "probe", lambda *_a, **_k:
+                        f"localm 2 does not start{steps_probe._tail(traceback)}")
+    real = applier.steps_update.put_back
+    asked: list = []
+
+    def put_back(lock, **kw):
+        kw["ask"]("part.py is held by x (pid 7)")
+        return real(lock, **kw)
+
+    def ask(text):
+        asked.append(text)
+        return True
+
+    monkeypatch.setattr(applier.steps_update, "put_back", put_back)
+    result, _ = _in_process(update, monkeypatch, ask=ask)
+    assert result["state"] == "old" and update.is_old()
+    assert result["note"] == ("The update to 2 failed and was undone: localm 2 does not "
+                              "start: RuntimeError: the runtime is missing. localm 1 runs.")
+    assert not any("was undone" in n for n in result["notes"]), result["notes"]
+    assert len(asked) == 1 and "Cancel leaves localm 1 not put back completely" in asked[0]
+    assert "run setup" in asked[0]
+    monkeypatch.setattr(updater, "_updates_dir", lambda create=True: update.root / "home" / "updates")
+    shown = next(s["note"] for s in updater_parts._last_steps("1") if s["part"] == "update")
+    assert shown.count("was undone") == 1 and shown.count("the runtime is missing") == 1, shown
+
+
+@pytest.mark.parametrize("lines, reason", [
+    (["it fails on purpose"], ": it fails on purpose"),
+    (["one", "two"], ": two"),
+    (["Traceback (most recent call last):", '  File "x", line 1', "    raise E()",
+      "ValueError: bad", "  during handling", "ValueError: bad"], ": ValueError: bad"),
+    ([], "")])
+def test_the_reason_of_a_probe_is_one_line(lines, reason):
+    from localm.update_mechanism import steps_probe
+    assert steps_probe._tail(lines) == reason
+
+
+# ------------------------------------------- Try again at the terminal on POSIX
+
+@pytest.mark.skipif(os.name == "nt", reason="a pseudo terminal is POSIX only")
+@pytest.mark.parametrize("typed, answer", [("t\n", True), ("c\n", False)])
+def test_the_applier_in_a_session_of_its_own_asks_at_the_terminal_of_localm_update(
+        update, typed, answer):
+    """The applier of ``localm update`` runs in a session of its own, which has no
+    controlling terminal: it asks at the terminal its standard error was given."""
+    import pty
+    import select
+    master, slave = pty.openpty()
+    code = "\n".join([
+        "from localm.update_mechanism import applier",
+        "ask = applier.terminal_ask()",
+        "print('ASKS', ask is not None, flush=True)",
+        "print('ANSWER', ask('part.py is held') if ask else None, flush=True)"])
+    proc = subprocess.Popen([sys.executable, "-c", code], cwd=str(update.root),
+                            env=update.env(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=slave, text=True, start_new_session=True)
+    os.close(slave)
+    seen = b""
+    try:
+        deadline = time.monotonic() + 60
+        while b"[T] Try again" not in seen and proc.poll() is None:
+            assert time.monotonic() < deadline, seen
+            if select.select([master], [], [], 0.5)[0]:
+                try:
+                    seen += os.read(master, 4096)
+                except OSError:
+                    break
+        if b"[T] Try again" in seen:
+            os.write(master, typed.encode())
+        out, _ = proc.communicate(timeout=60)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+        os.close(master)
+    assert "ASKS True" in out, (out, seen)
+    assert f"ANSWER {answer}" in out and b"part.py is held" in seen
+
+
+# ---------------------------------------------- the installed version's prepare
+
+def _signed(files: dict):
+    """A build zip of *files* and its signature under a test release key pinned for the
+    test: ``(download opener, signature, private key)``."""
+    import io
+    import zipfile
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from tests._update_signing import envelope
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for rel, text in sorted(files.items()):
+            z.writestr(rel, text)
+    data = buf.getvalue()
+    key = Ed25519PrivateKey.generate()
+
+    def opener(url, headers, timeout, dest):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+
+    return opener, envelope(data, [key]), key
+
+
+@pytest.mark.parametrize("case", ["prepared", "no uv", "no module"])
+def test_prepare_downloads_checks_extracts_and_runs_the_check_of_the_new_build(
+        update, monkeypatch, case):
+    """``updater_handoff.prepare`` as an update runs it: the build comes from a stand-in
+    of the download, its signature is checked with a pinned test key, it is extracted
+    into the update's folder, the program it ships is copied out and runs its ``check``
+    (the real one, ``-I -S``, with this install's uv a stub that has nothing to do). A
+    check that refuses (no uv) and a build whose program cannot be copied (a module of
+    it missing) are refused with the reason and leave nothing behind."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from localm import _version, config, updater, updater_handoff
+    from localm.bugreport import LocalmError
+    from tests._net_config import set_config
+    from tests._update_signing import keyset
+    files = {**_with_main(NEW)}
+    files["update-package.json"] = _statement(files, "2")
+    if case == "no module":
+        del files["localm/update_package.py"]
+    opener, signature, key = _signed(files)
+    monkeypatch.setattr(updater, "_PINNED_KEYSET", keyset(
+        1, [key], [Ed25519PrivateKey.generate() for _ in range(3)]))
+    monkeypatch.setattr(_version, "read_version", lambda: "1")
+    set_config(monkeypatch, lambda: {"update_url": "https://updates.invalid"})
+    monkeypatch.setattr(config, "HOME_DIR", update.root / "home")
+    if case != "no uv":
+        uv = update.root / ".uv" / ("uv.cmd" if os.name == "nt" else "uv.sh")
+        uv.parent.mkdir(parents=True)
+        uv.write_text("@exit /b 0\r\n" if os.name == "nt" else "#!/bin/sh\nexit 0\n",
+                      encoding="utf-8")
+        uv.chmod(0o755)
+        (update.root / ".localm-install.json").write_text(json.dumps({"uv_exe": str(uv)}),
+                                                          encoding="utf-8")
+    before, tree = set(os.listdir(update.root / ".localm-update")) | {"lock"}, update.tree()
+    said: list = []
+    if case != "prepared":
+        with pytest.raises(LocalmError) as refused:
+            updater_handoff.prepare(3, signature=signature, download_opener=opener,
+                                    installed=update.root, say=said.append)
+        assert ("uv of this install cannot be found" if case == "no uv"
+                else "update_package.py") in str(refused.value.reason)
+        assert set(os.listdir(update.root / ".localm-update")) | {"lock"} == before
+        assert update.tree() == tree
+        return
+    prepared = updater_handoff.prepare(3, signature=signature, download_opener=opener,
+                                       installed=update.root, say=said.append)
+    work = update.root / ".localm-update" / prepared.id
+    try:
+        assert (prepared.old, prepared.new, prepared.verified, prepared.legacy) == (
+            "1", "2", True, False)
+        assert (work / "new" / "VERSION").read_text(encoding="utf-8") == "2"
+        assert (work / "applier" / "update_mechanism" / "applier.py").is_file()
+        assert json.loads((work / "check.json").read_text(encoding="utf-8"))["refused"] is None
+        assert prepared.notes == ["prepared by 2"] and prepared.processes == []
+        assert "Checking localm 2..." in said
+    finally:
+        prepared.discard()
+    assert not work.exists() and update.tree() == tree

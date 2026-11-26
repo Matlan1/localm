@@ -48,12 +48,20 @@ HANDOFF_KEYS = frozenset({"mode", "starter", "confirmed", "home", "old", "new", 
 #: The keys a hand-off may carry besides :data:`HANDOFF_KEYS`. ``restarting``:
 #: ``[<pid>-<start>, purpose]`` of each other server that was asked to restart into the
 #: update.
-#: ``ancestors``: ``<pid>-<start>`` of each process above the starter, which goes on
-#: running (the one that shows the window of the app) and is neither ended nor named.
+#: ``ancestors``: ``<pid>-<start>`` of each process above the starter that goes on
+#: running and is neither ended nor named: a :data:`LAUNCHER` (it shows the window of the
+#: app), the ``localm update`` that waits for the update, and the programs between them
+#: that have no file of their own. Any other process listed there is ended only when the
+#: user agreed, like every other process.
 #: ``ask``: true when, in mode ``command``, the user is at the terminal of ``localm
 #: update`` and is asked "Try again" or "Cancel" about what is in the way.
 MORE_KEYS = frozenset({"restarting", "ancestors", "ask"})
 SERVER, COMMAND = "server", "command"
+#: The purpose of the process that shows the window of the app.
+LAUNCHER = "launcher"
+#: In the update's folder: the JSON list of ``<pid>-<start>`` of each other server that
+#: was asked to restart and did not; the update does not wait for it.
+NOT_RESTARTING = "not-restarting"
 #: Seconds the process that goes on for the user has to report at the gate.
 ARRIVE_S = 120.0
 #: Seconds another server that was asked to restart has to wait at the gate.
@@ -148,6 +156,13 @@ class Applier:
     def _held(self, held) -> bool:
         return self.ask is not None and self.ask(f"{held}. Close that program, then try again.")
 
+    def _held_back(self, held) -> bool:
+        """:meth:`_held` while the old version is put back: cancel then leaves the
+        install neither old nor new, which the question says with the ways out."""
+        return self.ask is not None and self.ask(
+            f"{held}. Close that program, then try again. Cancel leaves localm "
+            f"{self.h['old']} not put back completely: " + " ".join(restoring.ways_out(self.root)))
+
     def say(self, text: str) -> None:
         self.lines = [*self.lines, text][-_LINES:]
         restoring.say(text)
@@ -224,7 +239,7 @@ class Applier:
         try:
             back = steps_update.put_back(lock, uv=uv, env=self.env, say=self.say,
                                          network=restoring.network(self.root),
-                                         ask=self._held if self.ask is not None else None)
+                                         ask=self._held_back if self.ask is not None else None)
         except steps.STEP_ERRORS as e:
             back = job.Result("failed", [str(e)])
         steps_update.discard(self.root, self.id)
@@ -238,8 +253,11 @@ class Applier:
                 notes=[*back.notes, *restoring.ways_out(self.root)])
         if self.let_through:
             self._relaunch()
+        # One sentence says the outcome: the way back's own "was undone" note is left out.
+        undone = job.undone_note(h["new"], h["old"])
         return self._result("old", f"The update to {h['new']} failed and was undone: "
-                            f"{reason}. localm {h['old']} runs.", notes=back.notes)
+                            f"{reason}. localm {h['old']} runs.",
+                            notes=[n for n in back.notes if n != undone])
 
     # -------------------------------------------------- the processes of localm
 
@@ -270,33 +288,61 @@ class Applier:
         raise Abandoned(f"localm did not restart into the update within {ARRIVE_S:.0f} s")
 
     def _wait_for_restarts(self) -> None:
-        """Wait, at most :data:`RESTART_S`, until each other server that was asked to
-        restart (``restarting``) waits at the gate: the same process after its re-exec,
-        or the one it started for it. Each that does not by then is named and ended with
-        the rest (:meth:`_end_others`)."""
-        purposes = {str(k): str(p) for k, p in self.h.get("restarting") or ()}
+        """Wait, at most :data:`RESTART_S`, until for each other server that was asked to
+        restart (``restarting``, less those in :data:`NOT_RESTARTING`) a process waits at
+        the gate: the same process after its re-exec in place, or a recorded process of
+        its purpose that started after this one (the one it started for it, whatever its
+        parent). Each server that has none by then is named and ended with the rest
+        (:meth:`_end_others`)."""
+        wanted = [(str(k), str(p)) for k, p in self.h.get("restarting") or ()]
+        refused = set(self._not_restarting())
+        wanted = [(k, p) for k, p in wanted if k not in refused]
         procs = shared.also("procs")
-        if not purposes or procs is None:
+        if not wanted or procs is None:
             return
+        try:
+            row = procs._own_row()
+        except OSError:
+            row = None
+        me = (os.getpid(), row[1]) if row and row != procs._UNKNOWN else None
 
-        def restarts(e) -> bool:
-            parent = f"{e.parent[0]}-{e.parent[1]}" if e.parent else None
-            return f"{e.pid}-{e.start}" in purposes or (
-                e.recorded and purposes.get(parent or "") == e.purpose)
+        def after_me(e) -> bool:
+            number = procs._number(e.start)
+            return me is None or (number is not None and procs._later((e.pid, number), me))
 
         deadline = time.monotonic() + RESTART_S
         while True:
             running = procs.list(self.proot)
             waiting = restoring._waiting(self.root, running)
-            left = [e for e in running if e.pid not in waiting and restarts(e)]
+            at_gate = [e for e in running if e.pid in waiting and e.recorded
+                       and f"{e.pid}-{e.start}" != self.primary]
+            taken: set = set()
+            left = []
+            for key, purpose in wanted:
+                found = next((e for e in at_gate if e.key not in taken and (
+                    f"{e.pid}-{e.start}" == key or (e.purpose == purpose and after_me(e)))),
+                    None)
+                if found is None:
+                    left.append((key, purpose))
+                else:
+                    taken.add(found.key)
             if not left:
                 return
             if time.monotonic() >= deadline:
                 self.say("These servers of localm did not restart within "
-                         f"{RESTART_S:.0f} s and are ended: "
-                         + ", ".join(f"{e.purpose} (pid {e.pid})" for e in left))
+                         f"{RESTART_S:.0f} s and are ended: " + ", ".join(
+                             f"{p} (pid {k.split('-')[0]})" for k, p in left))
                 return
             time.sleep(0.2)
+
+    def _not_restarting(self) -> list:
+        """The keys in :data:`NOT_RESTARTING`; none when it cannot be read."""
+        try:
+            keys = disk.read_json(mover.work_folder(self.root, self.id) / NOT_RESTARTING,
+                                  1024 * 1024)
+        except (OSError, ValueError, disk.Held, disk.Unsafe):
+            return []
+        return [k for k in keys if isinstance(k, str)] if isinstance(keys, list) else []
 
     def _end_others(self) -> None:
         """End the processes of localm the user agreed to end and those the starter
@@ -308,7 +354,11 @@ class Applier:
         running = procs.list(root, holders=holders)
         waiting = restoring._waiting(self.root, running)
         agreed = set(self.h["confirmed"]) | {self.h["starter"]}
-        above = set(self.h.get("ancestors") or ())
+        named_above = set(self.h.get("ancestors") or ())
+        # Of the processes the hand-off names above the starter, only a launcher and a
+        # program without a file of its own go on unasked.
+        above = {f"{e.pid}-{e.start}" for e in running if f"{e.pid}-{e.start}" in named_above
+                 and (e.purpose == LAUNCHER or not e.recorded)}
         by_key = {(e.pid, e.start): e for e in running}
 
         def agreed_to(e) -> bool:
@@ -337,9 +387,12 @@ class Applier:
         if others:
             self.say("Ending " + ", ".join(f"{e.purpose} (pid {e.pid})" for e in others) + "...")
         try:
-            left = procs.end_others(root, spare=spare, holders=holders)
+            ended = procs.end_others(root, spare=spare, holders=holders)
         except OSError as e:
             raise Abandoned(str(e)) from None
+        # end_others also spares the processes above this one; one of those the user
+        # agreed to end that still runs is named like one that did not end.
+        left = [*ended, *(e for e in others if e not in ended and procs.alive(e))]
         if left:
             raise Abandoned("these processes of localm did not end: " + "; ".join(
                 restoring._in_the_way(w) for e in left
@@ -452,22 +505,22 @@ def try_again(text: str, answers, say: Callable[[str], None] = restoring.say) ->
     """Say *text* and ask "Try again" or "Cancel", reading the answer from the lines of
     *answers*. True to try again; the end of *answers* counts as cancel."""
     say(text)
-    while True:
-        say("  [T] Try again   [C] Cancel")
-        answer = answers.readline()
-        if not answer:
-            return False
-        if answer.strip().lower()[:1] in ("t", "c"):
-            return answer.strip().lower().startswith("t")
+    return restoring._try_again(answers, then="", tell=say)
 
 
 def terminal_ask() -> Optional[Callable[[str], bool]]:
     """:func:`try_again` at the terminal this program shares with the ``localm update``
-    that waits for it (``CONIN$`` on Windows, ``/dev/tty`` elsewhere); None when there
-    is none."""
+    that waits for it; None when there is none. On Windows that is the console
+    (``CONIN$``). Elsewhere this program runs in a session of its own, without a
+    controlling terminal, so ``/dev/tty`` names none: the terminal is the one its
+    standard error was given (``os.ttyname``), opened without making it the controlling
+    terminal."""
     try:
-        answers = open("CONIN$" if os.name == "nt" else "/dev/tty", encoding="utf-8",
-                       errors="replace")
+        if sys.platform == "win32":
+            answers = open("CONIN$", encoding="utf-8", errors="replace")
+        else:
+            fd = os.open(os.ttyname(2), os.O_RDONLY | os.O_NOCTTY)
+            answers = open(fd, encoding="utf-8", errors="replace")
     except OSError:
         return None
     return lambda text: try_again(text, answers)

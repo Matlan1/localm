@@ -40,11 +40,14 @@ def at_terminal() -> bool:
     return bool(sys.stderr and sys.stdin and sys.stderr.isatty() and sys.stdin.isatty())
 
 
-def _try_again() -> bool:
-    """Ask at the terminal. Nothing typed in counts as cancel."""
+def _try_again(answers=None, *, then: str = "LocaLM does not start", tell=None) -> bool:
+    """Ask "Try again" or "Cancel" through *tell* (:func:`say` when None), reading the
+    answer from the lines of *answers* (standard input when None); *then* says what
+    cancel does. True to try again; the end of *answers* counts as cancel."""
+    tell = tell or say
     while True:
-        say("  [T] Try again   [C] Cancel (LocaLM does not start)")
-        answer = sys.stdin.readline()
+        tell("  [T] Try again   [C] Cancel" + (f" ({then})" if then else ""))
+        answer = (sys.stdin if answers is None else answers).readline()
         if answer.strip().lower()[:1] in ("t", "c"):
             return answer.strip().lower().startswith("t")
         if not answer:

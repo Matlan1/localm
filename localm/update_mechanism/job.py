@@ -518,6 +518,12 @@ def _finish(lock: Lock, record: Record, ask: Optional[disk.Ask]) -> Result:
     return result
 
 
+def undone_note(new, old) -> str:
+    """The note :func:`restore` gives an update from *old* to *new* it undid."""
+    return (f"The update to {new} was undone. localm {old} is in place." if new
+            else "The update was undone.")
+
+
 def restore(lock: Lock, *, wait_s: Optional[float] = None,
             ask: Optional[disk.Ask] = None) -> Result:
     """End the unfinished update of *lock*'s install, if there is one: put the old
@@ -538,8 +544,7 @@ def restore(lock: Lock, *, wait_s: Optional[float] = None,
     if record.phase == DONE:
         return _finish(lock, record, ask)
     result = Result("none" if record.phase == ENDED else "old")
-    undone = (f"The update to {record.new} was undone. localm {record.old} is in place."
-              if record.new else "The update was undone.")
+    undone = undone_note(record.new, record.old)
     if record.phase != ENDED and (
             record.phase != ENDING or mover.has_plans(lock.root, record.id)):
         plans = mover.read_plans(lock.root, record.id)

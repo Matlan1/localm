@@ -35,6 +35,9 @@ READY_S = 60.0
 CHECK_S = 3600.0
 #: Whether the applier of a build is there, relative to its folder.
 APPLIER = Path("localm") / "update_mechanism" / "applier.py"
+#: The purposes of the processes an update may end because they come back by themselves:
+#: an MCP server is started again by its client (``localm mcp``, and one the coder runs).
+COMES_BACK = frozenset({"mcp", "mcp server"})
 
 
 @dataclass
@@ -70,6 +73,11 @@ class Prepared:
     def ended(self) -> list:
         """The other processes the update ends: those that do not restart."""
         return [p for p in self.processes if p["key"] not in self.servers]
+
+    def lost(self) -> list:
+        """The other processes the update ends that do not come back by themselves:
+        neither a server that restarts nor one of :data:`COMES_BACK`."""
+        return [p for p in self.ended() if p["purpose"] not in COMES_BACK]
 
     def discard(self) -> None:
         """Delete what was prepared."""
@@ -149,7 +157,12 @@ def prepare(asset_id, *, signature=None, target_version=None, allow_unverified=F
         if not (new_folder / APPLIER).is_file():
             out.legacy = True
             return out
-        program = shared.copy_applier(new_folder / "localm", work.path / "applier")
+        try:
+            program = shared.copy_applier(new_folder / "localm", work.path / "applier")
+        except OSError as e:
+            raise LocalmError("the update was not started; nothing was changed",
+                              reason=f"the program of the new version could not be copied: {e}"
+                              ) from None
         say(f"Checking localm {new_version}...")
         code = _run_check(program, root, update_id, say)
         try:
@@ -232,9 +245,21 @@ def _key(entry) -> str:
 
 def ancestors(root) -> list:
     """``<pid>-<start>`` of each running process of the install at *root* above this one
-    (a launcher that shows the window of the app): an update neither ends nor names
-    them (``ancestors`` of the hand-off)."""
-    return [_key(e) for e in _family(root)[1]]
+    that an update neither ends nor names (``ancestors`` of the hand-off,
+    :func:`_spared`)."""
+    return [_key(e) for e in _spared(_family(root)[1])]
+
+
+def _spared(above: list) -> list:
+    """Of the processes *above* this one, nearest first: the launcher that shows the
+    window of the app (``applier.LAUNCHER``), the ``localm update`` this process was
+    started by to wait for the update (``_update_parent``), and the programs without a
+    file of their own. Every other one is listed by :func:`other_processes`."""
+    from localm import _update_parent
+    recorded = [e for e in above if e.recorded]
+    waits = (recorded[0] if recorded and recorded[0].purpose == "update"
+             and os.environ.get(_update_parent.WORK) == "1" else None)
+    return [e for e in above if not e.recorded or e.purpose == "launcher" or e is waits]
 
 
 def _family(root) -> tuple:
@@ -261,14 +286,15 @@ def _family(root) -> tuple:
 
 def other_processes(root) -> list:
     """The running processes of the install at *root* that an update ends: every recorded
-    one but this process, those above it (:func:`ancestors`) and those it started."""
+    one but this process, those above it that go on (:func:`ancestors`) and those it
+    started."""
     from localm import procs
     me = procs.current()
     running, above = _family(root)
     if me is None:
         return []
     by_key = {(e.pid, e.start): e for e in running}
-    skip = {(e.pid, e.start) for e in above}
+    skip = {(e.pid, e.start) for e in _spared(above)}
 
     def started_by_me(e) -> bool:
         seen = set()
@@ -303,25 +329,44 @@ def servers_of(processes: list) -> dict:
     return found
 
 
-def restart_servers(prepared: Prepared, say: Callable[[str], None]) -> None:
+def restart_servers(prepared: Prepared, say: Callable[[str], None]) -> list:
     """Ask each other server of *prepared* to restart (``POST /v1/server/restart``); it
     then waits for the update at the gate of ``localm/__init__.py`` and runs the new
-    version after it. One that does not is ended by the applier and named there."""
+    version after it. Returns the keys of those that refused or could not be asked; the
+    applier ends them and names them, and so does one that does not restart."""
     if not prepared.servers:
-        return
+        return []
     import requests
 
     from localm.selfclient import self_request
-    for _key, server in sorted(prepared.servers.items()):
+    refused = []
+    for key, server in sorted(prepared.servers.items()):
         try:
             reply = self_request("POST", "/server/restart", base_url=server["url"], timeout=5,
                                  instance_token=server.get("token"))
             if reply.status_code != 200:
+                refused.append(key)
                 say(f"The server {server['url']} did not restart for the update "
                     f"({reply.status_code}); the update ends it.")
         except requests.RequestException as e:
+            refused.append(key)
             say(f"The server {server['url']} could not be asked to restart for the update "
                 f"({e}); the update ends it.")
+    return refused
+
+
+def _not_restarting(prepared: Prepared, keys: list) -> None:
+    """Tell the applier of *prepared* not to wait for the servers *keys*
+    (``applier.NOT_RESTARTING``)."""
+    if not keys:
+        return
+    from localm.update_mechanism import applier, disk
+    path = prepared.root / ".localm-update" / prepared.id / applier.NOT_RESTARTING
+    try:
+        disk.write_json(path, list(keys))
+    except (OSError, disk.Unsafe, disk.Held) as e:
+        from localm.debuglog import logger
+        logger.warning("the update waits for servers that did not restart: %s", e)
 
 
 def describe(processes: list) -> str:
@@ -396,7 +441,7 @@ def hand_off(prepared: Prepared, *, mode: str, confirmed: list, watch: Optional[
     work, prepared._work = prepared._work, None
     if work is not None:
         work.recorded()
-    restart_servers(prepared, say)
+    _not_restarting(prepared, restart_servers(prepared, say))
 
 
 def note_failed(prepared: Prepared, text: str) -> None:

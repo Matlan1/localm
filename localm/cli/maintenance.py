@@ -558,11 +558,12 @@ def _install_with_applier(asset_id, signature, *, yes: bool, target_version=None
                           f"localm:[/yellow] {escape(named)}. A server restarts into the new "
                           "version by itself; a chat or a command ends; an MCP server is "
                           "started again by its client.")
-            ended = prepared.ended()
-            if yes and ended:
-                console.print("[red]Not installed:[/red] --yes restarts the servers and ends "
-                              f"nothing else that is running: "
-                              f"{escape(updater_handoff.describe(ended))}. Close them, or run "
+            lost = prepared.lost()
+            if yes and lost:
+                console.print("[red]Not installed:[/red] --yes restarts the servers, ends the "
+                              "MCP servers (their clients start them again) and ends nothing "
+                              f"else that is running: "
+                              f"{escape(updater_handoff.describe(lost))}. Close them, or run "
                               "the update without --yes and agree.")
                 sys.exit(1)
             if not yes and not (sys.stdin.isatty()
