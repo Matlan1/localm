@@ -78,6 +78,7 @@ def test_every_known_site_uses_the_double_caret_escape(bat):
         'if "%UVRC%"=="63" echo  [^^!] Could not create a temporary folder in %STMP% for the uv installer.',
         'echo  [^^!] Type a number from 1 to %~2.',
         'echo  [^^!] uv was not installed under .\\.uv, so Portable cannot go on (another uv on',
+        'setup-done . || echo  [^^!] Setup goes on. Run it again to end the interrupted update.',
     ]
     for site in sites:
         assert site in bat, site
