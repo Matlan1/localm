@@ -8,14 +8,13 @@ keyless mode) and ``verify=localm.tls.requests_verify(url)``.
 
 from __future__ import annotations
 
-import ipaddress
 import re
 from typing import Optional
 from urllib.parse import urlsplit
 
 import requests
 
-from localm.bindhost import self_connect_host, url_host
+from localm.bindhost import is_own_address, self_connect_host, url_host
 
 # Matches every C0/C1 control byte, including ESC (the ANSI escape
 # introducer). See test_remote_hold_reason_strips_control_characters.
@@ -27,16 +26,14 @@ def _no_control_chars(value: str) -> str:
 
 
 def _proxies(url: str) -> Optional[dict]:
-    """The ``proxies`` of a request to *url*: when its host is a loopback address of this
-    machine (``127.0.0.0/8``, ``::1``, ``localhost``), a value that turns every proxy of
-    the environment off, so the request and its key reach this machine's own server and
+    """The ``proxies`` of a request to *url*: when its host is this machine (``localhost``,
+    a loopback address, or an address configured on one of its network interfaces, as
+    :func:`localm.bindhost.is_own_address` tells), a value that turns every proxy of the
+    environment off, so the request and its key reach this machine's own server and
     nothing else; else None, the environment's proxies."""
     host = urlsplit(url).hostname or ""
-    try:
-        loopback = ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        loopback = host == "localhost"
-    return {"http": None, "https": None, "all": None} if loopback else None
+    own = host == "localhost" or is_own_address(host)
+    return {"http": None, "https": None, "all": None} if own else None
 
 
 def read_activity(scheme: str, port, instance_token: Optional[str] = None,

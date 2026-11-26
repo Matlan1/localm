@@ -162,6 +162,22 @@ def test_verify_resolved_via_tls_module_for_loopback_https(monkeypatch, tmp_path
     assert captured["verify"] == str(ca)
 
 
+def test_an_address_of_this_machines_own_network_card_bypasses_the_proxy(monkeypatch):
+    """A server bound to an address of one of this machine's interfaces is reached
+    without the environment's proxy, the same as loopback; any other host keeps it."""
+    import ipaddress
+
+    from localm import bindhost, selfclient
+    monkeypatch.setattr(bindhost, "_interface_addresses",
+                        lambda: frozenset({ipaddress.ip_address("192.0.2.5")}))
+    off = {"http": None, "https": None, "all": None}
+    assert selfclient._proxies("http://192.0.2.5:8080/v1/server/restart") == off
+    assert selfclient._proxies("http://[::1]:8080/") == off
+    assert selfclient._proxies("http://localhost:8080/") == off
+    assert selfclient._proxies("http://198.51.100.7:8080/") is None
+    assert selfclient._proxies("http://localhost.example:8080/") is None
+
+
 def test_a_request_to_this_machines_own_server_never_goes_through_a_proxy(monkeypatch):
     """With a proxy in the environment and no ``no_proxy``, a call to a loopback address
     (``self_request``, ``read_activity`` and the restart of another server for an update,
