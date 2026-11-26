@@ -91,14 +91,32 @@ def _environment_lines(diag: dict) -> list:
         "native_libs": "Native libraries", "operation": "Operation",
         "backend": "Backend (effective)", "requested_backend": "Backend (requested)",
         "with_cudart": "Fetched CUDA runtime bundle",
+        "files_differing": "Files differing from the release",
     }
     for key, name in label.items():
         if key in diag:
             val = diag[key]
             if isinstance(val, list):
                 val = ", ".join(str(x) for x in val) if val else "(none)"
+            elif key == "files_differing":
+                val = _files_differing_text(val)
             env_lines.append(f"- {name}: {val}")
     return env_lines
+
+
+def _files_differing_text(counts) -> str:
+    """The report line of the integrity check's counts (``integrity.report_counts``)."""
+    if not isinstance(counts, dict):
+        return str(counts)
+    if counts.get("error"):
+        return f"not checked ({counts['error']})"
+    if not counts.get("checked"):
+        return "not checked (this install has no list of its release's files)"
+    n = (counts.get("differ", 0) + counts.get("missing", 0)
+         + counts.get("runtime_differ", 0))
+    return (f"{n} ({counts.get('differ', 0)} changed, {counts.get('missing', 0)} missing, "
+            f"{counts.get('runtime_differ', 0)} native runtime); "
+            f"{counts.get('kept', 0)} kept as the user's")
 
 
 def _context_diagnostic_sections(context: Optional[dict]) -> list:

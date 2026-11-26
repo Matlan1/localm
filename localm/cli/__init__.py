@@ -67,6 +67,7 @@ from . import (  # noqa: F401
     rerank as _rerank,
     speak as _speak,
     update_steps as _update_steps,
+    integrity_cmd as _integrity_cmd,
 )
 
 # Commands added to groups after their registration get the help options too.

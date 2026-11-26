@@ -629,6 +629,10 @@ def main() -> None:
     _export_subcommand_mode(ctx)
     if not ctx.meta.get(HELP_REQUESTED):
         _update_steps_at_start(ctx.invoked_subcommand)
+        if ctx.invoked_subcommand in _SERVER_COMMANDS:
+            from localm import integrity
+            integrity.startup(say=lambda text: click.echo(f"localm: {text}", err=True),
+                              on_close=ctx.call_on_close)
 
 
 def _update_steps_at_start(command) -> None:

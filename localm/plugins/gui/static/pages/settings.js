@@ -2181,11 +2181,23 @@ export async function refreshSettingsPage() {
   if (updateToggleBlock) updateToggleBlock.hidden = true;
   for (const sec of ordered) {
     if (sec.id === "core-Updates" && updateToggleBlock) {
+      // The integrity check's two settings render into the Integrity sub-block,
+      // which shows whether or not an update channel is configured.
+      const integrityGrid = $("integrity-settings");
+      const isIntegrity = (c) => integrityGrid && c.field && c.field.key.startsWith("integrity_");
       const grid = $("settings-sec-core-Updates");
-      grid.replaceChildren(...sec.ctrls.map((c) => c.node));
+      const rest = sec.ctrls.filter((c) => !isIntegrity(c));
+      grid.replaceChildren(...rest.map((c) => c.node));
       const save = $("update-toggles-save");
       if (save) save.onclick = () => savingState(save, () => saveSettingsSection(sec.id));
-      updateToggleBlock.hidden = false;
+      updateToggleBlock.hidden = !rest.length;
+      if (integrityGrid) {
+        const own = sec.ctrls.filter(isIntegrity);
+        integrityGrid.replaceChildren(...own.map((c) => c.node));
+        const isave = $("integrity-settings-save");
+        if (isave) isave.onclick = () => savingState(isave, () => saveSettingsSection(sec.id, integrityGrid));
+        $("integrity-settings-block").hidden = !own.length;
+      }
       continue;
     }
     // Every group has a real heading now (coreSectionHeading is total, and an
