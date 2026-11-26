@@ -301,10 +301,12 @@ def watchdogs(root, *, untold: Optional[list] = None) -> Optional[list]:
     """The pids of the update watchdogs of the install at *root* that run: an old
     client's ``scripts/update_watchdog.py`` whose ``--install-root`` is *root*. None
     when that cannot be told: the processes cannot be listed, or the command line of
-    one this user can open (one whose program can be read) cannot be read or parsed
-    while it still runs: one that ended between the listing and the read is listed
-    again, and left out when it is gone. On a system without ``/proc`` (macOS) only
-    processes whose program is a Python are read, from ``ps``
+    a Python interpreter (:func:`_interpreter`) cannot be read or parsed while it
+    still runs: one that ended between the listing and the read is listed again, and
+    left out when it is gone. A process whose program is known and is not such an
+    interpreter is not read: an old watchdog runs in one. Elsewhere than Windows, a
+    process whose program cannot be read is read from ``/proc`` when it can be. On a
+    system without ``/proc`` (macOS) the command lines come from ``ps``
     (:func:`_ps_command_line`). *untold*, when given, receives the
     ``install_manifest.list_processes`` row of each process that made the answer
     None."""
@@ -349,8 +351,10 @@ def _watchdog_of(row, root) -> Optional[bool]:
     """Whether the process of the :func:`install_manifest.list_processes` *row* is an
     update watchdog of the install at *root*; None when that cannot be told."""
     pid, exe = row[0], row[2]
+    if exe and not _interpreter(exe):
+        return False
     if _by_ps():
-        if not (exe and "python" in os.path.basename(exe).lower()):
+        if not exe:
             return False
         line = _ps_command_line(pid)
         if line is None:
@@ -368,6 +372,14 @@ def _watchdog_of(row, root) -> Optional[bool]:
     if named is None:
         return None
     return _same_folder(named, root)
+
+
+def _interpreter(exe: str) -> bool:
+    """Whether the program *exe* is one an old client's update watchdog runs in: a
+    Python interpreter (``python``, ``pythonw``, ``python3.12``, a macOS framework
+    ``Python``) or localm's own app program ``LocaLM.exe``, which is one."""
+    name = os.path.basename(exe).lower()
+    return name.startswith("python") or name == "localm.exe"
 
 
 def _by_ps() -> bool:

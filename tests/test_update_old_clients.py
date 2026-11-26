@@ -389,14 +389,33 @@ def test_a_process_that_ended_before_its_command_line_was_read_is_left_out(monke
     the same start time does."""
     root = tmp_path / "install"
     monkeypatch.setattr(oc, "_by_ps", lambda: False)
-    listings = [[(42, 1, "/x/git.exe", 100)], []]
+    listings = [[(42, 1, "/x/python.exe", 100)], []]
     monkeypatch.setattr(install_manifest, "list_processes", lambda: listings.pop(0))
     monkeypatch.setattr(oc, "_argv", lambda pid: None)
     assert oc.watchdogs(root) == []
-    listings[:] = [[(42, 1, "/x/git.exe", 100)], [(42, 1, "/x/other.exe", 200)]]
+    listings[:] = [[(42, 1, "/x/python.exe", 100)], [(42, 1, "/x/python.exe", 200)]]
     assert oc.watchdogs(root) == []
     listings[:] = [[(42, 1, "/x/python.exe", 100)], [(42, 1, "/x/python.exe", 100)]]
     assert oc.watchdogs(root) is None
+
+
+def test_a_program_that_is_no_interpreter_is_never_an_old_watchdog(monkeypatch, tmp_path):
+    """Seen on an elevated Windows runner: the isolated LSA process names its program
+    but refuses its command line (status 0x8000000d). An old watchdog runs in a Python
+    interpreter or in LocaLM.exe, so only those count when they cannot be read."""
+    root = tmp_path / "install"
+    monkeypatch.setattr(oc, "_by_ps", lambda: False)
+    rows = [(956, 4, "C:\\Windows\\System32\\LsaIso.exe", 100)]
+    monkeypatch.setattr(install_manifest, "list_processes", lambda: list(rows))
+    read = []
+    monkeypatch.setattr(oc, "_argv", lambda pid: read.append(pid))
+    assert oc.watchdogs(root) == [] and read == []
+    for program in ("C:\\py\\python.exe", "C:\\py\\pythonw.exe", "/usr/bin/python3.12",
+                    "C:\\x\\.venv\\localm-app\\LocaLM.exe"):
+        rows[:] = [(956, 4, "C:\\Windows\\System32\\LsaIso.exe", 100), (57, 4, program, 100)]
+        untold: list = []
+        assert oc.watchdogs(root, untold=untold) is None, program
+        assert [r[0] for r in untold] == [57]
 
 
 def test_the_command_lines_ps_shows_are_read_on_a_system_without_proc(monkeypatch, tmp_path):
