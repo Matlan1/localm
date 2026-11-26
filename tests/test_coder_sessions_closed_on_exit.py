@@ -78,7 +78,7 @@ def test_the_exit_paths_close_a_live_gui_coder_session(tmp_path, monkeypatch, pa
     proj.mkdir()
     monkeypatch.setattr(hs, "_engine", None)
     monkeypatch.setattr(os, "_exit", _raise_exit)
-    monkeypatch.setattr(os, "execv", _raise_exit)
+    monkeypatch.setattr(os, "execve", _raise_exit)
 
     with TestClient(app) as client:
         sess = _open_session(client, app, proj)

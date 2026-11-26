@@ -170,7 +170,7 @@ class TestExitPaths:
 
     def test_restart_releases_the_reranker_worker_without_the_load_lock(self, monkeypatch):
         reset_calls, released = _spy_exit_release(monkeypatch)
-        monkeypatch.setattr(os, "execv", lambda exe, argv: (_ for _ in ()).throw(SystemExit(0)))
+        monkeypatch.setattr(os, "execve", lambda exe, argv, env=None: (_ for _ in ()).throw(SystemExit(0)))
         try:
             hs._do_restart()
         except SystemExit:

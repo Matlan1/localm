@@ -23,10 +23,10 @@ def test_do_restart_marks_fds_non_inheritable(monkeypatch):
 
     monkeypatch.setattr(os, "set_inheritable", lambda fd, inh: calls.append((fd, inh)))
 
-    def _fake_execv(exe, argv):
+    def _fake_execv(exe, argv, env=None):
         raise _Stop()
 
-    monkeypatch.setattr(os, "execv", _fake_execv)
+    monkeypatch.setattr(os, "execve", _fake_execv)
     monkeypatch.setattr(http_server, "_restart_argv",
                         lambda port=None: ["python", "-m", "localm"])
     monkeypatch.setattr(http_server, "_engine", None)
@@ -62,9 +62,9 @@ def test_hang_restart_forced_fallback_marks_fds_non_inheritable(monkeypatch):
     monkeypatch.setattr(http_server, "_restart_argv",
                         lambda port=None: ["python", "-m", "localm"])
 
-    def _fake_execv(exe, argv):
+    def _fake_execv(exe, argv, env=None):
         raise _Stop()
-    monkeypatch.setattr(os, "execv", _fake_execv)
+    monkeypatch.setattr(os, "execve", _fake_execv)
 
     app = SimpleNamespace(state=SimpleNamespace(instance_port=None,
                                                  instance_id=None))

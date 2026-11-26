@@ -882,10 +882,11 @@ def test_this_versions_restart_marks_the_update_steps_done_with_its_version(monk
     monkeypatch.setattr(instances, "restore_own", lambda removed: None)
     seen = []
 
-    def execv(exe, argv):
-        seen.append(os.environ.get("LOCALM_UPDATE_STEPS_DONE"))
+    def execv(exe, argv, env=None):
+        assert "LOCALM_UPDATE_STEPS_DONE" not in os.environ
+        seen.append(env.get("LOCALM_UPDATE_STEPS_DONE"))
         raise OSError("not in a test")
-    monkeypatch.setattr(os, "execv", execv)
+    monkeypatch.setattr(os, "execve", execv)
     with pytest.raises(OSError):
         hs._execv_restart(None, None, update_steps_done=True)
     with pytest.raises(OSError):
@@ -1913,7 +1914,7 @@ def _restart_with_real_watchdog(monkeypatch, *, port, expect, after_steps=None):
     def stop_here(*_a):
         raise SystemExit(0)
 
-    monkeypatch.setattr(os, "execv", stop_here)
+    monkeypatch.setattr(os, "execve", stop_here)
     with pytest.raises(SystemExit):
         hs._do_restart(update_watchdog={"host": "127.0.0.1", "port": port, "scheme": "http",
                                         "expect_version": expect})

@@ -267,8 +267,8 @@ def restart_harness(tmp_path, monkeypatch):
     monkeypatch.setattr(updater, "spawn_health_watchdog",
                         lambda **kw: (seen.__setitem__("watchdog", kw), True)[1])
     monkeypatch.setattr(
-        os, "execv",
-        lambda exe, argv: (seen.__setitem__("argv", argv),
+        os, "execve",
+        lambda exe, argv, env=None: (seen.__setitem__("argv", argv),
                            (_ for _ in ()).throw(SystemExit(0)))[1])
     return seen
 

@@ -261,7 +261,7 @@ def test_do_restart_releases_the_embedder_without_the_load_lock(monkeypatch):
     not the worker child, so the release must run - and must not be able to hang
     on the embedder load lock."""
     reset_calls, released = _spy_exit_release(monkeypatch)
-    monkeypatch.setattr(os, "execv", lambda exe, argv: (_ for _ in ()).throw(SystemExit(0)))
+    monkeypatch.setattr(os, "execve", lambda exe, argv, env=None: (_ for _ in ()).throw(SystemExit(0)))
 
     try:
         hs._do_restart()
