@@ -1337,6 +1337,18 @@
                 <div id="update-rollback-status" class="sub" role="status" aria-live="polite" hidden></div>
               </div>
 
+              <!-- The GUI form of `localm update --remove-old-backup`: the backup an older
+                   localm's update left that is kept because it cannot be proven to be
+                   this install's. Revealed only when there is one (GET /api/update/old-backup). -->
+              <div class="update-subsection" id="app-old-backup-block" hidden>
+                <h4 class="update-sub-head" data-i18n="settings.oldBackup.subHead">Backup of an earlier update</h4>
+                <div class="sub" id="update-old-backup-text"></div>
+                <div class="actions">
+                  <button class="btn-secondary" id="update-old-backup-remove" data-i18n="settings.oldBackup.removeButton">Remove</button>
+                </div>
+                <div id="update-old-backup-status" class="sub" role="status" aria-live="polite" hidden></div>
+              </div>
+
               <!-- The GUI half of `localm update --repair`, and the results of the
                    runtime and component updates of the last day. Revealed only
                    when a part of the install differs from the installed version

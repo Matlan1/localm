@@ -709,8 +709,13 @@ def register(app: FastAPI, ctx) -> None:
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def integrity_repair_ep(request: Request):
         """Write the differing files ``{paths}`` (default every differing one) again
-        from the signed build of the installed version. OWNER-only. Returns
-        ``{repaired: true, files, failed, result}`` or ``{repaired: false, error}``."""
+        from the signed build of the installed version; without ``paths``, also install
+        the native runtime again when files of it differ
+        (``setup_llama.repair.repair_runtime``).
+        OWNER-only. Returns ``{repaired: true, files, failed, runtime, result}``
+        (``runtime`` the runtime repair's result, its ``error`` and ``fix``
+        path-scrubbed, or None with ``paths`` given) or ``{repaired: false, error}``, with
+        ``runtime`` too when the release files could not be repaired."""
         from localm import integrity
         from localm.bugreport import LocalmError
         _integrity_owner(request, "Repairing files")
@@ -719,16 +724,27 @@ def register(app: FastAPI, ctx) -> None:
         why = await asyncio.to_thread(integrity.refusal, paths, repairing=True)
         if why:
             return {"repaired": False, "error": fmt(why)}
+        async def runtime_repair():
+            if paths is not None:
+                return None
+            from localm.setup_llama.repair import repair_runtime
+            rt = await asyncio.to_thread(_probes_held, repair_runtime)
+            return {**rt, **{k: fmt(rt[k]) for k in ("error", "fix", "note")
+                             if rt[k] is not None}}
+
         try:
             res = await asyncio.to_thread(integrity.repair, paths)
         except integrity.IntegrityError as e:
             from localm.debuglog import logger
             logger.warning("integrity: the repair was refused: %s", e)
-            return {"repaired": False, "error": "Nothing was repaired; the log says why."}
+            return {"repaired": False, "error": "Nothing was repaired; the log says why.",
+                    "runtime": await runtime_repair()}
         except LocalmError as e:
-            return {"repaired": False, "error": fmt(format_localm_error(e))}
+            return {"repaired": False, "error": fmt(format_localm_error(e)),
+                    "runtime": await runtime_repair()}
         failed = [{"path": f["path"], "reason": fmt(f["reason"])} for f in res["failed"]]
         return {"repaired": True, "files": res["repaired"], "failed": failed,
+                "runtime": await runtime_repair(),
                 "result": await asyncio.to_thread(integrity.run)}
 
     # -----------------------------------------------------------------------

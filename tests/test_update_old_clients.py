@@ -803,3 +803,362 @@ def test_rollback_script_changes_nothing_when_it_refuses(tmp_path, monkeypatch, 
     assert "its checks passed" in capsys.readouterr().err
     assert sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*")) == before
     assert (root / "localm" / "x.py").read_text(encoding="utf-8") == "print('new')\n"
+
+
+# ---------------------------------------------------------------- the version after
+
+_STAND_IN_MAIN = """\
+import json, os, sys
+from pathlib import Path
+here = Path(__file__).resolve().parent.parent
+if sys.argv[1:] == ["--version"]:
+    print(os.environ.get("STAND_IN_SAYS") or "localm, version " + (here / "VERSION").read_text().strip())
+    raise SystemExit(int(os.environ.get("STAND_IN_VERSION_EXIT") or 0))
+print("stand-in build ran", flush=True)
+(here / "started.json").write_text(json.dumps({
+    "argv": sys.argv[1:], "cwd": os.getcwd(), "program": sys.executable,
+    "relaunched": os.environ.get("LOCALM_OLD_CLIENT_RELAUNCH"),
+    "restart": os.environ.get("LOCALM_RESTART_IN_PROGRESS")}))
+raise SystemExit(7)
+"""
+
+
+def _stand_in_build(root: Path) -> None:
+    """Make *root* a stand-in build that ``python -m localm`` (run in *root*) starts:
+    ``--version`` prints its ``VERSION`` (or ``STAND_IN_SAYS``), any other command
+    records its arguments and environment in ``started.json`` and exits 7."""
+    (root / "localm" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "localm" / "__main__.py").write_text(_STAND_IN_MAIN, encoding="utf-8")
+
+
+def _started(root: Path, wait_s: float = 0.0):
+    path = root / "started.json"
+    deadline = time.monotonic() + wait_s
+    while not path.is_file() and time.monotonic() < deadline:
+        time.sleep(0.2)
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+
+@pytest.fixture
+def put_back_build(setup, monkeypatch):
+    """The setup whose put-back writes the backup's VERSION into the install, the
+    install a stand-in build, this process's environment that of a restart."""
+    root, home, updates, put_back = setup
+    _stand_in_build(root)
+
+    def rollback_last(*, installed=None, say=None):
+        put_back.append(installed)
+        (root / "VERSION").write_text(OLD, encoding="utf-8")
+        return {"rolled_back": True}
+    monkeypatch.setattr(updater, "rollback_last", rollback_last)
+    monkeypatch.setenv("LOCALM_RESTART_IN_PROGRESS", "1")
+    monkeypatch.delenv(oc.RELAUNCHED, raising=False)
+    monkeypatch.chdir(root)
+    return root, home, updates, put_back
+
+
+def test_a_start_whose_checks_put_the_previous_version_back_starts_it(put_back_build,
+                                                                     monkeypatch):
+    """The old start exited 1 and the user had to start localm again: the previous
+    version now starts with the same command and arguments, and its status is the
+    status of this start."""
+    from localm.cli import _core
+    root, home, _updates, put_back = put_back_build
+    (root / "localm" / "x.py").write_text("print('changed')\n", encoding="utf-8")
+    monkeypatch.setattr(updater, "is_git_clone", lambda root=None: False)
+    monkeypatch.setattr(updater, "repo_root", lambda: root)
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.delenv("LOCALM_UPDATE_ID", raising=False)
+    monkeypatch.setattr(sys, "argv", ["localm", "gui", "--port", "8099"])
+    with pytest.raises(SystemExit) as e:
+        _core._old_client_checks("gui")
+    assert e.value.code == 7 and put_back == [None]
+    started = _started(root)
+    assert started["argv"] == ["gui", "--port", "8099"], started
+    from localm import _version
+    assert started["relaunched"].startswith(_version.read_version() + " "), started
+    assert started["restart"] is None, started
+    assert os.path.samefile(started["cwd"], root)
+
+
+def test_the_console_says_which_version_starts_and_why(put_back_build, capfd):
+    """The previous version writes where this process writes, also when this process
+    has no console window of its own."""
+    root, home, _updates, _ = put_back_build
+    (root / "README.md").unlink()
+    note, said, warned = _start(root, home)
+    assert isinstance(note, oc.Ending) and note.then == "previous" and note.old == OLD
+    capfd.readouterr()
+    told: list = []
+    assert oc.go_on(note, root=root, argv=["run", "m"], say=told.append, warn=told.append) == 7
+    assert "README.md" in note and f"localm {OLD} is in place again" in note
+    assert told == [f"Starting localm {OLD} with the same command: localm run m"]
+    assert "stand-in build ran" in capfd.readouterr().out
+    started = _started(root)
+    assert os.path.samefile(started["program"], sys.executable), started
+    assert started["relaunched"] == note.marker and note.marker.startswith(NEW + " ")
+
+
+@pytest.mark.parametrize("case", ["no-answer", "wrong-version", "not-back"])
+def test_a_previous_version_that_cannot_start_is_not_started_and_the_fix_is_named(
+        put_back_build, monkeypatch, case):
+    root, home, _updates, _ = put_back_build
+    (root / "README.md").unlink()
+    note = _start(root, home)[0]
+    if case == "no-answer":
+        monkeypatch.setenv("STAND_IN_VERSION_EXIT", "1")
+        monkeypatch.setenv("STAND_IN_SAYS", "ModuleNotFoundError: No module named 'localm.x'")
+    elif case == "wrong-version":
+        monkeypatch.setenv("STAND_IN_SAYS", "localm, version 0.1.0")
+    else:
+        (root / "VERSION").write_text("0.2.9", encoding="utf-8")
+    told: list = []
+    assert oc.go_on(note, root=root, argv=["gui"], say=told.append, warn=told.append) == 1
+    assert _started(root) is None
+    assert len(told) == 1 and f"unzip the localm {OLD} release" in told[0], told
+    if case == "no-answer":
+        assert "No module named" in told[0] and "not started" in told[0], told
+    elif case == "wrong-version":
+        assert "0.1.0" in told[0], told
+    else:
+        assert "localm 0.2.9 now" in told[0], told
+
+
+def _watchdog_process(root: Path, *extra: str, code: str = "import time; time.sleep(60)"):
+    return subprocess.Popen([sys.executable, "-c", code,
+                             str(root / "scripts" / "update_watchdog.py"),
+                             "--install-root", str(root), *extra],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, **_NO_WINDOW)
+
+
+@pytest.mark.parametrize("relaunch, server, then", [
+    (True, True, "watchdog"), (False, True, "after_watchdog"), (False, False, None)])
+def test_a_failed_check_under_an_old_watchdog_says_who_starts_the_previous_version(
+        setup, monkeypatch, relaunch, server, then):
+    """localm 0.3.4b3 and b4 watchdogs start the previous version after their rollback
+    (``--relaunch-argv``); for earlier ones a starter does."""
+    root, home, _updates, put_back = setup
+    monkeypatch.setattr(oc, "watchdogs", _real_watchdogs)
+    monkeypatch.setattr(oc, "_later", lambda *a, **k: None)
+    extra = ("--relaunch-argv", json.dumps(["python", "-m", "localm", "gui"])) if relaunch else ()
+    watchdog = _watchdog_process(root, *extra)
+    try:
+        _wait_listed(root, watchdog.pid)
+        (root / "localm" / "x.py").write_text("print('changed')\n", encoding="utf-8")
+        note = _start(root, home, server=server)[0]
+    finally:
+        watchdog.kill()
+        watchdog.wait(timeout=30)
+    assert isinstance(note, oc.Ending) and note.then == then and put_back == []
+    assert "watchdog of localm 0.3.3 puts" in note or "Start it again once" in note
+    if then == "after_watchdog":
+        assert watchdog.pid in note.pids and "starts again by itself" in note, note.pids
+    if then == "watchdog":
+        assert "starts it again with the same command" in note
+
+
+def test_the_starter_waits_for_the_old_watchdog_then_starts_the_previous_version(
+        tmp_path, monkeypatch):
+    """A real starter process (this module run with only the standard library) and a
+    real process standing in for an old watchdog that puts the previous version back
+    and ends."""
+    root = _install(tmp_path)
+    _stand_in_build(root)
+    monkeypatch.delenv(oc.RELAUNCHED, raising=False)
+    monkeypatch.chdir(root)
+    code = ("import sys, time; time.sleep(2); "
+            f"open(sys.argv[1], 'w').write({OLD!r})")
+    watchdog = subprocess.Popen([sys.executable, "-c", code, str(root / "VERSION")],
+                                stdin=subprocess.DEVNULL, **_NO_WINDOW)
+    try:
+        note = oc.Ending("failed", then="after_watchdog", old=OLD, new=NEW,
+                         pids=[watchdog.pid])
+        told: list = []
+        assert oc.go_on(note, root=root, argv=["serve", "-p", "1"], say=told.append,
+                        warn=told.append) == 1
+        assert told == [] and _started(root) is None, "started before the watchdog ended"
+        started = _started(root, wait_s=90)
+    finally:
+        watchdog.kill()
+        watchdog.wait(timeout=30)
+    assert started and started["argv"] == ["serve", "-p", "1"], started
+    assert started["relaunched"] == NEW
+    assert (root / "VERSION").read_text(encoding="utf-8") == OLD
+
+
+def test_a_start_by_a_starter_does_not_arrange_another_for_the_same_update(monkeypatch,
+                                                                          tmp_path):
+    """A later update that fails again (another backup) is started again by itself."""
+    backup = {"version": OLD, "mtime_ns": 11}
+    note = oc.Ending("failed", then="after_watchdog", old=OLD, new=NEW, pids=[1], backup=backup)
+    monkeypatch.setenv(oc.RELAUNCHED, note.marker)
+    spawned: list = []
+    monkeypatch.setattr(oc, "_spawn_starter", lambda *a: spawned.append(a))
+    told: list = []
+    assert oc.go_on(note, root=tmp_path, argv=["gui"], say=told.append, warn=told.append) == 1
+    assert told and "Start localm again" in told[0] and spawned == []
+    again = oc.Ending("failed", then="after_watchdog", old=OLD, new=NEW, pids=[1],
+                      backup=dict(backup, mtime_ns=12))
+    assert oc.go_on(again, root=tmp_path, argv=["gui"], say=told.append, warn=told.append) == 1
+    assert len(spawned) == 1
+
+
+def test_a_starter_that_cannot_tell_the_watchdogs_leaves_a_server_it_brought_up(
+        tmp_path, monkeypatch):
+    """A 0.3.4b3 or b4 watchdog that could not be told starts the previous version
+    itself: the starter waits for an answer on the port before it starts anything."""
+    root = _install(tmp_path)
+    (root / "VERSION").write_text(OLD, encoding="utf-8")
+    monkeypatch.setattr(oc, "_wait_for_watchdogs", lambda *a, **k: None)
+    monkeypatch.setattr(oc, "_RELAUNCH_GRACE_S", 3.0)
+    monkeypatch.setattr(oc, "_WATCHDOG_POLL_S", 0.1)
+    asked: list = []
+
+    def answers(port):
+        asked.append(port)
+        return len(asked) >= 3
+    monkeypatch.setattr(oc, "_answers_on", answers)
+    monkeypatch.setattr(oc, "start_previous", lambda *a, **k: pytest.fail("started a second"))
+    payload = {"root": str(root), "old": OLD, "new": NEW, "pids": None, "argv": ["gui", "-p", "5"],
+               "cwd": str(root), "until": time.time() + 5, "port": 5}
+    assert oc._start_after_watchdogs(payload) == 0 and asked == [5, 5, 5]
+
+
+def test_the_starter_waits_for_a_settled_version_when_the_watchdogs_cannot_be_told(
+        tmp_path, monkeypatch):
+    root = _install(tmp_path)
+    clock = [0.0]
+    slept: list = []
+
+    def sleep(s):
+        slept.append(s)
+        clock[0] += s
+        if len(slept) == 3:
+            (root / "VERSION").write_text(OLD, encoding="utf-8")
+    oc._wait_for_watchdogs(root, OLD, None, 600.0, sleep=sleep, clock=lambda: clock[0])
+    assert len(slept) > 3 and sum(slept[3:]) >= oc._SETTLED_S, slept
+    assert clock[0] < 600.0, "it waited for the time limit instead"
+    slept.clear()
+    (root / "VERSION").write_text(NEW, encoding="utf-8")
+    clock[0] = 0.0
+    oc._wait_for_watchdogs(root, "9.9", None, 30.0, sleep=lambda s: slept.append(s) or
+                           clock.__setitem__(0, clock[0] + s), clock=lambda: clock[0])
+    assert clock[0] >= 30.0
+
+
+# ---------------------------------------------------------------- the kept backup
+
+def test_a_backup_not_provably_this_install_s_is_offered_and_removed_on_request(setup):
+    root, home, updates, _ = setup
+    (updates / "backup-components" / "state.json").unlink()
+    assert _start(root, home)[0] is None and (updates / "backup").is_dir()
+    found = oc.kept_backup(root, home)
+    assert found and found["version"] == OLD and found["bytes"] > 0, found
+    assert oc.remove_kept_backup(root, home) == []
+    assert not any((updates / name).exists() for name in oc.BACKUP_PARTS)
+    assert oc.read_checked(root)["removed"] is True and oc.kept_backup(root, home) is None
+    with pytest.raises(oc.Refused, match="no backup"):
+        oc.remove_kept_backup(root, home)
+
+
+def test_the_kept_backup_is_not_offered_while_its_checks_are_open_or_it_is_mine(setup):
+    root, home, updates, _ = setup
+    assert oc.kept_backup(root, home) is None, "checks not run yet"
+    oc._record(root, NEW, oc.backup_identity(updates), passed=None, removed=False, reasons=[])
+    assert oc.kept_backup(root, home) is None, "checks open"
+    oc._record(root, NEW, oc.backup_identity(updates), passed=False, removed=False,
+               reasons=[], mine=False)
+    assert oc.kept_backup(root, home) is None, "provably this install's now"
+    with pytest.raises(oc.Refused):
+        oc.remove_kept_backup(root, home)
+    assert (updates / "backup" / "VERSION").is_file()
+
+
+def test_the_kept_backup_is_not_removed_while_a_watchdog_may_run_or_an_update_runs(
+        setup, monkeypatch):
+    from localm.update_mechanism import job
+    root, home, updates, _ = setup
+    (updates / "backup-components" / "state.json").unlink()
+    _start(root, home)
+    monkeypatch.setattr(oc, "watchdogs", lambda r: [7])
+    with pytest.raises(oc.Refused, match="watchdog"):
+        oc.remove_kept_backup(root, home)
+    monkeypatch.setattr(oc, "watchdogs", lambda r: [])
+    monkeypatch.setattr(job, "locked", lambda r: True)
+    with pytest.raises(oc.Refused, match="in progress"):
+        oc.remove_kept_backup(root, home)
+    assert (updates / "backup" / "VERSION").is_file() and oc.kept_backup(root, home)
+
+
+OWNER_KEY = "owner-admin-key-old-backup-abc123"
+
+
+@pytest.fixture
+def old_backup_client(setup, monkeypatch):
+    import localm.config as cfg
+    from fastapi.testclient import TestClient
+
+    from localm import auth
+    from localm.inference.http_server import create_app
+    from localm.plugins.engine import attach_engine
+    from localm.plugins.gui.web import attach_gui
+    root, home, updates, _ = setup
+    (updates / "backup-components" / "state.json").unlink()
+    _start(root, home)
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.setattr(cfg, "HOME_DIR", home)
+    monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(cfg, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+    monkeypatch.setattr(updater, "repo_root", lambda: root)
+    monkeypatch.setenv("LOCALM_API_KEY", OWNER_KEY)
+    scoped = auth.create_key("dev", ["config:read", "config:write"],
+                             allow_privileged=True)["key"]
+    app = create_app(None)
+    attach_engine(app)
+    attach_gui(app, self_url="http://127.0.0.1:9/v1", switch_model=lambda name: None,
+               active_model=lambda: "model-a")
+    with TestClient(app) as c:
+        yield c, scoped, root, home, updates
+
+
+def test_the_route_shows_the_kept_backup_and_removes_it_only_through_its_checks(
+        old_backup_client, monkeypatch):
+    c, scoped, root, home, updates = old_backup_client
+    owner = {"Authorization": f"Bearer {OWNER_KEY}"}
+    r = c.get("/api/update/old-backup", headers=owner)
+    assert r.status_code == 200 and r.json()["kept"] is True, r.text
+    assert r.json()["version"] == OLD and r.json()["bytes"] > 0
+    r = c.post("/api/update/old-backup/remove", headers={"Authorization": f"Bearer {scoped}"})
+    assert r.status_code == 403 and (updates / "backup").is_dir(), r.text
+    monkeypatch.setattr(oc, "watchdogs", lambda r: [7])
+    r = c.post("/api/update/old-backup/remove", headers=owner)
+    assert r.status_code == 409 and "watchdog" in r.json()["detail"], r.text
+    assert (updates / "backup" / "VERSION").is_file()
+    monkeypatch.setattr(oc, "watchdogs", lambda r: [])
+    r = c.post("/api/update/old-backup/remove", headers=owner)
+    assert r.status_code == 200 and r.json() == {"removed": True}, r.text
+    assert not (updates / "backup").exists()
+    assert c.get("/api/update/old-backup", headers=owner).json() == {"kept": False}
+
+
+def test_the_command_removes_the_kept_backup_only_when_there_is_one(setup, monkeypatch):
+    from click.testing import CliRunner
+
+    from localm.cli import _core, main
+    root, home, updates, _ = setup
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.setattr(updater, "repo_root", lambda: root)
+    monkeypatch.setattr(_core, "_update_steps_at_start", lambda command: None)
+    r = CliRunner().invoke(main, ["update", "--remove-old-backup", "--yes"])
+    assert r.exit_code == 1 and "no backup" in r.output, r.output
+    (updates / "backup-components" / "state.json").unlink()
+    _start(root, home)
+    r = CliRunner().invoke(main, ["update", "--remove-old-backup"])
+    assert r.exit_code == 1 and "--yes" in r.output and (updates / "backup").is_dir(), r.output
+    r = CliRunner().invoke(main, ["update", "--remove-old-backup", "--yes"])
+    assert r.exit_code == 0 and "was removed" in r.output, r.output
+    assert f"localm {OLD}" in r.output and not (updates / "backup").exists()
+    r = CliRunner().invoke(main, ["update", "--remove-old-backup", "--rollback"])
+    assert r.exit_code == 2

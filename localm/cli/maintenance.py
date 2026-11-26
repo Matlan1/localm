@@ -702,8 +702,12 @@ def _say_step(text: str) -> None:
 @click.option("--repair", "do_repair", is_flag=True,
               help="Bring every part of the install (dependencies, native runtime, "
                    "components) to the installed localm version.")
+@click.option("--remove-old-backup", "remove_old_backup", is_flag=True,
+              help="Remove the backup an older localm's update left that is kept because "
+                   "it cannot be proven to be this install's.")
 def update_cmd(check_only: bool, yes: bool, do_rollback: bool, list_only: bool,
-               to_version, allow_unverified: bool, do_repair: bool = False) -> None:
+               to_version, allow_unverified: bool, do_repair: bool = False,
+               remove_old_backup: bool = False) -> None:
     """Check for a newer localm build and apply it. You always initiate it - localm
     never updates itself automatically.
 
@@ -723,10 +727,15 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool, list_only: bool,
     from localm.bugreport import LocalmError
     from rich.markup import escape
 
-    if sum(map(bool, (do_rollback, list_only, to_version, check_only, do_repair))) > 1:
-        console.print("[yellow]Use only one of --check, --rollback, --list, --to and "
-                      "--repair.[/yellow]")
+    if sum(map(bool, (do_rollback, list_only, to_version, check_only, do_repair,
+                      remove_old_backup))) > 1:
+        console.print("[yellow]Use only one of --check, --rollback, --list, --to, "
+                      "--repair and --remove-old-backup.[/yellow]")
         sys.exit(2)
+    if remove_old_backup:
+        from .old_backup import remove_old_backup as _remove_old_backup
+        _remove_old_backup(yes=yes)
+        return
     if do_repair:
         _update_repair()
         return

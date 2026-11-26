@@ -112,6 +112,50 @@ test("Repair and Keep post to their routes and show the new result", async () =>
   assert.deepEqual(posts[2], { url: "/api/integrity/check", body: { full: true } });
 });
 
+test("only runtime files differing offers Repair, which installs the runtime again", async () => {
+  const rtResult = { ...RESULT, count: 1, differ: [], missing: [], kept: [],
+    runtime: { present: true, listed: true, differ: ["llama.dll"], missing: [] } };
+  const w = app([]);
+  w.renderIntegrity({ result: rtResult });
+  assert.equal(w.document.getElementById("integrity-repair").hidden, false);
+  assert.equal(w.document.getElementById("integrity-keep").hidden, true);
+  assert.ok(items(w).includes("The native runtime is not part of the release: Repair installs it again."));
+  const replies = [
+    { repaired: true, files: [], failed: [], result: { ...rtResult, count: 0,
+      runtime: { present: true, listed: true, differ: [], missing: [] } },
+    runtime: { needed: true, repaired: true, backend: "vulkan", build: "b1", files: ["llama.dll"],
+      error: null, fix: null, note: null } },
+    { repaired: true, files: [], failed: [], result: rtResult,
+      runtime: { needed: true, repaired: false, backend: "vulkan", build: "b1", files: ["llama.dll"],
+        error: "network access is off, so the runtime cannot be downloaded",
+        fix: "turn it on; then run: localm integrity --repair", note: null } },
+    { repaired: false, error: "the release 1.0 has no build to repair from",
+      runtime: { needed: true, repaired: true, backend: "vulkan", build: "b1", files: ["llama.dll"],
+        error: null, fix: null, note: null } },
+  ];
+  const fetchImpl = async (url, opts = {}) => {
+    if (String(url) === "/api/integrity/repair" && opts.method === "POST") {
+      const reply = replies.shift();
+      return { ok: true, status: 200, json: async () => reply };
+    }
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  };
+  const w2 = loadAppWithPages({ fetchImpl }).window;
+  w2.renderIntegrity({ result: rtResult });
+  await w2.integrityRepair();
+  assert.equal(text(w2, "integrity-action-status"),
+    "Installed the vulkan runtime b1 again: 1 file(s) of it repaired.");
+  assert.equal(w2.document.getElementById("integrity-repair").hidden, true);
+  await w2.integrityRepair();
+  assert.equal(text(w2, "integrity-action-status"),
+    "The native runtime was not repaired: network access is off, so the runtime cannot be "
+    + "downloaded. To repair it: turn it on; then run: localm integrity --repair");
+  await w2.integrityRepair();
+  assert.equal(text(w2, "integrity-action-status"),
+    "Failed: the release 1.0 has no build to repair from "
+    + "Installed the vulkan runtime b1 again: 1 file(s) of it repaired.");
+});
+
 // The two settings render into the Integrity block, which shows without an update
 // channel, and its own Save sends only them.
 test("the integrity settings show and save without an update channel", async () => {

@@ -61,7 +61,46 @@ def _network_drives_allowed() -> bool:
     return bool(load_config().get("allow_network_drives", True))
 
 
+def _old_backup_places() -> tuple:
+    """``(install root, data folder)`` of the running localm."""
+    from localm import updater
+    from localm.config import home_dir
+    return updater.repo_root(), home_dir()
+
+
 def register(app: FastAPI, ctx) -> None:
+
+    @app.get("/api/update/old-backup",
+             dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
+    def update_old_backup():
+        """The backup an older localm's update left that is kept because it cannot be
+        proven to be this install's (``updater_old_clients.kept_backup``): ``{kept,
+        version, bytes}``, ``kept`` False when there is none. Read-only."""
+        from localm import updater_old_clients
+        found = updater_old_clients.kept_backup(*_old_backup_places())
+        return {"kept": found is not None, **(found or {})}
+
+    @app.post("/api/update/old-backup/remove",
+              dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    def update_old_backup_remove(request: Request):
+        """Remove that backup, the user's explicit choice
+        (``updater_old_clients.remove_kept_backup`` and its checks). OWNER-only.
+        Returns ``{removed: true}``; 409 with the reason when it is refused, 500 with
+        what could not be removed."""
+        from localm import updater_old_clients
+        from localm.inference.http_server import caller_is_operator
+        if not caller_is_operator(request):
+            raise HTTPException(403, "Removing the backup of an earlier update requires an "
+                                "owner (admin) key: it cannot be undone.")
+        fmt = path_formatter(request)
+        try:
+            left = updater_old_clients.remove_kept_backup(*_old_backup_places())
+        except updater_old_clients.Refused as e:
+            raise HTTPException(409, fmt(str(e))) from None
+        if left:
+            raise HTTPException(500, fmt("Not everything could be removed: "
+                                         + "; ".join(left[:3])))
+        return {"removed": True}
 
     @app.post("/api/logs/export",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE)),

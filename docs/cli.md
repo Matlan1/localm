@@ -1335,9 +1335,10 @@ localm update --list            # list every release you can install
 localm update --to 0.3.0        # install that release, older or newer than yours
 localm update --to 0.3.0 -y --allow-unverified   # non-interactive, even if its signature does not verify
 localm update --repair          # bring the dependencies, native runtime and components to the installed version
+localm update --remove-old-backup     # remove an older localm's update backup that is not provably this install's
 localm integrity                # list the files that differ from the installed release
 localm integrity --keep [PATH...]     # keep your changed files: they are no longer reported
-localm integrity --repair [PATH...]   # write the differing files again from the signed release
+localm integrity --repair [PATH...]   # write the differing files again from the signed release (and the native runtime)
 localm bug-report -m "..."      # generate an editable bug report and offer to send it to the maintainer
 localm bug-report -m "what I did" -e "what I expected" -w "what happened" --send   # non-interactive, send immediately
 localm feedback -m "..."        # write feedback and offer to send it to the maintainer (--suggestion for a suggestion)
@@ -1383,7 +1384,7 @@ you had. `localm doctor` and Settings > System > Updates list any part that diff
 installed version (for example after an older version's own rollback), and
 `localm update --repair` or Settings > System > Updates > Repair brings each one to it.
 
-`localm integrity` compares localm's files with the list of the installed release (the list every signed release carries). It reads a file in full only when its size or time changed since the last check (`--full` reads every file), names each file that differs or is missing, and exits 1 while one does. `--keep` records those files (or the PATHS you name) as yours: they are listed apart and no longer reported, until a release changes them. `--repair` downloads the signed build of the installed version, checks its signature, and writes exactly those files from it, with the execute permission the build gives them. The native runtime is compared with the list written when it was installed, by size and time (in full with `--full`); `localm setup-llama` installs it again. A server checks at every start, in the background shortly after it is up, unless Settings > System > Updates > Check integrity at startup is off; then nothing is read at startup. Show a notice when files differ decides whether a difference is announced. A bug report says how many files differ, never which.
+`localm integrity` compares localm's files with the list of the installed release (the list every signed release carries). It reads a file in full only when its size or time changed since the last check (`--full` reads every file), names each file that differs or is missing, and exits 1 while one does. `--keep` records those files (or the PATHS you name) as yours: they are listed apart and no longer reported, until a release changes them. `--repair` downloads the signed build of the installed version, checks its signature, and writes exactly those files from it, with the execute permission the build gives them. The native runtime is compared with the list written when it was installed, by size and time (in full with `--full`). When files of it differ, `--repair` without PATHS (and Settings > System > Updates > Integrity > Repair) installs it again with setup-llama, the installed backend and build, as an update does, and compares it in full again; the runtime that was there stays in place when that fails. It says why and what to run instead when it cannot: network access is off, the runtime is a build you installed yourself (`--from`/`--url`) or does not record its backend, an update is in progress, or a program (a localm with a model loaded, for one) uses it. A server checks at every start, in the background shortly after it is up, unless Settings > System > Updates > Check integrity at startup is off; then nothing is read at startup. Show a notice when files differ decides whether a difference is announced. A bug report says how many files differ, never which.
 
 When a start cannot load localm's list of running processes (`localm/procs.py`), it does not stop. Every start, by any launcher, command, MCP client or script, writes back the damaged file the error names and `localm/procs.py` from the signed build of the installed version, as `--repair` does, and when the error is a Python package that is not installed it runs the repair of Settings > System > Updates > Installed parts; then it records the process and says in one line on the console (stderr) what it repaired. Each network wait of that repair lasts at most 15 seconds. When it cannot repair it (a git clone, no update server set, network access off, a download or signature failure, an update in progress), the start goes on without the list, a warning on the console and in the debug log names the error, the reason and what repairs it (`localm integrity --repair <file>`, or `localm update --repair` and Installed parts > Repair for a missing package), and a command that needs the list stops with that error until it is repaired. Both repair commands run without it.
 
@@ -1399,11 +1400,21 @@ packages are this version's, and this version starts and answers. While the olde
 version's update watchdog runs, that watchdog checks the last part, and the update is
 complete once it has ended. When the checks pass, the backup the older updater kept is
 deleted once that watchdog has ended, if it is provably this install's backup from that
-update (localm 0.3.2 keeps no such proof, so its backup stays until a later update
-replaces it), and `rollback.bat` / `rollback.sh` no longer put it back. When they fail,
+update, and `rollback.bat` / `rollback.sh` no longer put it back. localm 0.3.2 keeps no
+such proof, so its backup stays: Settings > System > Updates shows it with its size and a
+Remove button, and `localm update --remove-old-backup` removes it, once no update or
+watchdog of this install runs (it asks first; `-y` skips the question). When the checks fail,
 the previous version is put back from that backup, and localm says why on the console
 (stderr) and, for a day, in the previous version's Settings > System > Updates (localm
-0.3.3 to 0.3.4b4 list it under the last runtime and component updates); a put-back that
+0.3.3 to 0.3.4b4 list it under the last runtime and component updates); then the previous
+version starts by itself with the same command and arguments, in the same console, once it
+answers its version (when it does not, localm says so and how to repair it). While the
+older version's update watchdog judges a server, that watchdog puts the previous version
+back: one of localm 0.3.4b3 or b4 then starts it itself, and after one of an earlier
+version localm waits for it to end and starts the same command again. Another command
+that starts in that time (not `localm gui` or `localm serve`) says to run it again once
+the watchdog has put the previous version back, since its console is back at the prompt
+by then. A put-back that
 could not run is tried again at the next start. A backup that is not provably this
 install's is left alone, `rollback.bat` / `rollback.sh` do not put it back either, and
 localm says how to repair the install instead, on the console and in Settings > System >

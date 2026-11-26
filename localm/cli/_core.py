@@ -677,8 +677,9 @@ def _old_client_checks(command) -> None:
     started (``LOCALM_UPDATE_ID``), in localm's hidden commands, in ``localm mcp``
     (its stdout is the protocol; a later start runs them), in a pip install, in the
     container image and in a git clone (its files are git's). What they say goes to
-    stderr. When they failed and this version must not go on, print why and exit with
-    status 1."""
+    stderr. When they failed and this version must not go on, print why, start the
+    previous version with this command's arguments where it is back
+    (``updater_old_clients.go_on``) and exit with its status, else with status 1."""
     import os
     if ("LOCALM_UPDATE_ID" in os.environ or str(command or "").startswith("_")
             or command == "mcp"):
@@ -702,7 +703,10 @@ def _old_client_checks(command) -> None:
         return
     if note:
         err_console.print(f"[yellow]{escape(note)}[/yellow]")
-        raise SystemExit(1)
+        raise SystemExit(updater_old_clients.go_on(
+            note, root=root, argv=sys.argv[1:],
+            say=lambda m: err_console.print(escape(m)),
+            warn=lambda m: err_console.print(f"[yellow]{escape(m)}[/yellow]")))
 
 
 # Commands whose process a restart re-executes (a server).
