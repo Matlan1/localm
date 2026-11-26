@@ -30,6 +30,8 @@ WHAT IT CHECKS BEFORE WRITING:
     PASS set (a dry run only warns about a mismatch; ``--write`` refuses);
   * the release has a sha256 digest for every asset and at least
     ``MIN_ASSETS`` of them;
+  * every ``tokenizer.ggml.pre`` string the target tag accepts is covered by the
+    pre-tokenizer guard (``check_pretokenizer_redos.check_names``);
   * each edited region is found exactly once.
 
 WHAT IT LEAVES TO A PERSON, printed as the remaining checklist: the ctypes
@@ -70,6 +72,7 @@ REPO = Path(__file__).resolve().parent.parent
 SETUP_PATH = REPO / "localm" / "setup_llama" / "pins.py"
 API_PATH = REPO / "localm" / "inference" / "backends" / "llamacpp" / "_api.py"
 MTP_SCRIPT = REPO / "scripts" / "check_mtp_arch_allowlist.py"
+REDOS_SCRIPT = REPO / "scripts" / "check_pretokenizer_redos.py"
 
 UPSTREAM_REPO = "ggml-org/llama.cpp"
 CUDA_LINUX_REPO = "hybridgroup/llama-cpp-builder"
@@ -197,6 +200,23 @@ def derive_mtp_architectures(tag: str) -> set:
     if not derived:
         raise Refused(f"the MTP re-derivation at {tag} returned an empty set")
     return set(derived)
+
+
+def check_pretokenizer_names(tag: str) -> None:
+    """Raise Refused when llama.cpp at *tag* accepts a ``tokenizer.ggml.pre``
+    string the pre-tokenizer guard does not cover, or the check cannot be made
+    (scripts/check_pretokenizer_redos.py, ``check_names``)."""
+    spec = importlib.util.spec_from_file_location("check_pretokenizer_redos", REDOS_SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    try:
+        problems = mod.check_names(tag)
+    except (Exception, SystemExit) as e:
+        raise Refused(f"could not check the pre-tokenizer names at {tag}: "
+                      f"{type(e).__name__}: {e}") from e
+    if problems:
+        raise Refused(f"the pre-tokenizer guard does not cover llama.cpp {tag}:\n  "
+                      + "\n  ".join(problems))
 
 
 # --------------------------------------------------------------------------- #
@@ -388,6 +408,9 @@ def main(argv=None) -> int:
         print(f"re-deriving MTP_GRAPH_ARCHITECTURES at {tag} ...")
         archs = derive_mtp_architectures(tag)
         print(f"  {len(archs)} architecture(s): {', '.join(sorted(archs))}")
+
+        print(f"checking the pre-tokenizer names at {tag} ...")
+        check_pretokenizer_names(tag)
 
         print(f"reading the {tag} Linux CUDA assets of {CUDA_LINUX_REPO} ...")
         cuda_linux = fetch_cuda_linux_digests(tag)

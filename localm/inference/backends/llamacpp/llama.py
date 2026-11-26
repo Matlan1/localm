@@ -444,7 +444,7 @@ class _Tokenizer:
         # Cutting a text needs the special tokens known: without them a cut
         # could land beside one.
         self._chunkable = (
-            pretokenizer_guard.policy_for(self._pre_type) is not None
+            pretokenizer_guard.can_split(self._pre_type)
             and bool(self._separators)
             and self._tokens_join_across_cuts(model_ptr))
         hazard = pretokenizer_guard.hazard_note(self._pre_type)

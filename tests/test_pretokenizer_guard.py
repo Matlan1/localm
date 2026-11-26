@@ -72,6 +72,8 @@ _LETTER_RUN = [p for p in _RUN_BOUNDED
                in (guard._CLASS_LETTER, guard._CLASS_LETTER_SPACE)]
 _NEWLINE_BOUNDED = [p for p in _AFFECTED
                     if guard.UNSAFE_PRE_TYPES[p].newline_run is not None]
+# A policy with only a line-break bound states no total length.
+_CAPPED = [p for p in _AFFECTED if guard.UNSAFE_PRE_TYPES[p].max_chars is not None]
 _COST_BOUNDED = [p for p in _AFFECTED
                  if guard.UNSAFE_PRE_TYPES[p].cost_budget is not None]
 
@@ -143,21 +145,30 @@ class TestCalibration:
     # character class its own regex runs over. jais-2 and deepseek-llm are
     # absent on purpose: neither has ever been observed to throw on its own
     # class, and their bounds are COST bounds - see MEASURED_COST below.
+    # inkling2, pixtral, nemotron-3.5-embed and flint: measured with a
+    # vocabulary-only GGUF through llama_tokenize of the amd-rocm runtime
+    # (b12617), whose other entries throw at the lengths given here too.
     MEASURED_FIRST_CRASH = {
         "exaone-moe": 149,
         "gpt-4o": 198, "llama4": 198, "kanana2": 198, "talkie": 198,
+        "inkling2": 198,
         "minimax-m2": 198,
-        "tekken": 198, "tekken-num3": 198,
+        "tekken": 198, "pixtral": 198, "nemotron-3.5-embed": 198, "tekken-num3": 198,
         "granite-embed-multi-97m": 198,
         "superbpe": 297,
-        "tiny_aya": 1348, "cohere2moe": 1348, "youtu": 1348,
+        "tiny_aya": 1348, "cohere2moe": 1348, "youtu": 1348, "flint": 1348,
     }
+    # Pre-tokenizers measured to throw on a run of line breaks and on no other
+    # run up to 65536 characters.
+    MEASURED_NEWLINE_ONLY = frozenset({
+        "deepseek-v3", "hunyuan-dense", "joyai-llm", "hy_v4", "afmoe", "minicpm5",
+        "seed-coder", "ufakzeka"})
     # Shortest total length measured to abort even with runs held under the
     # limit, for the pre-tokenizers whose cost also grows with total length.
     MEASURED_TOTAL_CRASH = {"tiny_aya": 224000, "cohere2moe": 224000,
                             "youtu": 224000, "superbpe": 300000}
     # Shortest unbroken CR/LF run measured to throw. Identical for every
-    # pre-tokenizer whose pattern list carries a `\s*[\r\n]+` branch, bisected
+    # pre-tokenizer that runs a `\s*[\r\n]+` branch through std::regex, bisected
     # per pre-type rather than assumed from one of them.
     MEASURED_NEWLINE_CRASH = 3161
     # Bounds that stop a pre-tokenizer being SLOW, not a crash: the value at
@@ -172,7 +183,18 @@ class TestCalibration:
         crash = set(self.MEASURED_FIRST_CRASH)
         cost = set(self.MEASURED_COST_CONCERN)
         assert not crash & cost
-        assert crash | cost == set(guard.UNSAFE_PRE_TYPES)
+        assert not (crash | cost) & self.MEASURED_NEWLINE_ONLY
+        assert crash | cost | self.MEASURED_NEWLINE_ONLY == set(guard.UNSAFE_PRE_TYPES)
+
+    @pytest.mark.parametrize("pre_type", sorted(MEASURED_NEWLINE_ONLY))
+    def test_a_newline_only_pre_type_bounds_nothing_else(self, pre_type):
+        # Nothing else throws, and a text of 300000 characters within the bound
+        # was measured clean, so any other bound would refuse input that works.
+        assert guard.UNSAFE_PRE_TYPES[pre_type] == guard.Policy(
+            None, None, None, pre_type, newline_run=guard._NEWLINE_RUN_LIMIT)
+        for text in (_letters(300000), _digits(300000), " " * 300000, _CJK * 300000,
+                     ("x" + "\n" * guard._NEWLINE_RUN_LIMIT) * 1000):
+            assert guard.check_text(pre_type, text) is None
 
     def test_the_cost_bounded_pre_types_are_not_described_as_crashing(self):
         # jais-2 and deepseek-llm go quadratic; they have not been observed to
@@ -223,10 +245,11 @@ class TestCalibration:
         limit = policy.cost_budget if policy.cost_budget is not None else policy.max_run
         assert limit <= self.MEASURED_COST_CONCERN[pre_type] / 2
 
-    @pytest.mark.parametrize("pre_type", _AFFECTED)
+    @pytest.mark.parametrize("pre_type", sorted(set(_AFFECTED) - MEASURED_NEWLINE_ONLY))
     def test_every_policy_bounds_total_length_too(self, pre_type):
         # Bounding runs alone was measured insufficient for superbpe and the
-        # tiny_aya/youtu pair, so every policy carries a total bound.
+        # tiny_aya/youtu pair, so every policy that bounds more than line breaks
+        # carries a total bound.
         assert guard.UNSAFE_PRE_TYPES[pre_type].max_chars is not None
 
     @pytest.mark.parametrize("pre_type", sorted(MEASURED_TOTAL_CRASH))
@@ -367,7 +390,7 @@ class TestOrdinaryTextIsUntouched:
         limit = guard.UNSAFE_PRE_TYPES[pre_type].newline_run
         assert guard.check_text(pre_type, "a" + chr(10) * limit + "a") is None
 
-    @pytest.mark.parametrize("pre_type", _AFFECTED)
+    @pytest.mark.parametrize("pre_type", _CAPPED)
     def test_long_text_with_short_runs_passes(self, pre_type):
         policy = guard.UNSAFE_PRE_TYPES[pre_type]
         unit = "word word word. "
@@ -377,7 +400,7 @@ class TestOrdinaryTextIsUntouched:
 
 
 class TestTotalLengthBound:
-    @pytest.mark.parametrize("pre_type", _AFFECTED)
+    @pytest.mark.parametrize("pre_type", _CAPPED)
     def test_text_over_the_total_limit_is_refused(self, pre_type):
         policy = guard.UNSAFE_PRE_TYPES[pre_type]
         body = "ok. " * (policy.max_chars // 4 + 8)
@@ -385,7 +408,7 @@ class TestTotalLengthBound:
         with pytest.raises(PretokenizerUnsafeInputError, match="characters at once"):
             guard.check_text(pre_type, body)
 
-    @pytest.mark.parametrize("pre_type", _AFFECTED)
+    @pytest.mark.parametrize("pre_type", _CAPPED)
     def test_text_exactly_at_the_total_limit_passes(self, pre_type):
         policy = guard.UNSAFE_PRE_TYPES[pre_type]
         body = ("ok. " * (policy.max_chars // 4 + 4))[:policy.max_chars]
@@ -646,6 +669,56 @@ class TestVisionPathIsGuardedToo:
         mock_api.llama_free.assert_not_called()
 
 
+class TestRefusedRuns:
+    """``refused_runs`` is the one definition of a run: check_text refuses what
+    it yields, and the coder cuts what it yields."""
+
+    def test_it_yields_every_run_with_the_size_the_limit_counts(self):
+        text = "a" + "\n \n" * 3 + "b" + "\n" * 5 + "c"
+        runs = list(guard.refused_runs("line breaks", 4, text))
+        assert [(text[r.start:r.end], r.size) for r in runs] == [
+            ("\n \n" * 3, 6), ("\n" * 5, 5)]
+        assert list(guard.refused_runs("line breaks", 6, text)) == []
+
+    @pytest.mark.parametrize("kind,unit", [
+        ("letters", "a"), ("letters and spaces", "a "), ("digits", "5"),
+        ("whitespace characters", " "), ("line breaks", "\n"), (guard.BLOCK, "\u4e2d")])
+    def test_a_run_at_the_limit_is_not_yielded(self, kind, unit):
+        for limit in (10, 700):
+            text = (unit * limit)[:limit]
+            assert list(guard.refused_runs(kind, limit, f".{text}" if kind != guard.BLOCK
+                                           else text)) == []
+            assert len(list(guard.refused_runs(kind, limit, (unit * limit)[:limit] + unit))) == 1
+
+    def test_the_refusals_of_an_older_server_still_read_back(self):
+        old = ("This model's pre-tokenizer (tekken) crashes on an unbroken run of more than "
+               "256 line breaks; this input has a run of 300. Break the run with punctuation")
+        assert guard.parse_refusal(old) == guard.Refusal("run", 256, 300, "line breaks")
+
+
+class TestOnlyAPolicyWithALengthLimitIsSplit:
+    def test_can_split_matches_what_plan_chunks_cuts(self):
+        assert guard.can_split("gpt-4o") and guard.can_split("deepseek-llm")
+        for pre_type in ("exaone-moe", "llama-bpe", None,
+                         *sorted(TestCalibration.MEASURED_NEWLINE_ONLY)):
+            assert not guard.can_split(pre_type), pre_type
+
+    @pytest.mark.parametrize("pre_type,parts", [("deepseek-v3", False), ("gpt-4o", True)])
+    def test_the_load_log_announces_parts_only_where_text_is_split(self, pre_type, parts, caplog):
+        import logging
+        with caplog.at_level(logging.INFO, logger="localm"), \
+                patch(_LLAMA_API) as api, \
+                patch.object(guard, "read_pre_type", return_value=pre_type), \
+                patch.object(guard, "read_separators", return_value=(("<s>",), ())), \
+                patch.object(_Tokenizer, "_tokens_join_across_cuts", return_value=True):
+            api.llama_model_get_vocab.return_value = MagicMock()
+            tok = _Tokenizer.__new__(_Tokenizer)
+            tok.__init__(MagicMock(), None)
+        assert tok._chunkable is parts
+        assert ("tokenised in parts" in caplog.text) is parts
+        assert pre_type in caplog.text
+
+
 class TestAFailedPreTypeReadIsVisible:
     """A read that fails leaves the guard OFF for that model, so it must not be
     passed over in silence."""
@@ -690,9 +763,11 @@ class TestScannerCacheKeysAreDistinct:
                 if p.char_class is not None:
                     pairs.add((p.char_class, p.max_run))
                 if p.newline_run is not None:
-                    pairs.add((guard._CLASS_NEWLINE, p.newline_run))
+                    pairs.add((guard._CLASS_WHITESPACE, p.newline_run))
                 if p.digit_run is not None:
                     pairs.add((guard._CLASS_DIGIT, p.digit_run))
+                if p.cost_budget is not None:
+                    pairs.add((guard._CLASS_UNBROKEN, p.cost_budget // p.max_chars))
         assert len(guard._SCANNERS) == len(pairs)
         for cls, limit in pairs:
             scanner = guard._SCANNERS[(cls, limit)]
@@ -1673,6 +1748,35 @@ class TestANewlineRunIsRefusedBeforeNativeCode:
                 _tokenizer(pre_type).encode("\n" * (limit + 1))
         mock_api.llama_tokenize.assert_not_called()
 
+    @pytest.mark.parametrize("pre_type", _NEWLINE_BOUNDED)
+    @pytest.mark.parametrize("gap", [" ", "\t", "\x0b", "\u3000", "  \t"])
+    def test_other_whitespace_does_not_end_the_run(self, pre_type, gap):
+        # Measured: line-break runs of the permitted length separated by one
+        # whitespace character throw, since `\s*` carries on over it.
+        limit = guard.UNSAFE_PRE_TYPES[pre_type].newline_run
+        with pytest.raises(PretokenizerUnsafeInputError, match="line breaks") as exc:
+            guard.check_text(pre_type, "a" + ("\n" * limit + gap) * 3 + "b")
+        assert f"a run of {3 * limit}." in str(exc.value)
+
+    @pytest.mark.parametrize("pre_type", _NEWLINE_BOUNDED)
+    def test_the_run_is_counted_in_line_breaks_not_whitespace(self, pre_type):
+        limit = guard.UNSAFE_PRE_TYPES[pre_type].newline_run
+        blank_lines = ("\n" + " " * 3) * limit
+        assert guard.check_text(pre_type, "a" + blank_lines + "b") is None
+        with pytest.raises(PretokenizerUnsafeInputError, match="line breaks"):
+            guard.check_text(pre_type, "a" + blank_lines + "\nb")
+
+    @pytest.mark.parametrize("pre_type", _NEWLINE_BOUNDED)
+    def test_the_advice_is_for_line_breaks(self, pre_type):
+        # A line break does not end a run of line breaks, and spaces between
+        # them do not make the run an unbroken one.
+        with pytest.raises(PretokenizerUnsafeInputError) as exc:
+            guard.check_text(pre_type, "a" + "\n  " * 300 + "b")
+        msg = str(exc.value)
+        assert "Remove blank lines" in msg and "unbroken" not in msg
+        assert "punctuation" not in msg and "or a line break" not in msg
+        assert "unbroken run of more than 256 line breaks" not in guard.hazard_note(pre_type)
+
     def test_ordinary_blank_lines_still_pass(self):
         # Paragraph breaks and a generously blank-padded document are nowhere
         # near the bound.
@@ -1874,11 +1978,12 @@ class TestTheTableCannotShipAnUncompilableLimit:
             if p.char_class is not None:
                 assert (p.char_class, p.max_run) in guard._SCANNERS, pre_type
             if p.newline_run is not None:
-                assert (guard._CLASS_NEWLINE, p.newline_run) in guard._SCANNERS, pre_type
+                assert (guard._CLASS_WHITESPACE, p.newline_run) in guard._SCANNERS, pre_type
             if p.digit_run is not None:
                 assert (guard._CLASS_DIGIT, p.digit_run) in guard._SCANNERS, pre_type
             if p.cost_budget is not None:
-                assert (p.cost_budget, p.max_chars) in guard._COST_SCANNERS, pre_type
+                assert (guard._CLASS_UNBROKEN, guard._BLOCK_FLOOR) in guard._SCANNERS, pre_type
+                assert guard._BLOCK_FLOOR <= p.cost_budget // p.max_chars, pre_type
 
 
 class TestTheLoadTimeWarningDoesNotOverstateTheHazard:
@@ -2075,4 +2180,4 @@ class TestLinuxLimits:
             if policy.char_class is not None:
                 assert (policy.char_class, policy.max_run) in guard._SCANNERS
             if policy.newline_run is not None:
-                assert (guard._CLASS_NEWLINE, policy.newline_run) in guard._SCANNERS
+                assert (guard._CLASS_WHITESPACE, policy.newline_run) in guard._SCANNERS

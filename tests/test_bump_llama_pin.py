@@ -339,6 +339,7 @@ def tree(bump, tmp_path, monkeypatch):
     monkeypatch.setattr(bump, "REPO", tmp_path)
     monkeypatch.setattr(bump, "fetch_release_assets", lambda tag, opener=None: NEW_DIGESTS)
     monkeypatch.setattr(bump, "derive_mtp_architectures", lambda tag: {"qwen35", "glm4moe"})
+    monkeypatch.setattr(bump, "check_pretokenizer_names", lambda tag: None)
     return setup, api
 
 
@@ -422,3 +423,45 @@ def test_write_keeps_the_files_own_line_endings(bump, tree, tmp_path, newline):
 def test_a_malformed_tag_is_refused_before_anything_is_read(bump, tree, capsys):
     assert bump.main(["--tag", "latest"]) == 1
     assert "not an upstream build tag" in capsys.readouterr().out
+
+
+def _redos_stub(tmp_path, body):
+    path = tmp_path / "redos_stub.py"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_a_tag_with_an_uncovered_pretokenizer_name_is_refused(
+        bump, tree, tmp_path, monkeypatch, capsys):
+    setup, api = tree
+    monkeypatch.undo()
+    monkeypatch.setattr(bump, "SETUP_PATH", setup)
+    monkeypatch.setattr(bump, "API_PATH", api)
+    monkeypatch.setattr(bump, "fetch_release_assets", lambda tag, opener=None: NEW_DIGESTS)
+    monkeypatch.setattr(bump, "derive_mtp_architectures", lambda tag: {"qwen35", "glm4moe"})
+    monkeypatch.setattr(bump, "fetch_cuda_linux_digests", lambda tag, opener=None: {})
+    monkeypatch.setattr(bump, "REDOS_SCRIPT", _redos_stub(
+        tmp_path, "def check_names(ref):\n    return [f'{ref}: brand-new is not covered']\n"))
+    receipt = _receipt(tmp_path, "b200", {"cpu": "PASS", "vulkan": "PASS"})
+    assert bump.main(["--tag", "b200", "--receipt", str(receipt), "--write"]) == 1
+    out = capsys.readouterr().out
+    assert "REFUSED" in out and "b200: brand-new is not covered" in out
+    assert setup.read_text(encoding="utf-8") == SETUP_FIXTURE, "a refusal edits nothing"
+
+
+@pytest.mark.parametrize("failure", ["SystemExit('HTTP 404')", "OSError('offline')"])
+def test_a_name_check_that_cannot_run_is_a_refusal(bump, tmp_path, monkeypatch, failure):
+    monkeypatch.setattr(bump, "REDOS_SCRIPT", _redos_stub(
+        tmp_path, f"def check_names(ref):\n    raise {failure}\n"))
+    with pytest.raises(bump.Refused, match="could not check the pre-tokenizer names"):
+        bump.check_pretokenizer_names("b200")
+
+
+def test_a_covered_tag_is_not_refused(bump, tmp_path, monkeypatch):
+    monkeypatch.setattr(bump, "REDOS_SCRIPT", _redos_stub(
+        tmp_path, "def check_names(ref):\n    return []\n"))
+    assert bump.check_pretokenizer_names("b200") is None
+
+
+def test_the_name_check_is_the_one_the_guard_table_is_compared_with(bump):
+    assert bump.REDOS_SCRIPT == _ROOT / "scripts" / "check_pretokenizer_redos.py"

@@ -44,6 +44,14 @@ pinned headers declare that ``--ref`` dropped. A function upstream marks
 DEPRECATED fails too when localm calls it unconditionally, since upstream
 removes those in bulk, and is reported when localm probes for it first.
 
+IT ALSO CHECKS THE SIGNATURES localm gives the ``llama.h`` functions it binds in
+``_api.py`` (``bound_signatures``): the number of arguments, and the size and kind
+of each type and of the return type, against the prototypes of the same headers.
+
+WHAT IT CANNOT SEE: an enum outside ``_ENUM_BINDINGS``, a default value, a change
+of meaning behind an unchanged declaration, and a binding whose types are computed
+at call time (the by-value params structs, which the layout check covers).
+
 It complements the runtime guard ``_abi.verify_abi`` (which validates whatever DLL
 is actually loaded on a user's machine) and the CI load test: this one catches
 header-level drift before a build is even shipped.
@@ -140,6 +148,14 @@ _ENUM_BINDINGS = (
         c_prefix="LLAMA_POOLING_TYPE_",
         members=("UNSPECIFIED", "NONE", "MEAN", "CLS", "LAST", "RANK"),
         gate=("llama_context_params", "pooling_type"),
+    ),
+    _EnumBinding(
+        c_enum="llama_context_type",
+        module="localm.inference.backends.llamacpp._structs",
+        prefix="LLAMA_CONTEXT_TYPE_",
+        c_prefix="LLAMA_CONTEXT_TYPE_",
+        members=("DEFAULT", "MTP"),
+        gate=("llama_context_params", "ctx_type"),
     ),
 )
 
@@ -613,10 +629,10 @@ def _header_speech_interface(mtmd_text: str):
     return None
 
 
-def _prototype(text: str, name: str):
-    """(return type, [parameter declarations]) of the ``MTMD_API`` prototype
-    of *name* in comment-stripped *text*, or None when it is not declared."""
-    m = re.search(r"MTMD_API\s+([^;{}()]*?)\b" + re.escape(name) + r"\s*\(", text)
+def _prototype(text: str, name: str, macro: str = "MTMD_API"):
+    """(return type, [parameter declarations]) of the *macro* prototype of
+    *name* in comment-stripped *text*, or None when it is not declared."""
+    m = re.search(macro + r"\s+([^;{}()]*?)\b" + re.escape(name) + r"\s*\(", text)
     if not m:
         return None
     i = m.end()
@@ -988,18 +1004,154 @@ def check_functions(bound: dict, headers: dict, label: str,
     return problems
 
 
+_SIGNATURE_MODULE = "localm.inference.backends.llamacpp._api"
+
+
+def _static_type(node, names: dict):
+    """The ctypes type the expression *node* names: None, a module-level name of
+    *names*, an attribute of one, or ``ctypes.POINTER`` of such a type. Raises
+    LookupError for any other expression."""
+    import ast
+    import ctypes
+
+    if isinstance(node, ast.Constant) and node.value is None:
+        return None
+    if isinstance(node, ast.Name):
+        return names[node.id]
+    if isinstance(node, ast.Attribute):
+        owner = _static_type(node.value, names)
+        if not hasattr(owner, node.attr):
+            raise LookupError(node.attr)
+        return getattr(owner, node.attr)
+    if (isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "POINTER"
+            and len(node.args) == 1):
+        return ctypes.POINTER(_static_type(node.args[0], names))
+    raise LookupError(type(node).__name__)
+
+
+def bound_signatures(module_name: str = _SIGNATURE_MODULE) -> dict:
+    """name -> [(restype, argtypes, line)] for every ``_bind("name", restype,
+    *argtypes)`` call in *module_name* whose types are its module-level names or
+    ``ctypes.POINTER`` of them. A call that computes a type is left out."""
+    import ast
+
+    _ensure_localm_importable()
+    module = importlib.import_module(module_name)
+    tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+    out: dict = {}
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and getattr(node.func, "id", "") == "_bind"
+                and len(node.args) >= 2 and isinstance(node.args[0], ast.Constant)):
+            continue
+        try:
+            types = [_static_type(a, vars(module)) for a in node.args[1:]]
+        except LookupError:
+            continue
+        out.setdefault(node.args[0].value, []).append((types[0], types[1:], node.lineno))
+    return out
+
+
+def _localm_structs() -> dict:
+    """C struct name -> localm's ctypes class for it, for every class of
+    ``_structs`` named after its struct (``LlamaBatch`` = ``llama_batch``)."""
+    import ctypes
+
+    _ensure_localm_importable()
+    from localm.inference.backends.llamacpp import _structs as S
+    return {re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower(): cls
+            for name, cls in vars(S).items()
+            if isinstance(cls, type) and issubclass(cls, ctypes.Structure)}
+
+
+def _declared_type(decl: str, text: str, *, named: bool):
+    """(base type name, pointer depth) of the declaration *decl*, with an enum
+    as ``int`` and a typedef of *text* followed to what it names; None for a
+    function pointer."""
+    if re.search(r"\benum\b", decl):
+        return "int", decl.count("*")
+    base, stars = _c_type(decl, named=named)
+    if "[" in decl:
+        stars += 1
+    for _ in range(4):
+        if re.search(r"\(\s*\*\s*" + re.escape(base) + r"\s*\)", text):
+            return None
+        m = re.search(r"\btypedef\s+([^;{}()]*?)\b" + re.escape(base) + r"\s*;", text)
+        if m is None:
+            break
+        inner, extra = _c_type(m.group(1), named=False)
+        if inner == base or not inner:
+            break
+        base, stars = inner, stars + extra
+    if base == "callback" or base.endswith("_callback"):
+        return None
+    return base, stars
+
+
+def _signature_problems(text: str, proto, restype, argtypes, structs) -> list:
+    """What differs between a C prototype and a ctypes signature."""
+    import ctypes
+
+    ret, params = proto
+    if len(params) != len(argtypes):
+        return [f"takes {len(params)} argument(s) ({', '.join(params) or 'void'}), "
+                f"localm declares {len(argtypes)}"]
+    out = []
+    for decl, bound, named in [(ret, restype, False)] + [
+            (p, a, True) for p, a in zip(params, argtypes, strict=True)]:
+        declared = _declared_type(decl, text, named=named)
+        if declared is None:
+            why = "" if bound is ctypes.c_void_p or hasattr(bound, "_flags_") else (
+                f"is {getattr(bound, '__name__', bound)}, not a function pointer")
+        else:
+            why = _ctype_mismatch(*declared, bound, structs)
+        if why:
+            out.append(f"{decl!r} is bound wrongly: {why}")
+    return out
+
+
+def check_signatures(signatures: dict, llama_text: str, label: str) -> int:
+    """Check every entry of *signatures* (see :func:`bound_signatures`) that
+    *llama_text* declares: at least one of the signatures localm binds a name
+    with must match the prototype."""
+    print(f"\n############ Checking the signatures localm binds against {label} "
+          "############")
+    text = _strip_comments(llama_text)
+    structs = _localm_structs()
+    checked = problems = 0
+    for name in sorted(signatures):
+        proto = _prototype(text, name, r"\bLLAMA_API\b")
+        if proto is None:
+            continue
+        checked += 1
+        found = [(line, _signature_problems(text, proto, r, a, structs))
+                 for r, a, line in signatures[name]]
+        if any(not p for _line, p in found):
+            continue
+        problems += 1
+        for line, lines in found:
+            for why in lines:
+                print(f"  FAIL  {name} (_api.py:{line}): {why}")
+    print(f"  {checked} signature(s) checked, {problems} problem(s)")
+    if not checked:
+        print("  FAIL  no signature was checked: the scan or the header is empty")
+        problems += 1
+    return problems
+
+
 def _check_bound_functions(args, deprecated: list) -> int:
     """The bound-function check for one run: against the local headers given
     (only the groups given), or else against the pinned release and, with
     --ref, that ref too, which must keep everything the pin declares."""
     bound = bound_functions(Path(__file__).resolve().parent.parent)
+    signatures = bound_signatures()
     if args.header:
         headers = {"llama": Path(args.header).read_text(encoding="utf-8", errors="replace")}
         if args.mtmd_header:
             headers["mtmd"] = "\n".join(
                 Path(h).read_text(encoding="utf-8", errors="replace")
                 for h in args.mtmd_header)
-        return check_functions(bound, headers, args.header, deprecated=deprecated)
+        return (check_functions(bound, headers, args.header, deprecated=deprecated)
+                + check_signatures(signatures, headers["llama"], args.header))
     scripts_dir = str(Path(__file__).resolve().parent)
     if scripts_dir not in sys.path:
         sys.path.insert(0, scripts_dir)
@@ -1008,11 +1160,13 @@ def _check_bound_functions(args, deprecated: list) -> int:
     pinned = _fetch_function_headers(pin)
     total = check_functions(bound, pinned, f"{_REPO}@{pin} (the pin)",
                             deprecated=deprecated)
+    total += check_signatures(signatures, pinned["llama"], f"{_REPO}@{pin} (the pin)")
     if args.ref:
         ref = _resolve_ref(args.ref)
         if ref != pin:
-            total += check_functions(bound, _fetch_function_headers(ref),
-                                     f"{_REPO}@{ref}", pinned, deprecated)
+            headers = _fetch_function_headers(ref)
+            total += check_functions(bound, headers, f"{_REPO}@{ref}", pinned, deprecated)
+            total += check_signatures(signatures, headers["llama"], f"{_REPO}@{ref}")
     return total
 
 
@@ -1139,7 +1293,7 @@ def main() -> int:
     print(f"ABI check passed: localm's named fields match upstream offsets "
           f"for layout(s) {sorted(seen_layouts)}, every enum member localm "
           f"binds still has its upstream value, and every function localm "
-          f"binds is still declared.")
+          f"binds is still declared, with the signature localm gives it.")
     return 0
 
 

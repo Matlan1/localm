@@ -26,6 +26,11 @@ RerankFn = Callable[[str, list[str]], list[float]]
 ProgressFn = Callable[..., None]
 
 
+class EmbedTextRefused(RuntimeError):
+    """Raised by an ``EmbedFn`` when the embedding model cannot take one of the
+    texts. Other texts are unaffected."""
+
+
 class EmbeddingLossRefused(ValueError):
     """A forced re-index would have removed the embeddings of a document it
     could not re-embed. Nothing was saved: the collection is as it was."""

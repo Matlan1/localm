@@ -32,21 +32,35 @@ directly from the fetched source, so a pattern upstream has already hardened
 this way is correctly skipped rather than needlessly (though harmlessly)
 retested.
 
-KNOWN LIMITATION: needs an MSVC toolchain (Visual Studio Build Tools, via
-``vswhere``) and network access. It has no Linux/macOS path and is not part
-of the pytest suite - run it by hand when re-assessing the pin, or after a
-``_PINNED_TAG`` bump in ``setup_llama/pins.py``.
+THE NAMES ARE CHECKED TOO, and that half needs neither MSVC nor a build. Every
+``tokenizer_pre`` string ``llama-vocab.cpp`` accepts is mapped to its pattern
+list. A name in ``localm.inference.pretokenizer_guard.UNSAFE_PRE_TYPES`` must
+keep the list its limits were measured on (``GUARDED_LISTS``). Any other list
+that reaches ``std::regex`` must be one of ``MEASURED_SAFE_LISTS``, and no name
+outside that table may use a list of it: a new string for an old unsafe list, a
+new list and a changed or moved list each fail (``name_problems``). ``scripts/bump_llama_pin.py`` and
+``scripts/bump_rocm_pin.py`` refuse to move a pin that fails it.
+
+KNOWN LIMITATION: the timing half needs an MSVC toolchain (Visual Studio Build
+Tools, via ``vswhere``) and network access, has no Linux/macOS path and is not
+part of the pytest suite. It measures the ``std::regex`` of the toolset that
+compiles the probe. A newer toolset accepts input on which a runtime built with
+an older one aborts (the amd-rocm build is such a runtime), so its verdict never
+clears a pattern list: ``MEASURED_SAFE_LISTS`` is measured on the runtime's own
+``llama.dll``.
 
 Usage:
     python scripts/check_pretokenizer_redos.py                  # the pinned tag
     python scripts/check_pretokenizer_redos.py --ref b10375      # a specific tag
     python scripts/check_pretokenizer_redos.py --out report.json # full JSON dump
-    python scripts/check_pretokenizer_redos.py --gate            # exit 1 if any probe is flagged
+    python scripts/check_pretokenizer_redos.py --gate            # exit 1 if a name or an unguarded probe is flagged
+    python scripts/check_pretokenizer_redos.py --names-only --gate   # the names alone, on any platform
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -126,7 +140,7 @@ def _pinned_tag() -> str:
     return _PINNED_TAG
 
 
-def _fetch(ref: str, name: str, dest: Path) -> None:
+def _fetch_bytes(ref: str, name: str) -> bytes:
     url = f"https://raw.githubusercontent.com/{_REPO}/{ref}/src/{name}"
     req = urllib.request.Request(url, headers={"User-Agent": "localm-redos-check"})
     with urllib.request.urlopen(req, timeout=30) as r:
@@ -136,7 +150,11 @@ def _fetch(ref: str, name: str, dest: Path) -> None:
     if len(data) < 200:
         raise SystemExit(f"fetch {name} @ {ref}: suspiciously small ({len(data)} "
                          f"bytes) - likely an error page, not real source")
-    dest.write_bytes(data)
+    return data
+
+
+def _fetch(ref: str, name: str, dest: Path) -> None:
+    dest.write_bytes(_fetch_bytes(ref, name))
 
 
 # --------------------------------------------------------------------------- #
@@ -252,6 +270,194 @@ def extract_custom_triggers(unicode_src: str) -> dict:
     # Every literal in this function's body IS a dispatch-comparison target -
     # confirmed by reading the function (each `if (regex_expr == "...")`).
     return {_unescape_cpp_string(s): True for s in literals}
+
+
+# --------------------------------------------------------------------------- #
+#  tokenizer_pre names
+# --------------------------------------------------------------------------- #
+
+# list_digest of every pattern list that reaches std::regex and was measured to
+# throw on no run of up to 65536 characters (letters, digits, spaces, tabs, line
+# breaks, punctuation, CJK, Hangul, Thai, combining marks, emoji), through
+# llama_tokenize of the amd-rocm runtime at b12617 and of the CPU runtime at
+# b12676, with the enum names that use it.
+MEASURED_SAFE_LISTS = {
+    "eb04d9b972aca246": "BAILINGMOE",
+    "fff38a14a39e422e": "BLOOM, GPT3_FINNISH, PORO",
+    "c599fec34bc26444": "CHAMELEON",
+    "9605e6a402d36bf5": "CODESHELL, COMMAND_R, EXAONE, MELLUM2, MINERVA, REFACT, SMOLLM, STARCODER",
+    "aeb7ec792dc7a85b": "DEEPSEEK_CODER",
+    "0cb07e31283fe434": "DEFAULT",
+    "bfd73216750561ca": "FALCON",
+    "4947673ad7be3828": "SOPRANO",
+    "c9812f16cdd92700": "SPARK2_5",
+    "01bc41e6b16a527c": "VIKING",
+    "8e2c34f465a0fe9f": "WHITESPACE",
+    "8b0b0464eac48332": "ZONOS3",
+}
+
+# list_digest of the pattern list each name of UNSAFE_PRE_TYPES had at b12617 and
+# b12676, which its limits were measured on.
+GUARDED_LISTS = {
+    "afmoe": "eaed97eeca183f33",
+    "cohere2moe": "28b1e01f7005c516",
+    "deepseek-llm": "d0e57e4f663c10fa",
+    "deepseek-v3": "bfb6cd412a9c9638",
+    "exaone-moe": "1b5d04e3ba68c430",
+    "flint": "ce72e3542ea54910",
+    "gpt-4o": "e14833d7e0962861",
+    "granite-embed-multi-97m": "e14833d7e0962861",
+    "hunyuan-dense": "bfb6cd412a9c9638",
+    "hy_v4": "bfb6cd412a9c9638",
+    "inkling2": "e14833d7e0962861",
+    "jais-2": "a222d586d542e6ee",
+    "joyai-llm": "bfb6cd412a9c9638",
+    "kanana2": "e14833d7e0962861",
+    "llama4": "e14833d7e0962861",
+    "minicpm5": "89927421eed34d2e",
+    "minimax-m2": "e14833d7e0962861",
+    "nemotron-3.5-embed": "a5b9b3e5145cc001",
+    "pixtral": "a5b9b3e5145cc001",
+    "seed-coder": "b52969e3c183b7a9",
+    "superbpe": "2d06780e586e18c1",
+    "talkie": "e14833d7e0962861",
+    "tekken": "a5b9b3e5145cc001",
+    "tekken-num3": "00bf6a86a61ec545",
+    "tiny_aya": "28b1e01f7005c516",
+    "ufakzeka": "4aa23009821560c0",
+    "youtu": "21d12859c3adb6ca",
+}
+
+_NAME_OR_ENUM = re.compile(
+    r'tokenizer_pre\s*==\s*"([^"]+)"|\bpre_type\s*=\s*LLAMA_VOCAB_PRE_TYPE_(\w+)')
+_CASE_OR_LIST = re.compile(
+    r"^[ \t]*case\s+LLAMA_VOCAB_PRE_TYPE_(\w+)\s*:|^[ \t]*(default)\s*:|"
+    r"^[ \t]*regex_exprs\s*=\s*(\{)|^[ \t]*(break)\s*;", re.M)
+
+
+class Unreadable(Exception):
+    """llama-vocab.cpp does not have the shape the name check reads."""
+
+
+def list_digest(patterns: list) -> str:
+    """Identity of one ordered pattern list."""
+    return hashlib.sha256("\0".join(patterns).encode("utf-8")).hexdigest()[:16]
+
+
+def extract_pre_type_enums(vocab_src: str) -> dict:
+    """{tokenizer_pre string: enum name} of every string the pre-tokenizer chain
+    of llama-vocab.cpp accepts. Raises Unreadable when the chain is not found."""
+    start = vocab_src.find("tokenizer_pre.empty()")
+    end = vocab_src.find("unknown pre-tokenizer type", start)
+    if start == -1 or end == -1:
+        raise Unreadable("the tokenizer_pre chain was not found")
+    out: dict = {}
+    pending: list = []
+    for m in _NAME_OR_ENUM.finditer(vocab_src[start:end]):
+        if m.group(1):
+            pending.append(m.group(1))
+            continue
+        out.update(dict.fromkeys(pending, m.group(2)))
+        pending = []
+    if pending or not out:
+        raise Unreadable(f"tokenizer_pre strings with no pre_type: {pending or 'all'}")
+    return out
+
+
+def extract_pattern_lists(vocab_src: str) -> dict:
+    """{enum name: pattern list} of llm_tokenizer_bpe's constructor, the fallback
+    list under "default". Raises Unreadable when a list belongs to no case, or a
+    list of the file is outside the constructor."""
+    start = vocab_src.find("llm_tokenizer_bpe(const llama_vocab")
+    end = vocab_src.find("struct llm_tokenizer_bpe_session", start)
+    if start == -1 or end == -1:
+        raise Unreadable("the llm_tokenizer_bpe constructor was not found")
+    body = vocab_src[start:end]
+    out: dict = {}
+    pending: list = []
+    lists = 0
+    for m in _CASE_OR_LIST.finditer(body):
+        if m.group(4) and not pending:
+            continue
+        if m.group(4):
+            raise Unreadable(f"no pattern list for {pending}")
+        if m.group(3) is None:
+            pending.append(m.group(1) or m.group(2))
+            continue
+        if not pending:
+            raise Unreadable(f"a pattern list belongs to no case (line "
+                             f"{vocab_src.count(chr(10), 0, start + m.start()) + 1})")
+        literals, _end = _scan_string_literals_from(body, m.start(3))
+        out.update(dict.fromkeys(pending, [_unescape_cpp_string(s) for s in literals]))
+        pending = []
+        lists += 1
+    if "default" not in out or lists != len(extract_regex_exprs_blocks(vocab_src)):
+        raise Unreadable(f"{lists} pattern list(s) read, "
+                         f"{len(extract_regex_exprs_blocks(vocab_src))} in the file")
+    return out
+
+
+def pattern_lists_by_name(vocab_src: str) -> dict:
+    """{tokenizer_pre string: pattern list}. Raises Unreadable when a case of the
+    constructor is one no tokenizer_pre string reaches, which means a string was
+    not read."""
+    enums = extract_pre_type_enums(vocab_src)
+    lists = extract_pattern_lists(vocab_src)
+    unnamed = set(lists) - {"default", "DEFAULT"} - set(enums.values())
+    if unnamed:
+        raise Unreadable(f"no tokenizer_pre string reaches {sorted(unnamed)}")
+    return {name: lists.get(enum, lists["default"]) for name, enum in enums.items()}
+
+
+def name_problems(vocab_src: str, unicode_src: str, guarded, safe=None) -> list:
+    """Why a tokenizer_pre string of *vocab_src* is not covered, one line each.
+
+    *guarded* maps each guarded name to the digest of the list its limits were
+    measured on. [] when every guarded name still has that list, and every other
+    one uses only patterns unicode_regex_split_custom handles, or a list in
+    *safe* (:data:`MEASURED_SAFE_LISTS` by default) that no guarded name uses."""
+    safe = MEASURED_SAFE_LISTS if safe is None else safe
+    by_name = pattern_lists_by_name(vocab_src)
+    custom = extract_custom_triggers(unicode_src)
+    unsafe: dict = {}
+    for name, patterns in sorted(by_name.items()):
+        if name in guarded:
+            unsafe.setdefault(list_digest(patterns), []).append(name)
+    out = []
+    for name, patterns in sorted(by_name.items()):
+        digest = list_digest(patterns)
+        if name in guarded:
+            if digest != guarded[name]:
+                out.append(f"{name!r} no longer uses the pattern list its limits were "
+                           f"measured on ({guarded[name]}, now {digest}): measure it again, "
+                           f"then set its limits and GUARDED_LISTS")
+            continue
+        if all(p in custom for p in patterns):
+            continue
+        if digest in unsafe:
+            out.append(f"{name!r} uses the pattern list of {', '.join(unsafe[digest])}, which "
+                       f"pretokenizer_guard.UNSAFE_PRE_TYPES bounds: add it there")
+        elif digest not in safe:
+            out.append(f"{name!r} uses a pattern list nothing has measured ({digest}): add it "
+                       f"to UNSAFE_PRE_TYPES with its limit, or to MEASURED_SAFE_LISTS")
+    return out
+
+
+def check_names(ref: str) -> list:
+    """:func:`name_problems` of llama.cpp at *ref* against localm's table. Raises
+    Unreadable when the sources cannot be read, SystemExit or OSError when they
+    cannot be fetched."""
+    vocab_src, unicode_src = (_fetch_bytes(ref, name).decode("utf-8").replace("\r\n", "\n")
+                              for name in ("llama-vocab.cpp", "unicode.cpp"))
+    return name_problems(vocab_src, unicode_src, _guarded_lists())
+
+
+def _guarded_lists() -> dict:
+    """{name: GUARDED_LISTS digest} of every name in UNSAFE_PRE_TYPES, with ""
+    for one that has none, which no list matches."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from localm.inference.pretokenizer_guard import UNSAFE_PRE_TYPES
+    return {name: GUARDED_LISTS.get(name, "") for name in UNSAFE_PRE_TYPES}
 
 
 # --------------------------------------------------------------------------- #
@@ -416,11 +622,19 @@ def main() -> int:
     ap.add_argument("--ref", default=None, help="llama.cpp tag/commit (default: the pin)")
     ap.add_argument("--out", default=None, help="write the full JSON report here")
     ap.add_argument("--gate", action="store_true",
-                    help="exit 1 when any probe verdict is not linear-ish (default: always exit 0)")
+                    help="exit 1 when a tokenizer_pre string is not covered, or a probe verdict "
+                         "of a pattern a name outside UNSAFE_PRE_TYPES uses is not linear-ish "
+                         "(default: always exit 0)")
+    ap.add_argument("--names-only", action="store_true",
+                    help="check the tokenizer_pre strings only; needs no MSVC")
     args = ap.parse_args()
 
     ref = args.ref or _pinned_tag()
     print(f"# fetching llama.cpp @ {ref}", file=sys.stderr)
+    if args.names_only:
+        problems = check_names(ref)
+        _print_names(problems, ref)
+        return _exit_code(problems, args.gate)
 
     with tempfile.TemporaryDirectory(prefix="redos-check-") as tmp:
         workdir = Path(tmp)
@@ -429,6 +643,12 @@ def main() -> int:
 
         vocab_src = (workdir / "llama-vocab.cpp").read_text(encoding="utf-8")
         unicode_src = (workdir / "unicode.cpp").read_text(encoding="utf-8")
+
+        guarded = _guarded_lists()
+        names = name_problems(vocab_src, unicode_src, guarded)
+        unguarded = {p for name, patterns in pattern_lists_by_name(vocab_src).items()
+                     if name not in guarded for p in patterns}
+        _print_names(names, ref)
 
         blocks = extract_regex_exprs_blocks(vocab_src)
         distinct = sorted({p for b in blocks for p in b["patterns"]})
@@ -446,7 +666,7 @@ def main() -> int:
         results = sweep(exe, to_test, workdir, log=lambda s: print(s, file=sys.stderr))
 
     report = {"ref": ref, "n_blocks": len(blocks), "n_distinct": len(distinct),
-              "custom_handled": sorted(custom), "tested": results}
+              "custom_handled": sorted(custom), "name_problems": names, "tested": results}
 
     # Written before the summary print below: the report is the durable
     # artifact and must survive even if console rendering hits a problem.
@@ -455,24 +675,37 @@ def main() -> int:
                                   encoding="utf-8")
         print(f"full report: {args.out}", file=sys.stderr)
 
-    concerning = []
+    concerning, bounded = [], []
     for entry in results:
         for probe in entry["probes"]:
             if "linear-ish" not in probe["verdict"]:
-                concerning.append((entry["pattern"], probe["bait"], probe["verdict"]))
+                found = concerning if entry["pattern"] in unguarded else bounded
+                found.append((entry["pattern"], probe["bait"], probe["verdict"]))
 
     print(f"\n=== {len(to_test)} patterns driven through the real runtime, "
           f"{len(concerning)} probe(s) flagged ===\n")
     for pattern, bait, verdict in concerning:
         print(f"  [{bait}] {verdict}")
         print(f"    {pattern[:100]}")
+    if bounded:
+        print(f"\n{len(bounded)} more probe(s) flagged, each of a pattern only names in "
+              f"UNSAFE_PRE_TYPES use:")
+    for pattern, bait, verdict in bounded:
+        print(f"  [{bait}] {verdict}")
+        print(f"    {pattern[:100]}")
 
-    return _exit_code(concerning, args.gate)
+    return _exit_code(names + concerning, args.gate)
 
 
-def _exit_code(concerning: list, gate: bool) -> int:
-    """0 without *gate*; with it, 1 when *concerning* is non-empty."""
-    return 1 if (gate and concerning) else 0
+def _print_names(problems: list, ref: str) -> None:
+    print(f"\n=== tokenizer_pre strings at {ref}: {len(problems)} not covered ===")
+    for problem in problems:
+        print(f"  {problem}")
+
+
+def _exit_code(findings: list, gate: bool) -> int:
+    """0 without *gate*; with it, 1 when *findings* is non-empty."""
+    return 1 if (gate and findings) else 0
 
 
 if __name__ == "__main__":

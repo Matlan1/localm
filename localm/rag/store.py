@@ -73,7 +73,8 @@ from ._store.search import (  # noqa: F401
 from ._store.sidecar import (  # noqa: F401
     _MAX_REJECTED_KEPT, _REJECTED_VECTORS, _CollectionSidecar)
 from ._store.types import (  # noqa: F401
-    ClassifyFn, DescribeImageFn, EmbedFn, EmbeddingLossRefused, ProgressFn)
+    ClassifyFn, DescribeImageFn, EmbedFn, EmbeddingLossRefused,
+    EmbedTextRefused, ProgressFn)
 from ._store.vectors import (  # noqa: F401
     _NUMPY_DEGRADE_LOGGED, _NUMPY_IS_STUB, _cosine, _first_dim, _maxnorm, _numpy,
     _vectors_finite, _warn_numpy_degrade, _well_formed_vectors)

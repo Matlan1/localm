@@ -451,3 +451,43 @@ def test_cache_updates_after_remove_doc(base, docs):
 
     stats = _assert_peek_matches_eager(base, "kb")
     assert stats["n_chunks"] == 2
+
+
+_TEXT_REFUSAL = ("This model's pre-tokenizer (tekken) crashes on an unbroken run of more than "
+                 "64 letters; this input has a run of 200. Break the run")
+
+
+def test_a_document_whose_text_is_refused_does_not_stop_the_others(base, docs, monkeypatch):
+    """A pre-tokenizer refusal is about one text: the documents after it are still
+    embedded, and the refused one is indexed for keywords."""
+    from localm.plugins.builtin.rag.plug import _make_self_embed
+    said = []
+
+    class Reply:
+        text = ""
+
+        def __init__(self, texts):
+            self.ok = not any("compressors in the first" in t for t in texts)
+            self.status_code = 200 if self.ok else 400
+            self.body = ({"data": [{"embedding": [1.0, 0.0, 0.0]} for _ in texts]} if self.ok
+                         else {"detail": _TEXT_REFUSAL})
+
+        def json(self):
+            return self.body
+
+    monkeypatch.setattr("localm.selfclient.self_request",
+                        lambda *a, json=None, **kw: Reply(json["input"]))
+    monkeypatch.setattr("localm.jsonreply.response_json", lambda r: r.json())
+    embed = _make_self_embed("http://127.0.0.1:1", None)
+
+    first = docs / "aaa.txt"
+    first.write_text("compressors in the first document", encoding="utf-8")
+    coll = Collection("kb", base=base).create()
+    coll.add_paths([docs], embed_fn=embed,
+                   on_progress=lambda line, **_: said.append(line))
+    data = json.loads((base / "kb" / "vectors.json").read_text(encoding="utf-8"))
+    present = [bool(v) for v in data["vectors"]]
+    assert present.count(False) == 1 and len(present) == 4
+    refused = [line for line in said if "refused aaa.txt" in line]
+    assert refused and "lexical-only" in refused[0]
+    assert not any("embeddings unavailable" in line for line in said)

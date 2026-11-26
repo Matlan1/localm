@@ -71,6 +71,7 @@ EMBEDDING_ARCHITECTURES = [
 NON_CHAT_ARCHITECTURES = [
     "eagle3", "dflash", "gemma4-assistant",
     "wavtokenizer-dec", "pockettts",
+    "kokoro", "tiny-voca", "zonos3", "moshi",
 ]
 TTS_ARCHITECTURES = ["qwen3tts"]
 DIFFUSION_LM_ARCHITECTURES = ["dream", "llada", "llada-moe", "rnd1"]
@@ -172,6 +173,8 @@ class TestChatRefusal:
     @pytest.mark.parametrize("arch,what", [
         ("eagle3", "draft head"), ("dflash", "draft head"), ("gemma4-assistant", "draft head"),
         ("wavtokenizer-dec", "audio codec"),
+        ("kokoro", "text-to-speech"), ("tiny-voca", "text-to-speech"),
+        ("zonos3", "text-to-speech"), ("moshi", "speech-to-speech"),
         ("qwen3tts", "text-to-speech"), ("flux", "image or video generation"),
         ("acestep-dit", "music generation"), ("acestep-lm", "music generation"),
         ("acestep-vae", "music generation"), ("acestep-text-enc", "music generation"),

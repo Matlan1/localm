@@ -10,20 +10,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-import regex
-
-from localm.inference.pretokenizer_guard import Refusal
+from localm.inference.pretokenizer_guard import BLOCK, RUN_ADVICE, Refusal, refused_runs
 from localm.textguard import compose, slice_guarded
 
-# The character class each run refusal names, as a `regex` class.
-_RUN_CLASSES = {
-    "letters": r"[\p{L}\p{M}]",
-    "letters and spaces": r"[\p{L}\p{M} ]",
-    "digits": r"[\p{N}]",
-    "line breaks": r"[\r\n]",
-    "whitespace characters": r"[\s]",
-}
-_BLOCK_CLASS = r"[^ \t\n\r\f\v]"
 # Characters kept below a refused limit, for the marker and any template text
 # that shares the piece.
 _MARGIN = 1024
@@ -53,24 +42,18 @@ def shrink(content, budget: int):
                    slice_guarded(content, len(text) - tail, len(text)))
 
 
-def elide_runs(content, char_class: str, limit: int):
-    """``(content, n)``: *content* with every run of *char_class* longer than
-    *limit* replaced by its first characters and a marker, and how many runs
-    were replaced."""
-    keep = max(1, limit // 2)
-    pattern = regex.compile(char_class + "{" + str(limit + 1) + ",}")
+def elide_runs(content, runs, keep: int):
+    """*content* with each of *runs* (``pretokenizer_guard.refused_runs`` of its
+    text) replaced by its first *keep* characters and a marker."""
     text = str(content)
-    hits = list(pattern.finditer(text))
-    if not hits:
-        return content, 0
     parts: list = []
     pos = 0
-    for m in hits:
-        parts.append(slice_guarded(content, pos, m.start() + keep))
-        parts.append(f" [... {m.end() - m.start() - keep} characters omitted] ")
-        pos = m.end()
+    for run in runs:
+        parts.append(slice_guarded(content, pos, run.start + keep))
+        parts.append(f" [... {run.end - run.start - keep} characters omitted] ")
+        pos = run.end
     parts.append(slice_guarded(content, pos, len(text)))
-    return compose(*parts), len(hits)
+    return compose(*parts)
 
 
 def fit_messages(messages: list[dict], refusal: Refusal, *, protected: set,
@@ -115,23 +98,26 @@ def fit_messages(messages: list[dict], refusal: Refusal, *, protected: set,
             offenders.extend(i for i in sorted(protected)
                              if len(str(messages[i].get("content", ""))) > 0)
         return changed, offenders
-    if refusal.kind == "run":
-        char_class = _RUN_CLASSES.get(refusal.run_kind or "")
-        if char_class is None:
-            return changed, offenders
-        limit = max(1, refusal.limit)
+    if refusal.kind == "run" and refusal.run_kind:
+        kind, limit = refusal.run_kind, max(1, refusal.limit)
     else:
-        char_class, limit = _BLOCK_CLASS, max(1, refusal.limit // 2)
-    probe = regex.compile(char_class + "{" + str(limit + 1) + ",}")
-    for i, msg in enumerate(messages):
-        if probe.search(str(msg.get("content", ""))) is None:
-            continue
-        if i in protected:
-            offenders.append(i)
-            continue
-        msg["content"], n = elide_runs(msg["content"], char_class, limit)
-        if n:
+        kind, limit = BLOCK, max(1, refusal.limit // 2)
+    # A run at the edge of a message can go on in the text around it. When no
+    # message holds a whole refused run, the ones with half of it at an edge are cut.
+    for allowed, at_edge in ((limit, False), (max(1, limit // 2), True)):
+        for i, msg in enumerate(messages):
+            text = str(msg.get("content", ""))
+            runs = [r for r in refused_runs(kind, allowed, text)
+                    if not at_edge or r.start == 0 or r.end == len(text)]
+            if not runs:
+                continue
+            if i in protected:
+                offenders.append(i)
+                continue
+            msg["content"] = elide_runs(msg["content"], runs, max(1, allowed // 2))
             changed.append(i)
+        if changed or offenders:
+            break
     return changed, offenders
 
 
@@ -142,13 +128,12 @@ def user_message_refusal(refusal: Refusal) -> Optional[str]:
         return (f"Your message is too long for this model: its pre-tokenizer takes "
                 f"at most {refusal.limit} characters in one message. Send the text "
                 "in smaller parts, or attach it as a file the agent can read.")
-    if refusal.kind == "run":
-        return (f"Your message has an unbroken run of {refusal.run_kind} longer than "
-                f"this model's pre-tokenizer takes ({refusal.limit}). Break it up "
-                "with spaces or punctuation, or put the text in a file the agent "
-                "can read.")
+    if refusal.kind == "run" and refusal.run_kind:
+        return (f"Your message has more {refusal.run_kind} in a row than this model's "
+                f"pre-tokenizer takes ({refusal.limit}). {RUN_ADVICE[refusal.run_kind]}, "
+                "or put the text in a file the agent can read.")
     if refusal.kind == "block":
         return ("Your message has a long block of text with no spaces or line "
-                "breaks, which this model's pre-tokenizer cannot take. Break it up, "
+                f"breaks, which this model's pre-tokenizer cannot take. {RUN_ADVICE[BLOCK]}, "
                 "or put the text in a file the agent can read.")
     return None

@@ -56,7 +56,7 @@ NEVER_RAISE = {
     "gguf_architecture": gguf.gguf_architecture,
     "gguf_is_mmproj": gguf.gguf_is_mmproj,
     "gguf_mmproj_inferred_projector_type": gguf.gguf_mmproj_inferred_projector_type,
-    "_gguf_attending_layer_count": lambda p: gguf._gguf_attending_layer_count(p, 8),
+    "_gguf_attending_layers": lambda p: gguf._gguf_attending_layers(p, 8),
     "_has_gguf_magic": gguf._has_gguf_magic,
 }
 
