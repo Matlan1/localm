@@ -159,6 +159,34 @@ def test_passed_checks_remove_the_backup_that_is_this_install_s(setup):
     assert any("is complete" in line for line in said)
 
 
+def test_passed_checks_remove_the_venv_copy_the_old_backup_keeps_beside_the_venv(setup):
+    from localm import updater_components as uc
+    root, home, updates, _ = setup
+    snap = updates / "backup-components"
+    copy = uc._venv_copy_path(root / ".venv", snap, "deps")
+    copy.mkdir()
+    (copy / uc.COPY_MARKER).write_text(str(snap.resolve()), encoding="utf-8")
+    (copy / "pkg.py").write_text("old\n", encoding="utf-8")
+    state = json.loads((snap / "state.json").read_text(encoding="utf-8"))
+    state["components"] = {"venv": {"venv_copy": str(copy)}}
+    (snap / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    assert _start(root, home)[0] is None
+    assert not copy.exists() and not snap.exists() and not (updates / "backup").exists()
+
+
+def test_a_removal_that_stops_leaves_the_backup_folder_whole(setup, monkeypatch):
+    root, home, updates, _ = setup
+    monkeypatch.setattr(oc, "_remove", lambda path: [f"{path}: held"]
+                        if path.name == "backup-runtime" else [])
+    assert _start(root, home)[0] is None
+    assert (updates / "backup" / "localm" / "x.py").is_file()
+    assert oc.read_checked(root)["removed"] is False
+    monkeypatch.undo()
+    assert oc.tidy(root, updates, warn=print) is True
+    assert not os.path.lexists(updates / "backup")
+    assert [p.name for p in updates.iterdir() if p.name.startswith("backup")] == []
+
+
 def test_passed_checks_keep_a_backup_that_is_not_provably_this_install_s(setup):
     root, home, updates, _ = setup
     (updates / "backup-components" / "state.json").unlink()

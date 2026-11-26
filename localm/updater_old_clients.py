@@ -226,51 +226,63 @@ def watchdogs(root) -> Optional[list]:
 
 
 def remove_backup(updates_dir) -> list:
-    """Remove the old backup in *updates_dir* (:data:`BACKUP_PARTS`) and what an earlier
-    removal left. The backup folder is renamed aside first, so no rollback finds part of
-    it. Returns what could not be removed, one line each."""
+    """Remove the old backup in *updates_dir* (:data:`BACKUP_PARTS`), the venv copies its
+    components state names (``updater_components.discard``) and what an earlier removal
+    left. The backup folder goes last, renamed aside first, so a removal that stops
+    leaves a backup that is whole or none. Returns what could not be removed, one line
+    each; nothing of the backup folder is removed while anything else is left."""
+    from localm import updater_components as uc
     updates_dir = Path(updates_dir)
-    stamp = f"{_REMOVING}{os.getpid()}-{time.time_ns()}"
-    left = []
-    gone = []
+    left: list = []
+    snap = updates_dir / "backup-components"
+    if snap.exists():
+        state = uc._read_json(snap / uc.STATE_FILE) or {}
+        copies = [uc._own_copy(info, snap) for info in (state.get("components") or {}).values()]
+        uc.discard(snap)
+        left.extend(str(c) for c in [*copies, snap] if c is not None and os.path.lexists(c))
+    for name in ("backup-runtime", "applied_names.json"):
+        left.extend(_remove(updates_dir / name))
+    if left:
+        return left
     backup = updates_dir / "backup"
     if backup.exists():
-        aside = updates_dir / f"backup{stamp}"
         try:
-            os.rename(backup, aside)
+            os.rename(backup, updates_dir / f"backup{_REMOVING}{os.getpid()}-{time.time_ns()}")
         except OSError as e:
             return [f"{backup}: {e}"]
-        gone.append(aside)
-    for name in BACKUP_PARTS[1:]:
-        if os.path.lexists(updates_dir / name):
-            gone.append(updates_dir / name)
     try:
-        gone.extend(p for p in updates_dir.iterdir()
-                    if p.name.startswith(f"backup{_REMOVING}") and p not in gone)
+        asides = [p for p in updates_dir.iterdir() if p.name.startswith(f"backup{_REMOVING}")]
     except OSError as e:
-        left.append(f"{updates_dir}: {e}")
-    for path in gone:
-        errors = []
-        if path.is_dir() and not path.is_symlink():
-            shutil.rmtree(path, onexc=lambda _f, p, e, out=errors: out.append(f"{p}: {e}"))
-        else:
-            try:
-                os.unlink(path)
-            except FileNotFoundError:
-                pass
-            except OSError as e:
-                errors.append(f"{path}: {e}")
-        left.extend(errors[:3])
+        return [f"{updates_dir}: {e}"]
+    for path in asides:
+        left.extend(_remove(path))
     return left
 
 
+def _remove(path: Path) -> list:
+    """Remove the file or folder *path*; what could not be removed, at most three lines."""
+    errors: list = []
+    if not os.path.lexists(path):
+        return errors
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path, onexc=lambda _f, p, e: errors.append(f"{p}: {e}"))
+    else:
+        try:
+            os.unlink(path)
+        except OSError as e:
+            errors.append(f"{path}: {e}")
+    return errors[:3]
+
+
 def _record(root, version: str, identity: dict, *, passed: bool, removed: bool,
-            reasons: list) -> None:
-    """Write :data:`CHECKED` of the install at *root*. Raises OSError."""
+            reasons: list, mine: bool = False) -> None:
+    """Write :data:`CHECKED` of the install at *root*; *mine* says that the backup was
+    provably the install's (:func:`provable`) when the checks ran. Raises OSError."""
     folder = _folder(root)
     folder.mkdir(exist_ok=True)
     tmp = folder / f"{CHECKED}.tmp"
     data = {"version": version, "backup": identity, "passed": passed, "removed": removed,
+            "mine": mine,
             "reasons": [list(r) for r in reasons], "at": time.time()}
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f)
@@ -294,8 +306,10 @@ def _result(home, *, state: str, old: str, new: str, note: str, notes: list) -> 
 
 
 def tidy(root, updates_dir, *, warn: Say, wait_s: float = 0.0) -> Optional[bool]:
-    """Remove the old backup in *updates_dir* when the checks passed with it, it is
-    provably the install's at *root* and no update watchdog of the install runs; with
+    """Remove the old backup in *updates_dir* when the checks passed with it, it was
+    provably the install's at *root* when they ran (:data:`CHECKED` says so; an earlier
+    removal that stopped may have removed that proof) or is now, and no update watchdog
+    of the install runs; with
     *wait_s*, wait that long for such a watchdog to end. True when it was removed (and
     :data:`CHECKED` says so), False when it stays for a later start, None when there is
     nothing to remove."""
@@ -303,7 +317,7 @@ def tidy(root, updates_dir, *, warn: Say, wait_s: float = 0.0) -> Optional[bool]
     checked = read_checked(root)
     if identity is None or checked.get("passed") is not True or checked.get("backup") != identity:
         return None
-    if not provable(root, updates_dir):
+    if checked.get("mine") is not True and not provable(root, updates_dir):
         return None
     deadline = time.monotonic() + wait_s
     while True:
@@ -321,7 +335,7 @@ def tidy(root, updates_dir, *, warn: Say, wait_s: float = 0.0) -> Optional[bool]
         return False
     try:
         _record(root, str(checked.get("version")), identity, passed=True, removed=True,
-                reasons=[])
+                reasons=[], mine=True)
     except OSError as e:
         warn(f"Could not record that the backup was removed: {e}")
     return True
@@ -390,7 +404,8 @@ def at_start(*, root, home, version: str, say: Say, warn: Say, server: bool) -> 
                             answers=not (server and watchdogs(root)))
         mine = provable(root, updates_dir)
         try:
-            _record(root, version, identity, passed=not failed, removed=False, reasons=failed)
+            _record(root, version, identity, passed=not failed, removed=False, reasons=failed,
+                    mine=mine)
         except OSError as e:
             warn(f"Could not record the checks of the update to localm {version}: {e}")
         if not failed:

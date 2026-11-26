@@ -279,7 +279,11 @@ container, copied here with the folder, or, on a Linux system without a machine 
 left from before a restart, stays). A process that waits while an update of localm is
 not finished has an empty file in `.localm-update/` named after its process id and start
 time until it goes on; one that was ended while it waited leaves that file until the
-update is put back.
+update is put back. After an older localm (0.3.2 to 0.3.4b4) installed this version with
+its own updater, the first start writes `.localm-update/checked.json` in every session
+mode: the version, the size, times and file id of the `VERSION` file in that updater's
+backup, whether the checks of the update passed, and the paths of release files that
+differ; never their content.
 
 ---
 
