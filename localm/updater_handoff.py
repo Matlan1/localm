@@ -237,9 +237,10 @@ def hand_off(prepared: Prepared, *, mode: str, confirmed: list, watch: Optional[
         flags = _hidden() if mode == "server" else (
             {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
             else {"start_new_session": True})
-        proc = subprocess.Popen(
+        proc = procs.start(
             [base_python(), "-I", "-S", str(program), "apply", str(prepared.root), prepared.id],
-            cwd=str(prepared.root), env=_env(config.HOME_DIR), stdin=subprocess.PIPE,
+            purpose="update", cwd=str(prepared.root), env=_env(config.HOME_DIR),
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL if mode == "server" else None,
             text=True, encoding="utf-8", errors="replace", **flags)
         assert proc.stdin is not None and proc.stdout is not None

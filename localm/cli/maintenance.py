@@ -790,6 +790,14 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool, list_only: bool,
         return
 
     if do_rollback:
+        back = updater.rollback_info()
+        if back.get("reinstall"):
+            if not updater.available():
+                console.print("[yellow]The updater is not configured.[/yellow] Set the update "
+                              f"endpoint in config to install {escape(back['version'])} again.")
+                sys.exit(1)
+            _update_to(updater, back["version"], yes=yes, allow_unverified=False)
+            return
         try:
             updater.rollback_last(say=_say_step)
         except LocalmError as e:

@@ -2159,10 +2159,15 @@ def _backup_is_restorable(backup_dir: Path) -> bool:
 def rollback_info() -> dict:
     """What :func:`rollback_last` would restore, WITHOUT restoring anything.
 
-    Returns ``{available, backup, version, current}``. ``available`` is False too when
-    the backup's own list (``_apply_update.backup_problem``) shows it incomplete.
+    Returns ``{available, backup, version, current, reinstall}``. ``available`` is False
+    too when the backup's own list (``_apply_update.backup_problem``) shows it incomplete.
     ``version`` is the backed-up build's VERSION, or None when the backup predates that
     file or it is unreadable (reported as unknown, never guessed from the running version).
+
+    An update carried out by the program its build ships keeps no backup once it is done.
+    Without a backup, when the last such update installed the running version, the way
+    back is to install the version it replaced as a chosen release: ``reinstall`` is True
+    and ``version`` is that version.
 
     STRICTLY READ-ONLY: it restores nothing (:func:`rollback_last` MOVES THE
     INSTALL) and does not create ``updates/`` (see :func:`_updates_dir`), so a GUI
@@ -2177,10 +2182,18 @@ def rollback_info() -> dict:
             version = (backup_dir / "VERSION").read_text(encoding="utf-8").strip() or None
         except (OSError, ValueError):
             version = None
+    current = _version.read_version()
+    reinstall = False
+    if not available:
+        last = last_result()
+        if (last and last.get("state") == "new" and last.get("from")
+                and _direction(str(last.get("to")), current) == "same"
+                and _direction(str(last["from"]), current) != "same"):
+            available, reinstall, version = True, True, str(last["from"])
     return {"available": available,
-            "backup": str(backup_dir) if available else None,
+            "backup": str(backup_dir) if available and not reinstall else None,
             "version": version,
-            "current": _version.read_version()}
+            "current": current, "reinstall": reinstall}
 
 
 def _restore_all(target: Path, backup_dir: Path, names, *, say=None, components=None,

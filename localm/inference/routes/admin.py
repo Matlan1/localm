@@ -658,7 +658,9 @@ def register(app: FastAPI, ctx) -> None:
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def update_rollback_ep(request: Request):
         """Restore the previous build from the last update backup, then restart in
-        place so the restored code loads. Needs an owner (admin) key (403
+        place so the restored code loads. Without a backup, after an update the program of
+        its build carried out, the version it replaced is installed again as a chosen
+        release (``updater.rollback_info``'s ``reinstall``). Needs an owner (admin) key (403
         otherwise). Restores every part the update replaced, the same as the CLI:
         the files, the virtual environment as it was before the update's
         dependency step, the native runtime and the components. The reply,
@@ -675,7 +677,15 @@ def register(app: FastAPI, ctx) -> None:
                 "version, which can put back a fixed defect.")
         # Read the target version before restoring, so the reply can name what it put
         # back. rollback_info() is read-only and never calls rollback_last.
-        target_version = (await asyncio.to_thread(updater.rollback_info)).get("version")
+        back = await asyncio.to_thread(updater.rollback_info)
+        if back.get("reinstall"):
+            res = await _apply_selected(request, {"version": back["version"]})
+            if not res.get("applied"):
+                raise HTTPException(409 if res.get("needs_confirmation") else 500,
+                                    res.get("error") or res.get("reason")
+                                    or f"{back['version']} could not be installed")
+            return res
+        target_version = back.get("version")
         try:
             res = await asyncio.to_thread(_probes_held, updater.rollback_last)
         except LocalmError as e:

@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -218,3 +219,45 @@ def test_the_hand_off_must_be_complete():
     import io
     with pytest.raises(ValueError):
         applier.read_handoff(io.StringIO(json.dumps({"mode": "command"}) + "\n"))
+
+
+# ------------------------------------------------- the result, and going back
+
+@pytest.fixture
+def updates_dir(tmp_path, monkeypatch):
+    from localm import updater
+    folder = tmp_path / "updates"
+    folder.mkdir()
+    monkeypatch.setattr(updater, "_updates_dir", lambda create=True: folder)
+    monkeypatch.setattr(updater._version, "read_version", lambda: "1")
+    return folder
+
+
+def _ended(folder: Path, state: str, **more) -> None:
+    (folder / applier.RESULT).write_text(json.dumps({
+        "state": state, "from": "1", "to": "2", "version": "1" if state == "old" else "2",
+        "note": f"ended {state}", "notes": ["a note"], "lines": [], "at": time.time(),
+        **more}), encoding="utf-8")
+
+
+def test_a_rolled_back_update_says_why_in_settings(updates_dir):
+    from localm import updater_parts
+    _ended(updates_dir, "old", note="The update to 2 failed and was undone: it fails.")
+    steps = updater_parts._last_steps("1")
+    assert [s["part"] for s in steps] == ["update"]
+    assert steps[0]["state"] == "old" and "it fails" in steps[0]["note"]
+    assert "a note" in steps[0]["note"]
+    assert updater_parts._last_steps("2") == []
+
+
+@pytest.mark.parametrize("state, running, back", [
+    ("new", "2", "1"), ("old", "1", None), ("new", "3", None)])
+def test_going_back_after_an_update_installs_the_version_it_replaced(
+        updates_dir, monkeypatch, state, running, back):
+    from localm import updater
+    monkeypatch.setattr(updater._version, "read_version", lambda: running)
+    _ended(updates_dir, state)
+    info = updater.rollback_info()
+    assert info["reinstall"] is (back is not None)
+    assert info["available"] is (back is not None)
+    assert info["version"] == back and info["backup"] is None
