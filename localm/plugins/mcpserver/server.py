@@ -343,9 +343,10 @@ class EngineCache:
         registered model's (``get_model_mmproj``); None when it has none."""
         from localm.model_manager import get_model_mmproj
         from localm.model_manager.registry import get_operator_model_mmproj
-        return (get_operator_model_mmproj(self.default_model)
-                if self._operator_supplied(model_name)
-                else get_model_mmproj(model_name))
+        default = self.default_model
+        if default is not None and self._operator_supplied(model_name):
+            return get_operator_model_mmproj(default)
+        return get_model_mmproj(model_name)
 
     def resolve_model(self, requested: Optional[str]) -> str:
         # A client-supplied name must be a registered one; the operator's own
