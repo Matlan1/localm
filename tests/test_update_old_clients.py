@@ -987,6 +987,19 @@ def test_the_starter_waits_for_the_old_watchdog_then_starts_the_previous_version
     assert (root / "VERSION").read_text(encoding="utf-8") == OLD
 
 
+@pytest.mark.skipif(os.name == "nt", reason="a process that ended and was not collected is a POSIX state")
+def test_a_process_that_ended_and_was_not_collected_is_not_alive():
+    child = subprocess.Popen([sys.executable, "-c", "pass"], stdin=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 30
+        while oc._alive(child.pid) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not oc._alive(child.pid)
+        assert child.returncode is None, "the child was collected before it was probed"
+    finally:
+        child.wait(timeout=30)
+
+
 def test_a_start_by_a_starter_does_not_arrange_another_for_the_same_update(monkeypatch,
                                                                           tmp_path):
     """A later update that fails again (another backup) is started again by itself."""

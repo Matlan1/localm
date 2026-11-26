@@ -160,7 +160,7 @@ test("the external plugins list shows a loading line, and Install / remove show 
   assert.ok(rm);
   rm.click();
   await tick();
-  const confirm = [...win.document.querySelectorAll("button")].find((b) => b.textContent === "Remove");
+  const confirm = [...win.document.getElementById("modal").querySelectorAll("button")].find((b) => b.textContent === "Remove");
   assert.ok(confirm, "the confirm dialog opened");
   confirm.click();
   await tick();
