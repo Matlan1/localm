@@ -9,7 +9,7 @@ While an update of this install is not finished, :func:`_gate` waits for it, or 
 old version back when nobody is updating, or ends this process. Run as a program
 (``<python> -I -S <this file>``) this file does only that and its exit status says whether
 localm may start (0)."""
-__version__ = "0.3.4b4"
+__version__ = "0.3.4"
 
 import os
 import sys
