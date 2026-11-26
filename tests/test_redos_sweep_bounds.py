@@ -36,16 +36,17 @@ BUDGET = 0.5
 
 
 def _timed_cpu(fn, *a, **kw):
-    """``(fn(*a, **kw), seconds)``, the seconds being CPU time
-    (time.process_time), not wall-clock.
+    """``(fn(*a, **kw), seconds)``, the seconds being the CPU time of the calling
+    thread (time.thread_time), not wall-clock and not the whole process.
 
     Wall-clock elapsed time includes time this process spent DESCHEDULED while
     an unrelated process on the same box used the CPU, so a sibling process
-    hogging a core inflates it. CPU time only counts cycles actually spent
-    executing this process."""
-    start = time.process_time()
+    hogging a core inflates it. The CPU time of the process counts every thread
+    in it, so a thread another test left running in the same worker inflates it.
+    The calling thread's CPU time counts only the cycles spent executing *fn*."""
+    start = time.thread_time()
     result = fn(*a, **kw)
-    return result, time.process_time() - start
+    return result, time.thread_time() - start
 
 
 # ---------------------------------------------------------------------------
