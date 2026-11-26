@@ -352,6 +352,9 @@ def test_a_start_whose_checks_put_the_old_version_back_exits_1(monkeypatch):
         return "The update to localm 0.3.4 failed and was undone: x."
     monkeypatch.setattr(oc, "at_start", at_start)
     monkeypatch.delenv("LOCALM_UPDATE_ID", raising=False)
+    _core._old_client_checks("gui")   # this checkout is a git clone
+    assert calls == []
+    monkeypatch.setattr(updater, "is_git_clone", lambda root=None: False)
     with pytest.raises(SystemExit) as e:
         _core._old_client_checks("gui")
     assert e.value.code == 1 and calls == [True]

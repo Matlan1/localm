@@ -657,7 +657,8 @@ def _update_steps_at_start(command) -> None:
 def _old_client_checks(command) -> None:
     """The checks of the first start after an older localm installed this version with
     its own updater (``updater_old_clients.at_start``), skipped in a process an update
-    started (``LOCALM_UPDATE_ID``), in localm's hidden commands and in a pip install.
+    started (``LOCALM_UPDATE_ID``), in localm's hidden commands, in a pip install, in
+    the container image and in a git clone (its files are git's).
     When they failed and the old version was put back, or putting it back failed, print
     why and exit with status 1."""
     import os
@@ -667,7 +668,8 @@ def _old_client_checks(command) -> None:
     try:
         from localm import _version, updater, updater_old_clients
         root = updater.repo_root()
-        if updater.is_site_packages_install(root) or updater.in_container_image():
+        if (updater.is_site_packages_install(root) or updater.in_container_image()
+                or updater.is_git_clone(root)):
             return
         from localm.config import home_dir
         note = updater_old_clients.at_start(
