@@ -794,10 +794,18 @@ def finish(root, home, version: str, *, warn: Say, wait_s: float = 0.0) -> Optio
     seconds): when the checks of the old backup's update are open with every check but
     the version passed, and the install still is localm *version*, ask the version
     now; then remove the backup when it may go (:func:`tidy`). A check that fails here
-    is left to the next start, which puts the backup back. Returns :func:`tidy`'s
-    answer, False when the watchdog did not end."""
+    is left to the next start, which puts the backup back. When the install is another
+    version by then (the old watchdog put its version back under this process), says
+    that this process must be started again. Returns :func:`tidy`'s answer, False when
+    the watchdog did not end or the install is another version."""
     updates_dir = Path(home) / "updates"
     if not _no_watchdog(root, wait_s, _since(read_checked(root))):
+        return False
+    installed = _installed_version(root)
+    if installed and installed != version:
+        warn(f"localm {installed} is in place again: the update watchdog of the previous "
+             f"version undid the update to localm {version} while this localm ran. Close "
+             "localm and start it again.")
         return False
     identity = backup_identity(updates_dir)
     checked = read_checked(root)

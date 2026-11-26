@@ -427,6 +427,21 @@ def test_a_server_asks_the_version_once_the_watchdog_ended(setup, monkeypatch):
     assert oc.read_checked(root)["passed"] is True and not (updates / "backup").exists()
 
 
+def test_a_server_the_old_watchdog_undid_is_told_to_start_again(setup, monkeypatch):
+    """The new server answered too late: the old watchdog put its version back under it."""
+    root, home, updates, _ = setup
+    monkeypatch.setattr(oc, "watchdogs", lambda r: [7])
+    monkeypatch.setattr(oc, "_later", lambda *a, **k: None)
+    assert _start(root, home, server=True)[0] is None
+    monkeypatch.setattr(oc, "watchdogs", lambda r: [])
+    (root / "VERSION").write_text(OLD, encoding="utf-8")
+    warned = []
+    monkeypatch.setattr(oc, "run_checks", lambda *a, **k: pytest.fail("checked it again"))
+    assert oc.finish(root, home, NEW, warn=warned.append) is False
+    assert warned and "start it again" in warned[0] and f"localm {OLD} is in place" in warned[0]
+    assert (updates / "backup").is_dir()
+
+
 # ---------------------------------------------------------------- failed
 
 def test_a_changed_file_puts_this_install_s_backup_back_with_the_reason(setup):
