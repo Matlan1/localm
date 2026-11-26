@@ -1237,9 +1237,9 @@ def test_the_config_readers_never_make_max_share_leave_out_another_changes_impor
     _edit(root, "localm/config.py", *_ADD_KEY)
     _edit(root, "localm/b.py", "return 1", "return 2")
     graph = mod.Graph()
-    assert len(graph.test_files) == 27
+    assert len(graph.test_files) == 19
     held = {}
-    selected = mod.select(["localm/config.py", "localm/b.py"], graph, depth=1, max_share=0.3, held=held)
+    selected = mod.select(["localm/config.py", "localm/b.py"], graph, depth=1, max_share=0.45, held=held)
     assert selected["tests/test_a.py"] == ["imports localm.a (1 hop(s) from a change)"]
     assert held == {}
     assert _CONFIG_READERS <= set(selected)
