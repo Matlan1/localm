@@ -657,12 +657,14 @@ def _update_steps_at_start(command) -> None:
 def _old_client_checks(command) -> None:
     """The checks of the first start after an older localm installed this version with
     its own updater (``updater_old_clients.at_start``), skipped in a process an update
-    started (``LOCALM_UPDATE_ID``), in localm's hidden commands, in a pip install, in
-    the container image and in a git clone (its files are git's).
-    When they failed and the old version was put back, or putting it back failed, print
-    why and exit with status 1."""
+    started (``LOCALM_UPDATE_ID``), in localm's hidden commands, in ``localm mcp``
+    (its stdout is the protocol; a later start runs them), in a pip install, in the
+    container image and in a git clone (its files are git's). What they say goes to
+    stderr. When they failed and this version must not go on, print why and exit with
+    status 1."""
     import os
-    if "LOCALM_UPDATE_ID" in os.environ or str(command or "").startswith("_"):
+    if ("LOCALM_UPDATE_ID" in os.environ or str(command or "").startswith("_")
+            or command == "mcp"):
         return
     from rich.markup import escape
     try:
@@ -674,15 +676,15 @@ def _old_client_checks(command) -> None:
         from localm.config import home_dir
         note = updater_old_clients.at_start(
             root=root, home=home_dir(), version=_version.read_version(),
-            say=lambda m: console.print(f"[dim]{escape(m)}[/dim]"),
-            warn=lambda m: console.print(f"[yellow]{escape(m)}[/yellow]"),
+            say=lambda m: err_console.print(f"[dim]{escape(m)}[/dim]"),
+            warn=lambda m: err_console.print(f"[yellow]{escape(m)}[/yellow]"),
             server=command in _SERVER_COMMANDS)
     except Exception as e:
-        console.print(f"[yellow]The checks of the last update could not run ({escape(str(e))}); "
-                      "they run at the next start.[/yellow]")
+        err_console.print(f"[yellow]The checks of the last update could not run "
+                          f"({escape(str(e))}); they run at the next start.[/yellow]")
         return
     if note:
-        console.print(f"[yellow]{escape(note)}[/yellow]")
+        err_console.print(f"[yellow]{escape(note)}[/yellow]")
         raise SystemExit(1)
 
 

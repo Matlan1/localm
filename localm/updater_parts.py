@@ -15,6 +15,7 @@ or, in a server, during its restart.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Callable, Optional
@@ -239,7 +240,7 @@ def installed_parts(root=None) -> dict:
         problems.append(f"could not compare the components with this version: {e}")
     return {"app": app, "install_record": record, "install_record_matches": record_matches,
             "install_record_problem": record_problem,
-            "deps_problems": deps_problems, "last_steps": _last_steps(app),
+            "deps_problems": deps_problems, "last_steps": _last_steps(app, root),
             "runtime": runtime, "components": components, "problems": problems,
             "consistent": not problems}
 
@@ -248,12 +249,20 @@ def installed_parts(root=None) -> dict:
 LAST_STEPS_S = 24 * 3600.0
 
 
-def _last_steps(version: Optional[str]) -> list:
+def _same_root(a, b) -> bool:
+    try:
+        return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _last_steps(version: Optional[str], root=None) -> list:
     """The results of the update carried out by the program a build ships
     (``updater.last_result``), the runtime and component updates of the last
     :data:`LAST_STEPS_S` seconds: ``[{"part", "state", "note", "at"}]``. A result
-    recorded under another localm version than *version* is left out; one that
-    names no version (written by an older build) is kept. A note both parts
+    recorded under another localm version than *version*, or naming another install
+    than *root* (a data folder two installs share), is left out; one that names no
+    version or no install (written by an older build) is kept. A note both parts
     recorded (a rollback) is listed once."""
     import time
     out = []
@@ -269,6 +278,8 @@ def _last_steps(version: Optional[str]) -> list:
             if not st or not st.get("note"):
                 continue
             if st.get("version") and _norm_version(st["version"]) != _norm_version(version):
+                continue
+            if root is not None and st.get("root") and not _same_root(st["root"], root):
                 continue
             try:
                 at = float(st.get("at") or 0)

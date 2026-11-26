@@ -110,16 +110,16 @@ def _held_version(updates_dir: Path):
         return None
 
 
-def _passed_backup(install_root: Path, updates_dir: Path):
-    """The version of this install whose checks passed with the update backup in
-    *updates_dir* (``localm/updater_old_clients.py``, loaded by file path), None when
-    they did not, did not run for it, or the helper cannot be loaded (then the backup
-    is restored as before)."""
+def _refusal(install_root: Path, updates_dir: Path):
+    """Why the update backup in *updates_dir* is not put back
+    (``refusal`` of ``localm/updater_old_clients.py``, loaded by file path), None when
+    it may be, or the helper cannot be loaded (then the backup is restored as
+    before)."""
     helper = _load_helper(install_root, "updater_old_clients")
-    if helper is None or not hasattr(helper, "passed_backup"):
+    if helper is None or not hasattr(helper, "refusal"):
         return None
     try:
-        return helper.passed_backup(install_root, updates_dir)
+        return helper.refusal(install_root, updates_dir)
     except Exception as e:
         print(f"  Could not read whether the update was checked ({e}); restoring it.",
               file=sys.stderr)
@@ -302,10 +302,9 @@ def main(argv=None, *, install_root: Path = INSTALL_ROOT, code_root=None,
               "and re-run.", file=sys.stderr)
         return 1
 
-    checked = _passed_backup(install_root, updates_dir)
-    if checked:
-        print(f"Not rolled back: the backup in {backup_dir} is of an update to localm "
-              f"{checked} that is complete (its checks passed), so it is not put back.\n"
+    refused = _refusal(install_root, updates_dir)
+    if refused:
+        print(f"Not rolled back: the backup in {backup_dir} is not put back: {refused}.\n"
               f"To go back to localm {_held_version(updates_dir) or 'the previous version'}, "
               "install it with localm update --to <version>.", file=sys.stderr)
         return 1

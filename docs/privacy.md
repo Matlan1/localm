@@ -280,10 +280,20 @@ left from before a restart, stays). A process that waits while an update of loca
 not finished has an empty file in `.localm-update/` named after its process id and start
 time until it goes on; one that was ended while it waited leaves that file until the
 update is put back. After an older localm (0.3.2 to 0.3.4b4) installed this version with
-its own updater, the first start writes `.localm-update/checked.json` in every session
-mode: the version, the size, times and file id of the `VERSION` file in that updater's
-backup, whether the checks of the update passed, and the paths of release files that
-differ; never their content.
+its own updater, the starts that check that update write, in every session mode:
+`.localm-update/checked.json` in the install folder (this version; the version text,
+size, times and file id of the `VERSION` file in that updater's backup; whether the
+checks passed, whether that backup was this install's, removed or is being put back;
+when the checks first ran; and the reason each failed check gives: the paths of release
+files that are missing or differ, the package requirements the venv lacks, the last
+lines this version printed when it did not start, and error messages, which can name
+folders on this computer; never a file's content); `.localm-update/checking.lock` while
+a start runs them (its process id and start time, a random token and a hashed id of this
+computer, as every localm lock file holds); and in the data folder
+`updates/update-result.json` (the two versions, the outcome, that reason and the install
+folder). After the previous version was put back, that reason is also written into
+`updates/runtime-update.json` and `updates/components-update.json`, where the previous
+version shows it.
 
 ---
 
