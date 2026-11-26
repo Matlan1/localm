@@ -188,6 +188,18 @@ def test_without_a_record_the_gate_does_nothing(inst):
     assert ran(done, "1") and done.err == "" and not done.said["subprocess"]
 
 
+def test_a_process_record_that_cannot_be_imported_stops_the_start(inst):
+    """Only a ``localm/procs.py`` that is not there, or one without ``enter`` and
+    ``current`` (an older release's, put in place by an update), lets the gate go on
+    without the process record; any other failure to import it stops the start, loudly."""
+    procs = inst.root / "localm" / "procs.py"
+    procs.write_text("import localm_no_such_module_for_the_gate\n" + procs.read_text(encoding="utf-8"),
+                     encoding="utf-8")
+    done = inst.localm()
+    assert done.code != 0 and not done.said, done.out
+    assert "ModuleNotFoundError" in done.err and "localm_no_such_module_for_the_gate" in done.err
+
+
 @pytest.mark.parametrize("phase", [job.ENDING, job.MOVING, job.STEPS, job.STARTING])
 def test_an_interrupted_update_is_undone_before_localm_runs(inst, phase):
     inst.go(phase)

@@ -243,13 +243,20 @@ def _put_back(root: str, folder: str, update: str, window: bool) -> int:
 if __name__ == "__main__":
     _gate()
 else:
+    # An update into a release without this gate takes its localm/procs.py out, or puts that
+    # release's own in place, just before it replaces this file: without localm.procs, or
+    # with one that has no enter and current, the gate decides without the process record.
+    # Any other failure of the import is raised.
     try:
-        from localm import procs as _procs
+        import localm.procs as _procs
+    except ModuleNotFoundError as _e:
+        if _e.name != "localm.procs":
+            raise
+        _procs = None
+    _me = None
+    if _procs is not None and callable(getattr(_procs, "enter", None)) \
+            and callable(getattr(_procs, "current", None)):
         _me = _procs.enter, _procs.current, _procs.__file__
-    except (ImportError, AttributeError):
-        # An update into a release without this gate puts its localm/procs.py in place
-        # (or takes it out) just before this file: the gate decides without the record.
-        _me = None
     if _me is not None:
         _me[0]()
     _round = globals().get("_round", 0) + 1
