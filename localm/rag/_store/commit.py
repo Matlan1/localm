@@ -16,14 +16,14 @@ from __future__ import annotations
 
 import json
 import re
-import time
 import uuid
 from pathlib import Path
 from typing import Callable, Iterable, Optional, TypeVar
 
 from localm.debuglog import logger as _log
 from localm.rag import store as _st
-from localm.storekit import replace_atomic
+from localm.storekit import (_REPLACE_RETRIES, _is_transient_permission_error,
+                             _transient_backoff, replace_atomic)
 
 from .cache import _files_changing
 
@@ -45,13 +45,17 @@ _LEFTOVER_RE = re.compile(
 
 
 def _retrying(step: Callable[[], T]) -> T:
-    """``step()``, retried for a moment while another process's handle on the
-    file refuses it (Windows ``PermissionError``)."""
-    for _ in range(10):
+    """``step()``, retried with ``storekit.replace_atomic``'s bounded backoff
+    while a transient Windows ``PermissionError`` refuses it: another process
+    replacing the file or holding it open. The last refusal, and any refusal
+    on POSIX, is raised."""
+    for attempt in range(_REPLACE_RETRIES - 1):
         try:
             return step()
-        except PermissionError:
-            time.sleep(0.02)
+        except PermissionError as e:
+            if not _is_transient_permission_error(e):
+                raise
+            _transient_backoff(attempt)
     return step()
 
 
@@ -85,17 +89,18 @@ def pending_save(coll_dir: Path) -> Optional[tuple[str, tuple[str, ...]]]:
 
 def read_current(coll_dir: Path, name: str, read: Callable[[Path], T]) -> T:
     """``read(path)`` of *name*'s current file in *coll_dir*: the pending save's
-    staged file while there is one, else the file itself. Raises what *read*
-    raises, ``FileNotFoundError`` when there is no such file."""
+    staged file while there is one, else the file itself. A read that another
+    process's replace or open handle refuses is retried (``_retrying``). Raises
+    what *read* raises, ``FileNotFoundError`` when there is no such file."""
     pending = pending_save(coll_dir)
     if pending is not None:
         save_id, files = pending
         try:
-            return read(_staged_path(coll_dir, name, save_id))
+            return _retrying(lambda: read(_staged_path(coll_dir, name, save_id)))
         except FileNotFoundError:
             if name not in files:
                 raise
-    return read(coll_dir / name)
+    return _retrying(lambda: read(coll_dir / name))
 
 
 class StagedSave:
