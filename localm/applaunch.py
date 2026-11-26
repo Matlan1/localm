@@ -126,19 +126,23 @@ def _problem(notes: list, problems: list, text: str) -> None:
     problems.append(text)
 
 
-def _copy_runtime_dlls(src_dir: Path, dst_dir: Path) -> list[str]:
+def _copy_runtime_dlls(src_dir: Path, dst_dir: Path) -> tuple[list[str], list[str]]:
     """Copy the loader-critical DLLs (python3*.dll, vcruntime*.dll) next to the
     launcher so a base-interpreter copy can start outside its original directory.
-    Best-effort per file; returns the names copied."""
+    A DLL a running LocaLM.exe has loaded is renamed aside and replaced, as the
+    exe is (:func:`_copy_replacing_possibly_running_exe`). Returns
+    ``(copied, failed)``: the names copied, and ``"<name> (<error>)"`` for each
+    DLL that could not be replaced."""
     copied: list[str] = []
+    failed: list[str] = []
     for pattern in ("python3*.dll", "vcruntime*.dll"):
         for dll in src_dir.glob(pattern):
             try:
-                shutil.copy2(dll, dst_dir / dll.name)
+                _copy_replacing_possibly_running_exe(dll, dst_dir / dll.name)
                 copied.append(dll.name)
-            except OSError:
-                pass
-    return copied
+            except OSError as e:
+                failed.append(f"{dll.name} ({e})")
+    return copied, failed
 
 
 def _owns_console() -> bool:
@@ -171,6 +175,37 @@ def _self_check(exe: Path) -> bool:
         return False
 
 
+_VERSION_CODE = "import sys; print(sys.version)"
+
+
+def _python_version_of(exe: Path) -> Optional[str]:
+    """The ``sys.version`` that *exe* reports, or None when it cannot be run or
+    prints nothing."""
+    try:
+        r = subprocess.run([str(exe), "-I", "-c", _VERSION_CODE], capture_output=True,
+                           text=True, timeout=60,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = (r.stdout or "").strip()
+    return out if r.returncode == 0 and out else None
+
+
+def _stale_python_problem(exe: Path, base: Path) -> Optional[str]:
+    """A problem text when the launcher *exe* does not run the same Python as
+    *base*, or when the two versions cannot be read; else None."""
+    built, wanted = _python_version_of(exe), _python_version_of(base)
+    if built is None or wanted is None:
+        which = exe if built is None else base
+        return (f"could not read the Python version of {which}, so it is not known "
+                f"whether {exe.name} runs the same Python as {base}")
+    if built != wanted:
+        return (f"{exe.name} still runs Python {built.split()[0]}, but this venv's "
+                f"interpreter is {wanted.split()[0]}. Close every LocaLM window and "
+                "run `localm make-launcher --force` again.")
+    return None
+
+
 # --------------------------------------------------------------------------- #
 #  Windows: LocaLM.exe (a branded copy of the base interpreter)               #
 # --------------------------------------------------------------------------- #
@@ -190,14 +225,14 @@ def windows_launcher_path() -> Path:
 
 def _copy_replacing_possibly_running_exe(src: Path, dst: Path) -> bool:
     """Copy *src* onto *dst*, handling *dst* being the image THIS process is
-    currently executing from (``make-launcher --force`` invoked from the
-    branded LocaLM.exe launcher itself, to refresh it after a Python upgrade -
-    ``_base_interpreter`` then resolves *src* to the real base interpreter, a
-    different file than *dst*).
+    currently executing from, or a DLL it has loaded (``make-launcher --force``
+    invoked from the branded LocaLM.exe launcher itself, to refresh it after a
+    Python upgrade - ``_base_interpreter`` then resolves *src* to the real base
+    interpreter, a different file than *dst*).
 
-    Windows blocks a direct content-overwrite of a running exe's file
-    (``OSError`` / WinError 32, sharing violation) but DOES allow renaming that
-    same running exe's file out of the way first (the loader holds it open with
+    Windows blocks a direct content-overwrite of a running exe's or a loaded
+    DLL's file (``OSError`` / WinError 32, sharing violation) but DOES allow
+    renaming that same file out of the way first (the loader holds it open with
     ``FILE_SHARE_DELETE``), after which a fresh copy can be written at the freed
     path. The fast path (plain copy) is tried first, since *dst* is USUALLY not
     running. Returns True if the rename fallback was needed.
@@ -221,10 +256,21 @@ def _copy_replacing_possibly_running_exe(src: Path, dst: Path) -> bool:
             if old.exists():
                 old.unlink()
             dst.rename(old)
-            shutil.copy2(src, dst)
         except OSError as e:
             # Surface the original failure as the primary error; the fallback's
             # own error rides along as __context__.
+            raise copy_err from e
+        try:
+            shutil.copy2(src, dst)
+        except OSError as e:
+            # The renamed-aside copy goes back, so dst is the old file again
+            # rather than missing or half written.
+            try:
+                dst.unlink(missing_ok=True)
+                old.rename(dst)
+            except OSError as restore_err:
+                raise OSError(f"{e}; the old copy could not be put back and stays "
+                              f"at {old} ({restore_err})") from copy_err
             raise copy_err from e
         try:
             old.unlink()
@@ -255,12 +301,20 @@ def make_windows_launcher(*, force: bool = False) -> LauncherResult:
         # this process's own executing image, so the copy needs the running-exe
         # fallback, not a plain shutil.copy2.
         replaced_running = _copy_replacing_possibly_running_exe(base, dst)
-        dlls = _copy_runtime_dlls(base.parent, dst.parent)
+        dlls, dll_failures = _copy_runtime_dlls(base.parent, dst.parent)
         notes.append(f"built {dst.name} from {base.name} + {len(dlls)} runtime DLL(s)"
                      + (" (it was running; renamed the old copy aside to replace it)"
                         if replaced_running else ""))
+        if dll_failures:
+            _problem(notes, problems,
+                     f"could not replace {', '.join(dll_failures)}, so {dst.name} can "
+                     "keep running the old Python. Close every LocaLM window and run "
+                     "`localm make-launcher --force` again.")
     except OSError as e:
         text = f"could not build {dst.name}: {e}"
+        if isinstance(e, PermissionError):
+            text += (". A running LocaLM can hold it: close every LocaLM window and "
+                     "run `localm make-launcher --force` again.")
         return LauncherResult(ok=False, path=dst, notes=[text], problems=[text])
 
     stamped = False
@@ -291,7 +345,12 @@ def make_windows_launcher(*, force: bool = False) -> LauncherResult:
                               problems=problems)
 
     _ensure_bare_start(notes, problems)
-    return LauncherResult(ok=True, path=dst, icon_stamped=stamped, notes=notes,
+    refreshed = not dll_failures
+    stale = _stale_python_problem(dst, base)
+    if stale is not None:
+        refreshed = False
+        _problem(notes, problems, stale)
+    return LauncherResult(ok=refreshed, path=dst, icon_stamped=stamped, notes=notes,
                           problems=problems)
 
 

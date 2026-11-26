@@ -83,6 +83,19 @@ def plan_mode_refusal(name: str, tool_def: Any) -> Optional[str]:
         "can run.")
 
 
+# After this many plan-mode refusals of one tool in one run, the run stops (a
+# model that keeps asking for a refused tool and never proposes a plan).
+PLAN_REFUSAL_LIMIT = 4
+
+
+def plan_refusal_stop_message(tool: str, count: int) -> str:
+    """The message that ends a run after *count* plan-mode refusals of *tool*."""
+    return (f"[stopped: plan mode refused {tool} {count} times in this run, so it never "
+            "ran, and the model has not proposed a plan with exit_plan_mode. Stopping "
+            "so you can take a look instead of burning more turns. The conversation "
+            "is intact; ask for the plan, or leave plan mode, and continue.]")
+
+
 class _PlanModeMixin:
     """Plan-mode state on the Agent."""
 
@@ -100,6 +113,10 @@ class _PlanModeMixin:
     # (auto_approve, verify_cmd) as they were before an approved plan switched
     # on auto-run, or None when auto-run is not active.
     _plan_autorun_saved: Optional[tuple] = None
+    # Tool name -> plan-mode refusals in the current run (set in Agent.__init__),
+    # and the tool whose refusals reached PLAN_REFUSAL_LIMIT, else None.
+    _plan_refusals: dict[str, int]
+    _abort_plan_refused: Optional[str] = None
 
     @property
     def plan_mode(self) -> bool:
@@ -110,9 +127,35 @@ class _PlanModeMixin:
         return bool(parent is not None and getattr(parent, "plan_mode", False))
 
     def set_plan_mode(self, on: bool) -> None:
-        """Switch this agent's own plan mode on or off."""
+        """Switch this agent's own plan mode on or off. Either way the count of
+        plan-mode refusals starts again."""
         self._plan_mode = bool(on)
+        self._plan_refusals = {}
+        self._abort_plan_refused = None
         self._emit("info", text="plan mode on" if on else "plan mode off")
+
+    def _track_plan_refusal(self, call: Any, refusal: str) -> Any:
+        """The error result for *call*, refused by plan mode with *refusal*.
+
+        A refused call never ran, so it is not a tool failure: the failure
+        streaks and their hints are left alone. From the second refusal of the
+        same tool the result tells the model the tool stays refused until a plan
+        is approved; at :data:`PLAN_REFUSAL_LIMIT` it arms the plan-refusal stop
+        that ``_check_post_batch_breakers`` reports after the batch."""
+        from localm.textguard import compose
+
+        from ..tools import ToolResult
+        count = self._plan_refusals.get(call.name, 0) + 1
+        self._plan_refusals[call.name] = count
+        text = refusal
+        if count >= 2:
+            text = compose(refusal, (
+                f"\n\n[Plan mode has refused '{call.name}' {count} times; it cannot "
+                "run until the user approves a plan. Call exit_plan_mode with your "
+                "plan instead of calling it again.]"))
+        if count >= PLAN_REFUSAL_LIMIT:
+            self._abort_plan_refused = call.name
+        return ToolResult.error(text)
 
     def _add_user_with_plan_note(self, content) -> None:
         """Add user message *content*, with the plan-mode reminder appended

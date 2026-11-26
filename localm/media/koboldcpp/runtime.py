@@ -428,7 +428,7 @@ def install(build: str, *, force: bool = False,
         logger.info("koboldcpp runtime: installing the %s build was cancelled", build)
         raise
     except ProvisionError as e:
-        logger.warning("koboldcpp runtime: installing the %s build failed: %s", build, e)
+        logger.info("koboldcpp runtime: installing the %s build failed: %s", build, e)
         raise
 
 

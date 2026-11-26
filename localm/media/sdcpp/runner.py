@@ -124,6 +124,33 @@ class SdRunner:
         return describe_exit_code(None if self._proc is None else self._proc.exitcode)
 
     def _crash_detail(self) -> str:
+        return self._native_trace_detail() + self._native_output_detail()
+
+    def _native_output_detail(self) -> str:
+        """The native output the worker captured while it loaded the library
+        (``_child._off_the_console``), when the worker died before it could
+        report it; "" when there is none. The file is removed."""
+        from ._child import native_output_path
+        native = native_output_path(self._crash_trace_path)
+        if native is None:
+            return ""
+        p = Path(native)
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return ""
+        finally:
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if not text:
+            return ""
+        from localm.debuglog import logger
+        logger.error("sd.cpp worker native output before it stopped:\n%s", text)
+        return f" Native output: {text.splitlines()[-1].strip()}."
+
+    def _native_trace_detail(self) -> str:
         path = self._crash_trace_path
         if path is None:
             return " No native stack trace was captured."
