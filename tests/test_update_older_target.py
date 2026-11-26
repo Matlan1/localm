@@ -119,6 +119,7 @@ def test_a_plan_whose_files_that_are_never_absent_do_not_come_first_is_refused(u
     swaps = [op for op in plan.ops if op.swap]
     assert swaps and len(swaps) < len(plan.ops)
     plan.ops = [*(op for op in plan.ops if not op.swap), *swaps]
+    (update.root / ".localm-update" / ID / "plans").mkdir()   # as job.start makes it
     with pytest.raises(mover.Unreadable, match="never absent comes after"):
         mover.write_plan(update.root, ID, plan)
     assert not mover.has_plans(update.root, ID)
@@ -135,8 +136,8 @@ def _gateless(files: dict) -> dict:
 
 
 def test_killed_between_the_moves_of_the_gate_plan_a_start_runs_one_whole_version(tmp_path):
-    """An update into a release without the gate killed at points across both of its
-    plans, most of them between the moves of the gate files: the next start either puts
+    """An update into a release without the gate killed at points across its plans, at
+    every point from the first move of a gate file on: the next start either puts
     the old version back and runs it, or runs the new release over all of its files;
     never the old gate over new files left as they were, nor the new code over a mix."""
     from tests.test_update_gate import NEW, OLD, Install, ran
@@ -160,8 +161,8 @@ def test_killed_between_the_moves_of_the_gate_plan_a_start_runs_one_whole_versio
     gate = int(re.search(r"GATE (\d+)", counted.stdout).group(1))
     new_tree = um.tree(whole.root)
     assert 0 < gate < points - 20, (gate, points)
-    chosen = sorted({*range(0, gate, max(1, gate // 4)),
-                     *range(gate, points, max(1, (points - gate) // 12))})
+    # A few points of the other steps, and every point of the gate plans and the end.
+    chosen = sorted({*range(0, gate, max(1, gate // 4)), *range(gate, points)})
 
     def one(n):
         inst = install(tmp_path / f"k{n}")
