@@ -41,7 +41,8 @@ its version. While an update watchdog of the install judges a server, that watch
 puts the previous version back; one of localm 0.3.4b3 or b4 then starts it itself
 (``--relaunch-argv``), and for one of an earlier version a starter process
 (:func:`_start_after_watchdogs`, this file run with only the standard library) waits
-for it to end and runs the same command again.
+for it to end and runs the same command again. A command that is not a server says
+to run it again then: its console is back at the shell's prompt by that time.
 
 The outcome goes to the console (stderr), to the result of the last update
 (``update_mechanism.applier.RESULT``), which this version's Settings shows, and after
@@ -110,18 +111,27 @@ class Ending(str):
     localm ``old`` puts it back and starts it itself; ``"after_watchdog"`` one puts it
     back and starts nothing, so a starter waits for the watchdogs ``pids`` (None when
     they cannot be told) and starts the same command; None nothing starts. ``new`` is
-    the version that failed."""
+    the version that failed, ``backup`` the identity of the backup its update made
+    (:func:`backup_identity`)."""
 
     then: Optional[str]
     old: str
     new: str
     pids: Optional[list]
+    backup: Optional[dict]
 
     def __new__(cls, note: str, *, then: Optional[str] = None, old: str = "",
-                new: str = "", pids: Optional[list] = None):
+                new: str = "", pids: Optional[list] = None, backup: Optional[dict] = None):
         self = super().__new__(cls, note)
-        self.then, self.old, self.new, self.pids = then, old, new, pids
+        self.then, self.old, self.new, self.pids, self.backup = then, old, new, pids, backup
         return self
+
+    @property
+    def marker(self) -> str:
+        """The value of :data:`RELAUNCHED` on what :func:`go_on` starts for this update:
+        the version that failed and its backup's identity, so a later update that fails
+        again is told apart."""
+        return f"{self.new} {(self.backup or {}).get('mtime_ns', '')}".strip()
 
 
 # ---------------------------------------------------------------- reading
@@ -892,7 +902,8 @@ def _check(root, home, version: str, identity: dict, *, say: Say, warn: Say,
             note = f"The update to localm {version} failed its checks: {why}. {tail}"
             _write_result(home, root, warn, state="failed", old=old, new=version,
                           version=version, note=note)
-            return Ending(note, then=then, old=old, new=version, pids=pids), False
+            return Ending(note, then=then, old=old, new=version, pids=pids,
+                          backup=identity), False
         say(f"The files and packages are those of localm {version}; the update watchdog of "
             f"localm {old} checks that it answers, and the update is complete once it "
             "has ended.")
@@ -1025,7 +1036,7 @@ def _put_back(root, home, identity: dict, *, old: str, new: str, failed: list, t
     unwritten = _tell_old_version(home, root, old=old, note=note)
     if unwritten:
         warn(f"Could not record the reason where localm {old} shows it: {unwritten}")
-    return Ending(note, then="previous", old=old, new=new)
+    return Ending(note, then="previous", old=old, new=new, backup=identity)
 
 
 def _write_result(home, root, warn: Say, **fields) -> None:
@@ -1039,7 +1050,7 @@ def _write_result(home, root, warn: Say, **fields) -> None:
 # Everything below imports only the standard library: it runs after the previous
 # version's files are back, when ``localm`` on disk is that version's code.
 
-#: Set on the process :func:`go_on` starts, to the version that failed its checks.
+#: Set on what :func:`go_on` starts, to the :attr:`Ending.marker` of the failed update.
 RELAUNCHED = "LOCALM_OLD_CLIENT_RELAUNCH"
 #: The argument a starter (:func:`_start_after_watchdogs`) runs with.
 _STARTER = "--start-after-watchdogs"
@@ -1048,6 +1059,9 @@ _VERSION_LIMIT_S = 180.0
 #: Seconds the install must stay the previous version, while the watchdogs cannot be
 #: told, before a starter takes their rollback as finished.
 _SETTLED_S = 10.0
+#: Seconds a starter that could not tell the watchdogs then waits for a server the
+#: watchdog may have started on the command's port.
+_RELAUNCH_GRACE_S = 30.0
 #: Variables of a restart that a new start of the previous version must not carry.
 _RESTART_ENV = ("LOCALM_RESTART_IN_PROGRESS", "LOCALM_FINISH_UPDATE_AFTER_START",
                 "LOCALM_UPDATE_STEPS_DONE", "LOCALM_UPDATE_ID")
@@ -1060,13 +1074,14 @@ def go_on(note, *, root, argv: list, say: Say, warn: Say) -> int:
     the previous version with *argv* (the arguments of this command,
     :func:`start_previous`); ``"after_watchdog"``, start a starter that runs *argv*
     again once the old update watchdogs have ended (:func:`_spawn_starter`), unless
-    this process was itself started that way; otherwise 1."""
+    this process was itself started that way for the same update; otherwise 1. The
+    previous version runs with this process's program (``sys.executable``)."""
     then = getattr(note, "then", None)
     if then == "previous":
-        return start_previous(root, old=note.old, new=note.new, argv=argv, say=say,
-                              warn=warn)
+        return start_previous(root, old=note.old, argv=argv, say=say, warn=warn,
+                              marker=note.marker, program=sys.executable)
     if then == "after_watchdog":
-        if os.environ.get(RELAUNCHED):
+        if os.environ.get(RELAUNCHED) == note.marker:
             warn(f"Start localm again once localm {note.old} is in place.")
             return 1
         why = _spawn_starter(root, note, argv)
@@ -1084,12 +1099,26 @@ def _python(root) -> str:
     return str(own) if own.is_file() else sys.executable
 
 
-def _env(new: str) -> dict:
-    """The environment of a new start after the update to *new* failed: this one without
-    the variables of a restart (:data:`_RESTART_ENV`), with :data:`RELAUNCHED`."""
+def _env(marker: str) -> dict:
+    """The environment of a new start after an update failed: this one without the
+    variables of a restart (:data:`_RESTART_ENV`), with :data:`RELAUNCHED` *marker*."""
     env = {k: v for k, v in os.environ.items() if k not in _RESTART_ENV}
-    env[RELAUNCHED] = new
+    env[RELAUNCHED] = marker
     return env
+
+
+def _std() -> dict:
+    """This process's standard streams for a program it starts, so that program reads
+    and writes where this one does even when it gets no console of its own: each one
+    that has a file descriptor, else none for that stream."""
+    out = {}
+    for name, stream in (("stdin", sys.stdin), ("stdout", sys.stdout), ("stderr", sys.stderr)):
+        try:
+            if stream is not None:
+                out[name] = stream.fileno()
+        except (AttributeError, OSError, ValueError):
+            continue
+    return out
 
 
 def _has_console() -> bool:
@@ -1136,8 +1165,8 @@ def _says_version(python: str, root, version: str, env: dict) -> Optional[str]:
 
 
 def _run(cmd: list, env: dict, cwd: str, warn: Say) -> int:
-    """Run *cmd* in this console and return its exit status, with Ctrl+C left to it;
-    1 when it cannot be started."""
+    """Run *cmd* with this process's standard streams (:func:`_std`) and return its exit
+    status, with Ctrl+C left to it; 1 when it cannot be started."""
     import signal
     import subprocess
     try:
@@ -1145,7 +1174,7 @@ def _run(cmd: list, env: dict, cwd: str, warn: Say) -> int:
     except ValueError:
         before = None
     try:
-        return subprocess.run(cmd, cwd=cwd, env=env, **_flags()).returncode
+        return subprocess.run(cmd, cwd=cwd, env=env, **_std(), **_flags()).returncode
     except OSError as e:
         warn(f"localm could not be started ({e}).")
         return 1
@@ -1159,26 +1188,30 @@ def _repair_note(old: str) -> str:
             "setup again.")
 
 
-def start_previous(root, *, old: str, new: str, argv: list, say: Say, warn: Say) -> int:
-    """Start localm *old*, which the checks put back in place of *new* at *root*, with
-    the arguments *argv* in this console, once its ``VERSION`` names it and it answers
-    ``--version`` (:func:`_says_version`); return its exit status. When it does not,
-    say why and how to repair it and return 1."""
+def start_previous(root, *, old: str, argv: list, say: Say, warn: Say, marker: str,
+                   program: str, port: Optional[int] = None) -> int:
+    """Start localm *old*, put back at *root*, as ``<program> -m localm <argv>`` with this
+    process's standard streams, once its ``VERSION`` names it and it answers
+    ``--version`` (:func:`_says_version`), and return its exit status; :data:`RELAUNCHED`
+    is *marker*. When it does not, say why and how to repair it and return 1. When
+    something answers on *port* by then, start nothing and return 0."""
     installed = _installed_version(root)
     if installed != old:
         warn(f"localm {old} was put back, but the install is localm "
              f"{installed or '(no version that can be read)'} now, so it was not started. "
              + _repair_note(old))
         return 1
-    env = _env(new)
-    python = _python(root)
-    why = _says_version(python, root, old, env)
+    env = _env(marker)
+    why = _says_version(program, root, old, env)
     if why:
         warn(f"localm {old} is in place again, but {why}, so it was not started; its files "
              f"may not be whole. {_repair_note(old)}")
         return 1
+    if port and _answers_on(port):
+        say(f"localm already answers on port {port}, so it was not started again.")
+        return 0
     say(f"Starting localm {old} with the same command: localm {' '.join(argv)}".rstrip())
-    return _run([python, "-m", "localm", *argv], env, os.getcwd(), warn)
+    return _run([program, "-m", "localm", *argv], env, os.getcwd(), warn)
 
 
 def _port_of(argv: list) -> Optional[int]:
@@ -1199,17 +1232,20 @@ def _port_of(argv: list) -> Optional[int]:
 
 def _spawn_starter(root, note: Ending, argv: list) -> Optional[str]:
     """Start a starter (:func:`_start_after_watchdogs`, this file run by the install's
-    python with only the standard library) in this console, which outlives this
-    process; None when it started, else why not."""
+    python with only the standard library) with this process's output streams, which
+    outlives this process; None when it started, else why not. The starter runs the
+    command with this process's program (``sys.executable``)."""
     import subprocess
     payload = {"root": str(Path(root)), "old": note.old, "new": note.new,
+               "marker": note.marker, "program": sys.executable,
                "pids": note.pids, "argv": list(argv), "cwd": os.getcwd(),
                "until": time.time() + WATCHDOG_WAIT_S, "port": _port_of(argv)}
     cmd = [_python(root), "-I", "-S", str(Path(__file__).resolve()), _STARTER,
            json.dumps(payload)]
+    streams = {k: v for k, v in _std().items() if k != "stdin"}
     try:
-        subprocess.Popen(cmd, cwd=os.getcwd(), env=_env(note.new), stdin=subprocess.DEVNULL,
-                         close_fds=True, **_flags())
+        subprocess.Popen(cmd, cwd=os.getcwd(), env=_env(note.marker), stdin=subprocess.DEVNULL,
+                         close_fds=True, **streams, **_flags())
     except OSError as e:
         return str(e)
     return None
@@ -1285,14 +1321,19 @@ def _wait_for_watchdogs(root: Path, old: str, pids: Optional[list], until: float
 
 def _start_after_watchdogs(payload: dict) -> int:
     """The starter :func:`_spawn_starter` runs: wait for the old update watchdogs
-    (:func:`_wait_for_watchdogs`), then, unless something answers on the port the
-    command names, run the command again with the install's python and return its
-    exit status. When the watchdog put the previous version back, that version is
+    (:func:`_wait_for_watchdogs`; when they could not be told, then up to
+    :data:`_RELAUNCH_GRACE_S` seconds more for a server on the command's port, which a
+    watchdog that starts the previous version itself would bring up), then, unless
+    something answers on the port the command names, run the command again and return
+    its exit status. When the watchdog put the previous version back, that version is
     checked to answer first (:func:`start_previous`); when it did not, this version
     starts again and its own checks put the previous version back and start it."""
     root, old, new = Path(payload["root"]), str(payload["old"]), str(payload["new"])
     argv = [str(a) for a in payload.get("argv") or []]
     pids = payload.get("pids")
+    marker = str(payload.get("marker") or new)
+    program = str(payload.get("program") or _python(root))
+    port = int(payload["port"]) if payload.get("port") else None
 
     def say(message: str) -> None:
         print(f"localm: {message}", file=sys.stderr, flush=True)
@@ -1300,18 +1341,23 @@ def _start_after_watchdogs(payload: dict) -> int:
     say(f"Waiting for the update watchdog of localm {old} to put localm {old} back ...")
     _wait_for_watchdogs(root, old, [int(p) for p in pids] if pids is not None else None,
                         float(payload["until"]))
-    port = payload.get("port")
-    if port and _answers_on(int(port)):
-        say(f"localm already answers on port {port}, so it was not started again.")
-        return 0
+    grace = time.monotonic() + (_RELAUNCH_GRACE_S if pids is None and port else 0.0)
+    while True:
+        if port and _answers_on(port):
+            say(f"localm already answers on port {port}, so it was not started again.")
+            return 0
+        if time.monotonic() >= grace:
+            break
+        time.sleep(_WATCHDOG_POLL_S)
     os.chdir(payload.get("cwd") or str(root))
     installed = _installed_version(root)
     if installed == old:
         say(f"localm {old} is in place again: the update to localm {new} failed its checks.")
-        return start_previous(root, old=old, new=new, argv=argv, say=say, warn=say)
+        return start_previous(root, old=old, argv=argv, say=say, warn=say, marker=marker,
+                              program=program, port=port)
     say(f"The update watchdog of localm {old} did not put localm {old} back; starting localm "
         f"{installed or new} again with the same command.")
-    return _run([_python(root), "-m", "localm", *argv], _env(new), os.getcwd(), say)
+    return _run([program, "-m", "localm", *argv], _env(marker), os.getcwd(), say)
 
 
 if __name__ == "__main__":

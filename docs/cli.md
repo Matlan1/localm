@@ -1409,7 +1409,10 @@ version starts by itself with the same command and arguments, in the same consol
 answers its version (when it does not, localm says so and how to repair it). While the
 older version's update watchdog judges a server, that watchdog puts the previous version
 back: one of localm 0.3.4b3 or b4 then starts it itself, and after one of an earlier
-version localm waits for it to end and starts the same command again. A put-back that
+version localm waits for it to end and starts the same command again. Another command
+that starts in that time (not `localm gui` or `localm serve`) says to run it again once
+the watchdog has put the previous version back, since its console is back at the prompt
+by then. A put-back that
 could not run is tried again at the next start. A backup that is not provably this
 install's is left alone, `rollback.bat` / `rollback.sh` do not put it back either, and
 localm says how to repair the install instead, on the console and in Settings > System >

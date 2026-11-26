@@ -779,6 +779,44 @@ def test_a_runtime_repair_of_another_build_than_the_default_keeps_the_user_s_cho
     assert sl.pinned_tag() is None and not sl.tracks_latest()
 
 
+def test_a_choice_of_build_that_cannot_be_put_back_is_said(install, provision, monkeypatch):
+    from localm import setup_llama as sl
+    from localm.setup_llama import _record_provisioned_backend
+    lib, state = provision
+    state.update(pin="b1", build="b1")
+    _record_provisioned_backend(lib, "cpu", build="b1")
+    (lib / "llama.dll").write_bytes(b"X" * 1000)
+    real = sl.set_pinned_tag
+
+    def once(value):
+        if value != "b1":
+            raise OSError("config.json is locked")
+        real(value)
+    monkeypatch.setattr(sl, "set_pinned_tag", once)
+    res = _repair_runtime()
+    assert res["repaired"] and "could not be put back" in res["note"], res
+    assert "localm setup-llama --tag default" in res["note"], res
+
+
+def test_a_release_file_repair_that_fails_still_repairs_the_runtime(install, provision,
+                                                                   monkeypatch):
+    from click.testing import CliRunner
+
+    from localm.bugreport import LocalmError
+    from localm.cli import main
+    lib, state = provision
+    (lib / "llama.dll").write_bytes(b"X" * 1000)
+    (install / "localm" / "a.py").write_bytes(b"A = 9\n")
+
+    def refuse(*a, **k):
+        raise LocalmError("the release 1.0 has no build to repair from", reason="none")
+    monkeypatch.setattr(integrity, "repair", refuse)
+    r = CliRunner().invoke(main, ["integrity", "--repair"])
+    assert r.exit_code == 1, r.output
+    assert "Repair failed" in r.output and "Installed the cpu runtime" in r.output, r.output
+    assert len(state["calls"]) == 1 and integrity.check(full=True)["runtime"]["differ"] == []
+
+
 @pytest.mark.parametrize("case", ["net-off", "custom", "unrecorded", "exit-1", "still-differs",
                                   "update-running"])
 def test_a_runtime_repair_that_cannot_run_says_why_and_what_repairs_it(

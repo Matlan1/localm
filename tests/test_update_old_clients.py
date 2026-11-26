@@ -814,8 +814,9 @@ here = Path(__file__).resolve().parent.parent
 if sys.argv[1:] == ["--version"]:
     print(os.environ.get("STAND_IN_SAYS") or "localm, version " + (here / "VERSION").read_text().strip())
     raise SystemExit(int(os.environ.get("STAND_IN_VERSION_EXIT") or 0))
+print("stand-in build ran", flush=True)
 (here / "started.json").write_text(json.dumps({
-    "argv": sys.argv[1:], "cwd": os.getcwd(),
+    "argv": sys.argv[1:], "cwd": os.getcwd(), "program": sys.executable,
     "relaunched": os.environ.get("LOCALM_OLD_CLIENT_RELAUNCH"),
     "restart": os.environ.get("LOCALM_RESTART_IN_PROGRESS")}))
 raise SystemExit(7)
@@ -875,20 +876,27 @@ def test_a_start_whose_checks_put_the_previous_version_back_starts_it(put_back_b
     started = _started(root)
     assert started["argv"] == ["gui", "--port", "8099"], started
     from localm import _version
-    assert started["relaunched"] == _version.read_version(), started
+    assert started["relaunched"].startswith(_version.read_version() + " "), started
     assert started["restart"] is None, started
     assert os.path.samefile(started["cwd"], root)
 
 
-def test_the_console_says_which_version_starts_and_why(put_back_build):
+def test_the_console_says_which_version_starts_and_why(put_back_build, capfd):
+    """The previous version writes where this process writes, also when this process
+    has no console window of its own."""
     root, home, _updates, _ = put_back_build
     (root / "README.md").unlink()
     note, said, warned = _start(root, home)
     assert isinstance(note, oc.Ending) and note.then == "previous" and note.old == OLD
+    capfd.readouterr()
     told: list = []
     assert oc.go_on(note, root=root, argv=["run", "m"], say=told.append, warn=told.append) == 7
     assert "README.md" in note and f"localm {OLD} is in place again" in note
     assert told == [f"Starting localm {OLD} with the same command: localm run m"]
+    assert "stand-in build ran" in capfd.readouterr().out
+    started = _started(root)
+    assert os.path.samefile(started["program"], sys.executable), started
+    assert started["relaunched"] == note.marker and note.marker.startswith(NEW + " ")
 
 
 @pytest.mark.parametrize("case", ["no-answer", "wrong-version", "not-back"])
@@ -979,13 +987,42 @@ def test_the_starter_waits_for_the_old_watchdog_then_starts_the_previous_version
     assert (root / "VERSION").read_text(encoding="utf-8") == OLD
 
 
-def test_a_start_by_a_starter_does_not_arrange_another(monkeypatch, tmp_path):
-    monkeypatch.setenv(oc.RELAUNCHED, NEW)
-    monkeypatch.setattr(oc, "_spawn_starter", lambda *a: pytest.fail("a second starter"))
+def test_a_start_by_a_starter_does_not_arrange_another_for_the_same_update(monkeypatch,
+                                                                          tmp_path):
+    """A later update that fails again (another backup) is started again by itself."""
+    backup = {"version": OLD, "mtime_ns": 11}
+    note = oc.Ending("failed", then="after_watchdog", old=OLD, new=NEW, pids=[1], backup=backup)
+    monkeypatch.setenv(oc.RELAUNCHED, note.marker)
+    spawned: list = []
+    monkeypatch.setattr(oc, "_spawn_starter", lambda *a: spawned.append(a))
     told: list = []
-    note = oc.Ending("failed", then="after_watchdog", old=OLD, new=NEW, pids=[1])
     assert oc.go_on(note, root=tmp_path, argv=["gui"], say=told.append, warn=told.append) == 1
-    assert told and "Start localm again" in told[0]
+    assert told and "Start localm again" in told[0] and spawned == []
+    again = oc.Ending("failed", then="after_watchdog", old=OLD, new=NEW, pids=[1],
+                      backup=dict(backup, mtime_ns=12))
+    assert oc.go_on(again, root=tmp_path, argv=["gui"], say=told.append, warn=told.append) == 1
+    assert len(spawned) == 1
+
+
+def test_a_starter_that_cannot_tell_the_watchdogs_leaves_a_server_it_brought_up(
+        tmp_path, monkeypatch):
+    """A 0.3.4b3 or b4 watchdog that could not be told starts the previous version
+    itself: the starter waits for an answer on the port before it starts anything."""
+    root = _install(tmp_path)
+    (root / "VERSION").write_text(OLD, encoding="utf-8")
+    monkeypatch.setattr(oc, "_wait_for_watchdogs", lambda *a, **k: None)
+    monkeypatch.setattr(oc, "_RELAUNCH_GRACE_S", 3.0)
+    monkeypatch.setattr(oc, "_WATCHDOG_POLL_S", 0.1)
+    asked: list = []
+
+    def answers(port):
+        asked.append(port)
+        return len(asked) >= 3
+    monkeypatch.setattr(oc, "_answers_on", answers)
+    monkeypatch.setattr(oc, "start_previous", lambda *a, **k: pytest.fail("started a second"))
+    payload = {"root": str(root), "old": OLD, "new": NEW, "pids": None, "argv": ["gui", "-p", "5"],
+               "cwd": str(root), "until": time.time() + 5, "port": 5}
+    assert oc._start_after_watchdogs(payload) == 0 and asked == [5, 5, 5]
 
 
 def test_the_starter_waits_for_a_settled_version_when_the_watchdogs_cannot_be_told(

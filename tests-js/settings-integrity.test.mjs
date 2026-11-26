@@ -129,6 +129,9 @@ test("only runtime files differing offers Repair, which installs the runtime aga
       runtime: { needed: true, repaired: false, backend: "vulkan", build: "b1", files: ["llama.dll"],
         error: "network access is off, so the runtime cannot be downloaded",
         fix: "turn it on; then run: localm integrity --repair", note: null } },
+    { repaired: false, error: "the release 1.0 has no build to repair from",
+      runtime: { needed: true, repaired: true, backend: "vulkan", build: "b1", files: ["llama.dll"],
+        error: null, fix: null, note: null } },
   ];
   const fetchImpl = async (url, opts = {}) => {
     if (String(url) === "/api/integrity/repair" && opts.method === "POST") {
@@ -147,6 +150,10 @@ test("only runtime files differing offers Repair, which installs the runtime aga
   assert.equal(text(w2, "integrity-action-status"),
     "The native runtime was not repaired: network access is off, so the runtime cannot be "
     + "downloaded. To repair it: turn it on; then run: localm integrity --repair");
+  await w2.integrityRepair();
+  assert.equal(text(w2, "integrity-action-status"),
+    "Failed: the release 1.0 has no build to repair from "
+    + "Installed the vulkan runtime b1 again: 1 file(s) of it repaired.");
 });
 
 // The two settings render into the Integrity block, which shows without an update

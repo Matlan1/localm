@@ -76,16 +76,22 @@ def _with_build(cmd: list, backend: str, lib: Path) -> tuple:
     return cmd + ["--tag", build], str(config.load_config().get("llama_runtime_pin") or "")
 
 
-def _put_choice_back(value: str) -> None:
-    """Store *value* again as the user's choice of llama.cpp build, saying in the log
-    when it cannot be written."""
+def _put_choice_back(value: str) -> Optional[str]:
+    """Store *value* again as the user's choice of llama.cpp build; None when it was
+    stored, else what to tell the user (also logged)."""
     import localm.setup_llama as sl
     try:
         sl.set_pinned_tag(value)
+        return None
     except Exception as e:
         from localm.debuglog import logger
         logger.warning("runtime repair: the choice of llama.cpp build could not be put back "
                        "(%r): %s", value, e)
+        kind = type(e).__name__
+    word = {"": "default", "latest": "latest"}.get(value.strip().lower(), value)
+    return (f"your choice of llama.cpp build could not be put back ({kind}), so "
+            f"the installed build is now pinned: to choose again, run 'localm setup-llama "
+            f"--tag {word}'")
 
 
 def repair_runtime(*, root=None, say: Optional[Callable] = None,
@@ -152,6 +158,7 @@ def repair_runtime(*, root=None, say: Optional[Callable] = None,
                       f"one), then run: {RETRY}")
     cmd, choice_before = _with_build(command(backend), backend, lib)
     manual = f"localm setup-llama --backend {backend} --force"
+    choice_note = None
     try:
         with updater._apply_lock("repair"):
             say(f"Installing the {backend} runtime{' ' + build if build else ''} again...")
@@ -161,7 +168,8 @@ def repair_runtime(*, root=None, say: Optional[Callable] = None,
                 return refuse(f"setup-llama could not be started: {e}", manual)
             finally:
                 if choice_before is not None:
-                    _put_choice_back(choice_before)
+                    choice_note = _put_choice_back(choice_before)
+                    out["note"] = choice_note
     except LocalmError as e:
         return refuse(f"{e.summary} ({e.reason})", f"once it has finished, run: {RETRY}")
     if rc not in (0, VC_RUNTIME_ABSENT_EXIT):
@@ -175,8 +183,10 @@ def repair_runtime(*, root=None, say: Optional[Callable] = None,
         more = f" and {len(left) - 3} more" if len(left) > 3 else ""
         return refuse("after it was installed again, these files still differ from its "
                       "list: " + ", ".join(left[:3]) + more, manual)
+    notes = [choice_note] if choice_note else []
     if rc == VC_RUNTIME_ABSENT_EXIT:
-        out["note"] = ("no model can load until the Microsoft Visual C++ Redistributable is "
-                       "installed: run 'localm setup-llama', which offers to install it")
+        notes.append("no model can load until the Microsoft Visual C++ Redistributable is "
+                     "installed: run 'localm setup-llama', which offers to install it")
+    out["note"] = "; ".join(notes) or None
     out["repaired"] = True
     return out

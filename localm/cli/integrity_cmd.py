@@ -50,6 +50,7 @@ def integrity_cmd(paths, full: bool, do_keep: bool, do_repair: bool) -> None:
     rt_differing = result["runtime"]["differ"] + result["runtime"]["missing"]
     runtime_too = do_repair and not paths and bool(rt_differing)
     chosen = []
+    release_failed = False
     if do_keep or do_repair:
         chosen = list(paths) or differing
         unknown = [p for p in paths if p not in differing and p not in result["kept"]]
@@ -78,7 +79,9 @@ def integrity_cmd(paths, full: bool, do_keep: bool, do_repair: bool) -> None:
             what = "Keep" if do_keep else "Repair"
             text = (f"{e.summary} ({e.reason})" if isinstance(e, LocalmError) else str(e))
             console.print(f"[red]{what} failed:[/red] {escape(text)}")
-            sys.exit(1)
+            if not runtime_too:
+                sys.exit(1)
+            release_failed = True
     runtime_failed = False
     if runtime_too:
         from localm.setup_llama.repair import repair_runtime as _repair_runtime
@@ -94,6 +97,9 @@ def integrity_cmd(paths, full: bool, do_keep: bool, do_repair: bool) -> None:
             runtime_failed = True
             console.print(f"[red]The native runtime was not repaired:[/red] "
                           f"{escape(res['error'])}. To repair it: {escape(res['fix'])}")
+            if res["note"]:
+                console.print(f"[yellow]{escape(res['note'][0].upper() + res['note'][1:])}."
+                              "[/yellow]")
     if chosen or runtime_too:
         result = integrity.run()
     for line in integrity.lines(result):
@@ -112,5 +118,7 @@ def integrity_cmd(paths, full: bool, do_keep: bool, do_repair: bool) -> None:
         if (rt["differ"] or rt["missing"]) and not runtime_failed:
             console.print("[dim]'localm integrity --repair' also installs the native "
                           "runtime again.[/dim]")
+        sys.exit(1)
+    if release_failed:
         sys.exit(1)
     console.print(f"[green]{escape(integrity.summary(result))}.[/green]")

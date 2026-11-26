@@ -2905,10 +2905,12 @@ export async function integrityRepair() {
   if (btn) btn.disabled = true;
   try {
     const d = await _integrityPost("/api/integrity/repair", {}, out, t("settings.integrity.repairing"));
-    if (!d.repaired) throw new Error(d.error || t("settings.integrity.notRepairedAny"));
     const rt = d.runtime;
     const lines = [];
-    if ((d.files || []).length || (d.failed || []).length || !(rt && rt.needed)) {
+    if (!d.repaired) {
+      if (!(rt && rt.needed)) throw new Error(d.error || t("settings.integrity.notRepairedAny"));
+      lines.push(t("settings.integrity.failed", { message: d.error || t("settings.integrity.notRepairedAny") }));
+    } else if ((d.files || []).length || (d.failed || []).length || !(rt && rt.needed)) {
       lines.push(t("settings.integrity.repaired", { count: (d.files || []).length }));
     }
     for (const f of d.failed || []) lines.push(t("settings.integrity.notRepaired", { path: f.path, reason: f.reason }));
@@ -2920,7 +2922,7 @@ export async function integrityRepair() {
       lines.push(t("settings.integrity.runtimeNotRepaired", { error: rt.error || "", fix: rt.fix || "" }));
     }
     if (out) out.textContent = lines.join(" ");
-    renderIntegrity({ result: d.result });
+    if (d.result) renderIntegrity({ result: d.result });
   } catch (e) {
     showInlineError(out, t("settings.integrity.failed", { message: e.message }));
   } finally {
