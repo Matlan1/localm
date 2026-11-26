@@ -176,8 +176,8 @@ class Applier:
         self.ask: Optional[Callable[[str], bool]] = (
             terminal_ask() if handoff.get("ask") and handoff["mode"] == COMMAND else None)
         #: :attr:`ask` while the old version is put back, where closing the window is
-        #: no answer.
-        self.ask_back = self.ask
+        #: no answer; None: :attr:`ask` itself.
+        self.ask_back: Optional[Callable[[str], bool]] = None
 
     def _held(self, held) -> bool:
         return self.ask is not None and self.ask(f"{held}. Close that program, then try again.")
@@ -185,7 +185,8 @@ class Applier:
     def _held_back(self, held) -> bool:
         """:meth:`_held` while the old version is put back: cancel then leaves the
         install neither old nor new, which the question says with the ways out."""
-        return self.ask_back is not None and self.ask_back(
+        ask = self.ask_back or self.ask
+        return ask is not None and ask(
             f"{held}. Close that program, then try again. Cancel leaves localm "
             f"{self.h['old']} not put back completely: " + " ".join(restoring.ways_out(self.root)))
 

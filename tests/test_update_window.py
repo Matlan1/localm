@@ -333,16 +333,16 @@ def test_the_put_back_question_cannot_be_answered_by_closing_the_window(tmp_path
     answered Cancel by closing it."""
     log = tmp_path / "window.log"
     update = applier.Applier.__new__(applier.Applier)
-    update.lines, update.window = ["Replacing..."], None
+    update.lines, update.window, update.ask_back = ["Replacing..."], None, None
+    update.root, update.h = tmp_path, {"old": "1"}
     update.show_window(_fake(tmp_path / "w.py", log, ["cancel", "again"]))
     assert update.window is not None
-    assert update.ask is not None and update.ask_back is not None
-    assert update.ask("Held.") is False
-    assert update.ask_back("Held while putting back.") is True
+    assert update._held("x.dll is held") is False
+    assert update._held_back("x.dll is held") is True
     update.close_window("Done.")
     asks = [m for m in _sent(log) if "ask" in m]
-    assert asks == [{"ask": "Held.", "closing": "cancel"},
-                    {"ask": "Held while putting back.", "closing": None}]
+    assert [m["closing"] for m in asks] == ["cancel", None], asks
+    assert "Cancel leaves localm 1 not put back completely" in asks[1]["ask"]
     with allow_window():
         root = _tk_root()
         answers: list = []

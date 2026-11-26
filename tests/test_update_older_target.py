@@ -91,6 +91,7 @@ def test_into_a_release_without_the_gate_its_gate_files_go_in_a_plan_of_their_ow
     files = mover.plan_files(update.root, ID, um.stated(new), old["files"], protect=[],
                              swap=(), among=mover.is_not_gate)
     assert files.ops and not [op for op in files.ops if op.swap or op.path in mover.GATE_FILES]
+    (update.root / ".localm-update" / ID / "plans").mkdir()   # as job.start makes it
     mover.write_plan(update.root, ID, files)
     rest = mover.plan_gate(update.root, ID, 0, um.stated(new), old["files"], protect=[])
     assert rest.number == files.number + 1
