@@ -41,6 +41,16 @@ pyproject.toml, the version of the project's own editable entry in uv.lock)
 select the test files that reference __version__, name the VERSION, pyproject.toml,
 uv.lock or CHANGELOG.md files, or spell the old or the new version.
 
+A change to localm/config.py that only adds keys to DEFAULT_CONFIG (new key
+lines and their comment lines inserted inside the table, every existing key
+kept with its value and its place in the order, nothing else in the file
+changed) selects the tests that read the default table instead of every
+importer of the module: the test files named test_config*.py or
+test_settings*.py, the ones that name DEFAULT_CONFIG, validate_update or
+settings_schema, and the ones that name a new key. The tree scanners that read
+localm/*.py stay selected. Any other change to localm/config.py counts as a
+change to the module.
+
 A change to tests/conftest.py affects every test file. So does a change to
 pyproject.toml or uv.lock outside the [project] requirement lists, the
 [tool.ruff], [tool.basedpyright], [tool.mutmut] and [tool.uv] tables (a
@@ -80,6 +90,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import difflib
 import fnmatch
 import functools
 import json
@@ -113,6 +124,13 @@ _PACKAGE_INIT = "localm/__init__.py"
 _PROJECT_LOCK_SOURCE = {"editable": "."}
 _VERSION_FILE_NAMES = ("pyproject.toml", "uv.lock", "CHANGELOG.md")
 _VERSION_FILE_WORD = re.compile(r"(?<![A-Za-z0-9_])VERSION(?![A-Za-z0-9_])")
+_CONFIG_MODULE = "localm/config.py"
+_CONFIG_TABLE = "DEFAULT_CONFIG"
+# A test file whose name marks it as a test of the config or the settings.
+_CONFIG_TEST_NAME = re.compile(r"(^|/)test_(?:config|settings)[^/]*\.py$")
+# The default table, the settings-write validator that checks a write against
+# it, and the settings schema module that every key needs a field in.
+_CONFIG_TABLE_READER = re.compile(r"(?<!\w)(?:DEFAULT_CONFIG|validate_update|settings_schema)(?!\w)")
 _DEV_EXTRA = "dev"
 _REQUIREMENT_KEYS = ("dependencies", "optional-dependencies")
 # Modules whose callers import and patch the module itself, which re-exports the
@@ -724,6 +742,100 @@ def version_readers(graph: Graph, versions: set[str], test_text) -> dict[str, li
     return out
 
 
+def _config_table(tree: ast.Module) -> ast.Dict | None:
+    """The dict literal the one module-level statement assigning
+    DEFAULT_CONFIG assigns; None when no statement or more than one assigns
+    it, or the value is not a dict literal."""
+    found = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        if any(isinstance(t, ast.Name) and t.id == _CONFIG_TABLE for t in targets):
+            found.append(node)
+    if len(found) != 1 or not isinstance(found[0].value, ast.Dict):
+        return None
+    return found[0].value
+
+
+def _table_keys(table: ast.Dict) -> list[str] | None:
+    """The keys of *table* in order; None when a key is not a string literal
+    (a `**` spread included) or a key repeats."""
+    keys: list[str] = []
+    for key in table.keys:
+        if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+            return None
+        keys.append(key.value)
+    return keys if len(set(keys)) == len(keys) else None
+
+
+def config_key_additions(old_source: str, new_source: str) -> set[str] | None:
+    """The keys *new_source* adds to DEFAULT_CONFIG when that is all that
+    differs from *old_source* (two texts of localm/config.py): every line
+    the new text adds lies between the table's opening and closing lines, no
+    line is removed or changed, every old key keeps its value and its place in
+    the order, and the module is otherwise the same. None otherwise, when
+    nothing is added, or when either text does not parse or has no single
+    DEFAULT_CONFIG dict literal with string keys."""
+    try:
+        old_tree, new_tree = ast.parse(old_source), ast.parse(new_source)
+    except (SyntaxError, ValueError):
+        return None
+    old_table, new_table = _config_table(old_tree), _config_table(new_tree)
+    if old_table is None or new_table is None:
+        return None
+    old_keys, new_keys = _table_keys(old_table), _table_keys(new_table)
+    if old_keys is None or new_keys is None:
+        return None
+    added = set(new_keys) - set(old_keys)
+    if not added or [k for k in new_keys if k not in added] != old_keys:
+        return None
+    old_values = {k: ast.dump(v) for k, v in zip(old_keys, old_table.values, strict=True)}
+    if any(ast.dump(v) != old_values[k]
+           for k, v in zip(new_keys, new_table.values, strict=True) if k not in added):
+        return None
+    # 0-based indices of the new text's lines strictly between the table's
+    # opening line and its closing line.
+    inside = range(new_table.lineno, (new_table.end_lineno or 0) - 1)
+    matcher = difflib.SequenceMatcher(None, old_source.splitlines(), new_source.splitlines(),
+                                      autojunk=False)
+    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if tag != "insert" or j1 < inside.start or j2 > inside.stop:
+            return None
+    old_table.keys, old_table.values = [], []
+    new_table.keys, new_table.values = [], []
+    if ast.dump(old_tree) != ast.dump(new_tree):
+        return None
+    return added
+
+
+def config_key_readers(graph: Graph, keys: set[str], test_text) -> dict[str, list[str]]:
+    """{test file: reasons} for the test files that read the default config
+    table when localm/config.py adds only the DEFAULT_CONFIG *keys*: a file
+    named test_config*.py or test_settings*.py, one that names DEFAULT_CONFIG,
+    validate_update or settings_schema, and one that names a key of *keys* as
+    a whole word. *test_text* reads a test file."""
+    label = "localm/config.py adds DEFAULT_CONFIG keys only"
+    spelled = [(k, re.compile(r"(?<!\w)" + re.escape(k) + r"(?!\w)")) for k in sorted(keys)]
+    out: dict[str, list[str]] = {}
+    for t in graph.test_files:
+        text = test_text(t)
+        why: list[str] = []
+        if _CONFIG_TEST_NAME.search(t):
+            why.append(f"a config or settings test: {label}")
+        why += [f"names {name}: {label}"
+                for name in sorted(set(_CONFIG_TABLE_READER.findall(text)))]
+        why += [f"names the new key {k}: {label}" for k, rx in spelled if rx.search(text)]
+        if why:
+            out[t] = why
+    return out
+
+
 def dependency_change(old_pyproject: str, new_pyproject: str, old_lock: str,
                       new_lock: str) -> tuple[set[str], set[str], set[str]] | None:
     """(changed, affected, runtime) for a change to pyproject.toml and uv.lock,
@@ -939,6 +1051,14 @@ def select(changed: list[str], graph: Graph, depth: int = 0, base_ref: str = "HE
             for why in whys:
                 add(t, why)
 
+    config_keys = None
+    if _CONFIG_MODULE in changed:
+        config_keys = config_key_additions(_read_at(base_ref, _CONFIG_MODULE), _read(_CONFIG_MODULE))
+    if config_keys:
+        for t, whys in config_key_readers(graph, config_keys, test_text).items():
+            for why in whys:
+                add(t, why)
+
     if "pyproject.toml" in listed:
         readers = changed_tool_table_readers(_read_at(base_ref, "pyproject.toml"),
                                              _read("pyproject.toml"))
@@ -961,7 +1081,7 @@ def select(changed: list[str], graph: Graph, depth: int = 0, base_ref: str = "HE
         if rel in graph.test_imports:
             add(rel, "changed")
             continue
-        if rel in bump_files:
+        if rel in bump_files or (rel == _CONFIG_MODULE and config_keys):
             continue
         if rel.endswith("/conftest.py"):
             folder = rel.rsplit("/", 1)[0] + "/"
