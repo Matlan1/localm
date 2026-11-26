@@ -1214,6 +1214,8 @@ def test_a_code_change_in_the_config_module_selects_every_importer(config_repo):
     mod, root = config_repo
     _edit(root, "localm/config.py", "return dict(DEFAULT_CONFIG)", "return DEFAULT_CONFIG")
     assert _module_wide(_select(mod, ["localm/config.py"]))
+    _edit(root, "localm/config.py", *_ADD_KEY)
+    assert _module_wide(_select(mod, ["localm/config.py"]))
 
 
 def test_a_config_key_added_beside_a_changed_default_selects_every_importer(config_repo):
