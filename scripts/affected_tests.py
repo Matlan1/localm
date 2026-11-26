@@ -160,6 +160,8 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
         ("localm/update_mechanism/*.py", "*.bat", "*.sh", "launcher.pyw", "installer/gui.py"),
         "builds its install from the update mechanism and reads every launch script"),
     "tests/test_check_pins.py": (_LOCALM_PY, "greps every tracked localm/*.py for pin-shaped constants"),
+    "tests/test_update_old_code_is_gone.py": (
+        _LOCALM_PY, "scans every localm module for the names of the old update swap"),
     "tests/test_embedding_model_writers_refuse_a_chat_model.py": (
         _LOCALM_PY, "reads every localm/*.py for embedding_model config writers"),
     "tests/test_streaming_response_closes_body.py": (_LOCALM_PY, "reads every localm/*.py for StreamingResponse uses"),
@@ -330,7 +332,6 @@ _NOT_TREE_SCANNERS: dict[str, str] = {
     "tests/test_update_steps_packages.py": "reads the checkout's pyproject.toml only",
     "tests/test_update_steps_run.py": "starts the app of the checkout and asks it for its version",
     "tests/test_update_old_clients.py": "starts the app of the checkout and asks it for its version",
-    "tests/test_updater.py": "asks whether the checkout is a site-packages install",
     "tests/test_uv_tool.py": "reads the uv pin file",
     "tests/test_shell_entrypoints_executable.py": "reads the index mode of a fixed list of files",
     "tests/test_llama_pin_constant_and_currency.py": "names check_llama_abi.py as a workflow step without running it",
