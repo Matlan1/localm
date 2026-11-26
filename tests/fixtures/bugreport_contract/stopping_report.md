@@ -34,6 +34,7 @@ Reason: a native crash was caught by the fault handler after the server had begu
 - Native runtime build: b1234
 - Native runtime pinned to: b1234
 - Native libraries: ggml-cuda.dll, libmtmd.so.1, llama.dll
+- Files differing from the release: 4 (2 changed, 1 missing, 1 native runtime); 1 kept as the user's
 
 ## Configuration (safe subset)
 - binary_dir: C:\Users\<redacted>\localm\bin

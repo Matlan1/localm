@@ -112,7 +112,7 @@ _crash_trace_instance_id = None   # which instance_id currently owns _crash_trac
 _armed_instance_id = None   # instance_id of the last arm_crash_guard() in THIS process
 # Diagnostics a higher layer adds to every report, {field: callable() -> value}
 # (diagnostics.add_source).
-_diagnostic_sources: dict = {}
+_diagnostic_sources = {}
 
 __all__ = [
     "_all_crash_markers", "_all_crash_stopping_records", "_APIKEY_RE", "_AUTH_HEADER_RE",

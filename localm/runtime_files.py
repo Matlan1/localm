@@ -53,13 +53,20 @@ def own(rel: str) -> bool:
 
 
 def listed(folder) -> list:
-    """The paths (POSIX, relative to *folder*) of the runtime files in *folder*.
-    Raises OSError when the folder cannot be read."""
+    """The paths (POSIX, relative to *folder*) of the runtime files in *folder*; an
+    entry whose kind cannot be read counts as a file. Raises OSError when the folder
+    cannot be read."""
     folder = Path(folder)
     out = []
     for p in sorted(folder.rglob("*")):
         rel = p.relative_to(folder).as_posix()
-        if not own(rel) and p.is_file() and not p.is_symlink():
+        if own(rel):
+            continue
+        try:
+            plain = p.is_file() and not p.is_symlink()
+        except OSError:
+            plain = True
+        if plain:
             out.append(rel)
     return out
 

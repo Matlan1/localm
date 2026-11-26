@@ -186,6 +186,8 @@ def world(monkeypatch, tmp_path):
 
     monkeypatch.setattr(platform, "platform", lambda *a, **k: "TestOS-1.0-contract")
     monkeypatch.setattr(platform, "machine", lambda: "testarch")
+    monkeypatch.setitem(bugreport._diagnostic_sources, "files_differing", lambda: {
+        "checked": True, "differ": 2, "missing": 1, "kept": 1, "runtime_differ": 1})
     monkeypatch.setattr(version_mod, "read_version", lambda *a, **k: "0.0.0+contract")
 
     monkeypatch.setattr(hwdetect, "detect", lambda *a, **k: SimpleNamespace(

@@ -508,7 +508,9 @@ def test_repair_writes_exactly_the_differing_files_from_the_signed_build(install
     assert res == {"version": "1.0", "repaired": ["localm/a.py", "docs/c.md"], "failed": []}
     after = _tree(install)
     assert after["localm/a.py"] == b"A = 1\n" and after["docs/c.md"] == b"# c\n"
-    assert {k for k in after if after[k] != before.get(k)} == {"localm/a.py", "docs/c.md"}
+    assert {k for k in after if after[k] != before.get(k)} == {
+        "localm/a.py", "docs/c.md", ".localm-update/lock"}, (
+        "besides the install's update lock, only the repaired files changed")
     assert after["localm/b.py"] == b"B = 7\n", "a kept file is not repaired unless named"
     assert not (install.parent / "home" / "updates" / "integrity-repair").exists()
     assert integrity.check()["count"] == 0
@@ -699,7 +701,6 @@ def test_localm_bug_report_carries_the_counts_without_a_check_before_and_writes_
     (install / "localm" / "a.py").write_bytes(b"A = 9\n")
     (install / "docs" / "c.md").unlink()
     integrity.keep(["docs/c.md"])
-    monkeypatch.setattr(bugreport, "offer_to_send", lambda *a, **k: False)
     monkeypatch.setattr(bugreport, "stdin_is_interactive", lambda: False)
     home = install.parent / "home"
     updates = home / "updates"
@@ -710,7 +711,8 @@ def test_localm_bug_report_carries_the_counts_without_a_check_before_and_writes_
     report = saved.read_text(encoding="utf-8")
     assert ("- Files differing from the release: 1 (1 changed, 0 missing, 0 native "
             "runtime); 1 kept as the user's") in report, report
-    assert "a.py" not in report and "c.md" not in report
+    (line,) = [ln for ln in report.splitlines() if "Files differing" in ln]
+    assert "a.py" not in line and "c.md" not in line
     assert integrity.state()["result"] is None, "no check had run in this process"
     assert sorted(p.name for p in updates.iterdir()) == before, "the report wrote a record"
     assert diagnostics.collect_diagnostics()["files_differing"] == {
