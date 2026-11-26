@@ -1206,6 +1206,8 @@ def test_a_removed_config_key_selects_every_importer(config_repo):
     mod, root = config_repo
     _edit(root, "localm/config.py", '    "gamma": "x",\n', "")
     assert _module_wide(_select(mod, ["localm/config.py"]))
+    _edit(root, "localm/config.py", *_ADD_KEY)
+    assert _module_wide(_select(mod, ["localm/config.py"]))
 
 
 def test_a_code_change_in_the_config_module_selects_every_importer(config_repo):
