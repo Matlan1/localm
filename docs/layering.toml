@@ -40,8 +40,8 @@ units = ["plugins"]
 
 [[tier]]
 name = "introspection"
-role = "Self-checks and live statistics read from the running engine, presented by the plugins and the cli."
-units = ["diagnostics", "sysstats"]
+role = "Self-checks and live statistics read from the running engine, presented by the plugins and the cli, and the checks of the first start after an older localm installed this build."
+units = ["diagnostics", "sysstats", "updater_old_clients"]
 
 [[tier]]
 name = "engine"

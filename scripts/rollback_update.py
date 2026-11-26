@@ -110,6 +110,22 @@ def _held_version(updates_dir: Path):
         return None
 
 
+def _passed_backup(install_root: Path, updates_dir: Path):
+    """The version of this install whose checks passed with the update backup in
+    *updates_dir* (``localm/updater_old_clients.py``, loaded by file path), None when
+    they did not, did not run for it, or the helper cannot be loaded (then the backup
+    is restored as before)."""
+    helper = _load_helper(install_root, "updater_old_clients")
+    if helper is None or not hasattr(helper, "passed_backup"):
+        return None
+    try:
+        return helper.passed_backup(install_root, updates_dir)
+    except Exception as e:
+        print(f"  Could not read whether the update was checked ({e}); restoring it.",
+              file=sys.stderr)
+        return None
+
+
 def _parts_left(updates_dir: Path) -> list:
     """The names of the parts the update kept a copy of that this script does not
     restore, unless they were kept for another backup than the one being restored.
@@ -286,6 +302,13 @@ def main(argv=None, *, install_root: Path = INSTALL_ROOT, code_root=None,
               "and re-run.", file=sys.stderr)
         return 1
 
+    checked = _passed_backup(install_root, updates_dir)
+    if checked:
+        print(f"Not rolled back: the backup in {backup_dir} is of an update to localm "
+              f"{checked} that is complete (its checks passed), so it is not put back.\n"
+              f"To go back to localm {_held_version(updates_dir) or 'the previous version'}, "
+              "install it with localm update --to <version>.", file=sys.stderr)
+        return 1
     print(f"Roll back localm at {install_root}")
     print(f"  restoring the previous version from {backup_dir}")
     au = _load_apply_update(install_root, code_root)

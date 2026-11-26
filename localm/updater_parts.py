@@ -140,34 +140,12 @@ def _deps(root: Path) -> dict:
             "problems": uc.unsatisfied(reqs, installed)}
 
 
-def installed_parts(root=None) -> dict:
-    """What each part of the install at *root* (default the running one) is
-    at, against this localm version. Read-only, never raises.
-
-    Returns ``{"app", "install_record", "install_record_matches",
-    "install_record_problem", "deps_problems", "runtime", "components", "problems", "consistent",
-    "last_steps"}``:
-    ``app`` the code's version, ``install_record`` the venv's localm record
-    version (None when there is none to compare: no venv, or a pip install;
-    a git clone with a venv is compared like any install) and whether it is
-    ``app`` (False also when the venv has
-    no record at all). A record of another version is a problem
-    (``install_record_problem``) unless an update that kept the dependencies
-    left it (:func:`note_kept_record`), or *root* is a git clone (``.git``
-    present) whose record is an editable install of *root* and whose
-    dependencies are all satisfied,
-    ``deps_problems`` each dependency the venv does not satisfy (a problem),
-    ``runtime``
-    ``{"backend", "current", "target", "matches"}`` (``matches`` None when it
-    cannot be told), ``components`` ``[{"name", "label", "current",
-    "target", "matches"}]`` for every installed component the shallow plan can
-    compare, and ``problems`` one user-facing line per part that disagrees.
-    ``consistent`` is True when ``problems`` is empty. ``last_steps`` holds
-    the runtime and component update results of the last day for this version
-    (:func:`_last_steps`)."""
-    from localm import _version, updater
-    root = Path(root) if root else updater.repo_root()
-    app = _version.read_version()
+def venv_part(root: Path, app: str) -> dict:
+    """The venv of the install at *root* against localm *app* (see
+    :func:`installed_parts`): ``{"install_record", "install_record_matches",
+    "install_record_problem", "deps_problems", "problems"}``, ``problems`` one
+    user-facing line each. Nothing for a pip install. Never raises."""
+    from localm import updater
     problems: list = []
     record, record_matches, deps_problems = None, None, []
     record_problem = False
@@ -196,6 +174,43 @@ def installed_parts(root=None) -> dict:
                             f"{app} needs: " + ", ".join(deps_problems[:5])
                             + (f" (and {len(deps_problems) - 5} more)"
                                if len(deps_problems) > 5 else ""))
+    return {"install_record": record, "install_record_matches": record_matches,
+            "install_record_problem": record_problem, "deps_problems": deps_problems,
+            "problems": problems}
+
+
+def installed_parts(root=None) -> dict:
+    """What each part of the install at *root* (default the running one) is
+    at, against this localm version. Read-only, never raises.
+
+    Returns ``{"app", "install_record", "install_record_matches",
+    "install_record_problem", "deps_problems", "runtime", "components", "problems", "consistent",
+    "last_steps"}``:
+    ``app`` the code's version, ``install_record`` the venv's localm record
+    version (None when there is none to compare: no venv, or a pip install;
+    a git clone with a venv is compared like any install) and whether it is
+    ``app`` (False also when the venv has
+    no record at all). A record of another version is a problem
+    (``install_record_problem``) unless an update that kept the dependencies
+    left it (:func:`note_kept_record`), or *root* is a git clone (``.git``
+    present) whose record is an editable install of *root* and whose
+    dependencies are all satisfied,
+    ``deps_problems`` each dependency the venv does not satisfy (a problem),
+    ``runtime``
+    ``{"backend", "current", "target", "matches"}`` (``matches`` None when it
+    cannot be told), ``components`` ``[{"name", "label", "current",
+    "target", "matches"}]`` for every installed component the shallow plan can
+    compare, and ``problems`` one user-facing line per part that disagrees.
+    ``consistent`` is True when ``problems`` is empty. ``last_steps`` holds
+    the runtime and component update results of the last day for this version
+    (:func:`_last_steps`)."""
+    from localm import _version, updater
+    root = Path(root) if root else updater.repo_root()
+    app = _version.read_version()
+    venv = venv_part(root, app)
+    record, record_matches = venv["install_record"], venv["install_record_matches"]
+    record_problem, deps_problems = venv["install_record_problem"], venv["deps_problems"]
+    problems: list = list(venv["problems"])
     runtime: dict = {"backend": None, "current": None, "target": None, "matches": None}
     try:
         from localm import updater_runtime

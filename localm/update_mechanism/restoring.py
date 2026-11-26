@@ -259,17 +259,31 @@ def _set_aside(lock: job.Lock, *, added: bool = True) -> str:
 def release_of(root) -> str:
     """The version of the release whose statement the install at *root* has, when every
     file it states is there as stated, else an empty string."""
-    stated = _statement(root)
     try:
-        a = mover.area(root, "0" * 32, mover.FILES, 1)
-        for rel, identity in (stated or {"files": {}})["files"].items():
-            if a.inside(rel):
-                path, st = a.find(rel)
-                if st is None or not disk.same(path, identity, disk.Wait(0)):
-                    return ""
-        return stated["version"] if stated else ""
+        version, differ = stated_differences(root, first=True)
     except (OSError, ValueError, disk.Unsafe, disk.Held):
         return ""
+    return "" if differ else version
+
+
+def stated_differences(root, *, first: bool = False) -> tuple:
+    """``(version, paths)``: the version of the release whose statement the install at
+    *root* has (empty when it has none that can be read) and the files it states that
+    are absent or differ, in the statement's order; with *first*, at most the first of
+    them. Raises OSError, ValueError, :class:`.disk.Unsafe` or :class:`.disk.Held`."""
+    stated = _statement(root)
+    if stated is None:
+        return "", []
+    differ = []
+    a = mover.area(root, "0" * 32, mover.FILES, 1)
+    for rel, identity in stated["files"].items():
+        if a.inside(rel):
+            path, st = a.find(rel)
+            if st is None or not disk.same(path, identity, disk.Wait(0)):
+                differ.append(rel)
+                if first:
+                    break
+    return stated["version"], differ
 
 
 def _statement(root) -> Optional[dict]:
