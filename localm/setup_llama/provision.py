@@ -12,6 +12,7 @@ from typing import Optional
 import click
 from rich.markup import escape
 
+from localm.debuglog import logger
 from localm.setup_llama._common import console
 from localm.setup_llama.pins import _PINNED_TAG
 from localm.setup_llama.download import _human_mb, ArtifactError
@@ -314,7 +315,9 @@ BUILD_UNUSABLE_EXIT = 79
 
 
 def _refuse_other_backend(chosen: str, why: str, code: int) -> None:
-    """Exit for ``--only``: say that *chosen* is not used here and *why*."""
+    """Exit for ``--only``: say that *chosen* is not used here and *why*, and
+    log it."""
+    logger.info("setup-llama: the %s build is not used (--only): %s", chosen, why)
     console.print(f"[red]The {chosen} build is not used:[/red] {escape(why)}")
     sys.exit(code)
 
@@ -391,6 +394,7 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
     console.print(f"[dim]Backend:[/dim] [bold]{chosen}[/bold]  ({notes.get(chosen, chosen)})")
 
     provisioned = True
+    provision_error = ""
     try:
         _try(chosen, with_cudart)
     except click.exceptions.Abort:
@@ -405,13 +409,13 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
         _exit_runtime_in_use(e)
     except click.ClickException as e:
         console.print(f"[red]{e.message}[/red]")
-        provisioned = False
+        provisioned, provision_error = False, e.message
     except (ArtifactError, OSError) as e:
         console.print(f"[red]Provisioning {chosen} failed:[/red] {e}")
-        provisioned = False
+        provisioned, provision_error = False, str(e)
     except Exception as e:
         console.print(f"[red]Provisioning {chosen} failed:[/red] {e}")
-        provisioned = False
+        provisioned, provision_error = False, str(e)
 
     loaded, detail = (_chosen_backend_loads(chosen) if provisioned
                       else (False, "not provisioned"))
@@ -469,8 +473,16 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
     # An explicit --sha256 pin means "exactly this artifact" - never silently
     # swap to a different (unpinned) build, even to recover. Report and stop.
     if sha256:
-        why = "failed validation" if not provisioned else "was provisioned but did not load"
-        console.print(f"[red]The pinned artifact {why}.[/red] Not falling back "
+        if provisioned:
+            reason = _name_missing_shared_lib(detail or "") or detail or "no reason was reported"
+            why = f"was provisioned but did not load: {reason}"
+        else:
+            why = "failed validation"
+        logger.info("setup-llama: the pinned %s artifact %s; not falling back "
+                    "(an explicit --sha256 was set); %s", chosen, why,
+                    f"load check: {detail or 'none'}" if provisioned
+                    else f"provisioning: {provision_error or 'no reason was reported'}")
+        console.print(f"[red]The pinned artifact {escape(why)}.[/red] Not falling back "
                       "(an explicit --sha256 was set).")
         sys.exit(1)
 
