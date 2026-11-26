@@ -2,7 +2,8 @@
 """Run the finishing step a build ships for its own update.
 
 A build may contain ``localm/_finish_update.py`` (:data:`MODULE`). After the swap,
-``updater.apply`` runs it from the tree the signature check verified::
+the updater of an older localm (0.3.3 and later, with its own copy of this module)
+runs it from the tree the signature check verified::
 
     <the install's python> -I -X utf8 -u <install>/localm/_finish_update.py OLD NEW CLASS RESULT
 

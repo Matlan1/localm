@@ -306,8 +306,7 @@ def storm_active(history: list, now_epoch: float) -> bool:
 
 def relaunch(argv: list, *, restart_history: list, now_epoch: float,
             log_path: Optional[Path]) -> Optional[int]:
-    """Start *argv* detached, matching the creation flags
-    localm.updater.spawn_health_watchdog already uses for a process meant to
+    """Start *argv* detached, with the creation flags of a process meant to
     outlive its spawner. The updated restart history is set on the child's
     environment (a plain Popen, unlike os.execv, does not inherit implicitly)
     so the watchdog THAT process spawns for itself can see how many

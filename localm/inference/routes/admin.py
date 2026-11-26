@@ -20,7 +20,7 @@ from localm.inference.errors import format_localm_error
 
 
 def _watchdog_probe_host(bind_host) -> str:
-    """The address the post-update health watchdog should probe: a wildcard bind
+    """The address the update program asks for the new version: a wildcard bind
     (0.0.0.0 / :: / unset) is not itself connectable, so it is mapped to the
     loopback it covers; a concrete single-interface bind is used AS-IS, since
     that is the only address it answers on.
@@ -389,39 +389,6 @@ def register(app: FastAPI, ctx) -> None:
         with discover.torch_probes_held(), probe_daemon_held():
             return fn(*args, **kwargs)
 
-    def _restart_after_apply(res: dict) -> None:
-        """Restart in place after a successful apply so the swapped code loads,
-        except for a setup-class update, which needs the setup script
-        (setup.bat or setup.sh) re-run by the user. Sets ``res["restarting"]`` when it restarts."""
-        if res.get("klass") == "setup":
-            return
-        # This is the only restart trigger that transitions automatically with no
-        # user watching, so it carries a post-restart health watchdog. Built from
-        # app.state (set by advertise()); with no instance_port the watchdog stays
-        # None and the restart proceeds unwatched.
-        watchdog = None
-        port = getattr(app.state, "instance_port", None)
-        new_version = res.get("version")
-        if port and new_version:
-            watchdog = {
-                "host": _watchdog_probe_host(getattr(app.state, "bind_host", None)),
-                "port": port,
-                "scheme": getattr(app.state, "instance_scheme", None) or "http",
-                "expect_version": new_version,
-            }
-        else:
-            from localm.debuglog import logger
-            logger.warning(
-                "update applied but the instance has no bind port/version to "
-                "probe (never fully advertised); restarting WITHOUT a health "
-                "watchdog")
-        # Pin the port we are bound to into the re-exec, so the new process comes
-        # back on the same port the watchdog probes. Without it the restart re-runs
-        # pick_port() and can bind a different one.
-        _request_restart(update_watchdog=watchdog, port=port,
-                         instance_id=getattr(app.state, "instance_id", None))
-        res["restarting"] = True
-
     #: Held while an update is prepared through the program its build ships.
     _handing = asyncio.Lock()
 
@@ -467,8 +434,7 @@ def register(app: FastAPI, ctx) -> None:
         :data:`_UPDATE_CONFIRM_S` that finds the same processes is the agreement to end
         them, and uses what was prepared; once that window has passed, what the first press
         prepared is discarded (:func:`_expire`). Anyone else gets 403, and the owner's first press
-        stays armed: only an owner's press uses or discards it. Returns None when the build
-        ships no such program (``updater.apply`` installs it then). Raises LocalmError or
+        stays armed: only an owner's press uses or discards it. Raises LocalmError or
         ``updater.UnverifiedBuild``."""
         import time as _time
 
@@ -486,9 +452,6 @@ def register(app: FastAPI, ctx) -> None:
         if prepared is None:
             prepared = await asyncio.to_thread(_probes_held, updater_handoff.prepare,
                                                asset_id, **kwargs)
-        if prepared.legacy:
-            prepared.discard()
-            return None
         keys = sorted(p["key"] for p in prepared.processes)
         if keys:
             if not owner:
@@ -557,35 +520,25 @@ def register(app: FastAPI, ctx) -> None:
         if not asset.get("id"):
             raise HTTPException(400, "This release has no downloadable build attached.")
         try:
-            handed = await _with_applier(request, asset["id"], signature=rel.get("signature"),
-                                         target_version=rel["version"],
-                                         allow_unverified=allow_unverified,
-                                         expect_sha256=sha256)
-            if handed is not None:
-                return handed
-            res = await asyncio.to_thread(
-                _probes_held, updater.apply, asset["id"], signature=rel.get("signature"),
-                target_version=rel["version"], allow_unverified=allow_unverified,
-                expect_sha256=sha256, defer_runtime=True)
+            return await _with_applier(request, asset["id"], signature=rel.get("signature"),
+                                       target_version=rel["version"],
+                                       allow_unverified=allow_unverified,
+                                       expect_sha256=sha256)
         except updater.UnverifiedBuild as e:
             return {"applied": False, "needs_confirmation": "unverified",
                     "version": rel["version"], "reason": e.reason, "sha256": e.sha256}
         except LocalmError as e:
             return {"applied": False, "error": format_localm_error(e)}
-        res["available"] = True
-        _restart_after_apply(res)
-        return res
 
     @app.post("/api/update/apply", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def update_apply_ep(request: Request):
-        """Apply the latest update (download, swap, class step), then restart in
-        place so the new code loads. Only an explicit request applies an update;
-        localm never updates itself. A failed apply is rolled back and reported as
-        an error, never as success. The build to install is chosen by the server
-        from the latest release, not taken from the request. The ``backup``,
-        ``runtime_note``, ``components_note`` and ``error`` fields are path-scrubbed
-        for a caller other than the local operator. A native runtime re-provision
-        the update needs runs during the restart, after the models are unloaded.
+        """Install the latest update: download, verify and check it, then hand it over
+        to its update program and restart into it (:func:`_hand_over`). Only an
+        explicit request applies an update; localm never updates itself. An update that
+        was not started is reported as an error, never as success. The build to install
+        is chosen by the server from the latest release, not taken from the request.
+        The ``error``, ``notes`` and ``edited`` fields are path-scrubbed for a caller
+        other than the local operator.
 
         A JSON body ``{"version": V}`` installs release V instead, older ones
         included. That form needs an owner (admin) key (403 otherwise) and answers
@@ -626,22 +579,10 @@ def register(app: FastAPI, ctx) -> None:
         if not asset.get("id"):
             raise HTTPException(400, "This release has no downloadable build attached.")
         try:
-            handed = await _with_applier(request, asset["id"], signature=info.get("signature"))
-            if handed is not None:
-                return handed
-            res = await asyncio.to_thread(
-                _probes_held, updater.apply, asset["id"], signature=info.get("signature"),
-                defer_runtime=True)
+            return await _with_applier(request, asset["id"], signature=info.get("signature"))
         except LocalmError as e:
-            # The error says whether apply() changed nothing, rolled back, or needs a manual restore.
             return {"applied": False,
                     "error": _hs.path_formatter(request)(format_localm_error(e))}
-        for key in ("backup", "runtime_note", "components_note"):
-            if res.get(key) is not None:
-                res[key] = _hs.path_formatter(request)(res[key])
-        res["available"] = True
-        _restart_after_apply(res)
-        return res
 
     # -----------------------------------------------------------------------
     #  Installed parts: which version each part is at, and the repair

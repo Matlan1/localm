@@ -1,24 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Apply a downloaded localm update: verify + extract the build zip, then swap the
-source tree into the install with a backup, restoring that backup if the swap (or
-the post-swap deps/runtime step run by ``updater.apply``) fails partway.
+"""File primitives of an update: verify and extract the build zip, the parts of the
+install an update never replaces, and the restore of the backup an update by an older
+localm made (:func:`rollback`, :func:`backup_names`, :func:`backup_problem`).
 
-Runs ONLY from an explicit user action (``localm update`` / the GUI "Update now"
-button), NEVER automatically. The swap runs in-process inside ``updater.apply()``
-and the caller restarts afterwards (the CLI tells the user; the server re-execs).
-The server's automatic restart (``_do_restart`` in
-``localm/inference/http_server.py``) spawns a DETACHED helper process right
-before re-exec'ing (``updater.spawn_health_watchdog()`` ->
-``scripts/update_watchdog.py``) that polls the relaunched build's own
-``/whoami`` for the applied VERSION and automatically rolls back - via the
-standalone ``scripts/rollback_update.py``, loaded by file path so it works even
-if the new build's ``localm`` package will not import - if it never comes up
-healthy within a bounded window. Manual recovery (``localm update --rollback``,
-or ``rollback.bat``/``rollback.sh`` in the install root) remains available for
-a build too broken for even the watchdog's own spawn to matter.
-
-The file primitives here are pure and unit-tested; ``updater.apply()`` wires them
-to download, signature verification, and the post-swap step.
+An older localm installs this build with its own updater and keeps a backup of what it
+replaced; its health watchdog runs this build's ``scripts/rollback_update.py``, which
+loads this file BY FILE PATH and puts that backup back with :func:`rollback`, so this
+module imports only the standard library at import time. ``localm update --rollback``
+(``updater.rollback_last``) uses the same functions.
 """
 
 from __future__ import annotations
@@ -57,7 +46,7 @@ RUNTIME_KEPT_RECORD = ".localm-runtime-kept.json"
 #: The extras the dependency step of an update installs.
 DEPS_EXTRAS = ("coder", "voice", "monitor")
 
-# The file :func:`backup` writes last, inside the backup:
+# The file the backup of an update by an older localm holds:
 # ``{"names": the swap set, "files": every file it copied}``.
 BACKUP_RECORD = ".localm-backup.json"
 
@@ -100,20 +89,6 @@ def restore_executables(root) -> list:
             if (root / rel).is_file() and _add_exec(root / rel)]
 
 
-def _debug_warn(msg, *args) -> None:
-    """Best-effort WARNING via localm's logger. This module is stdlib-only and can be
-    loaded BY FILE PATH (``scripts/rollback_update.py``) with NO importable localm
-    package, so the logger import is lazy and guarded: a logging failure must never
-    break or mask a swap. The only caller (``apply_files``) runs on the forward-apply
-    path where the full package is importable; the standalone rollback path never
-    reaches it."""
-    try:
-        from localm.debuglog import logger
-        logger.warning(msg, *args)
-    except Exception:
-        pass
-
-
 def _within_preserved(rel_posix: str) -> bool:
     """True if install-root-relative POSIX path *rel_posix* is a PRESERVE_WITHIN
     sub-tree or lies inside one."""
@@ -146,28 +121,23 @@ def _copy_into(src, dst, name) -> None:
             shutil.copy2(s, d)
 
 
-def _prune(dst, name, *, keep_src=None) -> list:
+def _prune(dst, name) -> list:
     """Remove entries under *dst*, deepest first, SKIPPING PRESERVE_WITHIN sub-trees
     (and never deleting a non-empty dir, which protects the ancestors of a preserved
-    sub-tree). With *keep_src*, remove only entries absent under keep_src (prune what
-    the new build dropped - used by apply); without it, remove everything not preserved
-    (used by rollback before restoring the backup).
+    sub-tree): everything not preserved goes (:func:`rollback`, before it restores the
+    backup).
 
     Returns a list of human-readable strings, one per FILE that was meant to be removed
     but could NOT be (its unlink raised - e.g. a Windows AV lock on a freshly written
     file). Such a file is left behind STALE, so the caller must SURFACE it rather than
-    report success over it: ``rollback()`` folds these into its RuntimeError,
-    ``apply_files()`` logs them. A dir that will not rmdir is NOT reported: the only
+    report success over it: ``rollback()`` folds these into its RuntimeError. A dir that will not rmdir is NOT reported: the only
     dirs attempted are already-empty ones, and a non-empty (or locked) dir left behind
     strands no functional state."""
     dst = Path(dst)
-    keep_src = Path(keep_src) if keep_src is not None else None
     errors = []
     for d in sorted(dst.rglob("*"), key=lambda p: len(p.parts), reverse=True):
         rel = f"{name}/{d.relative_to(dst).as_posix()}"
         if _within_preserved(rel):
-            continue
-        if keep_src is not None and (keep_src / d.relative_to(dst)).exists():
             continue
         try:
             if d.is_dir():
@@ -214,8 +184,8 @@ def _unsafe_member(name: str) -> bool:
     """True if a zip member name would escape the extraction root: an absolute path,
     a Windows drive (``C:``), or any ``..`` traversal component. We reject these
     OUTRIGHT rather than rely on extractall's silent sanitization, which would still
-    drop a sanitized name (``../evil`` -> ``evil``) at the staging root where
-    swap_entries() would then pick it up and copy it into the install."""
+    drop a sanitized name (``../evil`` -> ``evil``) at the staging root, where it
+    would count as a file of the build."""
     norm = (name or "").replace("\\", "/")
     if not norm:
         return False
@@ -239,8 +209,8 @@ def _unsafe_swap_name(name) -> bool:
       is the install dir itself, so ``shutil.rmtree`` on it deletes the entire
       installation.
     * A NESTED name (``a/b``) reaches a path the swap set never describes.
-    * A ``NEVER_TOUCH`` name is by definition not part of any swap: swap_entries
-      excludes them, so a manifest naming one is poisoned by construction. This
+    * A ``NEVER_TOUCH`` name is by definition not part of any swap: an update
+      never replaces one, so a manifest naming one is poisoned by construction. This
       matters most on a PORTABLE install, where ``home`` sits INSIDE the install
       root - rolling back an entry named ``home`` would delete the user's models,
       chat history and auth keys, and the backup does not contain them to restore.
@@ -289,48 +259,8 @@ def extract(zip_path, staging) -> Path:
     return staging
 
 
-def swap_entries(staged_root) -> list:
-    """Top-level names in the staged build to copy into the install (everything
-    except the NEVER_TOUCH set). Sorted for determinism."""
-    return sorted(p.name for p in Path(staged_root).iterdir()
-                  if p.name not in NEVER_TOUCH)
-
-
-def backup(installed, names, backup_dir) -> None:
-    """Copy the install's current version of each *name* into *backup_dir* (cleared
-    first), so a failed apply can be rolled back. Names absent from the install are
-    skipped (recorded by their absence). Writes :data:`BACKUP_RECORD` last, so it moves
-    with the folder (:func:`backup_names`, :func:`backup_problem`). ``__pycache__``
-    files are not listed.
-
-    A name containing a PRESERVE_WITHIN sub-tree is backed up WITHOUT that sub-tree:
-    the provisioned binaries are never modified by the swap, so there is nothing to
-    restore, and skipping them avoids copying large (and, while running, locked)
-    files on every update."""
-    installed, backup_dir = Path(installed), Path(backup_dir)
-    if backup_dir.exists():
-        shutil.rmtree(backup_dir)
-    backup_dir.mkdir(parents=True)
-    for name in names:
-        src = installed / name
-        if not src.exists():
-            continue
-        dst = backup_dir / name
-        if src.is_dir():
-            if _name_has_preserved(name):
-                _copy_into(src, dst, name)
-            else:
-                shutil.copytree(src, dst)
-        else:
-            shutil.copy2(src, dst)
-    files = sorted(p.relative_to(backup_dir).as_posix() for p in backup_dir.rglob("*")
-                   if p.is_file() and "__pycache__" not in p.parts)
-    (backup_dir / BACKUP_RECORD).write_text(json.dumps({"names": sorted(names), "files": files}),
-                                            encoding="utf-8")
-
-
 def _backup_record(backup_dir):
-    """The record :func:`backup` left in *backup_dir*, or None when it has none (a
+    """The record :data:`BACKUP_RECORD` in *backup_dir*, or None when it has none (a
     backup made by an older build). Raises OSError or ValueError when it cannot be
     read."""
     try:
@@ -381,42 +311,6 @@ def backup_problem(backup_dir, names) -> Optional[str]:
     if missing:
         return f"{len(missing)} expected item(s) are missing, first {missing[0]}"
     return None
-
-
-def apply_files(staged_root, installed, names) -> None:
-    """Replace each *name* in the install with the staged version (whole-tree replace
-    so upstream deletions within a replaced dir take effect).
-
-    A name that contains a PRESERVE_WITHIN sub-tree (e.g. ``runtime/`` holding the
-    provisioned native binaries) is MERGED instead of blunt-replaced: the new scaffold
-    is copied in and files the new build dropped are pruned, but the preserved sub-tree
-    is never read, written, or deleted - so provisioned binaries persist and a locked
-    DLL never blocks the swap."""
-    staged_root, installed = Path(staged_root), Path(installed)
-    for name in names:
-        src = staged_root / name
-        if not src.exists():
-            continue
-        dst = installed / name
-        if _name_has_preserved(name):
-            _copy_into(src, dst, name)
-            prune_errs = _prune(dst, name, keep_src=src)
-            if prune_errs:
-                # A stale file the new build dropped could not be removed. Logged
-                # rather than failing the update: an extra file, not a broken tree.
-                _debug_warn("update apply: could not remove %d stale file(s) under %r "
-                            "after merge: %s", len(prune_errs), name,
-                            "; ".join(prune_errs[:6]))
-            continue
-        if dst.exists():
-            if dst.is_dir():
-                shutil.rmtree(dst)
-            else:
-                dst.unlink()
-        if src.is_dir():
-            shutil.copytree(src, dst)
-        else:
-            shutil.copy2(src, dst)
 
 
 def rollback(backup_dir, installed, names) -> None:
@@ -486,95 +380,6 @@ def rollback(backup_dir, installed, names) -> None:
     if errors:
         raise RuntimeError(
             f"rollback incomplete (backup kept at {backup_dir}): " + "; ".join(errors[:6]))
-
-
-# Free space kept on top of what an update writes, in bytes.
-SPACE_MARGIN = 64 * 1024 * 1024
-
-
-class NoSpace(Exception):
-    """The disk cannot hold an update and its backup; nothing was changed."""
-
-
-def _tree_bytes(path: Path) -> int:
-    if path.is_file():
-        return path.stat().st_size
-    total = 0
-    for p in path.rglob("*"):
-        if p.is_file() and not _within_preserved(p.relative_to(path.parent).as_posix()):
-            total += p.stat().st_size
-    return total
-
-
-def space_needed(staged_root, installed, names) -> tuple:
-    """``(new, backup)``: the bytes swapping *names* from *staged_root* writes
-    into *installed*, and the bytes the backup of what they replace takes. A
-    PRESERVE_WITHIN sub-tree is neither backed up nor replaced, so it is not
-    counted."""
-    staged_root, installed = Path(staged_root), Path(installed)
-    new = sum(_tree_bytes(staged_root / n) for n in names if (staged_root / n).exists())
-    backup = sum(_tree_bytes(installed / n) for n in names if (installed / n).exists())
-    return new, backup
-
-
-def check_space(staged_root, installed, names, backup_parent, *, free=None) -> None:
-    """Raise :class:`NoSpace` unless the drive of *installed* has room for the
-    new files and the drive of *backup_parent* (an existing folder) for the
-    backup, each with :data:`SPACE_MARGIN` to spare; one drive holding both
-    needs room for both. *free* returns the free bytes at a path (default
-    ``shutil.disk_usage(path).free``). Raises OSError when the free space cannot
-    be read. Changes nothing."""
-    import os
-    installed, backup_parent = Path(installed), Path(backup_parent)
-    free = free or (lambda path: shutil.disk_usage(path).free)
-    new, backup = space_needed(staged_root, installed, names)
-    places: dict = {}
-    for where, need in ((installed, new), (backup_parent, backup)):
-        key = os.stat(where).st_dev
-        first, total = places.get(key, (where, 0))
-        places[key] = (first, total + need)
-    for where, need in places.values():
-        have = free(where)
-        if have < need + SPACE_MARGIN:
-            mb = 1024 * 1024
-            raise NoSpace(f"{where} has {have // mb} MB free and the update needs "
-                          f"{(need + SPACE_MARGIN) // mb + 1} MB there")
-
-
-class BackupFailed(Exception):
-    """:func:`backup` could not complete: nothing was swapped and what it wrote is
-    gone."""
-
-
-def swap_with_backup(staged_root, installed, backup_dir, names=None) -> list:
-    """Back up, then swap the staged source into the install. Returns the list of
-    swapped names (for a later rollback). *names* are the top-level entries to
-    swap, default every entry of the staged build (:func:`swap_entries`).
-
-    Raises :class:`BackupFailed` when the backup cannot be completed, with nothing
-    swapped and *backup_dir* removed. Raises the swap's own error, after restoring the
-    install, when the swap fails partway, with *backup_dir* removed. Raises
-    RuntimeError when the restore fails too, with *backup_dir* kept: it is then the
-    only copy of what the swap replaced."""
-    names = swap_entries(staged_root) if names is None else list(names)
-    try:
-        backup(installed, names, backup_dir)
-    except OSError as e:
-        shutil.rmtree(backup_dir, ignore_errors=True)
-        raise BackupFailed(str(e)) from e
-    try:
-        apply_files(staged_root, installed, names)
-    except Exception as swap_err:
-        try:
-            rollback(backup_dir, installed, names)
-        except Exception as rb:
-            # Both the swap and the recovery failed; the backup dir is kept.
-            raise RuntimeError(
-                f"update swap failed ({swap_err}) AND rollback also failed ({rb}); "
-                f"the install may be inconsistent - restore from {backup_dir}") from swap_err
-        shutil.rmtree(backup_dir, ignore_errors=True)
-        raise
-    return names
 
 
 def post_swap_command(klass: str, backend: Optional[str] = None,
