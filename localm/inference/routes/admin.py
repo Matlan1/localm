@@ -769,8 +769,12 @@ def register(app: FastAPI, ctx) -> None:
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def integrity_repair_ep(request: Request):
         """Write the differing files ``{paths}`` (default every differing one) again
-        from the signed build of the installed version. OWNER-only. Returns
-        ``{repaired: true, files, failed, result}`` or ``{repaired: false, error}``."""
+        from the signed build of the installed version; without ``paths``, also install
+        the native runtime again when files of it differ
+        (``setup_llama.repair.repair_runtime``).
+        OWNER-only. Returns ``{repaired: true, files, failed, runtime, result}``
+        (``runtime`` the runtime repair's result, its ``error`` and ``fix``
+        path-scrubbed, or None without ``paths`` given) or ``{repaired: false, error}``."""
         from localm import integrity
         from localm.bugreport import LocalmError
         _integrity_owner(request, "Repairing files")
@@ -788,8 +792,14 @@ def register(app: FastAPI, ctx) -> None:
         except LocalmError as e:
             return {"repaired": False, "error": fmt(format_localm_error(e))}
         failed = [{"path": f["path"], "reason": fmt(f["reason"])} for f in res["failed"]]
+        runtime = None
+        if paths is None:
+            from localm.setup_llama.repair import repair_runtime
+            runtime = await asyncio.to_thread(_probes_held, repair_runtime)
+            runtime = {**runtime, **{k: fmt(runtime[k]) for k in ("error", "fix")
+                                     if runtime[k] is not None}}
         return {"repaired": True, "files": res["repaired"], "failed": failed,
-                "result": await asyncio.to_thread(integrity.run)}
+                "runtime": runtime, "result": await asyncio.to_thread(integrity.run)}
 
     # -----------------------------------------------------------------------
     #  Update rollback: restore the previous build (owner-only)

@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from localm import integrity, runtime_files, update_package, updater
+from localm.setup_llama.repair import repair_runtime as _repair_runtime
 
 FILES = {
     "VERSION": "1.0\n",
@@ -681,17 +682,156 @@ def test_the_command_lists_keeps_and_reports_its_exit_code(install):
     assert r.exit_code == 0 and "kept as yours: localm/a.py" in r.output, r.output
 
 
-def test_keep_or_repair_with_only_runtime_differences_still_exits_1(install):
+def test_keep_with_only_runtime_differences_still_exits_1(install):
     from click.testing import CliRunner
 
     from localm.cli import main
     lib = _runtime(install)
     integrity.write_runtime_list(lib)
     (lib / "llama.dll").write_bytes(b"L" * 999)
-    for flag in ("--keep", "--repair"):
-        r = CliRunner().invoke(main, ["integrity", flag])
-        assert r.exit_code == 1, (flag, r.output)
-        assert "nothing to" in r.output and "llama.dll" in r.output, r.output
+    r = CliRunner().invoke(main, ["integrity", "--keep"])
+    assert r.exit_code == 1, r.output
+    assert "nothing to" in r.output and "llama.dll" in r.output, r.output
+
+
+# ------------------------------------------------------------ runtime repair
+
+@pytest.fixture
+def provision(install, monkeypatch):
+    """A stand-in for the setup-llama run of a runtime repair (no network, no GPU): it
+    writes the runtime's files as a provision does, records the backend and build with
+    the real ``_record_provisioned_backend`` (which writes the list), and records each
+    argv. ``state["rc"]`` is its exit code, ``state["leave"]`` a file it leaves changed,
+    ``state["pin"]`` a build it stores as the user's choice, as ``--tag`` does."""
+    from localm.setup_llama import _record_provisioned_backend
+    from localm.setup_llama.versions import runtime_target
+    lib = _runtime(install)
+    state = {"calls": [], "rc": 0, "leave": None, "pin": None,
+             "build": runtime_target("cpu")[0]}
+    _record_provisioned_backend(lib, "cpu", build=state["build"])
+
+    def stand_in(cmd, root, say):
+        state["calls"].append(list(cmd))
+        say("stand-in setup-llama ran")
+        if state["pin"]:
+            from localm import setup_llama as sl
+            sl.set_pinned_tag(state["pin"])
+        if state["rc"] != 0:
+            return state["rc"], ["Cannot replace the installed runtime: it is in use."]
+        (lib / "llama.dll").write_bytes(b"L" * 1000)
+        (lib / "rocblas" / "kernel.dat").write_bytes(b"K" * 500)
+        _record_provisioned_backend(lib, "cpu", build=state["build"])
+        if state["leave"]:
+            (lib / state["leave"]).write_bytes(b"changed after")
+        return 0, ["OK"]
+
+    from localm.setup_llama import repair
+    monkeypatch.setattr(repair, "_run", stand_in)
+    from localm.setup_llama import _common
+    monkeypatch.setattr(_common, "_net_allowed", lambda: True)
+    return lib, state
+
+
+def test_the_runtime_repair_runs_the_command_an_update_re_provisions_with():
+    """One command for both: the repair's argv is the update's re-provision argv of
+    this tree (``updater_runtime._command``)."""
+    from localm import updater_runtime
+    from localm.setup_llama import BACKENDS, repair
+    repo = Path(__file__).resolve().parents[1]
+    for backend in BACKENDS:
+        assert repair.command(backend) == updater_runtime._command(repo, backend), backend
+
+
+def test_repair_installs_a_changed_runtime_again_and_exits_0(install, provision):
+    """The old command exited 1 here ("nothing to repair"): the runtime is now installed
+    again and compared in full."""
+    from click.testing import CliRunner
+
+    from localm.cli import main
+    lib, state = provision
+    (lib / "llama.dll").write_bytes(b"X" * 1000)
+    (lib / "rocblas" / "kernel.dat").unlink()
+    r = CliRunner().invoke(main, ["integrity", "--repair"])
+    assert r.exit_code == 0, r.output
+    assert f"Installed the cpu runtime {state['build']} again" in r.output, r.output
+    assert "2 file(s)" in r.output, r.output
+    (cmd,) = state["calls"]
+    assert cmd[1:6] == ["-m", "localm", "setup-llama", "--backend", "cpu"]
+    assert "--force" in cmd and "--yes" in cmd and "--tag" not in cmd
+    assert (lib / "llama.dll").read_bytes() == b"L" * 1000
+    assert integrity.check(full=True)["count"] == 0
+
+
+def test_a_runtime_repair_of_another_build_than_the_default_keeps_the_user_s_choice(
+        install, provision):
+    """The installed build b1 is not the one setup-llama installs by default: it is
+    installed again with --tag b1, and the stored choice of build is put back."""
+    from localm.setup_llama import _record_provisioned_backend
+    lib, state = provision
+    state.update(pin="b1", build="b1")
+    _record_provisioned_backend(lib, "cpu", build="b1")
+    (lib / "llama.dll").write_bytes(b"X" * 1000)
+    res = _repair_runtime()
+    assert res["repaired"] and res["build"] == "b1", res
+    (cmd,) = state["calls"]
+    assert cmd[-2:] == ["--tag", "b1"]
+    from localm import setup_llama as sl
+    assert sl.pinned_tag() is None and not sl.tracks_latest()
+
+
+@pytest.mark.parametrize("case", ["net-off", "custom", "unrecorded", "exit-1", "still-differs",
+                                  "update-running"])
+def test_a_runtime_repair_that_cannot_run_says_why_and_what_repairs_it(
+        install, provision, monkeypatch, case):
+    from click.testing import CliRunner
+
+    from localm.cli import main
+    from localm.setup_llama import _common
+    lib, state = provision
+    (lib / "llama.dll").write_bytes(b"X" * 1000)
+    if case == "net-off":
+        monkeypatch.setattr(_common, "_net_allowed", lambda: False)
+    elif case == "custom":
+        (lib / ".localm-backend").write_text("custom\n", encoding="utf-8")
+    elif case == "unrecorded":
+        (lib / ".localm-backend").unlink()
+    elif case == "exit-1":
+        state["rc"] = 1
+    elif case == "still-differs":
+        state["leave"] = "llama.dll"
+    else:
+        from localm.update_mechanism import job
+        monkeypatch.setattr(job, "locked", lambda root: True)
+    res = _repair_runtime()
+    assert res["needed"] and not res["repaired"] and res["error"] and res["fix"], res
+    expected = {"net-off": ("network access is off", "localm integrity --repair"),
+                "custom": ("installed yourself", "--from"),
+                "unrecorded": ("does not record", "localm setup-llama --force"),
+                "exit-1": ("setup-llama exited 1", "localm setup-llama --backend cpu --force"),
+                "still-differs": ("still differ", "localm setup-llama --backend cpu --force"),
+                "update-running": ("in progress", "localm integrity --repair")}[case]
+    assert expected[0] in res["error"] and expected[1] in res["fix"], res
+    assert len(state["calls"]) == (1 if case in ("exit-1", "still-differs") else 0)
+    if case == "still-differs":
+        (lib / "llama.dll").write_bytes(b"X" * 1000)
+    r = CliRunner().invoke(main, ["integrity", "--repair"])
+    assert r.exit_code == 1, r.output
+    assert "The native runtime was not repaired" in r.output and "To repair it" in r.output
+    if case != "still-differs":
+        assert (lib / "llama.dll").read_bytes() == b"X" * 1000
+
+
+def test_the_repair_route_installs_the_runtime_again(install, client, provision):
+    c, _scoped = client
+    lib, state = provision
+    (lib / "llama.dll").write_bytes(b"X" * 1000)
+    owner = {"Authorization": f"Bearer {OWNER_KEY}"}
+    r = c.post("/api/integrity/repair", headers=owner)
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["repaired"] is True and d["files"] == [], d
+    assert d["runtime"]["repaired"] is True and d["runtime"]["files"] == ["llama.dll"], d
+    assert d["result"]["count"] == 0 and len(state["calls"]) == 1
 
 
 def test_localm_bug_report_carries_the_counts_without_a_check_before_and_writes_nothing(

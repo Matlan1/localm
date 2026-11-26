@@ -2677,6 +2677,51 @@ export async function updateRollback() {
 }
 if ($("update-rollback")) $("update-rollback").onclick = updateRollback;
 
+// The backup an older localm's update left that is kept because it cannot be proven to
+// be this install's: the GUI form of `localm update --remove-old-backup`. The block
+// shows only while there is one (GET /api/update/old-backup).
+export async function oldBackupCheck() {
+  const block = $("app-old-backup-block"), text = $("update-old-backup-text");
+  if (!block) return;
+  try {
+    const r = await fetch("/api/update/old-backup", { headers: authHeaders() });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.kept) { block.hidden = true; return; }
+    block.hidden = false;
+    const size = Math.max(1, Math.round((d.bytes || 0) / (1024 * 1024)));
+    if (text) {
+      text.textContent = t("settings.oldBackup.text", { version: d.version || "", size });
+      text.dataset.version = d.version || "";
+    }
+  } catch (e) {
+    block.hidden = true;
+    console.warn("could not read the backup of an earlier update:", e);
+  }
+}
+window.__localmOldBackupCheck = oldBackupCheck;
+
+export async function oldBackupRemove() {
+  const out = $("update-old-backup-status"), btn = $("update-old-backup-remove");
+  const version = ($("update-old-backup-text") && $("update-old-backup-text").dataset.version) || "";
+  confirmDanger(t("settings.oldBackup.confirmTitle"), t("settings.oldBackup.confirmBody", { version }),
+    t("settings.oldBackup.confirmLabel"), async () => {
+      if (btn) btn.disabled = true;
+      if (out) { out.hidden = false; out.textContent = t("settings.oldBackup.removing"); }
+      try {
+        const r = await fetch("/api/update/old-backup/remove", { method: "POST", headers: authHeaders() });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || r.statusText);
+        if (!d.removed) throw new Error(d.error || r.statusText);
+        if (out) out.textContent = t("settings.oldBackup.removed");
+        if (btn) btn.hidden = true;
+      } catch (e) {
+        showInlineError(out, t("settings.oldBackup.failed", { message: e.message }));
+        if (btn) btn.disabled = false;
+      }
+    });
+}
+if ($("update-old-backup-remove")) $("update-old-backup-remove").onclick = oldBackupRemove;
+
 // Installed parts: the GUI form of `localm update --repair`. The block shows
 // only when a part of the install differs from the installed version.
 export async function updatePartsCheck() {
@@ -2774,7 +2819,9 @@ export function renderIntegrity(state) {
   }
   if (list) list.replaceChildren(...items.map(item));
   const releaseFiles = r && r.available && ((r.differ || []).length + (r.missing || []).length) > 0;
-  if ($("integrity-repair")) $("integrity-repair").hidden = !releaseFiles;
+  const rtFiles = r && r.available && r.runtime
+    && ((r.runtime.differ || []).length + (r.runtime.missing || []).length) > 0;
+  if ($("integrity-repair")) $("integrity-repair").hidden = !(releaseFiles || rtFiles);
   if ($("integrity-keep")) $("integrity-keep").hidden = !releaseFiles;
   return differs;
 }
@@ -2859,8 +2906,19 @@ export async function integrityRepair() {
   try {
     const d = await _integrityPost("/api/integrity/repair", {}, out, t("settings.integrity.repairing"));
     if (!d.repaired) throw new Error(d.error || t("settings.integrity.notRepairedAny"));
-    const lines = [t("settings.integrity.repaired", { count: (d.files || []).length })];
+    const rt = d.runtime;
+    const lines = [];
+    if ((d.files || []).length || (d.failed || []).length || !(rt && rt.needed)) {
+      lines.push(t("settings.integrity.repaired", { count: (d.files || []).length }));
+    }
     for (const f of d.failed || []) lines.push(t("settings.integrity.notRepaired", { path: f.path, reason: f.reason }));
+    if (rt && rt.needed && rt.repaired) {
+      lines.push(t("settings.integrity.runtimeRepaired",
+        { backend: rt.backend || "", build: rt.build || "", count: (rt.files || []).length }));
+      if (rt.note) lines.push(rt.note);
+    } else if (rt && rt.needed) {
+      lines.push(t("settings.integrity.runtimeNotRepaired", { error: rt.error || "", fix: rt.fix || "" }));
+    }
     if (out) out.textContent = lines.join(" ");
     renderIntegrity({ result: d.result });
   } catch (e) {

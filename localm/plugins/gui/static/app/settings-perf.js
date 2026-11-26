@@ -2025,6 +2025,7 @@ export async function refreshPluginCommands() {
     // block is gated on, and the probe is a read-only local check that reveals
     // nothing when there is no backup (the overwhelmingly common case).
     if (typeof window.__localmRollbackCheck === "function") window.__localmRollbackCheck();
+    if (typeof window.__localmOldBackupCheck === "function") window.__localmOldBackupCheck();
     if (typeof window.__localmPartsCheck === "function") window.__localmPartsCheck();
     if (typeof window.__localmIntegrityCheck === "function") window.__localmIntegrityCheck();
     const isSec = $("sec-issues");

@@ -30,7 +30,8 @@ check that writes nothing (:func:`report_counts`).
 
 :func:`repair` downloads the installed version's build through the updater, checks
 its signature, and writes exactly the named files from it, with the execute
-permission the build gives them.
+permission the build gives them. The native runtime is repaired by installing it
+again (``setup_llama.repair.repair_runtime``).
 """
 
 from __future__ import annotations
