@@ -446,10 +446,12 @@ def register(app: FastAPI, ctx) -> None:
                 prepared.discard()
                 return {"applied": False, "needs_confirmation": "processes",
                         "processes": prepared.processes,
-                        "error": f"The update to {prepared.new} ends these processes of "
-                                 f"localm: {updater_handoff.describe(prepared.processes)}. A "
-                                 "chat or a command ends; an MCP server is started again by "
-                                 "its client. Press Update now again to continue."}
+                        "error": f"The update to {prepared.new} restarts or ends these "
+                                 "processes of localm: "
+                                 f"{updater_handoff.describe(prepared.processes)}. A server "
+                                 "restarts into the new version by itself; a chat or a command "
+                                 "ends; an MCP server is started again by its client. Press "
+                                 "Update now again to continue."}
             if not _hs.caller_is_operator(request):
                 prepared.discard()
                 raise HTTPException(403, "Ending the other processes of localm for an update "

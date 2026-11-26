@@ -104,6 +104,13 @@ def test_the_update_dependency_step_syncs_from_the_lock():
     assert not any("verify-hashes" in a or a == "pip" for a in cmd)
 
 
+def test_an_update_installs_the_extras_every_setup_installs_and_no_more():
+    """The extras every update installs are the ones every setup variant installed, so
+    an update adds no feature the user never had."""
+    from localm import setup_spec
+    assert tuple(setup_spec.BASE_EXTRAS.split(",")) == au.DEPS_EXTRAS
+
+
 def test_the_update_dependency_step_installs_what_the_lock_names():
     """The extras the step syncs resolve, in the shipped lock, to hashed pins."""
     uv = _uv()

@@ -554,15 +554,21 @@ def _install_with_applier(asset_id, signature, *, yes: bool, target_version=None
     try:
         if prepared.processes:
             named = updater_handoff.describe(prepared.processes)
-            console.print(f"[yellow]The update ends these processes of localm:[/yellow] "
-                          f"{escape(named)}. A chat or a command ends; an MCP server is "
+            console.print(f"[yellow]The update restarts or ends these processes of "
+                          f"localm:[/yellow] {escape(named)}. A server restarts into the new "
+                          "version by itself; a chat or a command ends; an MCP server is "
                           "started again by its client.")
-            if yes:
-                console.print("[red]Not installed:[/red] --yes ends nothing that is running. "
-                              "Close them, or run the update without --yes and agree.")
+            ended = prepared.ended()
+            if yes and ended:
+                console.print("[red]Not installed:[/red] --yes restarts the servers and ends "
+                              f"nothing else that is running: "
+                              f"{escape(updater_handoff.describe(ended))}. Close them, or run "
+                              "the update without --yes and agree.")
                 prepared.discard()
                 sys.exit(1)
-            if not (sys.stdin.isatty() and click.confirm("  End them and update?", default=False)):
+            if not yes and not (sys.stdin.isatty()
+                                and click.confirm("  Restart or end them and update?",
+                                                  default=False)):
                 console.print("[dim]Not installed.[/dim]")
                 prepared.discard()
                 sys.exit(1)

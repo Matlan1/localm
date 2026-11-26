@@ -91,6 +91,9 @@ class Update(Install):
         work = root / ".localm-update" / ID
         um.write(work / "new", {**new, "update-package.json": _statement(new, "2")})
         (work / steps_update.STEPS_FILE).write_text(json.dumps(_STEPS), encoding="utf-8")
+        later = time.time() + 10
+        for path in (work / "new").rglob("*"):
+            os.utime(path, (later, later))   # extracted after the install was written
         subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(root / ".venv")],
                        check=True, **HIDDEN)
         self.old = self.tree()
@@ -105,7 +108,7 @@ class Update(Install):
     def version(self) -> str:
         return (self.root / "VERSION").read_text(encoding="utf-8")
 
-    def apply(self, *, confirmed=(), starter: str = "0-0") -> subprocess.Popen:
+    def apply(self, *, confirmed=(), starter: str = "0-0", restarting=()) -> subprocess.Popen:
         """Start the applier with its hand-off and return it once it holds the update."""
         program = self.root / ".localm-update" / ID / "applier" / "update_mechanism"
         proc = subprocess.Popen(
@@ -116,7 +119,7 @@ class Update(Install):
         proc.stdin.write(json.dumps({
             "mode": applier.COMMAND, "starter": starter, "confirmed": list(confirmed),
             "home": str(self.root / "home"), "old": "1", "new": "2", "watch": None,
-            "relaunch": None}) + "\n")
+            "relaunch": None, "restarting": list(restarting)}) + "\n")
         proc.stdin.close()
         assert proc.stdout.readline().strip() == "ready", proc.stderr.read()
         return proc
@@ -214,6 +217,150 @@ def test_localm_update_exits_0_only_once_the_new_version_is_in_place(tmp_path, f
         assert proc.returncode == 0, err
         assert version == "2" and not record
     assert not list((update.root / ".localm-update").glob("result-*.json"))
+
+
+@pytest.mark.parametrize("waits", [False, True])
+def test_a_result_nobody_waits_for_any_more_is_deleted_by_the_next_cleanup(update, waits):
+    from localm import procs
+    from localm.update_mechanism import job, steps
+    proc = update.apply()
+    _end(proc, update.waiter())
+    left = update.root / ".localm-update" / job.result_name(ID)
+    assert json.loads(left.read_text(encoding="utf-8"))[job.RESULT_FOR]
+    other = subprocess.Popen([sys.executable, "-m", "localm", "stay"], cwd=str(update.root),
+                             env=update.env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True, **HIDDEN)
+    assert other.stdout is not None and other.stdin is not None
+    try:
+        assert other.stdout.readline().startswith("STARTED ")
+        if waits:
+            entry = next(e for e in procs.list(str(update.root)) if e.recorded and (
+                e.pid == other.pid or (e.parent and e.parent[0] == other.pid)))
+            said = json.loads(left.read_text(encoding="utf-8"))
+            left.write_text(json.dumps({**said, job.RESULT_FOR: f"{entry.pid}-{entry.start}"}),
+                            encoding="utf-8")
+        steps.sweep(update.root)
+        assert left.exists() is waits
+    finally:
+        other.stdin.close()
+        _end(other)
+
+
+def _stay(update, *more):
+    """A start of localm in *update* that runs until its input ends, and its entry."""
+    from localm import procs
+    proc = subprocess.Popen([sys.executable, "-m", "localm", *(more or ("stay",))],
+                            cwd=str(update.root), env=update.env(), stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **HIDDEN)
+    assert proc.stdout is not None and proc.stdin is not None
+    if more:
+        return proc, None
+    assert proc.stdout.readline().startswith("STARTED ")
+    entry = next(e for e in procs.list(str(update.root)) if e.recorded and (
+        e.pid == proc.pid or (e.parent and e.parent[0] == proc.pid)))
+    return proc, entry
+
+
+def _waits(update, *, count: int = 1, timeout: float = 60) -> None:
+    """Wait until *count* starts of localm wait at the gate of *update*."""
+    deadline = time.monotonic() + timeout
+    folder = update.root / ".localm-update"
+    while len(list(folder.glob("waiting-*"))) < count:
+        assert time.monotonic() < deadline, "nothing waits at the gate"
+        time.sleep(0.1)
+
+
+def _started(out: str) -> dict:
+    return next(json.loads(ln[8:]) for ln in out.splitlines() if ln.startswith("STARTED "))
+
+
+def test_a_server_asked_to_restart_is_waited_for_and_runs_the_new_version_after_it(update):
+    """The other server (here a start that the test restarts by hand, 3 s after the
+    update began) is neither ended nor counted as a process nobody agreed to end: its
+    successor waits at the gate and runs the new version."""
+    server, entry = _stay(update)
+    key = f"{entry.pid}-{entry.start}"
+    proc = update.apply(confirmed=[key], restarting=[[key, entry.purpose]])
+    waiting = update.waiter()
+    try:
+        time.sleep(3)
+        assert server.poll() is None, "a server asked to restart was ended at once"
+        assert json.loads(update.record.read_text(encoding="utf-8"))["phase"] == "ending"
+        assert update.version() == "1"
+        again, _ = _stay(update, "again")
+        _waits(update, count=2)
+    finally:
+        server.stdin.close()
+        _end(server)
+    (_, err), _, (out, _) = _end(proc, waiting, again)
+    assert proc.returncode == 0, err
+    assert update.version() == "2" and "did not restart" not in err
+    assert {_started(out)[k] for k in ("localm", "part", "VERSION")} == {"2"}, (out, err)
+
+
+def test_a_start_during_the_update_waits_and_runs_only_the_new_version(update):
+    """MATRIX-COMBO-162: nothing of localm runs between the hand-off and the end of the
+    update, so a ``localm update --repair`` (any start) started then neither races the
+    update's steps nor sees the old process answer with the new version: it waits at the
+    gate, is not ended, and then runs the new version."""
+    proc = update.apply()
+    repair, _ = _stay(update, "repair")
+    _waits(update)
+    waiting = update.waiter()
+    (_, err), _, (out, _) = _end(proc, waiting, repair)
+    assert proc.returncode == 0, err
+    assert update.version() == "2"
+    said = _started(out)
+    assert said["argv"] == ["repair"]
+    assert {said[k] for k in ("localm", "part", "VERSION")} == {"2"}
+
+
+def test_the_other_servers_of_this_install_are_asked_to_restart(tmp_path, monkeypatch):
+    """``servers_of`` finds a server of this data folder's registry by its process, and
+    ``restart_servers`` sends it ``POST /v1/server/restart``; a process the registry does
+    not list, or that it lists for another process, is not one."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from localm import config, instances, updater_handoff
+    asked: list = []
+
+    class Answer(BaseHTTPRequestHandler):
+        def do_POST(self):
+            asked.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *_a):
+            pass
+
+    http = HTTPServer(("127.0.0.1", 0), Answer)
+    threading.Thread(target=http.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setattr(config, "HOME_DIR", tmp_path)
+        path = instances.register_instance(
+            tmp_path, instance_id="a" * 32, port=http.server_address[1], host="127.0.0.1",
+            root_dir=str(tmp_path), mode="full", token="t" * 32)
+        processes = [{"key": "me", "pid": os.getpid(), "purpose": "server"},
+                     {"key": "chat", "pid": os.getpid() + 1, "purpose": "chat"}]
+        servers = updater_handoff.servers_of(processes)
+        assert list(servers) == ["me"]
+        assert servers["me"]["url"].endswith(f":{http.server_address[1]}/v1")
+        prepared = updater_handoff.Prepared(tmp_path, "b" * 32, "1", "2", None, True, None,
+                                            False, None, processes=processes,
+                                            servers=servers)
+        assert prepared.restarting() == [["me", "server"]]
+        assert [p["key"] for p in prepared.ended()] == ["chat"]
+        updater_handoff.restart_servers(prepared, say=lambda _t: None)
+        assert asked == ["/v1/server/restart"]
+        entry = json.loads(Path(path).read_text(encoding="utf-8"))
+        Path(path).write_text(json.dumps({**entry, "start_identity": {"x": 1}}),
+                              encoding="utf-8")
+        assert updater_handoff.servers_of(processes) == {}
+    finally:
+        http.shutdown()
 
 
 def test_the_hand_off_must_be_complete():

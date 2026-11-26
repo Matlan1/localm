@@ -54,7 +54,19 @@ class Prepared:
     notes: list = field(default_factory=list)
     #: ``{"host", "port", "scheme"}`` of the server that restarts into the update.
     watch: Optional[dict] = None
+    #: ``{key: {"url", "token"}}`` of the other servers of this install that restart into
+    #: the update (:func:`restart_servers`); their entries in :attr:`processes` carry
+    #: ``"restarts": True``.
+    servers: dict = field(default_factory=dict)
     _work: object = None
+
+    def restarting(self) -> list:
+        """``[key, purpose]`` of each other server that restarts into the update."""
+        return [[p["key"], p["purpose"]] for p in self.processes if p["key"] in self.servers]
+
+    def ended(self) -> list:
+        """The other processes the update ends: those that do not restart."""
+        return [p for p in self.processes if p["key"] not in self.servers]
 
     def discard(self) -> None:
         """Delete what was prepared."""
@@ -146,6 +158,9 @@ def prepare(asset_id, *, signature=None, target_version=None, allow_unverified=F
                               reason=str(found.get("refused") or f"its check ended with {code}"))
         out.edited, out.notes = list(found.get("edited") or ()), list(found.get("notes") or ())
         out.processes = other_processes(root)
+        out.servers = servers_of(out.processes)
+        for p in out.processes:
+            p["restarts"] = p["key"] in out.servers
         return out
     except BaseException:
         work.__exit__(None, None, None)
@@ -204,15 +219,56 @@ def other_processes(root) -> list:
             for e in running if e.recorded and not is_mine(e)]
 
 
+def servers_of(processes: list) -> dict:
+    """``{key: {"url", "token"}}`` of the servers among *processes* (:func:`other_processes`)
+    that this data folder's instance registry lists, that are proven to be that server
+    and that listen on this machine: they can be asked to restart."""
+    from localm import config, instances
+    from localm.bindhost import is_own_address, self_connect_host, url_host
+    by_pid = {p["pid"]: p["key"] for p in processes}
+    found: dict = {}
+    for entry in instances.list_entries(config.HOME_DIR):
+        key = by_pid.get(entry.get("pid"))
+        if key is None or instances.entry_process_state(entry)[0] != "same":
+            continue
+        dial = self_connect_host(entry.get("host"))
+        if not is_own_address(dial) or not entry.get("port"):
+            continue
+        found[key] = {"url": f"{entry.get('scheme') or 'http'}://{url_host(dial)}:"
+                             f"{entry['port']}/v1", "token": entry.get("token")}
+    return found
+
+
+def restart_servers(prepared: Prepared, say: Callable[[str], None]) -> None:
+    """Ask each other server of *prepared* to restart (``POST /v1/server/restart``); it
+    then waits for the update at the gate of ``localm/__init__.py`` and runs the new
+    version after it. One that does not is ended by the applier and named there."""
+    import requests
+
+    from localm.selfclient import self_request
+    for _key, server in sorted(prepared.servers.items()):
+        try:
+            reply = self_request("POST", "/server/restart", base_url=server["url"], timeout=5,
+                                 instance_token=server.get("token"))
+            if reply.status_code != 200:
+                say(f"The server {server['url']} did not restart for the update "
+                    f"({reply.status_code}); the update ends it.")
+        except requests.RequestException as e:
+            say(f"The server {server['url']} could not be asked to restart for the update "
+                f"({e}); the update ends it.")
+
+
 def describe(processes: list) -> str:
-    """The processes an update ends, for the user."""
-    return ", ".join(f"{p['purpose']} (pid {p['pid']})" for p in processes)
+    """The processes an update ends or restarts, for the user."""
+    return ", ".join(f"{p['purpose']} (pid {p['pid']})"
+                     + (", restarts" if p.get("restarts") else "") for p in processes)
 
 
 def hand_off(prepared: Prepared, *, mode: str, confirmed: list, watch: Optional[dict] = None,
              relaunch: Optional[list] = None, say: Optional[Callable[[str], None]] = None) -> None:
     """Start the applier of *prepared* and return once it holds the update (its record
-    is written). *confirmed* are the keys of the processes the user agreed to end.
+    is written) and the other servers were asked to restart (:func:`restart_servers`).
+    *confirmed* are the keys of the processes the user agreed to end or restart.
     *mode* ``server``: this server restarts next (*watch* is ``{"host", "port",
     "scheme"}``, *relaunch* its command line); ``command``: this process exits with
     :data:`HANDED_OFF`. Raises LocalmError with the update discarded."""
@@ -232,7 +288,7 @@ def hand_off(prepared: Prepared, *, mode: str, confirmed: list, watch: Optional[
                 updater._backup_data_for_downgrade(prepared.new)
         handoff = {"mode": mode, "starter": _key(me), "confirmed": list(confirmed),
                    "home": str(config.HOME_DIR), "old": prepared.old, "new": prepared.new,
-                   "watch": watch, "relaunch": relaunch}
+                   "watch": watch, "relaunch": relaunch, "restarting": prepared.restarting()}
         program = prepared.root / ".localm-update" / prepared.id / "applier" / shared._PACKAGE.name
         flags = _hidden() if mode == "server" else (
             {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
@@ -263,6 +319,7 @@ def hand_off(prepared: Prepared, *, mode: str, confirmed: list, watch: Optional[
     work, prepared._work = prepared._work, None
     if work is not None:
         work.recorded()
+    restart_servers(prepared, say)
 
 
 def note_failed(prepared: Prepared, text: str) -> None:

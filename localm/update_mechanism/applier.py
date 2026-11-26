@@ -45,9 +45,15 @@ RESULT = "update-result.json"
 #: new one was let through and failed.
 HANDOFF_KEYS = frozenset({"mode", "starter", "confirmed", "home", "old", "new", "watch",
                           "relaunch"})
+#: The keys a hand-off may carry besides :data:`HANDOFF_KEYS`. ``restarting``:
+#: ``[<pid>-<start>, purpose]`` of each other server that was asked to restart into the
+#: update.
+MORE_KEYS = frozenset({"restarting"})
 SERVER, COMMAND = "server", "command"
 #: Seconds the process that goes on for the user has to report at the gate.
 ARRIVE_S = 120.0
+#: Seconds another server that was asked to restart has to wait at the gate.
+RESTART_S = 30.0
 #: Seconds a restarted server has to answer with the new version.
 ANSWER_S = 180.0
 _LINES = 40
@@ -132,6 +138,7 @@ class Applier:
         h, uv = self.h, restoring.find_uv(self.root)
         try:
             self.primary = self._wait_for_primary()
+            self._wait_for_restarts()
             self._end_others()
         except (Abandoned, OSError) as e:
             steps_update.discard(self.root, self.id)
@@ -221,6 +228,35 @@ class Applier:
                     return name[len("waiting-"):]
             time.sleep(0.1)
         raise Abandoned(f"localm did not restart into the update within {ARRIVE_S:.0f} s")
+
+    def _wait_for_restarts(self) -> None:
+        """Wait, at most :data:`RESTART_S`, until each other server that was asked to
+        restart (``restarting``) waits at the gate: the same process after its re-exec,
+        or the one it started for it. Each that does not by then is named and ended with
+        the rest (:meth:`_end_others`)."""
+        purposes = {str(k): str(p) for k, p in self.h.get("restarting") or ()}
+        procs = shared.also("procs")
+        if not purposes or procs is None:
+            return
+
+        def restarts(e) -> bool:
+            parent = f"{e.parent[0]}-{e.parent[1]}" if e.parent else None
+            return f"{e.pid}-{e.start}" in purposes or (
+                e.recorded and purposes.get(parent or "") == e.purpose)
+
+        deadline = time.monotonic() + RESTART_S
+        while True:
+            running = procs.list(self.proot)
+            waiting = restoring._waiting(self.root, running)
+            left = [e for e in running if e.pid not in waiting and restarts(e)]
+            if not left:
+                return
+            if time.monotonic() >= deadline:
+                self.say("These servers of localm did not restart within "
+                         f"{RESTART_S:.0f} s and are ended: "
+                         + ", ".join(f"{e.purpose} (pid {e.pid})" for e in left))
+                return
+            time.sleep(0.2)
 
     def _end_others(self) -> None:
         """End the processes of localm the user agreed to end and those the starter
@@ -333,13 +369,14 @@ class Applier:
                   "notes": [str(n) for n in notes or ()], "lines": self.lines, "at": time.time()}
         for line in [text, *result["notes"]]:
             self.say(line)
-        places = [self.home / "updates" / RESULT]
+        places = [(self.home / "updates" / RESULT, result)]
         if h["mode"] == COMMAND:
-            places.append(mover.update_folder(self.root) / f"result-{self.id}.json")
-        for path in places:
+            places.append((mover.update_folder(self.root) / job.result_name(self.id),
+                           {**result, job.RESULT_FOR: self.primary}))
+        for path, value in places:
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                disk.write_json(path, result)
+                disk.write_json(path, value)
             except (OSError, disk.Unsafe, disk.Held) as e:
                 restoring.say(f"The result of the update could not be written to {path}: {e}")
         return result
@@ -348,8 +385,10 @@ class Applier:
 def read_handoff(stream) -> dict:
     """The hand-off on *stream*. Raises ValueError."""
     raw = json.loads(stream.readline(1024 * 1024) or "null")
-    if not isinstance(raw, dict) or set(raw) != HANDOFF_KEYS or raw["mode"] not in (
-            SERVER, COMMAND) or not isinstance(raw["confirmed"], list):
+    if not isinstance(raw, dict) or not HANDOFF_KEYS <= set(raw) <= HANDOFF_KEYS | MORE_KEYS \
+            or raw["mode"] not in (SERVER, COMMAND) or not isinstance(raw["confirmed"], list) \
+            or not all(isinstance(r, list) and len(r) == 2
+                       for r in raw.get("restarting") or ()):
         raise ValueError("the hand-off of the update is not complete")
     return raw
 
