@@ -623,15 +623,35 @@ class Engine:
                 f"{self.display_name} was not kept loaded: plugin {plugin!r}, "
                 f"whose backend runs it, was disabled while it loaded")
 
-    def _attach_registered_adapters(self) -> None:
-        """Give a GGUF backend the LoRA adapters currently attached to this
-        engine's registered model, so a load applies the attachments as they are
-        now. Applies only when ``display_name`` is a registered model whose file
-        is this engine's ``model_path``. Raises
+    def _next_load_backend(self, method: str):
+        """The bound *method* of the backend the next load runs, or None when
+        this engine's backend has no callable *method*. That backend is the
+        current one until its first load; after it, the next load is a reload,
+        so it is a backend built as ``_load_locked`` builds one for a reload
+        (the explicit arguments, the config as it is now) with the registered
+        LoRA adapters attached. Raises what ``create_backend`` and
+        ``_attach_registered_adapters`` raise."""
+        if not callable(getattr(self._backend, method, None)):
+            return None
+        args = getattr(self, "_backend_args", None)
+        if args is None or getattr(self, "_backend_fresh", True):
+            return getattr(self._backend, method)
+        backend = create_backend(self.model_path, **args)
+        self._attach_registered_adapters(backend)
+        found = getattr(backend, method, None)
+        return found if callable(found) else None
+
+    def _attach_registered_adapters(self, backend=None) -> None:
+        """Give a GGUF backend (*backend*, default this engine's) the LoRA
+        adapters currently attached to this engine's registered model, so a
+        load applies the attachments as they are now. Applies only when
+        ``display_name`` is a registered model whose file is this engine's
+        ``model_path``. Raises
         :class:`~localm.inference.backends.base.AdapterLoadError` when an
         attached adapter's registry entry is unusable."""
         from localm.inference.backends.gguf import GgufBackend
-        backend = self._backend
+        if backend is None:
+            backend = self._backend
         if not isinstance(backend, GgufBackend):
             return
         from localm.model_manager import AdapterError, get_model_adapters, get_model_info
@@ -732,19 +752,21 @@ class Engine:
 
     def full_offload_vram_bytes(self) -> Optional[int]:
         """Free VRAM the next load needs for every layer to go on the GPU, as
-        the backend sizes it (``full_offload_vram_bytes`` of a GGUF backend),
-        or None for a backend that does not size its GPU layers, or when the
-        backend cannot answer. Blocking: reads the model file and may take a
-        GPU reading."""
-        size = getattr(self._backend, "full_offload_vram_bytes", None)
-        return size() if callable(size) else None
+        the backend of the next load sizes it (``full_offload_vram_bytes`` of
+        a GGUF backend, from :meth:`_next_load_backend`), or None for a backend
+        that does not size its GPU layers, or when the backend cannot answer.
+        Blocking: reads the config and the model file and may take a GPU
+        reading."""
+        size = self._next_load_backend("full_offload_vram_bytes")
+        return size() if size is not None else None
 
     def configured_gpu_layers(self) -> Optional[int]:
         """The GPU layer count the next load uses as configured
-        (``configured_gpu_layers`` of a GGUF backend); None when auto sizing
-        decides it or the backend does not size GPU layers."""
-        configured = getattr(self._backend, "configured_gpu_layers", None)
-        if not callable(configured):
+        (``configured_gpu_layers`` of the next load's GGUF backend, from
+        :meth:`_next_load_backend`); None when auto sizing decides it or the
+        backend does not size GPU layers. Reads the config."""
+        configured = self._next_load_backend("configured_gpu_layers")
+        if configured is None:
             return None
         answer = configured()
         return answer if isinstance(answer, int) else None
@@ -753,12 +775,13 @@ class Engine:
                           total_vram: Optional[int] = None,
                           ram_available: Optional[int] = None,
                           ram_total: Optional[int] = None) -> Optional[dict]:
-        """What the next load would place where, as the backend sizes it
-        (``predict_placement`` of a GGUF backend), without loading; None for a
-        backend that cannot predict it or when it cannot answer. Blocking:
-        reads the model file and may take a GPU and a RAM reading."""
-        predict = getattr(self._backend, "predict_placement", None)
-        if not callable(predict):
+        """What the next load would place where, as the backend of the next
+        load sizes it (``predict_placement`` of a GGUF backend, from
+        :meth:`_next_load_backend`), without loading; None for a backend that
+        cannot predict it or when it cannot answer. Blocking: reads the config
+        and the model file and may take a GPU and a RAM reading."""
+        predict = self._next_load_backend("predict_placement")
+        if predict is None:
             return None
         answer = predict(free_vram, total_vram, ram_available, ram_total)
         return answer if isinstance(answer, dict) else None
@@ -784,11 +807,13 @@ class Engine:
         the GPU as the backend plans it, and the least demanding placement
         that still keeps every layer there (a Mixture-of-Experts model with
         every expert in system RAM; the full figure for any other model). From
-        the backend's ``gpu_offload_needs``; for a backend with only
+        ``gpu_offload_needs`` of the backend of the next load (from
+        :meth:`_next_load_backend`); for a backend with only
         ``full_offload_vram_bytes``, that figure twice; None when neither
-        answers. Blocking: reads the model file and may take a GPU reading."""
-        needs = getattr(self._backend, "gpu_offload_needs", None)
-        if callable(needs):
+        answers. Blocking: reads the config and the model file and may take a
+        GPU reading."""
+        needs = self._next_load_backend("gpu_offload_needs")
+        if needs is not None:
             answer = needs()
             return answer if isinstance(answer, tuple) else None
         full = self.full_offload_vram_bytes()
@@ -812,12 +837,13 @@ class Engine:
         return not (callable(no_kv) and no_kv())
 
     def context_reserve_limit(self) -> tuple[Optional[int], Optional[str]]:
-        """``(tokens, reason)`` from the backend's ``ctx_reserve_limit``: the
-        largest window a load may keep usable and what sets it ("trained",
-        "n_ctx_max" or "auto_cap"); ``(None, None)`` for a backend without it.
-        Reads the model file's header."""
-        limit = getattr(self._backend, "ctx_reserve_limit", None)
-        answer = limit() if callable(limit) else None
+        """``(tokens, reason)`` from ``ctx_reserve_limit`` of the backend of
+        the next load (:meth:`_next_load_backend`): the largest window a load
+        may keep usable and what sets it ("trained", "n_ctx_max" or
+        "auto_cap"); ``(None, None)`` for a backend without it. Reads the
+        config and the model file's header."""
+        limit = self._next_load_backend("ctx_reserve_limit")
+        answer = limit() if limit is not None else None
         return answer if isinstance(answer, tuple) else (None, None)
 
     def reserve_context(self, tokens: int) -> None:
