@@ -6467,13 +6467,20 @@ def _execv_restart(port: Optional[int], instance_id: Optional[str], *,
     With *update_steps_done* (this restart carried out the pending update
     steps, :func:`_finish_pending_runtime_update`), ``LOCALM_UPDATE_STEPS_DONE``
     is set to the installed version for the re-exec'd process, whose start-up
-    then does not repeat them; it is removed again when os.execv raises."""
+    then does not repeat them; it is removed again when os.execv raises.
+    ``LOCALM_RESTARTED_FROM`` is set to ``<pid>-<start>`` of this process: the
+    re-exec'd one writes it into its file at the gate of ``localm/__init__.py``, which
+    removes the variable, so that an update matches it to the server it restarted
+    from; it is removed again when os.execv raises."""
     import os
     import sys
 
-    from localm import _version, instances
+    from localm import _version, instances, procs
     if update_steps_done:
         os.environ["LOCALM_UPDATE_STEPS_DONE"] = _version.read_version()
+    me = procs.current()
+    if me is not None:
+        os.environ["LOCALM_RESTARTED_FROM"] = f"{me.pid}-{me.start}"
     removed = None
     try:
         removed = instances.unregister_own(instance_id)
@@ -6485,6 +6492,7 @@ def _execv_restart(port: Optional[int], instance_id: Optional[str], *,
         os.execv(sys.executable, _execv_argv(_restart_argv(port)))
     except BaseException:
         os.environ.pop("LOCALM_UPDATE_STEPS_DONE", None)
+        os.environ.pop("LOCALM_RESTARTED_FROM", None)
         try:
             instances.restore_own(removed)
         except Exception:

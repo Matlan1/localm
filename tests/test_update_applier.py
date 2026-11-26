@@ -67,7 +67,8 @@ if args[:1] == ['update']:
                              say=lambda t: print(t, file=sys.stderr))
     sys.exit(_update_parent.HANDED_OFF)
 said = {'localm': localm.__version__, 'part': part.V, 'VERSION': version, 'argv': args,
-        'during': os.path.exists(os.path.join(root, '.localm-update', 'job.json'))}
+        'during': os.path.exists(os.path.join(root, '.localm-update', 'job.json')),
+        'restarted_from': os.environ.get('LOCALM_RESTARTED_FROM')}
 print('STARTED ' + json.dumps(said), flush=True)
 if args[:1] == ['serve'] and os.path.exists(os.path.join(root, 'SERVEFAILS')):
     sys.exit(1)
@@ -281,11 +282,11 @@ def test_a_result_nobody_waits_for_any_more_is_deleted_by_the_next_cleanup(updat
         _end(other)
 
 
-def _stay(update, *more):
+def _stay(update, *more, **env):
     """A start of localm in *update* that runs until its input ends, and its entry."""
     from localm import procs
     proc = subprocess.Popen([sys.executable, "-m", "localm", *(more or ("stay",))],
-                            cwd=str(update.root), env=update.env(), stdin=subprocess.PIPE,
+                            cwd=str(update.root), env=update.env(**env), stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **HIDDEN)
     assert proc.stdout is not None and proc.stdin is not None
     if more:
@@ -312,10 +313,11 @@ def _started(out: str) -> dict:
 def test_a_server_asked_to_restart_is_waited_for_and_runs_the_new_version_after_it(update):
     """The other server (here a start that the test restarts by hand, 3 s after the
     update began) is neither ended at once nor counted as a process nobody agreed to
-    end: its successor, a process of its purpose started after the hand-off and not by
-    it (as on Windows, where the old server is not its parent), waits at the gate and is
-    taken for it at once; the old process, still running, is ended; the successor runs
-    the new version."""
+    end. A new start of the same purpose that does not come from it (a stranger's) is not
+    taken for it. Its successor, a new process (as on Windows, where the old server is
+    not its parent) that names it at the gate (``LOCALM_RESTARTED_FROM``, set by the
+    restart), is taken for it at once; the old process, still running, is ended; the
+    successor runs the new version, without the variable."""
     server, entry = _stay(update)
     key = f"{entry.pid}-{entry.start}"
     proc = update.apply(confirmed=[key], restarting=[[key, entry.purpose]])
@@ -323,11 +325,15 @@ def test_a_server_asked_to_restart_is_waited_for_and_runs_the_new_version_after_
     try:
         time.sleep(3)
         assert server.poll() is None, "a server asked to restart was ended at once"
-        assert json.loads(update.record.read_text(encoding="utf-8"))["phase"] == "ending"
-        assert update.version() == "1"
-        again, _ = _stay(update, "again")
+        stranger, _ = _stay(update, "stranger")
         _waits(update, count=2)
-        (_, err), _, (out, _) = _end(proc, waiting, again)
+        time.sleep(3)
+        assert json.loads(update.record.read_text(encoding="utf-8"))["phase"] == "ending", \
+            "a stranger's start was taken for the server that restarts"
+        assert server.poll() is None and update.version() == "1"
+        again, _ = _stay(update, "again", LOCALM_RESTARTED_FROM=key)
+        _waits(update, count=3)
+        (_, err), _, (out, _), _ = _end(proc, waiting, again, stranger)
         ended = server.wait(timeout=30) is not None
     finally:
         server.stdin.close()
@@ -335,7 +341,30 @@ def test_a_server_asked_to_restart_is_waited_for_and_runs_the_new_version_after_
     assert proc.returncode == 0, err
     assert update.version() == "2" and "did not restart" not in err, err
     assert ended, "the old server that went on was not ended"
-    assert {_started(out)[k] for k in ("localm", "part", "VERSION")} == {"2"}, (out, err)
+    said = _started(out)
+    assert {said[k] for k in ("localm", "part", "VERSION")} == {"2"}, (out, err)
+    assert said["restarted_from"] is None
+
+
+def test_a_restart_names_the_server_it_restarts_from_for_the_next_process_only(monkeypatch):
+    """``_execv_restart`` hands ``<pid>-<start>`` of this server to its re-exec
+    (``LOCALM_RESTARTED_FROM``) and takes it back when os.execv raises."""
+    import localm.inference.http_server as hs
+    from localm import instances, procs
+    monkeypatch.delenv("LOCALM_RESTARTED_FROM", raising=False)
+    monkeypatch.setattr(instances, "unregister_own", lambda iid: None)
+    monkeypatch.setattr(instances, "restore_own", lambda removed: None)
+    seen = []
+
+    def execv(exe, argv):
+        seen.append(os.environ.get("LOCALM_RESTARTED_FROM"))
+        raise OSError("not in a test")
+    monkeypatch.setattr(os, "execv", execv)
+    with pytest.raises(OSError):
+        hs._execv_restart(None, None)
+    me = procs.current()
+    assert me is not None and seen == [f"{me.pid}-{me.start}"]
+    assert "LOCALM_RESTARTED_FROM" not in os.environ
 
 
 def test_a_server_that_refused_to_restart_is_not_waited_for(update, monkeypatch):
@@ -624,6 +653,54 @@ def test_only_an_owner_confirms_and_the_second_press_uses_what_the_first_prepare
     assert replies[4].status_code == 409 and len(made) == 3
 
 
+def test_an_armed_confirmation_expires_and_discards_what_it_prepared(monkeypatch):
+    """The owner's first press while a chat runs keeps the prepared update for the
+    window of :data:`admin._UPDATE_CONFIRM_S`; when it passes without a second press,
+    the confirmation is disarmed and the prepared update is discarded then, not only at
+    the next start. A press after that prepares the update again and asks again."""
+    from unittest.mock import MagicMock
+
+    from fastapi.testclient import TestClient
+
+    import localm.inference.http_server as hs
+    from localm import updater, updater_handoff
+    from localm.inference.routes import admin
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    monkeypatch.setattr(admin, "_UPDATE_CONFIRM_S", 0.3)
+    made, gone, handed = [], [], []
+
+    def prepare(*_a, **_k):
+        p = updater_handoff.Prepared(Path("."), "0" * 32, "1", "2", None, True, None, False,
+                                     None, processes=[{"key": "9-9", "pid": 9,
+                                                       "purpose": "chat", "restarts": False}])
+        p.discard = lambda: gone.append(p)
+        made.append(p)
+        return p
+
+    monkeypatch.setattr(hs, "_request_restart", lambda **k: handed.append(k.get("update")))
+    monkeypatch.setattr(hs, "caller_is_operator", lambda _r: True)
+    monkeypatch.setattr(updater, "available", lambda: True)
+    monkeypatch.setattr(updater, "check", lambda: {
+        "current": "1", "latest": "v2", "newer": True, "notes": "", "asset": {"id": 3}})
+    monkeypatch.setattr(updater_handoff, "prepare", prepare)
+    monkeypatch.setattr(updater_handoff, "look_around", lambda p: p)
+    engine = MagicMock()
+    engine.display_name, engine.loaded = "m", True
+    app = hs.create_app(engine)
+    headers = {"Authorization": f"Bearer {app.state.shell_token}"}
+    with TestClient(app) as client:
+        first = client.post("/api/update/apply", headers=headers).json()
+        assert first["needs_confirmation"] == "processes" and gone == []
+        deadline = time.monotonic() + 10
+        while not gone and time.monotonic() < deadline:
+            time.sleep(0.05)
+        disarmed = app.state.update_confirm is None
+        again = client.post("/api/update/apply", headers=headers).json()
+    assert gone == [made[0]] and disarmed, "the armed confirmation did not expire"
+    assert again["needs_confirmation"] == "processes" and len(made) == 2 and handed == []
+
+
 def test_a_scoped_caller_sees_the_reply_of_an_update_without_host_paths(monkeypatch):
     from unittest.mock import MagicMock
 
@@ -843,6 +920,108 @@ def test_a_server_that_does_not_restart_within_its_time_is_ended(update, monkeyp
     assert ended, "the server that did not restart was not ended"
     assert result["state"] == "new" and update.version() == "2"
     assert any("did not restart within 1 s" in t and f"pid {entry.pid}" in t for t in said)
+
+
+def test_a_process_that_reaches_the_gate_while_the_others_end_is_not_named(
+        update, monkeypatch):
+    """A process the user agreed to end that waits at the gate once the others have
+    been ended (here put there by a stand-in for ``procs.end_others``, which returns it
+    as still running) goes on with the update: it is not named as one that did not end."""
+    other, entry = _stay(update)
+    key = f"{entry.pid}-{entry.start}"
+    real = applier.shared.also
+    procs = real("procs")
+    folder = update.root / ".localm-update"
+
+    def end_others(root, **_k):
+        (folder / f"waiting-{key}").write_text("", encoding="ascii")
+        return [e for e in procs.list(root) if e.pid == entry.pid]
+
+    procs.end_others = end_others
+    monkeypatch.setattr(applier.shared, "also",
+                        lambda name: procs if name == "procs" else real(name))
+    try:
+        result, _ = _in_process(update, monkeypatch, confirmed=[key])
+    finally:
+        assert other.stdin is not None
+        other.stdin.close()
+        _end(other)
+    assert result["state"] == "new" and update.version() == "2", result
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a server re-executes itself in place only on POSIX")
+def test_an_agreed_process_above_a_server_that_restarts_in_place_is_ended(tmp_path):
+    """On POSIX the server that starts the update re-executes itself in place, so the
+    applier it started stays its child and what started that server (``localm run``,
+    which starts ``localm gui --api-mode``) is above the applier, where
+    ``procs.end_others`` spares it. The user agreed to end it: the applier ends it
+    itself and the update goes on. Here the applier is a grandchild of that process."""
+    import signal
+    update = Update(tmp_path / "inst")
+    port = _free_port()
+    log = tmp_path / "applier.log"
+    program = update.root / ".localm-update" / ID / "applier" / "update_mechanism"
+    handoff = {"mode": applier.SERVER, "home": str(update.root / "home"), "old": "1",
+               "new": "2", "watch": {"host": "127.0.0.1", "port": port, "scheme": "http"},
+               "restarting": [], "ancestors": []}
+    server = "\n".join([
+        "import json, os, subprocess, sys",
+        "import localm",
+        "from localm import procs",
+        "me = procs.current()",
+        f"handoff = json.loads({json.dumps(handoff)!r})",
+        "handoff['starter'] = f'{me.pid}-{me.start}'",
+        "handoff['confirmed'] = [f'{me.parent[0]}-{me.parent[1]}']",
+        f"with open({str(log)!r}, 'w') as err:",
+        f"    proc = subprocess.Popen([sys.executable, '-I', '-S', {str(program)!r}, 'apply',",
+        f"                             {str(update.root)!r}, {ID!r}], stdin=subprocess.PIPE,",
+        "                            stdout=subprocess.PIPE, stderr=err, text=True)",
+        "proc.stdin.write(json.dumps(handoff) + '\\n')",
+        "proc.stdin.close()",
+        "assert proc.stdout.readline().strip() == 'ready'",
+        "print(f'SERVER {me.pid}', flush=True)",
+        f"os.environ['LOCALM_UPDATE_PRIMARY'] = {ID!r}",
+        f"os.execv(sys.executable, [sys.executable, '-m', 'localm', 'serve', '{port}'])"])
+    above = subprocess.Popen(
+        [sys.executable, "-c", "import subprocess, sys\nimport localm\n"
+         f"subprocess.Popen([sys.executable, '-c', {server!r}]).wait()\n"],
+        cwd=str(update.root), env=update.env(), stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, **HIDDEN)
+    assert above.stdin is not None and above.stdout is not None
+    pid = None
+    try:
+        line = above.stdout.readline()
+        assert line.startswith("SERVER "), line
+        pid = int(line.split()[1])
+        result = update.root / "home" / "updates" / applier.RESULT
+        deadline = time.monotonic() + 300
+        while not result.exists():
+            assert time.monotonic() < deadline, log.read_text(encoding="utf-8")
+            time.sleep(0.2)
+        said = _started(above.stdout.readline())
+        try:
+            ended = above.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            ended = None
+    finally:
+        above.stdin.close()
+        if above.poll() is None:
+            above.kill()
+        deadline = time.monotonic() + 30
+        while pid is not None and time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                break
+            time.sleep(0.1)
+        else:
+            if pid is not None:
+                os.kill(pid, signal.SIGKILL)
+    note = log.read_text(encoding="utf-8")
+    assert update.result()["state"] == "new" and update.version() == "2", note
+    assert "did not end" not in note, note
+    assert ended == -signal.SIGTERM, (ended, note)
+    assert {said[k] for k in ("localm", "part", "VERSION")} == {"2"}
 
 
 def test_a_record_that_raises_leaves_the_new_version_with_a_note(update, monkeypatch):

@@ -54,6 +54,10 @@ _BUG_REPORT_SAVE_TIMEOUT_S = 2 * _BUG_REPORT_OWN_WORK_TIMEOUT_S
 # independently; this is 2x that pair.
 _BUG_REPORT_UPLOAD_TIMEOUT_S = 60.0
 
+#: Seconds within which a second press of Update confirms the processes it ends; then
+#: the update the first press prepared is discarded.
+_UPDATE_CONFIRM_S = 600.0
+
 
 def _strip_unreleased(markdown: str) -> str:
     """Return *markdown* with the ``[Unreleased]`` section (and its link-reference
@@ -418,10 +422,25 @@ def register(app: FastAPI, ctx) -> None:
                          instance_id=getattr(app.state, "instance_id", None))
         res["restarting"] = True
 
-    #: Seconds within which a second press of Update confirms the processes it ends.
-    _CONFIRM_S = 600.0
     #: Held while an update is prepared through the program its build ships.
     _handing = asyncio.Lock()
+
+    def _discard(prepared) -> None:
+        """Delete what *prepared* holds; a failure is logged."""
+        try:
+            prepared.discard()
+        except Exception as e:
+            from localm.debuglog import logger as _dbg
+            _dbg.warning("the prepared update to %s could not be deleted: %s",
+                         prepared.new, e)
+
+    def _expire(armed) -> None:
+        """Disarm the owner's first press *armed* (``app.state.update_confirm``) once
+        :data:`_UPDATE_CONFIRM_S` has passed and no press took it, and discard what it
+        prepared, in a thread."""
+        if getattr(app.state, "update_confirm", None) is armed:
+            app.state.update_confirm = None
+            asyncio.get_running_loop().run_in_executor(None, _discard, armed[3])
 
     async def _with_applier(request: Request, asset_id, **kwargs):
         """:func:`_hand_over` for one press at a time: 409 while another press is
@@ -445,8 +464,9 @@ def register(app: FastAPI, ctx) -> None:
         other processes of localm run, an owner's first press answers ``{applied: false,
         needs_confirmation: "processes", processes, error}`` naming them and keeps the
         prepared update; the owner's second press for the same build within
-        :data:`_CONFIRM_S` that finds the same processes is the agreement to end them,
-        and uses what was prepared. Anyone else gets 403, and the owner's first press
+        :data:`_UPDATE_CONFIRM_S` that finds the same processes is the agreement to end
+        them, and uses what was prepared; once that window has passed, what the first press
+        prepared is discarded (:func:`_expire`). Anyone else gets 403, and the owner's first press
         stays armed: only an owner's press uses or discards it. Returns None when the build
         ships no such program (``updater.apply`` installs it then). Raises LocalmError or
         ``updater.UnverifiedBuild``."""
@@ -459,7 +479,7 @@ def register(app: FastAPI, ctx) -> None:
         if owner:
             app.state.update_confirm = None
         prepared = None
-        if asked and asked[1] == target and _time.monotonic() - asked[2] < _CONFIRM_S:
+        if asked and asked[1] == target and _time.monotonic() - asked[2] < _UPDATE_CONFIRM_S:
             prepared = await asyncio.to_thread(updater_handoff.look_around, asked[3])
         elif asked:
             asked[3].discard()
@@ -476,7 +496,9 @@ def register(app: FastAPI, ctx) -> None:
                 raise HTTPException(403, "Ending the other processes of localm for an update "
                                          "requires an owner (admin) key.")
             if not (asked and asked[3] is prepared and asked[0] == keys):
-                app.state.update_confirm = (keys, target, _time.monotonic(), prepared)
+                armed = (keys, target, _time.monotonic(), prepared)
+                app.state.update_confirm = armed
+                asyncio.get_running_loop().call_later(_UPDATE_CONFIRM_S, _expire, armed)
                 return {"applied": False, "needs_confirmation": "processes",
                         "processes": prepared.processes,
                         "error": f"The update to {prepared.new} restarts or ends these "

@@ -8,8 +8,10 @@ keyless mode) and ``verify=localm.tls.requests_verify(url)``.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from typing import Optional
+from urllib.parse import urlsplit
 
 import requests
 
@@ -22,6 +24,19 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 def _no_control_chars(value: str) -> str:
     return _CONTROL_CHARS.sub("", value)
+
+
+def _proxies(url: str) -> Optional[dict]:
+    """The ``proxies`` of a request to *url*: when its host is a loopback address of this
+    machine (``127.0.0.0/8``, ``::1``, ``localhost``), a value that turns every proxy of
+    the environment off, so the request and its key reach this machine's own server and
+    nothing else; else None, the environment's proxies."""
+    host = urlsplit(url).hostname or ""
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host == "localhost"
+    return {"http": None, "https": None, "all": None} if loopback else None
 
 
 def read_activity(scheme: str, port, instance_token: Optional[str] = None,
@@ -55,7 +70,7 @@ def read_activity(scheme: str, port, instance_token: Optional[str] = None,
     headers = resolve_bearer_headers(instance_token)
     try:
         r = requests.get(url, headers=headers, timeout=5,
-                         verify=_tls.requests_verify(url))
+                         verify=_tls.requests_verify(url), proxies=_proxies(url))
     except requests.exceptions.RequestException as e:
         return "unreachable", type(e).__name__
     if r.status_code in (401, 403):
@@ -151,7 +166,7 @@ def read_model_file_hold(scheme: str, port, model: str,
     headers = resolve_bearer_headers(instance_token)
     try:
         r = requests.get(url, headers=headers, timeout=5,
-                         verify=_tls.requests_verify(url))
+                         verify=_tls.requests_verify(url), proxies=_proxies(url))
     except requests.exceptions.RequestException as e:
         return "unreachable", type(e).__name__
     if r.status_code in (401, 403):
@@ -316,6 +331,8 @@ def self_request(method: str, path: str, *, json: Optional[dict] = None,
 
     A redirect is never followed: a 3xx is returned to the caller.
 
+    A request to a loopback address never goes through a proxy (:func:`_proxies`).
+
     *headers*: extra request headers (``audit.privacy_headers``); the
     ``Authorization`` header is never taken from them.
     """
@@ -329,4 +346,4 @@ def self_request(method: str, path: str, *, json: Optional[dict] = None,
     url = f"{base_url}{path}"
     return requests.request(method, url, json=json, headers=sent,
                             timeout=timeout, verify=_tls.requests_verify(url),
-                            allow_redirects=False)
+                            allow_redirects=False, proxies=_proxies(url))

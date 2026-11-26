@@ -22,6 +22,12 @@ _WAIT_S, _MCP_WAIT_S, _NAME_S = 3600.0, 60.0, 60.0
 def _gate(me=None) -> bool:
     """Whether the files of localm may have been replaced while this waited. *me* is the
     :class:`localm.procs.Entry` of this process."""
+    # A server that restarted itself (``LOCALM_RESTARTED_FROM``, ``<pid>-<start>`` of the
+    # process it was) says so in the file that says it waits here; nothing it starts
+    # gets the variable.
+    restarted = os.environ.pop("LOCALM_RESTARTED_FROM", "")
+    if not (restarted.isascii() and restarted.replace("-", "").replace(".", "").isalnum()):
+        restarted = ""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     folder = os.path.join(root, ".localm-update")
     record = os.path.join(folder, "job.json")
@@ -54,7 +60,8 @@ def _gate(me=None) -> bool:
             if not held and os.environ.get("LOCALM_UNINSTALL") == "1":
                 return waited
             if mark and not _touch(mark, update if os.environ.get(
-                    "LOCALM_UPDATE_PRIMARY") == update else ""):
+                    "LOCALM_UPDATE_PRIMARY") == update else
+                    f"restarted {restarted}" if restarted else ""):
                 mark = None
             if held:
                 if not waited:
@@ -90,8 +97,10 @@ def _gate(me=None) -> bool:
 
 
 def _touch(mark: str, update: str = "", remove: bool = False) -> bool:
-    """Make or *remove* the file that says that this process waits here; it holds the id
-    of the *update* this process goes on with for the user (``LOCALM_UPDATE_PRIMARY``).
+    """Make or *remove* the file that says that this process waits here; it holds *update*:
+    the id of the update this process goes on with for the user
+    (``LOCALM_UPDATE_PRIMARY``), ``restarted <pid>-<start>`` of the server this process
+    restarted from, or nothing.
     The restore program, which ends what an update left running, does not end the
     waiting ones."""
     try:

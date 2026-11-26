@@ -68,6 +68,8 @@ ARRIVE_S = 120.0
 RESTART_S = 30.0
 #: Seconds a restarted server has to answer with the new version.
 ANSWER_S = 180.0
+#: Seconds a process above this one that the user agreed to end has to end.
+END_S = 20.0
 _LINES = 40
 _VERSION = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}")
 
@@ -290,38 +292,36 @@ class Applier:
     def _wait_for_restarts(self) -> None:
         """Wait, at most :data:`RESTART_S`, until for each other server that was asked to
         restart (``restarting``, less those in :data:`NOT_RESTARTING`) a process waits at
-        the gate: the same process after its re-exec in place, or a recorded process of
-        its purpose that started after this one (the one it started for it, whatever its
-        parent). Each server that has none by then is named and ended with the rest
-        (:meth:`_end_others`)."""
+        the gate: the same process after its re-exec in place, or the process its re-exec
+        started (on Windows a new one), whose file at the gate names it
+        (``restarted <pid>-<start>``, ``LOCALM_RESTARTED_FROM``). Each server that has none
+        by then is named and ended with the rest (:meth:`_end_others`)."""
         wanted = [(str(k), str(p)) for k, p in self.h.get("restarting") or ()]
         refused = set(self._not_restarting())
         wanted = [(k, p) for k, p in wanted if k not in refused]
         procs = shared.also("procs")
         if not wanted or procs is None:
             return
-        try:
-            row = procs._own_row()
-        except OSError:
-            row = None
-        me = (os.getpid(), row[1]) if row and row != procs._UNKNOWN else None
+        folder = mover.update_folder(self.root)
 
-        def after_me(e) -> bool:
-            number = procs._number(e.start)
-            return me is None or (number is not None and procs._later((e.pid, number), me))
+        def said(e) -> str:
+            try:
+                return (folder / f"waiting-{e.pid}-{e.start}").read_text(
+                    encoding="ascii").strip()
+            except (OSError, ValueError):
+                return ""
 
         deadline = time.monotonic() + RESTART_S
         while True:
             running = procs.list(self.proot)
             waiting = restoring._waiting(self.root, running)
-            at_gate = [e for e in running if e.pid in waiting and e.recorded
+            at_gate = [(e, said(e)) for e in running if e.pid in waiting and e.recorded
                        and f"{e.pid}-{e.start}" != self.primary]
             taken: set = set()
             left = []
             for key, purpose in wanted:
-                found = next((e for e in at_gate if e.key not in taken and (
-                    f"{e.pid}-{e.start}" == key or (e.purpose == purpose and after_me(e)))),
-                    None)
+                found = next((e for e, text in at_gate if e.key not in taken and (
+                    f"{e.pid}-{e.start}" == key or text == f"restarted {key}")), None)
                 if found is None:
                     left.append((key, purpose))
                 else:
@@ -390,13 +390,35 @@ class Applier:
             ended = procs.end_others(root, spare=spare, holders=holders)
         except OSError as e:
             raise Abandoned(str(e)) from None
-        # end_others also spares the processes above this one; one of those the user
-        # agreed to end that still runs is named like one that did not end.
-        left = [*ended, *(e for e in others if e not in ended and procs.alive(e))]
+        # end_others also spares the processes above this one (on POSIX, where the server
+        # that started the update re-executes itself in place, what started that server);
+        # those of them the user agreed to end are ended here.
+        left = [*ended, *self._end_above(procs, [e for e in others if e not in ended])]
+        if left:
+            # One that reached the gate meanwhile goes on with the update.
+            waiting = restoring._waiting(self.root, procs.list(root, holders=holders))
+            left = [e for e in left if e.pid not in waiting]
         if left:
             raise Abandoned("these processes of localm did not end: " + "; ".join(
                 restoring._in_the_way(w) for e in left
                 for w in (e.in_the_way or ({"pid": e.pid, "name": e.purpose},))))
+
+    def _end_above(self, procs, entries) -> list:
+        """End each of *entries* that still runs and does not wait at the gate, as
+        ``procs.end_others`` ends a process: asked first, ended after
+        ``procs._POSIX_GRACE_S``. Returns those that still run after :data:`END_S`."""
+        asked: dict = {}
+        deadline = time.monotonic() + END_S
+        while True:
+            waiting = restoring._waiting(self.root, procs.list(self.proot))
+            rest = [e for e in entries if e.pid not in waiting and procs.alive(e)]
+            now = time.monotonic()
+            if not rest or now >= deadline:
+                return rest
+            for entry in rest:
+                first = asked.setdefault(entry.key, now)
+                procs._end(entry, now - first >= procs._POSIX_GRACE_S)
+            time.sleep(0.1)
 
     def _let_primary_through(self) -> Optional[str]:
         """Let the restarted server through the gate and wait until it answers with the
