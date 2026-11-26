@@ -116,13 +116,13 @@ def test_the_untested_backends_are_the_ones_needing_absent_hardware():
     is downgraded to save a test run, or an unmeasured one is upgraded without
     being measured.
 
-    cpu and vulkan are measurable here (any machine; this project's own AMD box).
-    cuda, sycl, hip and metal need hardware nobody here has. amd-rocm is NOT in
+    cpu, vulkan and hip are measurable here (any machine; this project's own AMD
+    box). cuda, sycl and metal need hardware nobody here has. amd-rocm is NOT in
     the measured set even though this box could run it: it ships from a different
     tag series (_ROCM_TAG), so this pin's confirmation never touched it."""
     measured = {b for b, note in sl._PIN_CONFIRMATION.items()
                 if "load + generate, measured" in note}
-    assert measured == {"cpu", "vulkan"}, measured
+    assert measured == {"cpu", "vulkan", "hip"}, measured
 
 
 # --------------------------------------------------------------------------- #

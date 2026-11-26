@@ -94,8 +94,8 @@ _PINNED_TAG = "b12676"
 # it could not test would carry the word "confirmed" without the evidence.
 #
 # The asymmetry is hardware: a GitHub runner has no
-# GPU, so CI can honestly generate on cpu only. vulkan is confirmed on the
-# maintainer's box. cuda, sycl, hip and metal need hardware nobody here has.
+# GPU, so CI can honestly generate on cpu only. vulkan and hip are confirmed on
+# the maintainer's box. cuda, sycl and metal need hardware nobody here has.
 #
 # What every entry DOES rest on, including the untested ones, is the byte-
 # identity above: the ABI/struct compatibility that broke in the incident this
@@ -115,7 +115,9 @@ _PIN_CONFIRMATION = {
     # Maintainer-run, occasional cadence.
     "cuda": "ABI only (shared llama library); generation NOT measured - no NVIDIA hardware",
     "sycl": "ABI only (shared llama library); generation NOT measured - no Intel GPU",
-    "hip": "ABI only (shared llama library); generation NOT measured - needs a system ROCm toolkit",
+    "hip": "load + generate, measured (Windows x64, AMD RX 6900 XT / gfx1030; the "
+           "runtime registered a ROCm0 GPU device, with AMD's ROCm libraries added by "
+           "setup)",
     "metal": "ABI only (shared llama library); generation NOT measured - no Apple Silicon",
     # Not an upstream tag at all: the lemonade-sdk build, pinned separately by
     # _ROCM_TAG, so this table's subject (_PINNED_TAG) does not describe it.
