@@ -64,7 +64,8 @@ if args[:1] == ['update']:
                                   'relaunch': None}) + '\\n')
     child.stdin.close()
     sys.exit(_update_parent.HANDED_OFF if child.stdout.readline().strip() == 'ready' else 1)
-said = {'localm': localm.__version__, 'part': part.V, 'VERSION': version, 'argv': args}
+said = {'localm': localm.__version__, 'part': part.V, 'VERSION': version, 'argv': args,
+        'during': os.path.exists(os.path.join(root, '.localm-update', 'job.json'))}
 print('STARTED ' + json.dumps(said), flush=True)
 if args[:1] == ['stay']:
     sys.stdin.read()
@@ -311,7 +312,7 @@ def test_a_start_during_the_update_waits_and_runs_only_the_new_version(update):
     assert proc.returncode == 0, err
     assert update.version() == "2"
     said = _started(out)
-    assert said["argv"] == ["repair"]
+    assert said["argv"] == ["repair"] and said["during"] is False
     assert {said[k] for k in ("localm", "part", "VERSION")} == {"2"}
 
 
