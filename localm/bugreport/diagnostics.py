@@ -183,24 +183,29 @@ def collect_diagnostics(context: Optional[dict] = None) -> dict:
     diag["config_subset"] = _safe_config_subset()
     diag["config_unreadable"] = _config_unreadable()
     diag["dependencies"] = _dependency_versions()
-    diag["files_differing"] = _integrity_counts()
+    diag.update(_from_sources())
     return diag
 
 
-# How many of localm's files differ from the installed release, from the last
-# integrity check of this process (counts only, set by ``integrity``).
-_integrity: dict = {"checked": False}
+def add_source(field: str, collect) -> None:
+    """Add the diagnostics field *field* to every report from now on, its value what
+    *collect()* returns when the report is made. Raises nothing."""
+    _br._diagnostic_sources[field] = collect
 
 
-def note_integrity(counts: dict) -> None:
-    """Record the counts of the last integrity check for the next report."""
-    global _integrity
-    _integrity = dict(counts)
-
-
-def _integrity_counts() -> dict:
-    """The counts :func:`note_integrity` recorded, ``{"checked": False}`` before."""
-    return dict(_integrity)
+def _from_sources() -> dict:
+    """``{field: value}`` of every :func:`add_source` field. A source that raises
+    gives ``{"error": <exception type>}`` and its failure goes to the log."""
+    out = {}
+    for field, collect in list(_br._diagnostic_sources.items()):
+        try:
+            out[field] = collect()
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.warning("bug report: the %s diagnostics could not be collected: %s",
+                           field, e)
+            out[field] = {"error": type(e).__name__}
+    return out
 
 
 # Config keys SAFE to echo into a report and useful for debugging a setup. An

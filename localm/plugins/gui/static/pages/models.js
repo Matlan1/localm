@@ -2764,8 +2764,12 @@ export function renderIntegrity(state) {
     for (const path of [...(rt.differ || []), ...(rt.missing || [])]) {
       items.push(t("settings.integrity.itemRuntime", { path }));
     }
+    for (const path of [...(r.unreadable || []), ...(rt.unreadable || [])]) {
+      items.push(t("settings.integrity.itemUnreadable", { path }));
+    }
     for (const path of r.kept || []) items.push(t("settings.integrity.itemKept", { path }));
-    if (rt.present && !rt.listed) items.push(t("settings.integrity.runtimeUnlisted"));
+    if (rt.error) items.push(t("settings.integrity.runtimeListUnreadable", { reason: rt.error }));
+    else if (rt.present && !rt.listed) items.push(t("settings.integrity.runtimeUnlisted"));
     if ((rt.differ || []).length || (rt.missing || []).length) items.push(t("settings.integrity.runtimeHint"));
   }
   if (list) list.replaceChildren(...items.map(item));

@@ -19,13 +19,18 @@ full check is asked for.
 
 :func:`startup` runs the check in a background thread of a server, after
 :data:`START_DELAY_S`, when the setting ``integrity_check_at_start`` is on, and
-reads nothing at all when it is off. ``integrity_notice`` decides whether a
-difference it finds is announced. The result is kept in memory (:func:`state`); the
-record of the last check is written at startup only where automatic writes are
-allowed (``audit.automatic_write_allowed``), and on every check a person asks for.
+reads nothing at all when it is off; the thread ends when the server's command
+ends. ``integrity_notice`` decides whether a difference it finds is announced. The
+result is kept in memory (:func:`state`); the record of the last check is written
+at startup only where automatic writes are allowed
+(``audit.automatic_write_allowed``), and on every check a person asks for.
+
+Every bug report of a process that imported this module carries the counts of a
+check that writes nothing (:func:`report_counts`).
 
 :func:`repair` downloads the installed version's build through the updater, checks
-its signature, and writes exactly the named files from it.
+its signature, and writes exactly the named files from it, with the execute
+permission the build gives them.
 """
 
 from __future__ import annotations
@@ -40,13 +45,15 @@ import zipfile
 from pathlib import Path
 from typing import Callable, Optional
 
+from localm.bugreport import diagnostics as _diagnostics
+
 RECORD = "integrity-record.json"
 RECORD_FORMAT = "localm-integrity-record/1"
 KEPT = "integrity-kept.json"
 # Seconds a server waits after its start before the startup check begins.
 START_DELAY_S = 30.0
-# The commands whose start runs the check (a server).
-SERVER_COMMANDS = frozenset({"gui", "serve"})
+# Seconds the end of a server's command waits for a startup check that is reading.
+_STOP_WAIT_S = 5.0
 # Seconds a repair keeps trying to replace a file another program holds.
 _HELD_S = 3.0
 
@@ -166,7 +173,12 @@ def _check_runtime(root: Path, full: bool) -> dict:
 
 # --------------------------------------------------------------------- check
 
-def check(root=None, *, full: bool = False, write_record: bool = True) -> dict:
+class Stopped(Exception):
+    """The check was ended by its *stop* event before it finished."""
+
+
+def check(root=None, *, full: bool = False, write_record: bool = True,
+          stop: Optional[threading.Event] = None) -> dict:
     """Compare the install at *root* (default the running one) with its release.
 
     Returns ``{"available", "reason", "version", "checked", "differ", "missing",
@@ -174,11 +186,12 @@ def check(root=None, *, full: bool = False, write_record: bool = True) -> dict:
     ``available`` False with a ``reason`` when there is nothing to compare with;
     ``differ`` and ``missing`` the stated paths whose file is not the stated one or
     is absent, ``unreadable`` those that could not be read, ``kept`` the differing
-    ones the user keeps (:func:`keep`), ``runtime`` the runtime's result
-    (:func:`_check_runtime`), ``count`` how many files differ or are missing, kept
-    ones aside, ``hashed`` how many release files were read in full. With *full* the
-    record of the last check is not used. With *write_record* the identities found
-    are recorded for the next check. Never raises for a file it cannot read."""
+    or absent ones the user keeps (:func:`keep`), ``runtime`` the runtime's result
+    (``runtime_files.compare``), ``count`` how many files differ or are missing,
+    kept ones aside, ``hashed`` how many release files were read in full. With
+    *full* the record of the last check is not used. With *write_record* the
+    identities found are recorded for the next check. Raises :class:`Stopped` when
+    *stop* is set before the check ends; never raises for a file it cannot read."""
     root = _root(root)
     result = {"available": False, "reason": None, "version": None, "checked": 0,
               "differ": [], "missing": [], "unreadable": [], "kept": [], "hashed": 0,
@@ -193,6 +206,8 @@ def check(root=None, *, full: bool = False, write_record: bool = True) -> dict:
     mine = kept()
     found = {}
     for rel, entry in sorted(manifest["files"].items()):
+        if stop is not None and stop.is_set():
+            raise Stopped()
         if _skipped(rel):
             continue
         result["checked"] += 1
@@ -200,7 +215,7 @@ def check(root=None, *, full: bool = False, write_record: bool = True) -> dict:
         try:
             st = os.stat(p)
         except (FileNotFoundError, NotADirectoryError):
-            result["missing"].append(rel)
+            (result["kept"] if mine.get(rel) == entry["sha256"] else result["missing"]).append(rel)
             continue
         except OSError:
             result["unreadable"].append(rel)
@@ -220,6 +235,8 @@ def check(root=None, *, full: bool = False, write_record: bool = True) -> dict:
         found[rel] = [st.st_size, st.st_mtime_ns, sha]
         if sha != entry["sha256"]:
             (result["kept"] if mine.get(rel) == entry["sha256"] else result["differ"]).append(rel)
+    if stop is not None and stop.is_set():
+        raise Stopped()
     result["runtime"] = _check_runtime(root, full)
     rt = result["runtime"]
     result["count"] = (len(result["differ"]) + len(result["missing"])
@@ -244,6 +261,9 @@ def lines(result: dict) -> list:
     rt = result.get("runtime") or {}
     out += [f"native runtime file differs: {p}" for p in rt.get("differ", [])]
     out += [f"native runtime file missing: {p}" for p in rt.get("missing", [])]
+    out += [f"native runtime file could not be read: {p}" for p in rt.get("unreadable", [])]
+    if rt.get("error"):
+        out.append(f"the native runtime's list could not be read: {rt['error']}")
     return out
 
 
@@ -303,19 +323,18 @@ def _set(result: Optional[dict] = None, *, pending=None, running=None) -> None:
     with _lock:
         if result is not None:
             _last = result
-            from localm.bugreport import diagnostics
-            diagnostics.note_integrity(_counts(result))
         if pending is not None:
             _pending = pending
         if running is not None:
             _running = running
 
 
-def run(*, full: bool = False, root=None, write_record: bool = True) -> dict:
+def run(*, full: bool = False, root=None, write_record: bool = True,
+        stop: Optional[threading.Event] = None) -> dict:
     """:func:`check`, with its result kept for :func:`state`."""
     _set(running=True)
     try:
-        result = check(root, full=full, write_record=write_record)
+        result = check(root, full=full, write_record=write_record, stop=stop)
         _set(result)
         return result
     finally:
@@ -348,15 +367,24 @@ def _counts(r: dict) -> dict:
             "runtime_differ": len(rt.get("differ", [])) + len(rt.get("missing", []))}
 
 
-def startup(command, *, say: Optional[Callable] = None,
-            delay: float = START_DELAY_S) -> Optional[threading.Thread]:
-    """Start the startup check of a server (*command* in :data:`SERVER_COMMANDS`) in a
-    daemon thread that waits *delay* seconds first, and return the thread. None, with
-    nothing read, for another command or when ``integrity_check_at_start`` is off.
-    With ``integrity_notice`` on, a difference found is passed to *say* as one
-    line."""
-    if command not in SERVER_COMMANDS:
-        return None
+def report_counts() -> dict:
+    """The counts a bug report carries, from a check of the running install that
+    writes nothing: ``{"checked": False}`` without a list to compare with, else
+    ``{"checked", "differ", "missing", "kept", "runtime_differ"}``. No path."""
+    return _counts(check(write_record=False))
+
+
+_diagnostics.add_source("files_differing", report_counts)
+
+
+def startup(*, say: Optional[Callable] = None, delay: float = START_DELAY_S,
+            on_close: Optional[Callable] = None) -> Optional[threading.Thread]:
+    """Start the startup check of a server in a daemon thread that waits *delay*
+    seconds first, and return the thread. None, with nothing read, when
+    ``integrity_check_at_start`` is off. With ``integrity_notice`` on, a difference
+    found is passed to *say* as one line. *on_close* receives the function that ends
+    the thread (``click.Context.call_on_close`` of the server's command): it ends the
+    wait or the check and waits up to :data:`_STOP_WAIT_S` for the thread."""
     try:
         at_start, notice = _settings()
     except Exception as e:
@@ -366,13 +394,18 @@ def startup(command, *, say: Optional[Callable] = None,
     if not at_start:
         return None
     _set(pending=True)
+    stop = threading.Event()
 
     def work():
-        time.sleep(delay)
+        if stop.wait(delay):
+            _set(pending=False)
+            return
         began = time.monotonic()
         try:
             from localm.audit import automatic_write_allowed
-            result = run(write_record=automatic_write_allowed("server"))
+            result = run(write_record=automatic_write_allowed("server"), stop=stop)
+        except Stopped:
+            return
         except Exception as e:
             from localm.debuglog import logger
             logger.warning("integrity: the check at startup failed: %s", e)
@@ -385,26 +418,62 @@ def startup(command, *, say: Optional[Callable] = None,
                 "'localm integrity --repair' puts them back.")
 
     thread = threading.Thread(target=work, name="localm-integrity", daemon=True)
+
+    def end():
+        stop.set()
+        thread.join(_STOP_WAIT_S)
+
     thread.start()
+    if on_close is not None:
+        on_close(end)
     return thread
 
 
 # -------------------------------------------------------------------- repair
 
-def _replace(path: Path, data: bytes) -> None:
+def _executable(info: zipfile.ZipInfo, rel: str) -> bool:
+    """Whether the build gives the file *rel* the execute permission: its archive
+    entry has one (as ``_apply_update.extract`` reads it) or it is one of
+    ``_apply_update.EXECUTABLES``."""
+    from localm import _apply_update as au
+    return bool((info.external_attr >> 16) & 0o111) or rel in au.EXECUTABLES
+
+
+def _inside(root: Path, path: Path) -> bool:
+    """Whether *path*'s folder, its links followed, lies in the install at *root*."""
+    try:
+        return path.parent.resolve().is_relative_to(root.resolve())
+    except (OSError, RuntimeError):
+        return False
+
+
+def _replace(path: Path, data: bytes, *, executable: bool) -> None:
+    """Put *data* at *path* through a temporary file beside it, with the execute
+    permission outside Windows when *executable*. The temporary file is removed when
+    the write fails. Raises OSError."""
+    from localm import _apply_update as au
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".localm-repair")
-    tmp.write_bytes(data)
-    deadline = time.monotonic() + _HELD_S
-    while True:
+    try:
+        tmp.write_bytes(data)
+        if executable and os.name != "nt":
+            au._add_exec(tmp)
+        deadline = time.monotonic() + _HELD_S
+        while True:
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.2)
+    except BaseException:
         try:
-            os.replace(tmp, path)
-            return
-        except PermissionError:
-            if time.monotonic() >= deadline:
-                tmp.unlink(missing_ok=True)
-                raise
-            time.sleep(0.2)
+            tmp.unlink(missing_ok=True)
+        except OSError as e:
+            from localm.debuglog import logger
+            logger.warning("integrity: the unfinished copy %s was not removed: %s", tmp, e)
+        raise
 
 
 def repair(paths=None, *, root=None, say: Optional[Callable] = None,
@@ -413,12 +482,13 @@ def repair(paths=None, *, root=None, say: Optional[Callable] = None,
     ones aside) again from the signed build of the installed version: the build is
     downloaded through the updater, its signature checked, and each file is taken
     from it only when the build's own statement gives it the content the installed
-    statement does. A repaired file stops being kept. Returns ``{"version",
-    "repaired", "failed"}`` (``failed``: ``[{"path", "reason"}]``). Raises
-    IntegrityError when nothing can be repaired (no statement, a path the release
-    does not state, an update in progress) and LocalmError when the build cannot be
-    fetched or does not verify. *opener* is the updater's download opener."""
-    from localm import update_package, updater
+    statement does; a file whose folder leads outside the install is not written. A
+    repaired file stops being kept. Returns ``{"version", "repaired", "failed"}``
+    (``failed``: ``[{"path", "reason"}]``). Raises IntegrityError when nothing can be
+    repaired (no statement, a path the release does not state, an update in
+    progress) and LocalmError when the build cannot be fetched, read or does not
+    verify. *opener* is the updater's download opener."""
+    from localm import updater
     from localm.bugreport import LocalmError
     say = say or (lambda _m: None)
     root = _root(root)
@@ -449,49 +519,110 @@ def repair(paths=None, *, root=None, say: Optional[Callable] = None,
             updater.download(asset["id"], zip_path, opener=opener)
             data = zip_path.read_bytes()
             updater.verify_signature(data, meta.get("signature"))
-            with zipfile.ZipFile(io.BytesIO(data)) as z:
-                names = set(z.namelist())
-                if update_package.NAME not in names:
-                    raise LocalmError(f"the build of {version} lists no files",
-                                      reason="it cannot tell which content is right")
-                signed = update_package.parse(z.read(update_package.NAME).decode("utf-8"))
-                if signed["version"] != version:
-                    raise LocalmError(f"the update server sent {signed['version'][:40]} "
-                                      f"for {version}", reason="nothing was repaired")
-                repaired, failed = [], []
-                for rel in paths:
-                    entry = signed["files"].get(rel)
-                    if entry != manifest["files"][rel] or rel not in names:
-                        failed.append({"path": rel, "reason": "the signed build states "
-                                       "other content for it than this install's list"})
-                        continue
-                    content = z.read(rel)
-                    if (hashlib.sha256(content).hexdigest() != entry["sha256"]
-                            or len(content) != entry["size"]):
-                        failed.append({"path": rel, "reason": "the build's copy differs "
-                                       "from its own list"})
-                        continue
-                    try:
-                        _replace(_path(root, rel), content)
-                    except OSError as e:
-                        from localm.debuglog import logger
-                        logger.warning("integrity: %s could not be written: %s", rel, e)
-                        failed.append({"path": rel, "reason": "it could not be written (another "
-                                       "program may hold it; the log says why)"})
-                        continue
-                    repaired.append(rel)
-                    say(f"Repaired {rel}")
+            planned, failed = _from_build(data, version, manifest, paths)
         finally:
-            import shutil
-            try:
-                shutil.rmtree(scratch)
-            except OSError as e:
-                from localm.debuglog import logger
-                logger.warning("integrity: the downloaded build in %s was not removed: %s",
-                               scratch, e)
+            _remove_scratch(scratch)
+        repaired = _write_planned(root, planned, failed, say)
     mine = kept()
     if any(rel in mine for rel in repaired):
         for rel in repaired:
             mine.pop(rel, None)
-        _write_json(_updates(True) / KEPT, mine)
+        try:
+            _write_json(_updates(True) / KEPT, mine)
+        except OSError as e:
+            from localm.debuglog import logger
+            logger.warning("integrity: the repaired files stay listed as kept, since the "
+                           "list of kept files could not be written: %s", e)
     return {"version": version, "repaired": repaired, "failed": failed}
+
+
+def _from_build(data: bytes, version: str, manifest: dict, paths: list) -> tuple:
+    """``(planned, failed)`` for repairing *paths* from the verified build *data* of
+    *version*: ``planned`` ``[(path, content, executable)]`` for each file the build
+    states and holds with the content *manifest* states, ``failed`` ``[{"path",
+    "reason"}]`` for the others. Raises LocalmError when the build cannot be read,
+    lists no files, or is of another version."""
+    import zlib
+
+    from localm import update_package
+    from localm.bugreport import LocalmError
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            names = set(z.namelist())
+            if update_package.NAME not in names:
+                raise LocalmError(f"the build of {version} lists no files",
+                                  reason="it cannot tell which content is right")
+            signed = update_package.parse(z.read(update_package.NAME).decode("utf-8"))
+            if signed["version"] != version:
+                raise LocalmError(f"the update server sent {signed['version'][:40]} "
+                                  f"for {version}", reason="nothing was repaired")
+            planned, failed = [], []
+            for rel in paths:
+                entry = signed["files"].get(rel)
+                if entry != manifest["files"][rel] or rel not in names:
+                    failed.append({"path": rel, "reason": "the signed build states "
+                                   "other content for it than this install's list"})
+                    continue
+                content = z.read(rel)
+                if (hashlib.sha256(content).hexdigest() != entry["sha256"]
+                        or len(content) != entry["size"]):
+                    failed.append({"path": rel, "reason": "the build's copy differs "
+                                   "from its own list"})
+                    continue
+                planned.append((rel, content, _executable(z.getinfo(rel), rel)))
+    except (zipfile.BadZipFile, zlib.error, EOFError, KeyError, UnicodeDecodeError,
+            update_package.PackageError) as e:
+        raise LocalmError(f"the build of {version} cannot be read",
+                          reason=f"nothing was repaired ({type(e).__name__})") from e
+    return planned, failed
+
+
+def _write_planned(root: Path, planned: list, failed: list, say: Callable) -> list:
+    """Write each planned ``(path, content, executable)`` into the install at *root*
+    while holding the install's update lock, appending to *failed* the files that
+    could not be written, and return the paths written. Raises IntegrityError when
+    an update of the install holds the lock or has started."""
+    from localm.update_mechanism import job
+    busy = "an update of this install is in progress; repair it once the update has finished"
+    repaired = []
+    try:
+        with job.Lock(root, wait_s=0):
+            if job.record_path(root).exists():
+                raise IntegrityError(busy)
+            for rel, content, executable in planned:
+                target = _path(root, rel)
+                if not _inside(root, target):
+                    failed.append({"path": rel, "reason": "its folder leads outside the "
+                                   "install folder, so it was not written"})
+                    continue
+                try:
+                    _replace(target, content, executable=executable)
+                except OSError as e:
+                    from localm.debuglog import logger
+                    logger.warning("integrity: %s could not be written: %s", rel, e)
+                    failed.append({"path": rel, "reason": "it could not be written (another "
+                                   "program may hold it; the log says why)"})
+                    continue
+                repaired.append(rel)
+                say(f"Repaired {rel}")
+    except job.Busy:
+        raise IntegrityError(busy) from None
+    except OSError as e:
+        from localm.debuglog import logger
+        logger.warning("integrity: the update lock of %s could not be taken: %s", root, e)
+        raise IntegrityError("the install's update lock could not be taken, so nothing "
+                             "was repaired; the log says why") from None
+    return repaired
+
+
+def _remove_scratch(scratch: Path) -> None:
+    """Remove the folder of the downloaded build, saying in the log when it stays."""
+    import shutil
+    if not scratch.exists():
+        return
+    try:
+        shutil.rmtree(scratch)
+    except OSError as e:
+        from localm.debuglog import logger
+        logger.warning("integrity: the downloaded build in %s was not removed: %s",
+                       scratch, e)

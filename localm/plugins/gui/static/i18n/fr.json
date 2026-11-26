@@ -2790,6 +2790,8 @@
   "settings.integrity.itemMissing": "manquant : {path}",
   "settings.integrity.itemRuntime": "runtime natif : {path}",
   "settings.integrity.itemKept": "gardé comme le vôtre : {path}",
+  "settings.integrity.itemUnreadable": "illisible : {path}",
+  "settings.integrity.runtimeListUnreadable": "La liste des fichiers du runtime natif est illisible ({reason}).",
   "settings.integrity.runtimeUnlisted": "Le runtime natif n'a pas encore de liste de ses fichiers ; il en aura une à sa prochaine installation.",
   "settings.integrity.runtimeHint": "Le runtime natif ne fait pas partie de la version : localm setup-llama le réinstalle.",
   "settings.integrity.checkButton": "Vérifier maintenant",

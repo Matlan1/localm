@@ -2994,6 +2994,8 @@ export const I18N_EN = {
   "settings.integrity.itemMissing": "missing: {path}",
   "settings.integrity.itemRuntime": "native runtime: {path}",
   "settings.integrity.itemKept": "kept as yours: {path}",
+  "settings.integrity.itemUnreadable": "could not be read: {path}",
+  "settings.integrity.runtimeListUnreadable": "The native runtime's list of its files could not be read ({reason}).",
   "settings.integrity.runtimeUnlisted": "The native runtime has no list of its files yet; it gets one the next time it is installed.",
   "settings.integrity.runtimeHint": "The native runtime is not part of the release: localm setup-llama installs it again.",
   "settings.integrity.checkButton": "Check now",

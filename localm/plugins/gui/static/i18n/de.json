@@ -2607,6 +2607,8 @@
   "settings.integrity.itemMissing": "fehlt: {path}",
   "settings.integrity.itemRuntime": "native Laufzeit: {path}",
   "settings.integrity.itemKept": "als deine behalten: {path}",
+  "settings.integrity.itemUnreadable": "nicht lesbar: {path}",
+  "settings.integrity.runtimeListUnreadable": "Die Liste der Dateien der nativen Laufzeit ist nicht lesbar ({reason}).",
   "settings.integrity.runtimeUnlisted": "Die native Laufzeit hat noch keine Liste ihrer Dateien; sie bekommt eine bei der nächsten Installation.",
   "settings.integrity.runtimeHint": "Die native Laufzeit gehört nicht zum Release: localm setup-llama installiert sie erneut.",
   "settings.integrity.checkButton": "Jetzt prüfen",

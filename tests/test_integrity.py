@@ -50,8 +50,6 @@ def install(tmp_path, monkeypatch):
     monkeypatch.setattr(integrity, "_last", None)
     monkeypatch.setattr(integrity, "_pending", False)
     monkeypatch.setattr(integrity, "_running", False)
-    from localm.bugreport import diagnostics
-    monkeypatch.setattr(diagnostics, "_integrity", {"checked": False})
     return root
 
 
@@ -175,6 +173,22 @@ def test_a_kept_file_is_listed_apart_until_the_release_changes_it(install):
         "a new release of the kept file must be reported again")
 
 
+def test_a_deleted_file_kept_as_yours_is_listed_apart_and_no_longer_counted(install, release):
+    from click.testing import CliRunner
+
+    from localm.cli import main
+    (install / "docs" / "c.md").unlink()
+    assert integrity.check()["count"] == 1
+    r = CliRunner().invoke(main, ["integrity", "--keep", "docs/c.md"])
+    assert r.exit_code == 0 and "kept as yours: docs/c.md" in r.output, r.output
+    r = integrity.check()
+    assert (r["missing"], r["kept"], r["count"]) == ([], ["docs/c.md"], 0)
+    assert integrity.repair(opener=release["opener"])["repaired"] == [], (
+        "a kept deleted file is not repaired unless named")
+    assert integrity.repair(["docs/c.md"], opener=release["opener"])["repaired"] == ["docs/c.md"]
+    assert (install / "docs" / "c.md").read_bytes() == b"# c\n" and integrity.kept() == {}
+
+
 def test_keep_refuses_a_file_the_release_does_not_state(install):
     with pytest.raises(integrity.IntegrityError, match="not a file of the release"):
         integrity.keep(["localm/zzz.py"])
@@ -198,7 +212,70 @@ def test_the_runtime_list_holds_its_files_and_not_its_own_records(install):
     assert set(data["files"]) == {"llama.dll", "rocblas/kernel.dat"}
     r = integrity.check()
     assert r["runtime"] == {"present": True, "listed": True, "full": False, "checked": 2,
-                            "differ": [], "missing": [], "hashed": 0}
+                            "differ": [], "missing": [], "unreadable": [], "hashed": 0,
+                            "error": None}
+
+
+def test_every_record_of_localm_in_the_runtime_folder_stays_out_of_the_list(install):
+    lib = _runtime(install)
+    for name in (".localm-cuda-staged", ".localm-cuda-runtime.json", ".localm-cpu-overlay",
+                 ".localm-cpu-overlay-failed", ".localm-kernel-packs", ".localm-cpu-tier",
+                 ".localm-backend-choice", ".gitkeep"):
+        (lib / name).write_bytes(b"{}")
+    (lib / ".localm-cpu-tier.lock").mkdir()
+    (lib / ".localm-cpu-tier.lock" / "owner.json").write_bytes(b"{}")
+    integrity.write_runtime_list(lib)
+    data = json.loads((lib / runtime_files.NAME).read_text(encoding="utf-8"))
+    assert set(data["files"]) == {"llama.dll", "rocblas/kernel.dat"}
+
+
+def test_a_cpu_tier_the_loader_set_aside_is_no_difference(install, monkeypatch):
+    from localm import cpu_backend_select
+    lib = _runtime(install)
+    for tier in ("alderlake", "haswell", "zen4"):
+        (lib / f"libggml-cpu-{tier}.so").write_bytes(tier.encode() * 100)
+    integrity.write_runtime_list(lib)
+    monkeypatch.setattr(cpu_backend_select, "_probe_score",
+                        lambda c, d: {"libggml-cpu-haswell.so": 64}.get(c.name, 0))
+    assert cpu_backend_select.ensure_cpu_tier_selected(lib) == "libggml-cpu-haswell.so"
+    assert (lib / "_unused-libggml-cpu-zen4.so").is_file()
+    assert not (lib / "libggml-cpu-zen4.so").exists()
+    for full in (False, True):
+        rt = integrity.check(full=full)["runtime"]
+        assert (rt["differ"], rt["missing"], rt["checked"]) == ([], [], 5), (full, rt)
+    (lib / "_unused-libggml-cpu-zen4.so").write_bytes(b"x")
+    assert integrity.check()["runtime"]["differ"] == ["libggml-cpu-zen4.so"]
+    (lib / "_unused-libggml-cpu-zen4.so").unlink()
+    assert integrity.check()["runtime"]["missing"] == ["libggml-cpu-zen4.so"]
+
+
+def test_a_runtime_file_or_list_that_cannot_be_read_is_reported_not_raised(
+        install, monkeypatch):
+    lib = _runtime(install)
+    integrity.write_runtime_list(lib)
+    real = os.stat
+
+    def stat(p, *a, **k):
+        if str(p).endswith("llama.dll"):
+            raise PermissionError(13, "Permission denied", str(p))
+        return real(p, *a, **k)
+
+    monkeypatch.setattr(runtime_files.os, "stat", stat)
+    r = integrity.check()
+    assert r["runtime"]["unreadable"] == ["llama.dll"] and r["runtime"]["differ"] == []
+    assert "native runtime file could not be read: llama.dll" in integrity.lines(r)
+    monkeypatch.setattr(runtime_files.os, "stat", real)
+    real_read = Path.read_text
+
+    def read_text(self, *a, **k):
+        if self.name == runtime_files.NAME:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    rt = integrity.check()["runtime"]
+    assert rt["listed"] is False and rt["error"] == "PermissionError: Permission denied"
+    assert str(lib) not in rt["error"]
 
 
 def test_a_runtime_file_of_another_size_is_reported_without_reading_it(install, reads):
@@ -251,15 +328,82 @@ def test_with_the_setting_off_a_start_reads_nothing(install, monkeypatch, reads)
     looked: list = []
     monkeypatch.setattr(integrity, "statement", lambda *a, **k: looked.append(a) or (None, ""))
     monkeypatch.setattr(integrity, "check", lambda *a, **k: looked.append(a) or {})
-    assert integrity.startup("gui", delay=0) is None
+    assert integrity.startup(delay=0) is None
     assert looked == [] and reads == []
     assert integrity.state()["pending"] is False
 
 
-def test_a_start_that_is_not_a_server_reads_nothing(install, monkeypatch, reads):
+def _start(command, monkeypatch):
+    """The CLI start of *command* with its update steps and the command itself
+    replaced: returns what ``integrity.startup`` was called with."""
+    import click
+    from click.testing import CliRunner
+
+    from localm.cli import _core, main
+    seen: list = []
+    monkeypatch.setattr(integrity, "startup", lambda **k: seen.append(k))
+    monkeypatch.setattr(_core, "_update_steps_at_start", lambda command: None)
+    monkeypatch.setitem(main.commands, command, click.Command(command, callback=lambda: None))
+    r = CliRunner().invoke(main, [command])
+    assert r.exit_code == 0, r.output
+    return seen
+
+
+@pytest.mark.parametrize("command", ["gui", "serve"])
+def test_a_server_start_starts_the_check_and_hands_it_the_end_of_its_command(
+        install, monkeypatch, command):
+    (call,) = _start(command, monkeypatch)
+    assert set(call) == {"say", "on_close"}
+
+
+@pytest.mark.parametrize("command", ["chat", "integrity", "run"])
+def test_a_start_that_is_not_a_server_does_not_start_the_check(install, monkeypatch, command):
+    assert _start(command, monkeypatch) == []
+
+
+def test_the_end_of_the_command_ends_the_waiting_check_and_reads_nothing(
+        install, monkeypatch, reads):
+    _settings(monkeypatch, integrity_check_at_start=True, integrity_notice=True)
+    ends: list = []
+    thread = integrity.startup(delay=3600, on_close=ends.append)
+    assert thread.is_alive() and integrity.state()["pending"] is True
+    (end,) = ends
+    end()
+    assert not thread.is_alive(), "the startup check outlived its command"
+    assert reads == [] and integrity.state()["pending"] is False
+    assert integrity.state()["result"] is None
+
+
+def test_the_end_of_the_command_ends_a_check_that_is_reading(install, monkeypatch):
+    import threading
     _settings(monkeypatch, integrity_check_at_start=True)
-    assert integrity.startup("chat", delay=0) is None
-    assert reads == []
+    stop = threading.Event()
+    stop.set()
+    with pytest.raises(integrity.Stopped):
+        integrity.check(stop=stop)
+    reading = threading.Event()
+    release_read = threading.Event()
+    real = runtime_files.sha256
+
+    def slow(path):
+        reading.set()
+        release_read.wait(10)
+        return real(path)
+
+    monkeypatch.setattr(runtime_files, "sha256", slow)
+    ends: list = []
+    thread = integrity.startup(delay=0, on_close=ends.append)
+    assert reading.wait(10)
+    (stopping,) = [c.cell_contents for c in ends[0].__closure__
+                   if isinstance(c.cell_contents, threading.Event)]
+    stopper = threading.Thread(target=ends[0])
+    stopper.start()
+    assert stopping.wait(10)
+    release_read.set()
+    stopper.join(10)
+    thread.join(10)
+    assert not thread.is_alive()
+    assert integrity.state()["result"] is None, "a check ended midway keeps no result"
 
 
 @pytest.mark.parametrize("notice", [True, False])
@@ -268,7 +412,7 @@ def test_the_startup_check_keeps_its_result_and_says_it_only_with_the_notice_on(
     _settings(monkeypatch, integrity_check_at_start=True, integrity_notice=notice)
     (install / "localm" / "a.py").write_bytes(b"A = 9\n")
     said: list = []
-    thread = integrity.startup("serve", say=said.append, delay=0)
+    thread = integrity.startup(say=said.append, delay=0)
     assert thread is not None and thread.daemon
     thread.join(30)
     state = integrity.state()
@@ -285,33 +429,36 @@ def test_the_startup_check_writes_its_record_only_where_automatic_writes_are_all
     _settings(monkeypatch, integrity_check_at_start=True, integrity_notice=False, mode=mode)
     monkeypatch.setattr("localm.audit.automatic_write_allowed",
                         lambda surface, cwd=None: mode != "privacy")
-    integrity.startup("gui", delay=0).join(30)
+    integrity.startup(delay=0).join(30)
     record = install.parent / "home" / "updates" / integrity.RECORD
     assert record.exists() is (mode != "privacy")
 
 
-def test_every_cli_start_but_a_help_hands_its_command_to_the_startup_check(
-        install, monkeypatch):
+def test_a_server_help_does_not_start_the_check(install, monkeypatch):
     from click.testing import CliRunner
 
     from localm.cli import _core, main
     seen: list = []
-    monkeypatch.setattr(integrity, "startup", lambda command, say=None: seen.append(command))
+    monkeypatch.setattr(integrity, "startup", lambda **k: seen.append(k))
     monkeypatch.setattr(_core, "_update_steps_at_start", lambda command: None)
-    CliRunner().invoke(main, ["integrity", "--help"])
+    CliRunner().invoke(main, ["serve", "--help"])
     assert seen == []
-    CliRunner().invoke(main, ["integrity"])
-    assert seen == ["integrity"]
 
 
 # ------------------------------------------------------------------ repair
 
-def _build(files: dict, statement: dict) -> bytes:
+def _build(files: dict, statement, modes: dict | None = None) -> bytes:
+    """A build zip of *files* and *statement* (a dict, or the text of a broken one),
+    each entry with the permission *modes* gives it (default 0o600, as a release
+    zip records a plain file)."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
         for rel, text in sorted(files.items()):
-            z.writestr(rel, text)
-        z.writestr(update_package.NAME, json.dumps(statement))
+            info = zipfile.ZipInfo(rel)
+            info.external_attr = (0o100000 | (modes or {}).get(rel, 0o600)) << 16
+            z.writestr(info, text)
+        z.writestr(update_package.NAME,
+                   statement if isinstance(statement, str) else json.dumps(statement))
     return buf.getvalue()
 
 
@@ -423,6 +570,97 @@ def test_repair_waits_for_an_update_in_progress(install, release):
     assert (install / "localm" / "a.py").read_bytes() == b"A = 9\n"
 
 
+def _with_scripts(install: Path, release: dict) -> None:
+    """Add a launcher (one of ``_apply_update.EXECUTABLES``) and a script the build
+    marks executable to the install and its signed build, both recorded 0600 and
+    0755 as a release zip records them."""
+    files = dict(FILES, **{"localm.sh": "#!/bin/sh\necho launch\n",
+                           "tools/x.sh": "#!/bin/sh\necho x\n"})
+    for rel in ("localm.sh", "tools/x.sh"):
+        (install / rel).parent.mkdir(parents=True, exist_ok=True)
+        (install / rel).write_bytes(files[rel].encode())
+    statement = _statement(install)
+    release["data"] = _build(files, statement, {"tools/x.sh": 0o755})
+
+
+def test_a_repaired_script_keeps_the_execute_permission_the_build_gives_it(install, release):
+    _with_scripts(install, release)
+    for rel in ("localm.sh", "tools/x.sh", "localm/a.py"):
+        (install / rel).write_bytes(b"edited\n")
+    res = integrity.repair(opener=release["opener"])
+    assert sorted(res["repaired"]) == ["localm.sh", "localm/a.py", "tools/x.sh"], res
+    assert (install / "localm.sh").read_bytes() == b"#!/bin/sh\necho launch\n"
+    with zipfile.ZipFile(io.BytesIO(release["data"])) as z:
+        decided = {rel: integrity._executable(z.getinfo(rel), rel)
+                   for rel in ("localm.sh", "tools/x.sh", "localm/a.py")}
+    assert decided == {"localm.sh": True, "tools/x.sh": True, "localm/a.py": False}
+    if os.name != "nt":
+        modes = {rel: os.stat(install / rel).st_mode & 0o111
+                 for rel in ("localm.sh", "tools/x.sh", "localm/a.py")}
+        assert modes["localm.sh"] and modes["tools/x.sh"], modes
+        assert modes["localm/a.py"] == 0, modes
+
+
+def test_a_failed_write_leaves_no_unfinished_copy(install, release, monkeypatch):
+    (install / "localm" / "a.py").write_bytes(b"A = 9\n")
+    real = Path.write_bytes
+
+    def half(self, data):
+        if self.name.endswith(".localm-repair"):
+            real(self, data[:2])
+            raise OSError(28, "No space left on device")
+        return real(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", half)
+    res = integrity.repair(opener=release["opener"])
+    assert res["repaired"] == [] and res["failed"][0]["path"] == "localm/a.py"
+    assert list(install.rglob("*.localm-repair")) == []
+    assert (install / "localm" / "a.py").read_bytes() == b"A = 9\n"
+
+
+def test_repair_does_not_write_through_a_folder_that_leads_outside(install, release, tmp_path):
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "c.md").write_bytes(b"theirs\n")
+    import shutil
+    shutil.rmtree(install / "docs")
+    try:
+        (install / "docs").symlink_to(outside, target_is_directory=True)
+    except OSError as e:
+        pytest.skip(f"this system cannot make a folder link here: {e}")
+    res = integrity.repair(["docs/c.md"], opener=release["opener"])
+    assert res["repaired"] == [] and "outside" in res["failed"][0]["reason"], res
+    assert (outside / "c.md").read_bytes() == b"theirs\n"
+
+
+def test_an_update_that_starts_during_the_download_stops_the_repair(
+        install, release, monkeypatch):
+    from localm.update_mechanism import job
+    (install / "localm" / "a.py").write_bytes(b"A = 9\n")
+    real = updater.verify_signature
+
+    def verify_while_an_update_starts(data, signature):
+        record = job.record_path(install)
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_bytes(b"{}")
+        return real(data, signature)
+
+    monkeypatch.setattr(updater, "verify_signature", verify_while_an_update_starts)
+    with pytest.raises(integrity.IntegrityError, match="update"):
+        integrity.repair(opener=release["opener"])
+    assert (install / "localm" / "a.py").read_bytes() == b"A = 9\n"
+
+
+def test_a_build_whose_list_cannot_be_read_repairs_nothing_and_says_so(install, release):
+    from localm.bugreport import LocalmError
+    (install / "localm" / "a.py").write_bytes(b"A = 9\n")
+    release["data"] = _build(FILES, "{not json")
+    with pytest.raises(LocalmError, match="cannot be read"):
+        integrity.repair(opener=release["opener"])
+    assert (install / "localm" / "a.py").read_bytes() == b"A = 9\n"
+    assert not (install.parent / "home" / "updates" / "integrity-repair").exists()
+
+
 # ------------------------------------------------------------ CLI and report
 
 def test_the_command_lists_keeps_and_reports_its_exit_code(install):
@@ -438,15 +676,56 @@ def test_the_command_lists_keeps_and_reports_its_exit_code(install):
     assert r.exit_code == 0 and "kept as yours: localm/a.py" in r.output, r.output
 
 
-def test_the_bug_report_carries_counts_and_no_paths(install):
+def test_keep_or_repair_with_only_runtime_differences_still_exits_1(install):
+    from click.testing import CliRunner
+
+    from localm.cli import main
+    lib = _runtime(install)
+    integrity.write_runtime_list(lib)
+    (lib / "llama.dll").write_bytes(b"L" * 999)
+    for flag in ("--keep", "--repair"):
+        r = CliRunner().invoke(main, ["integrity", flag])
+        assert r.exit_code == 1, (flag, r.output)
+        assert "nothing to" in r.output and "llama.dll" in r.output, r.output
+
+
+def test_localm_bug_report_carries_the_counts_without_a_check_before_and_writes_nothing(
+        install, monkeypatch):
+    from click.testing import CliRunner
+
+    from localm import bugreport
     from localm.bugreport import diagnostics
-    assert diagnostics._integrity_counts() == {"checked": False}
+    from localm.cli import main
     (install / "localm" / "a.py").write_bytes(b"A = 9\n")
-    integrity.run()
-    counts = diagnostics.collect_diagnostics()["files_differing"]
-    assert counts == {"checked": True, "differ": 1, "missing": 0, "kept": 0,
-                      "runtime_differ": 0}
-    assert "a.py" not in json.dumps(counts)
+    (install / "docs" / "c.md").unlink()
+    integrity.keep(["docs/c.md"])
+    monkeypatch.setattr(bugreport, "offer_to_send", lambda *a, **k: False)
+    monkeypatch.setattr(bugreport, "stdin_is_interactive", lambda: False)
+    home = install.parent / "home"
+    updates = home / "updates"
+    before = sorted(p.name for p in updates.iterdir())
+    r = CliRunner().invoke(main, ["bug-report", "-m", "it broke", "--no-log"])
+    assert r.exit_code == 0, r.output
+    (saved,) = [p for p in home.rglob("*.md")]
+    report = saved.read_text(encoding="utf-8")
+    assert ("- Files differing from the release: 1 (1 changed, 0 missing, 0 native "
+            "runtime); 1 kept as the user's") in report, report
+    assert "a.py" not in report and "c.md" not in report
+    assert integrity.state()["result"] is None, "no check had run in this process"
+    assert sorted(p.name for p in updates.iterdir()) == before, "the report wrote a record"
+    assert diagnostics.collect_diagnostics()["files_differing"] == {
+        "checked": True, "differ": 1, "missing": 0, "kept": 1, "runtime_differ": 0}
+
+
+def test_a_failing_source_of_the_bug_report_is_named_not_raised(install, monkeypatch):
+    import localm.bugreport as br
+    from localm.bugreport import diagnostics
+
+    def broken():
+        raise RuntimeError("no")
+
+    monkeypatch.setitem(br._diagnostic_sources, "files_differing", broken)
+    assert diagnostics.collect_diagnostics()["files_differing"] == {"error": "RuntimeError"}
 
 
 # ------------------------------------------------------------------ routes

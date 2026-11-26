@@ -6,6 +6,8 @@ import sys
 
 import click
 
+from localm import integrity
+
 from ._core import console, main
 
 
@@ -30,7 +32,6 @@ def integrity_cmd(paths, full: bool, do_keep: bool, do_repair: bool) -> None:
     from it. Exits 1 while files differ."""
     from rich.markup import escape
 
-    from localm import integrity
     from localm.bugreport import LocalmError
     if do_keep and do_repair:
         console.print("[yellow]Use only one of --keep and --repair.[/yellow]")
@@ -43,6 +44,7 @@ def integrity_cmd(paths, full: bool, do_keep: bool, do_repair: bool) -> None:
         console.print(f"[yellow]Not checked:[/yellow] {escape(result['reason'])}")
         sys.exit(1)
     differing = result["differ"] + result["missing"]
+    chosen = []
     if do_keep or do_repair:
         chosen = list(paths) or differing
         unknown = [p for p in paths if p not in differing and p not in result["kept"]]
@@ -51,8 +53,9 @@ def integrity_cmd(paths, full: bool, do_keep: bool, do_repair: bool) -> None:
                           f"[/yellow] {escape(', '.join(unknown))}")
             sys.exit(2)
         if not chosen:
-            console.print(f"[green]{escape(integrity.summary(result))}.[/green]")
-            return
+            console.print("No file of the release differs, so there is nothing to "
+                          f"{'keep' if do_keep else 'repair'}.")
+    if chosen:
         try:
             if do_keep:
                 for rel in integrity.keep(chosen):
@@ -77,7 +80,7 @@ def integrity_cmd(paths, full: bool, do_keep: bool, do_repair: bool) -> None:
     for rel in result["kept"]:
         console.print(f"  [dim]kept as yours: {escape(rel)}[/dim]")
     rt = result["runtime"]
-    if rt["present"] and not rt["listed"]:
+    if rt["present"] and not rt["listed"] and not rt.get("error"):
         console.print("  [dim]The native runtime has no list of its files yet (it was "
                       "installed by an older localm); it gets one the next time it is "
                       "installed.[/dim]")
