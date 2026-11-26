@@ -497,7 +497,8 @@ def test_a_failing_check_keep_or_repair_answers_without_exception_text(
     owner = {"Authorization": f"Bearer {OWNER_KEY}"}
     secret = "SECRET-DETAIL-4711"
     statement = (install / update_package.NAME).read_bytes()
-    (install / update_package.NAME).write_bytes(b'{"format": "' + secret.encode() + b'"')
+    broken = dict(json.loads(statement), format=secret)
+    (install / update_package.NAME).write_bytes(json.dumps(broken).encode())
     for r in (c.post("/api/integrity/check", headers=owner),
               c.post("/api/integrity/repair", headers=owner),
               c.post("/api/integrity/keep", headers=owner, json={"paths": ["localm/a.py"]})):
