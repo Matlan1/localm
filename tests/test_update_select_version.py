@@ -10,6 +10,7 @@ import importlib.util
 import io
 import json
 import zipfile
+from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -50,6 +51,15 @@ def _download(data):
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)
     return opener
+
+
+@pytest.fixture(autouse=True)
+def _builds_without_an_applier(monkeypatch):
+    """The builds these tests install ship no program of their own, so the routes and
+    commands install them with ``updater.apply`` (``updater_handoff.Prepared.legacy``)."""
+    from localm import updater_handoff
+    monkeypatch.setattr(updater_handoff, "prepare", lambda *_a, **_k: updater_handoff.Prepared(
+        Path("."), "0" * 32, "", "", None, True, None, False, None, legacy=True))
 
 
 @pytest.fixture
