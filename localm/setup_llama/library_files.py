@@ -89,6 +89,19 @@ def _is_wanted(f: Path) -> bool:
 _BLAS_LIBRARY_DIRS = ("rocblas", "hipblaslt", ".kpack")
 
 
+# The folder of a runtime that holds the ROCm libraries localm adds to the
+# upstream Windows hip build (hip_libraries.py), in the layout of AMD's wheel:
+# the DLLs in "<dir>/bin", rocBLAS's kernel data in "<dir>/bin/rocblas/library",
+# the kernel packs in "<dir>/.kpack". rocBLAS reads its kernel packs from
+# "../.kpack" relative to its own DLL, so its DLL stays in "<dir>/bin".
+HIP_LIBRARIES_DIR = "rocm"
+
+
+# Every subfolder of a runtime folder that belongs to the runtime: cleared with
+# it, checked for files in use, and replaced as a whole by an update.
+RUNTIME_SUBDIRS = (*_BLAS_LIBRARY_DIRS, HIP_LIBRARIES_DIR)
+
+
 # Of those, the ones whose kernel data is genuinely REQUIRED by an install that
 # ships the matching vendor library. Only rocblas:
 #   * rocblas WITHOUT its Tensile data hard-crashes the native process on the
@@ -140,22 +153,31 @@ def blas_kernel_problems(target: Path) -> list[str]:
     try:
         if not target.is_dir():
             return problems
-        for name in _BLAS_DIRS_REQUIRING_KERNELS:
-            if not _sl._has_vendor_library(target, name):
+        hip_bin = target / HIP_LIBRARIES_DIR / "bin"
+        for lib_dir in (target, hip_bin):
+            if not lib_dir.is_dir():
                 continue
-            d = target / name
-            if not d.is_dir():
-                problems.append(f"{name} is installed but its {name}/ kernel "
-                                f"directory is missing entirely")
-                continue
-            n = sum(1 for p in d.rglob("*") if p.is_file())
-            if n == 0:
-                problems.append(f"{name} is installed but its {name}/ kernel "
-                                f"directory is empty")
+            where = "" if lib_dir == target else f"{HIP_LIBRARIES_DIR}/bin/"
+            for name in _BLAS_DIRS_REQUIRING_KERNELS:
+                if not _sl._has_vendor_library(lib_dir, name):
+                    continue
+                d = lib_dir / name
+                if not d.is_dir():
+                    problems.append(f"{name} is installed but its {where}{name}/ kernel "
+                                    f"directory is missing entirely")
+                    continue
+                n = sum(1 for p in d.rglob("*") if p.is_file())
+                if n == 0:
+                    problems.append(f"{name} is installed but its {where}{name}/ kernel "
+                                    f"directory is empty")
         if _sl._has_vendor_library(target, "rocm_kpack"):
-            packs = target / ".kpack"
+            # Kernel packs are read from beside the libraries that carry them:
+            # the runtime folder's own, or the HIP_LIBRARIES_DIR tree's.
+            hip_tree = hip_bin.is_dir()
+            packs = target / HIP_LIBRARIES_DIR / ".kpack" if hip_tree else target / ".kpack"
             if not packs.is_dir() or not any(p.is_file() for p in packs.rglob("*.kpack")):
-                problems.append("rocm_kpack is installed but its .kpack/ kernel "
+                where = f"{HIP_LIBRARIES_DIR}/" if hip_tree else ""
+                problems.append(f"rocm_kpack is installed but its {where}.kpack/ kernel "
                                 "pack directory is missing or empty")
     except OSError as e:
         # Cannot read the install: say so rather than returning "no problems",

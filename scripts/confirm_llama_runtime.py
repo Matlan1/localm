@@ -315,6 +315,18 @@ def pe_imports(path: Path) -> list[str]:
 #  Placing a build                                                             #
 # --------------------------------------------------------------------------- #
 
+def _hip_wheels(dest: Path) -> list:
+    """``{"asset", "sha256"}`` of each AMD wheel the hip library supply recorded
+    in *dest* (none when it added nothing)."""
+    from localm import setup_llama as sl
+    marker = dest / sl.HIP_LIBRARIES_DIR / sl.HIP_LIBRARIES_MARKER
+    try:
+        wheels = json.loads(marker.read_text(encoding="utf-8")).get("wheels") or {}
+    except (OSError, ValueError):
+        return []
+    return [{"asset": name, "sha256": sha} for name, sha in sorted(wheels.items())]
+
+
 def _place_build(backend: str, tag: str, dest: Path, cuda_line: str | None = None,
                  attempts: int = 3) -> tuple[str, list, str, str]:
     """Place *backend* at *tag* into *dest* through setup-llama's
@@ -350,6 +362,9 @@ def _place_build(backend: str, tag: str, dest: Path, cuda_line: str | None = Non
         try:
             sl._provision_backend(backend, dest, None, with_cudart=True,
                                   cuda_line=cuda_line or sl._CUDA_LINE, tag=tag)
+            if sl.needs_hip_libraries(dest):
+                sl.supply_hip_libraries(dest)
+                fetched.extend(_hip_wheels(dest))
             last, kind = "", ""
             break
         except click.ClickException as e:

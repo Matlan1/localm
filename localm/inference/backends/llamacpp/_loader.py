@@ -225,7 +225,54 @@ def rocm_runtime_dirs() -> list[Path]:
     return found
 
 
-def _ensure_rocblas_tensile_path() -> None:
+def hip_library_dirs(binary_dir: Optional[Path]) -> list[Path]:
+    """The folder of the ROCm libraries setup added to the runtime in
+    *binary_dir* (``HIP_LIBRARIES_DIR/bin``, see setup_llama/hip_libraries.py),
+    as a one-element list, or ``[]`` when it has none."""
+    if binary_dir is None:
+        return []
+    from localm.setup_llama.library_files import HIP_LIBRARIES_DIR
+    d = Path(binary_dir) / HIP_LIBRARIES_DIR / "bin"
+    try:
+        return [d] if d.is_dir() else []
+    except OSError:
+        return []
+
+
+def _preload_hip_libraries(binary_dir: Path, hip_dirs: list[Path]) -> None:
+    """Load the runtime's own HIP runtime (``amdhip64_*.dll`` in *binary_dir*)
+    and then ``hipblas.dll`` from *hip_dirs* by absolute path, so the imports of
+    ggml-hip.dll and of the ROCm libraries resolve to these files and not to a
+    same-named DLL in the system folder or in another directory on the search
+    path. A no-op when *hip_dirs* is empty."""
+    if not hip_dirs:
+        return
+    try:
+        runtimes = sorted(binary_dir.glob("amdhip64_*.dll"))
+    except OSError:
+        runtimes = []
+    for path in runtimes:
+        _preload(path)
+    for d in hip_dirs:
+        path = d / "hipblas.dll"
+        if path.is_file():
+            _preload(path)
+
+
+def _runtime_ships_rocblas_data(dirs: list[Path]) -> bool:
+    """Whether one of *dirs* holds ``rocblas.dll`` with its ``rocblas/library``
+    kernel data beside it, which that rocBLAS reads without
+    ROCBLAS_TENSILE_LIBPATH."""
+    for d in dirs:
+        try:
+            if (d / "rocblas.dll").is_file() and (d / "rocblas" / "library").is_dir():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _ensure_rocblas_tensile_path(runtime_dirs: Optional[list[Path]] = None) -> None:
     """Point rocBLAS at its Tensile library if the caller has not already.
 
     The bundled rocm-sdk wheel ships ``rocblas/library/*.dat`` (the gfx-specific
@@ -236,9 +283,12 @@ def _ensure_rocblas_tensile_path() -> None:
     Mixture-of-Experts model, text-only ones included, do NOT and abort the
     native process outright. This call is REQUIRED for MoE and vision on ROCm.
 
-    No-op when already set or when no such directory exists (non-ROCm builds, or
-    a runtime without the rocm-sdk wheel)."""
+    No-op when already set, when no such directory exists (non-ROCm builds, or
+    a runtime without the rocm-sdk wheel), and when one of *runtime_dirs* (the
+    runtime's own library folders) ships rocBLAS with its kernel data beside it."""
     if os.environ.get("ROCBLAS_TENSILE_LIBPATH"):
+        return
+    if _runtime_ships_rocblas_data(runtime_dirs or []):
         return
     for d in rocm_runtime_dirs():
         lib = d / "rocblas" / "library"
@@ -289,7 +339,8 @@ def missing_dll_clause(binary_dir: Optional[Path], images: list) -> Optional[str
     if sys.platform != "win32" or binary_dir is None:
         return None
     from localm import vc_runtime
-    return vc_runtime.missing_clause(images, [Path(binary_dir), *rocm_runtime_dirs()])
+    return vc_runtime.missing_clause(
+        images, [Path(binary_dir), *hip_library_dirs(binary_dir), *rocm_runtime_dirs()])
 
 
 def _vc_runtime_short(binary_dir: Optional[Path], error_text: str) -> bool:
@@ -613,11 +664,16 @@ def load_lib() -> ctypes.CDLL:
     # ggml-vulkan initialises, i.e. before the preload below.
     _force_vulkan_dedicated_vram(binary_dir)
 
-    # Make the binary dir AND the venv's ROCm runtime resolvable by the loader.
+    # Make the binary dir, the ROCm libraries setup added to it, AND the venv's
+    # ROCm runtime resolvable by the loader.
+    hip_dirs = hip_library_dirs(binary_dir)
     _add_to_search_path(binary_dir)
+    for d in hip_dirs:
+        _add_to_search_path(d)
     for d in rocm_runtime_dirs():
         _add_to_search_path(d)
-    _ensure_rocblas_tensile_path()
+    _ensure_rocblas_tensile_path([binary_dir, *hip_dirs])
+    _preload_hip_libraries(binary_dir, hip_dirs)
 
     # POSIX only. The runtime ships one libggml-cpu-<tier>.so per x86
     # microarchitecture and every tier exports identically-named global C

@@ -93,7 +93,7 @@ from localm.setup_llama.pins import (
     DEFAULT_URL, DEFAULT_URL_SHA256, _ROCM_TAG, _ROCM_BUILD, _ROCM_CPU_ASSET, _ROCM_CPU_TAG,
     _AMD_ROCM_ASSET_TAG, _UPSTREAM_REPO,
     _PINNED_TAG, _PIN_CONFIRMATION, _TRACK_LATEST, _TRACK_DEFAULT, _CUDA_LINUX_REPO,
-    _PINNED_FALLBACK_SHA256, _ASSET_MATCH, _UPSTREAM_BACKENDS,
+    _PINNED_FALLBACK_SHA256, _ASSET_MATCH, _UPSTREAM_BACKENDS, _HIP_SDK_INDEX, _HIP_SDK_WHEELS,
 )
 from localm.setup_llama.download import (
     _MIN_ARTIFACT_BYTES, _DOWNLOAD_STALL_TIMEOUT, _DownloadResult, ArtifactError,
@@ -106,7 +106,8 @@ from localm.setup_llama.library_files import (
     blas_kernel_problems, _copy_blas_library_dirs, _LLAMA_CPP_MIT_NOTICE,
     KERNEL_PACKS_MARKER, kernel_packs_missing,
     _LICENSE_NAME_PREFIXES, _copy_license_files, _safe_is_file, _copy_binaries,
-    LLAMA_CPP_LICENSE, _license_dest_name, _place_license_file,
+    LLAMA_CPP_LICENSE, _license_dest_name, _place_license_file, HIP_LIBRARIES_DIR,
+    RUNTIME_SUBDIRS,
 )
 from localm.setup_llama.runtime_dir import (
     _platform_key, _machine_arch, _lib_name, _BACKEND_MARKER, _record_provisioned_backend,
@@ -146,6 +147,10 @@ from localm.setup_llama.native_deps import (
     _LIBGOMP_LICENSE_NOTICE, _read_ar_archive, _extract_libgomp_from_deb,
     _bundle_missing_native_deps, offer_vc_runtime, set_vc_unattended, vc_runtime_blocks_load,
     vc_runtime_missing,
+)
+from localm.setup_llama.hip_libraries import (
+    HIP_LIBRARIES_MARKER, HipLibrariesError, needs_hip_libraries, rocm_release, hip_gpu_archs,
+    supply_hip_libraries,
 )
 from localm.setup_llama.load_probe import (
     _EXC_HEADER_RE, _informative_error_line, _KNOWN_SHARED_LIB_PACKAGES, _MISSING_SO_RE,
@@ -232,5 +237,7 @@ __all__ = [
     "_TRACK_DEFAULT", "_TRACK_LATEST", "tracks_latest", "_UPSTREAM_BACKENDS",
     "_UPSTREAM_REPO", "_validate_archive", "_validated_tag", "_ver_at_least",
     "_ver_tuple", "verified_urlopen", "_require_network_allowed", "_verify",
-    "_warn_off_profile",
+    "_warn_off_profile", "_HIP_SDK_INDEX", "_HIP_SDK_WHEELS", "HIP_LIBRARIES_DIR",
+    "RUNTIME_SUBDIRS", "HIP_LIBRARIES_MARKER", "HipLibrariesError", "needs_hip_libraries",
+    "rocm_release", "hip_gpu_archs", "supply_hip_libraries",
 ]

@@ -100,7 +100,7 @@ def _prepare_runtime(root: Path, update_id: str, plan: dict, out: dict, say: Say
     """Fetch and test the runtime of the new tree beside the installed one. None when it
     does not work here and the installed one works with the new tree: that one is kept."""
     from localm import setup_llama as sl, updater_runtime as ur
-    from localm.setup_llama.library_files import _BLAS_LIBRARY_DIRS
+    from localm.setup_llama.library_files import RUNTIME_SUBDIRS
     from localm.setup_llama.runtime_dir import _PRESERVED_TARGET_FILES
     from localm.setup_spec import VC_RUNTIME_ABSENT_EXIT
     from localm.update_mechanism import job, steps
@@ -119,7 +119,7 @@ def _prepare_runtime(root: Path, update_id: str, plan: dict, out: dict, say: Say
     part = {"kind": "runtime", "label": f"{backend} runtime", "root": _located(root, folder),
             "name": live.name, "beside": staged.name, "backend": backend,
             "from": plan["current"] or "", "to": plan["target"], "unproven": False,
-            "keep": list(_PRESERVED_TARGET_FILES), "folders": sorted(_BLAS_LIBRARY_DIRS)}
+            "keep": list(_PRESERVED_TARGET_FILES), "folders": sorted(RUNTIME_SUBDIRS)}
     if code == VC_RUNTIME_ABSENT_EXIT:
         out["notes"].append("no model can load until the Microsoft Visual C++ Redistributable "
                             "is installed: run 'localm setup-llama', which offers to install it")
