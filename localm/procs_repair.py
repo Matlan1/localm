@@ -70,18 +70,18 @@ def _rel(root: Path, path) -> str:
 def named_files(error: BaseException, root: Path) -> list:
     """The files of localm in the install at *root* that *error* names, then
     ``localm/procs.py``: the file of a missing ``localm`` module, the file of a
-    ``SyntaxError``, and the last file of localm in the traceback (the one whose code
-    raised it)."""
+    ``SyntaxError``, and otherwise the last file of localm in the traceback (the one
+    whose code raised it)."""
     import traceback
     out = []
     name = getattr(error, "name", None)
     if isinstance(error, ImportError) and isinstance(name, str) and name.startswith("localm."):
         out.append(name.replace(".", "/") + ".py")
-    if isinstance(error, SyntaxError) and error.filename:
-        out.append(_rel(root, error.filename))
-    inside = [_rel(root, frame.filename) for frame in traceback.extract_tb(error.__traceback__)]
-    inside = [rel for rel in inside if rel.startswith("localm/")]
-    out += inside[-1:]
+    elif isinstance(error, SyntaxError):
+        out += [_rel(root, error.filename)] if error.filename else []
+    else:
+        inside = [_rel(root, f.filename) for f in traceback.extract_tb(error.__traceback__)]
+        out += [rel for rel in inside if rel.startswith("localm/")][-1:]
     out.append(_PROCS)
     return [rel for rel in dict.fromkeys(out) if rel.startswith("localm/")]
 
@@ -173,11 +173,14 @@ def _repair_parts(package: str) -> str:
 
 def _fix(files: list, damaged: list, package: str, no_list, root: Path) -> str:
     """What the user runs to repair it: the repair of the installed parts for a
-    missing *package* when the release states the named files as they are, else the
-    one that puts the files back, and with a *package* both."""
+    missing *package* when the release states the named files as they are, the one
+    that puts the files back when it states other content for them, and both when
+    there is no release to compare with."""
     parts = f"{_PARTS}, or 'localm update --repair'"
     if package and not no_list and not damaged:
         return parts
+    if damaged:
+        package = ""
     names = " ".join(damaged or files)
     if (root / ".git").exists():
         put_back = f"'git checkout -- {names}' in {root}"
@@ -208,7 +211,7 @@ def repair_and_enter(error: BaseException):
         if damaged and "files" not in tried:
             tried.add("files")
             step, arg = _repair_files, damaged
-        elif package and "parts" not in tried:
+        elif package and not damaged and "parts" not in tried:
             tried.add("parts")
             step, arg = _repair_parts, package
         else:
@@ -223,14 +226,14 @@ def repair_and_enter(error: BaseException):
         except Exception as e:
             why.append(f"{getattr(e, 'summary', None) or e}"
                        + (f" ({e.reason})" if getattr(e, "reason", "") else ""))
-            continue
         procs, error = _import_procs()
         if error is None:
             procs.enter()
-            _say("; ".join(done) + f" (it could not be imported: {_error_text(first)})",
-                 logging.INFO)
+            _say(("; ".join(done) or "localm/procs.py imports now (another start repaired "
+                  "it)") + f" (it could not be imported: {_error_text(first)})", logging.INFO)
             return procs
     _say(f"the list of running processes (localm/procs.py) cannot be imported: "
-         f"{_error_text(error)}. {'; '.join(done + why)}. localm runs without it; "
-         f"to repair it: {_fix(files, damaged, package, no_list, root)}.")
+         f"{_error_text(error)}. {'; '.join(done + why)}. This start goes on without it, "
+         f"and a command that needs it stops with this error; to repair it: "
+         f"{_fix(files, damaged, package, no_list, root)}.")
     return None

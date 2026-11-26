@@ -271,7 +271,8 @@ else:
         except Exception as _e:
             _say(f"localm: the list of running processes (localm/procs.py) cannot be imported: "
                  f"{type(_broken).__name__}: {_broken}, and its repair failed: "
-                 f"{type(_e).__name__}: {_e}. localm runs without it; to repair it: "
+                 f"{type(_e).__name__}: {_e}. This start goes on without it, and a command "
+                 f"that needs it stops with this error; to repair it: "
                  f"'localm integrity --repair localm/procs.py'.")
     if _again:
         # The files just put in place are read instead of the ones this began with, whose

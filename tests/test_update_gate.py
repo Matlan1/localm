@@ -198,7 +198,7 @@ def test_a_process_record_that_cannot_be_imported_does_not_stop_the_start(inst):
     done = inst.localm()
     assert done.code == 0 and ran(done, "1"), (done.out, done.err)
     assert "No module named 'localm_no_such_module_for_the_gate'" in done.err
-    assert "localm runs without it" in done.err
+    assert "This start goes on without it" in done.err
     assert "its repair failed: ImportError: cannot import name 'procs_repair'" in done.err
     assert not inst.record.exists()
 

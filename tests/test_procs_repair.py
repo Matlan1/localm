@@ -208,20 +208,48 @@ def _ran(done, inst) -> bool:
             and Path(done.said["file"]).resolve() == (inst.root / "localm" / "__init__.py").resolve())
 
 
-def test_a_damaged_process_record_is_repaired_from_the_signed_release(tmp_path, monkeypatch):
+@pytest.mark.parametrize("damage, error", [
+    (BROKEN, "ModuleNotFoundError: No module named 'localm_no_such_module_for_the_gate'"),
+    ("def (\n", "SyntaxError: invalid syntax"),
+])
+def test_a_damaged_process_record_is_repaired_from_the_signed_release(tmp_path, damage, error):
     inst = Install(tmp_path)
     spec = inst.signed_build()
-    inst.procs.write_text(BROKEN + inst.good.decode("utf-8"), encoding="utf-8")
+    inst.procs.write_text(damage + inst.good.decode("utf-8"), encoding="utf-8")
     done = inst.start(spec)
     assert _ran(done, inst), (done.out, done.err)
     assert done.said["record"] and inst.recorded(done.said["pid"]), done.err
     assert inst.procs.read_bytes() == inst.good
     lines = [ln for ln in done.err.splitlines() if ln.startswith("localm: ")]
-    assert lines == [f"localm: repaired localm/procs.py from the signed release {inst.version} "
-                     "(it could not be imported: ModuleNotFoundError: No module named "
-                     "'localm_no_such_module_for_the_gate')"], done.err
+    assert len(lines) == 1 and lines[0].startswith(
+        f"localm: repaired localm/procs.py from the signed release {inst.version} "
+        f"(it could not be imported: {error}"), done.err
     assert inst.seen_lines() == [{"download_timeout": float(procs_repair.NET_S)}]
     assert not (inst.home / "updates" / "integrity-repair").exists()
+
+
+@pytest.mark.parametrize("case, reason", [
+    ("no update server", "the updater is not configured"),
+    ("lock busy", "another repair is already being applied"),
+])
+def test_a_repair_that_cannot_run_says_why_and_the_start_goes_on(tmp_path, case, reason):
+    inst = Install(tmp_path, with_package=True)
+    spec = inst.signed_build()
+    if case == "no update server":
+        (inst.home / "config.json").write_text(json.dumps(
+            {"update_url": "", "bugreport_upload_url": ""}), encoding="utf-8")
+    else:
+        lock = inst.home / "updates" / "apply.lock"
+        lock.mkdir(parents=True)
+        (lock / "pid").write_text(str(os.getpid()), encoding="utf-8")
+    inst.procs.write_text(BROKEN + inst.good.decode("utf-8"), encoding="utf-8")
+    done = inst.start(spec)
+    assert _ran(done, inst) and done.said["record"] is False, (done.out, done.err)
+    assert "No module named 'localm_no_such_module_for_the_gate'" in done.err
+    assert reason in done.err and "This start goes on without it" in done.err, done.err
+    assert done.err.endswith("to repair it: 'localm integrity --repair localm/procs.py'.\n"), \
+        done.err
+    assert inst.procs.read_bytes() != inst.good and inst.seen_lines() == []
 
 
 def test_a_normal_start_loads_no_repair(tmp_path, monkeypatch):
@@ -243,7 +271,7 @@ def test_without_a_release_statement_the_start_runs_and_says_why_and_the_fix(
     assert "ModuleNotFoundError: No module named 'localm_no_such_module_for_the_gate'" in done.err
     assert "this install has no list of its release's files" in done.err
     assert "the installed parts are complete" in done.err
-    assert "localm runs without it" in done.err
+    assert "This start goes on without it" in done.err
     assert (f"to repair it: unzip the release of this version over {inst.root}; when the "
             "package localm_no_such_module_for_the_gate is missing: Settings > System > "
             "Updates > Installed parts > Repair") in done.err
@@ -303,6 +331,25 @@ def test_the_repair_imports_without_the_process_record(tmp_path):
     proc = subprocess.run([sys.executable, "-c", code], cwd=str(REPO), env=env,
                           capture_output=True, text=True, timeout=120, **HIDDEN)
     assert proc.stdout.strip().endswith("IMPORTED"), proc.stderr
+
+
+@pytest.mark.parametrize("argv, said", [
+    (["--version"], f"localm, version {localm.__version__}"),
+    (["integrity", "--help"], "--repair"),
+    (["update", "--help"], "--repair"),
+])
+def test_the_commands_that_repair_it_run_without_the_process_record(tmp_path, argv, said):
+    """What the warning tells the user to run works while localm.procs cannot be
+    imported: the command line loads no module that imports it at module level."""
+    code = ("import sys; sys.modules['localm.procs'] = None\n"
+            "from localm.cli import main\n"
+            f"sys.argv = ['localm', *{argv!r}]\n"
+            "main()")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("LOCALM_")}
+    env["LOCALM_HOME"] = str(tmp_path / "home")
+    proc = subprocess.run([sys.executable, "-c", code], cwd=str(REPO), env=env,
+                          capture_output=True, text=True, timeout=120, **HIDDEN)
+    assert proc.returncode == 0 and said in proc.stdout, (proc.stdout, proc.stderr)
 
 
 @pytest.mark.parametrize("error, files", [
