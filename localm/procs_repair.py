@@ -18,6 +18,7 @@ Nothing of this runs while the process record imports."""
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import sys
@@ -233,10 +234,10 @@ def repair_and_enter(error: BaseException):
             no_list = f"the files could not be compared with the release ({e})"
         if damaged and ("files", *damaged) not in tried:
             tried.add(("files", *damaged))
-            step, arg = _repair_files, damaged
+            step = functools.partial(_repair_files, damaged)
         elif package and not damaged and ("parts",) not in tried:
             tried.add(("parts",))
-            step, arg = _repair_parts, package
+            step = functools.partial(_repair_parts, package)
         else:
             if kept:
                 why.append(f"{', '.join(kept)} is kept as yours ('localm integrity --keep'), "
@@ -249,12 +250,14 @@ def repair_and_enter(error: BaseException):
                            "package")
             break
         try:
-            done.append(step(arg))
+            done.append(step())
         except Exception as e:
-            why.append(f"{getattr(e, 'summary', None) or e}"
-                       + (f" ({e.reason})" if getattr(e, "reason", "") else ""))
-        procs, error = _import_procs()
-        if error is None:
+            reason = getattr(e, "reason", "")
+            why.append(f"{getattr(e, 'summary', None) or e}" + (f" ({reason})" if reason else ""))
+        procs, again = _import_procs()
+        if again is not None:
+            error = again
+        elif procs is not None:
             procs.enter()
             _say(("; ".join(done) or "localm/procs.py imports now (another start repaired "
                   "it)") + f" (it could not be imported: {_error_text(first)})", logging.INFO)
