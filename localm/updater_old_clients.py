@@ -297,7 +297,7 @@ def _answers(root, home, version: str) -> Optional[str]:
 
 # ---------------------------------------------------------------- old watchdogs
 
-def watchdogs(root) -> Optional[list]:
+def watchdogs(root, *, untold: Optional[list] = None) -> Optional[list]:
     """The pids of the update watchdogs of the install at *root* that run: an old
     client's ``scripts/update_watchdog.py`` whose ``--install-root`` is *root*. None
     when that cannot be told: the processes cannot be listed, or the command line of
@@ -305,7 +305,9 @@ def watchdogs(root) -> Optional[list]:
     while it still runs: one that ended between the listing and the read is listed
     again, and left out when it is gone. On a system without ``/proc`` (macOS) only
     processes whose program is a Python are read, from ``ps``
-    (:func:`_ps_command_line`)."""
+    (:func:`_ps_command_line`). *untold*, when given, receives the
+    ``install_manifest.list_processes`` row of each process that made the answer
+    None."""
     from localm import install_manifest
     rows = install_manifest.list_processes()
     if rows is None:
@@ -326,15 +328,20 @@ def watchdogs(root) -> Optional[list]:
     if again is None:
         return None
     now = {row[0]: row for row in again}
+    unknown = []
     for row in unread:
         still = now.get(row[0])
         if still is None or still[3] != row[3]:
             continue
         seen = _watchdog_of(still, root)
         if seen is None:
-            return None
-        if seen:
+            unknown.append(still)
+        elif seen:
             found.append(row[0])
+    if unknown:
+        if untold is not None:
+            untold.extend(unknown)
+        return None
     return found
 
 

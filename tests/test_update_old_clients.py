@@ -277,10 +277,50 @@ def _fake_watchdog(root: Path) -> subprocess.Popen:
                             stderr=subprocess.DEVNULL, **_NO_WINDOW)
 
 
+def _read_error(pid: int) -> str:
+    """What the system says when the command line of process *pid* is read."""
+    if os.name != "nt":
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                return f"read {len(fh.read())} bytes"
+        except OSError as e:
+            return repr(e)
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    nt = ctypes.WinDLL("ntdll")
+    nt.NtQueryInformationProcess.restype = ctypes.c_long
+    nt.NtQueryInformationProcess.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                                             wintypes.ULONG, ctypes.POINTER(wintypes.ULONG)]
+    h = k32.OpenProcess(0x1000, False, pid)
+    if not h:
+        return f"OpenProcess failed, winerror {ctypes.get_last_error()}"
+    try:
+        buf = ctypes.create_string_buffer(0x10010)
+        got = wintypes.ULONG(0)
+        status = nt.NtQueryInformationProcess(h, 60, buf, len(buf), ctypes.byref(got))
+        return f"NtQueryInformationProcess(60) status {status & 0xFFFFFFFF:#010x}, {got.value} bytes"
+    finally:
+        k32.CloseHandle(h)
+
+
 def _wait_listed(root: Path, pid: int) -> None:
+    """Wait up to 20 s for *pid* among the watchdogs of *root*; on failure, say what
+    watchdogs() returned and, for each process it could not tell, its pid, program
+    and the error of reading its command line."""
     deadline = time.monotonic() + 20
-    while pid not in (oc.watchdogs(root) or []):
-        assert time.monotonic() < deadline, "the watchdog was not found"
+    while True:
+        untold: list = []
+        got = oc.watchdogs(root, untold=untold)
+        if pid in (got or []):
+            return
+        if time.monotonic() >= deadline:
+            detail = "; ".join(f"pid {r[0]} program {r[2]}: {_read_error(r[0])}" for r in untold)
+            pytest.fail(f"the watchdog (pid {pid}) was not found: watchdogs() returned {got!r}; "
+                        f"could not tell {len(untold)} process(es): {detail}")
         time.sleep(0.2)
 
 
@@ -737,6 +777,7 @@ def test_rollback_script_changes_nothing_when_it_refuses(tmp_path, monkeypatch, 
     rb = _load_rb()
     oc._record(root, NEW, oc.backup_identity(updates), passed=True, removed=False,
                reasons=[])
+    assert rb._refusal(root, updates)    # the first load may write the helper's bytecode
     before = sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*"))
     assert rb.main(["--yes"], install_root=root) == 1
     assert "its checks passed" in capsys.readouterr().err
