@@ -436,8 +436,9 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
         return chosen, used_tag[0]
 
     if only:
-        _refuse_other_backend(chosen, detail or "it did not load",
-                              BUILD_UNUSABLE_EXIT if provisioned else 1)
+        why = ((detail or "it did not load") if provisioned
+               else (provision_error or "it could not be provisioned"))
+        _refuse_other_backend(chosen, why, BUILD_UNUSABLE_EXIT if provisioned else 1)
 
     # ---- The installer must never hand the user a runtime our OWN gate rejects.
     #

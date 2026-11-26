@@ -83,3 +83,19 @@ def test_only_logs_why_the_build_is_not_used(monkeypatch, tmp_path, capsys, capl
     assert "hipblas.dll" in _flat(capsys)
     assert "the hip build is not used (--only)" in _records(caplog)
     assert "hipblas.dll" in _records(caplog)
+
+
+def test_only_logs_why_the_build_could_not_be_placed(monkeypatch, tmp_path, capsys, caplog):
+    _wire(monkeypatch, tmp_path, loads=[])
+
+    def refuse(*args, **kwargs):
+        raise ArtifactError("sha256 mismatch for llama-b1-bin-win-hip-x64.zip")
+
+    monkeypatch.setattr(sl, "_provision_backend", refuse)
+    with caplog.at_level(logging.INFO, logger="localm"), pytest.raises(SystemExit) as exc:
+        sl._provision_with_fallback("hip", tmp_path, None, False, assume_yes=True,
+                                    only=True)
+    assert exc.value.code == 1
+    assert ("the hip build is not used (--only): sha256 mismatch for "
+            "llama-b1-bin-win-hip-x64.zip") in _records(caplog)
+    assert "not provisioned" not in _flat(capsys)
