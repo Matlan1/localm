@@ -892,14 +892,11 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             gpu_devices = [{"slot": d.device.slot, "device_id": d.device.device_id,
                             "units": d.units} for d in placed]
             self._fit_source_index = {d.device.slot: d.device.index for d in placed}
-            # The vision projector's GPU: the one the placement charged it to,
-            # else the configured main_gpu_index when the placement uses it,
-            # else the placed GPU with the most memory left.
+            # The vision projector's GPU: the configured main_gpu_index when the
+            # placement uses it, else the placed GPU with the most memory left.
             chosen_main = load_config().get("main_gpu_index")
-            main_slot = next((d.device.slot for d in placed if d.main), None)
-            if main_slot is None:
-                main_slot = next((d.device.slot for d in placed
-                                  if d.device.index == chosen_main), None)
+            main_slot = next((d.device.slot for d in placed
+                              if d.device.index == chosen_main), None)
             if main_slot is None:
                 main_slot = max(placed, key=lambda d: d.device.free - d.need).device.slot
         configured = load_config().get("gpu_split_indices")

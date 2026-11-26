@@ -681,9 +681,9 @@ class VramSizingMixin:
         is charged in equal parts to the layers that keep one. A draft model on
         the GPU (:meth:`_draft_model_vram_bytes`) is split over the same devices
         as the target, so it is charged to them in proportion to their shares.
-        The projector (:meth:`_projector_vram_bytes`) is charged to the one
-        device it goes on: the configured ``main_gpu_index`` when that device
-        receives a layer, else the first device that does.
+        The projector (:meth:`_projector_vram_bytes`) goes on one device, which
+        the plan cannot know, so every device that receives a layer or the
+        output layer is charged all of it, beside ``_VRAM_OVERHEAD_BYTES``.
         A plan that writes a split or reports a shortfall is
         returned only when :func:`localm.discover.runtime_split_devices_match`
         confirms the device numbering; when the runtime instead keeps the
@@ -762,13 +762,9 @@ class VramSizingMixin:
                 "fit_kw": dict(output_bytes=int(output_bytes),
                                layer_kv_bytes=layer_kv, n_gpu_layers=int(gpu_layers),
                                logits_bytes=logits,
-                               reserve_bytes=int(self._VRAM_OVERHEAD_BYTES),
-                               spread_bytes=int(self._draft_model_vram_bytes()),
-                               main_bytes=int(self._projector_vram_bytes()),
-                               main_index=next(
-                                   (int(d["index"]) for d in devices
-                                    if d.get("source_index", d["index"])
-                                    == cfg.get("main_gpu_index")), None)),
+                               reserve_bytes=int(self._VRAM_OVERHEAD_BYTES
+                                                 + self._projector_vram_bytes()),
+                               spread_bytes=int(self._draft_model_vram_bytes())),
             }
         except Exception as e:
             from localm.debuglog import logger as _dbg
@@ -858,14 +854,13 @@ class VramSizingMixin:
         routed-expert bytes, its KV cache for *kv_tokens* tokens (default
         ``_plan_kv_tokens()``) and per
         token, the recurrent state of the blocks that keep one, the output
-        layer and the logits of one batch, ``_VRAM_OVERHEAD_BYTES`` per device
-        and a draft model or MoE cache shared among the devices, and the
-        projector on one device (``ModelUnits.main_bytes``, the configured
-        ``main_gpu_index`` as ``main_index``). MTP / nextn
+        layer and the logits of one batch, ``_VRAM_OVERHEAD_BYTES`` and the
+        whole projector (:meth:`_projector_vram_bytes`, which goes on one
+        device the plan cannot know) per device, and a draft model or MoE cache
+        shared among the devices. MTP / nextn
         blocks are charged only with MTP enabled, as their draft context. None
         when the header cannot be read. Never raises."""
         try:
-            from localm.config import load_config
             from localm.inference.backends.llamacpp._gpu_plan import ModelUnits
             from localm.inference.backends.llamacpp._split_fit import logits_buffer_bytes
             from localm.model_manager.gguf import (
@@ -924,10 +919,8 @@ class VramSizingMixin:
                 layer_bytes=layer_bytes, expert_bytes=expert_bytes,
                 layer_kv=layer_kv, kv_per_token=kv_per_token,
                 output_bytes=int(output), logits_bytes=int(logits),
-                reserve_bytes=int(self._VRAM_OVERHEAD_BYTES),
-                spread_bytes=int(self._draft_model_vram_bytes()) + self._moe_cache_charge(),
-                main_bytes=self._projector_vram_bytes(),
-                main_index=load_config().get("main_gpu_index"))
+                reserve_bytes=int(self._VRAM_OVERHEAD_BYTES) + self._projector_vram_bytes(),
+                spread_bytes=int(self._draft_model_vram_bytes()) + self._moe_cache_charge())
         except Exception as e:
             from localm.debuglog import logger as _dbg
             _dbg.debug("GPU placement: model layout unreadable (%s: %s)",

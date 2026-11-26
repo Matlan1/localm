@@ -170,79 +170,50 @@ def _devices(*frees):
             for i, f in enumerate(frees)]
 
 
-def test_a_load_over_two_gpus_charges_the_projector_to_one_of_them(tmp_path):
+def test_a_load_over_two_gpus_charges_the_whole_projector_to_each_device(tmp_path):
     from localm.inference.backends.llamacpp._gpu_plan import plan_placement
     model, projector = _two_gpu_model(tmp_path), _projector(tmp_path)
     plain, vision = _units(model), _units(model, projector)
     assert vision.spread_bytes == plain.spread_bytes
-    assert vision.main_bytes == _charge(projector) and plain.main_bytes == 0
+    assert vision.reserve_bytes == plain.reserve_bytes + _charge(projector)
     plan = plan_placement(_devices(10**7, 10**7), vision,
                           n_gpu_layers=vision.n_layer + 1, n_cpu_moe=0)
-    base = plan_placement(_devices(10**7, 10**7), plain,
-                          n_gpu_layers=plain.n_layer + 1, n_cpu_moe=0)
-    assert plan.need == base.need + _charge(projector)
-    mains = [d for d in plan.loads if d.main]
-    assert len(mains) == 1
-    others = [d for d in plan.loads if not d.main]
-    by_slot = {d.device.slot: d for d in base.loads}
-    assert all(d.need == by_slot[d.device.slot].need for d in others)
-    assert mains[0].need == by_slot[mains[0].device.slot].need + _charge(projector)
+    assert len(plan.loads) == 2
+    assert all(d.reserve == OVERHEAD + _charge(projector) for d in plan.loads)
 
 
-def test_the_configured_main_gpu_holds_the_projector(tmp_path):
-    from localm.config import update_config
-    from localm.inference.backends.llamacpp._gpu_plan import plan_placement
-    update_config(lambda cfg: cfg.__setitem__("main_gpu_index", 0))
-    units = _units(_two_gpu_model(tmp_path), _projector(tmp_path))
-    assert units.main_index == 0
-    plan = plan_placement(_devices(10**7, 2 * 10**7), units,
-                          n_gpu_layers=units.n_layer + 1, n_cpu_moe=0)
-    assert [d.device.index for d in plan.loads if d.main] == [0]
-
-
-def test_a_placement_never_leaves_the_projector_device_short(tmp_path):
+def test_a_placement_never_leaves_a_device_short_of_the_projector(tmp_path):
     from localm.inference.backends.llamacpp._gpu_plan import plan_placement
     units = _units(_two_gpu_model(tmp_path), _projector(tmp_path))
     # Every layer fits the two devices with half the projector on each, but not
-    # with the whole projector on one of them.
-    free = 430_000
+    # with the whole projector on either of them.
+    free = 450_000
     halves = plan_placement(_devices(free, free), dataclasses.replace(
-        units, main_bytes=0, spread_bytes=units.main_bytes))
+        units, reserve_bytes=OVERHEAD, spread_bytes=_charge_of(units)))
     assert halves.full_offload and halves.fits
     plan = plan_placement(_devices(free, free), units)
-    assert plan.fits and not plan.full_offload
+    assert plan.fits and plan.loads and not plan.full_offload
     assert all(d.need <= d.device.free for d in plan.loads)
-    assert sum(d.main for d in plan.loads) == 1
+    assert all(d.reserve >= _charge_of(units) for d in plan.loads)
 
 
-def test_the_implicit_split_charges_the_projector_to_one_device():
-    from localm.inference.backends.llamacpp._split_fit import charge_devices
-    kw = dict(layer_bytes=[100] * 4, output_bytes=10, layer_kv_bytes=[0] * 4,
-              n_gpu_layers=99, logits_bytes=0, reserve_bytes=5)
-    devices = [{"index": 0, "free": 10**6}, {"index": 1, "free": 10**6}]
-    plain = charge_devices(devices, [1.0, 1.0], **kw)
-    first = charge_devices(devices, [1.0, 1.0], main_bytes=1000, **kw)
-    chosen = charge_devices(devices, [1.0, 1.0], main_bytes=1000, main_index=1, **kw)
-    assert [c.reserve - p.reserve for c, p in zip(first, plain, strict=True)] == [1000, 0]
-    assert [c.reserve - p.reserve for c, p in zip(chosen, plain, strict=True)] == [0, 1000]
+def _charge_of(units) -> int:
+    return units.reserve_bytes - OVERHEAD
 
 
-def test_the_implicit_split_fit_carries_the_projector_to_the_main_gpu(tmp_path):
+def test_the_implicit_split_fit_charges_the_whole_projector_to_each_device(tmp_path):
     from localm import discover
-    from localm.config import update_config
     from localm.inference.backends.llamacpp import _loader
     model, projector = _two_gpu_model(tmp_path), _projector(tmp_path)
     devices = [{"index": 0, "source_index": 1, "free": 10**7, "total": 2 * 10**7},
                {"index": 1, "source_index": 0, "free": 10**7, "total": 2 * 10**7}]
-    update_config(lambda cfg: cfg.__setitem__("main_gpu_index", 0))
     with patch.object(discover, "implicit_split_devices", return_value=devices), \
-            patch.object(_loader, "native_lib_loaded", return_value=False):
-        inputs = _backend(model, projector)._implicit_split_inputs(99)
-        plain = _backend(model)._implicit_split_inputs(99)
-    assert inputs["fit_kw"]["main_bytes"] == _charge(projector)
-    assert inputs["fit_kw"]["main_index"] == 1
-    assert inputs["fit_kw"]["spread_bytes"] == plain["fit_kw"]["spread_bytes"]
-    assert plain["fit_kw"]["main_bytes"] == 0
+            patch.object(_loader, "native_lib_loaded", return_value=False), \
+            patch.object(GgufBackend, "_VRAM_OVERHEAD_BYTES", OVERHEAD):
+        vision = _backend(model, projector)._implicit_split_inputs(99)["fit_kw"]
+        plain = _backend(model)._implicit_split_inputs(99)["fit_kw"]
+    assert vision["reserve_bytes"] == plain["reserve_bytes"] + _charge(projector)
+    assert vision["spread_bytes"] == plain["spread_bytes"]
 
 
 def test_the_projector_charge_covers_the_measured_buffers():

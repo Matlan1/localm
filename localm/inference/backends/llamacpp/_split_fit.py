@@ -118,8 +118,7 @@ def charge_devices(devices: Sequence[dict], shares: Sequence[float], *,
                    layer_bytes: Sequence[int], output_bytes: int,
                    layer_kv_bytes: Sequence[int], n_gpu_layers: int,
                    logits_bytes: int, reserve_bytes: int,
-                   spread_bytes: int = 0, main_bytes: int = 0,
-                   main_index: Optional[int] = None) -> list[DeviceCharge]:
+                   spread_bytes: int = 0) -> list[DeviceCharge]:
     """Charge each device in *devices* (``{"index", "free"}``, in split order)
     for what a layer split weighted by *shares* places on it: its layers'
     weights and KV cache, the output layer's weights and the logits buffer on
@@ -127,10 +126,8 @@ def charge_devices(devices: Sequence[dict], shares: Sequence[float], *,
     receives a layer or the output layer. *spread_bytes* (a second model split
     the same way) is shared among those devices in proportion to their
     shares, rounded up, and added to their ``reserve``. A device that receives
-    neither is charged nothing. *main_bytes* (a vision projector, which goes
-    on one device) is added to the ``reserve`` of the receiving device whose
-    index is *main_index*, else of the first receiving device.
-    *layer_kv_bytes* is each layer's KV cache, parallel to *layer_bytes*."""
+    neither is charged nothing. *layer_kv_bytes* is each layer's KV cache,
+    parallel to *layer_bytes*."""
     n_layer_all = len(layer_bytes)
     positions, out_pos = layer_devices(shares, n_layer_all, n_gpu_layers)
     charges = [DeviceCharge(index=int(d["index"]), free=int(d["free"]),
@@ -152,9 +149,6 @@ def charge_devices(devices: Sequence[dict], shares: Sequence[float], *,
         c.reserve = int(reserve_bytes)
         if spread_bytes > 0 and total_share > 0:
             c.reserve += int(-(-int(spread_bytes) * c.share // total_share))
-    if main_bytes > 0 and receiving:
-        main = next((c for c in receiving if c.index == main_index), receiving[0])
-        main.reserve += int(main_bytes)
     return charges
 
 
@@ -172,8 +166,7 @@ def logits_buffer_bytes(n_vocab: int, n_ctx: int, *, max_batch: int = 2048,
 def plan_split(devices: Sequence[dict], *, layer_bytes: Sequence[int],
                layer_kv_bytes: Sequence[int], output_bytes: int, n_gpu_layers: int,
                logits_bytes: int, reserve_bytes: int,
-               spread_bytes: int = 0, main_bytes: int = 0,
-               main_index: Optional[int] = None) -> SplitFitPlan:
+               spread_bytes: int = 0) -> SplitFitPlan:
     """Decide whether llama.cpp's default split fits *devices*
     (``[{"index", "free"}, ...]`` in the runtime's device order) and, when it
     does not, which devices to leave out.
@@ -187,13 +180,12 @@ def plan_split(devices: Sequence[dict], *, layer_bytes: Sequence[int],
     (:func:`_packed_shares`), which fits layers of unequal size (the blocks
     whose routed experts stay in system RAM beside those whose experts do not).
     When no plan fits, ``tensor_split`` is ``None`` and only ``default``
-    reports the shortfall. *spread_bytes*, *main_bytes* and *main_index* are
-    charged as in :func:`charge_devices`."""
+    reports the shortfall. *spread_bytes* is charged as in
+    :func:`charge_devices`."""
     kw: dict[str, Any] = dict(layer_bytes=layer_bytes, output_bytes=output_bytes,
                               n_gpu_layers=n_gpu_layers, layer_kv_bytes=layer_kv_bytes,
                               logits_bytes=logits_bytes, reserve_bytes=reserve_bytes,
-                              spread_bytes=spread_bytes, main_bytes=main_bytes,
-                              main_index=main_index)
+                              spread_bytes=spread_bytes)
     frees = [max(0, int(d["free"])) for d in devices]
     default = charge_devices(devices, frees, **kw)
     if all(c.fits for c in default):

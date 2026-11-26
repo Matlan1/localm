@@ -55,9 +55,7 @@ class ModelUnits:
     the logits of one batch, both on the output device. ``reserve_bytes`` is
     charged to every device that is used (driver context and compute buffer)
     and ``spread_bytes`` (a draft model split the same way) is shared among
-    them by the units they hold. ``main_bytes`` (a vision projector) goes on
-    one device: the one whose index is ``main_index`` when it holds units,
-    else the one with the most free memory left."""
+    them by the units they hold."""
     layer_bytes: Sequence[int]
     expert_bytes: Sequence[int]
     layer_kv: Sequence[int]
@@ -66,8 +64,6 @@ class ModelUnits:
     logits_bytes: int
     reserve_bytes: int
     spread_bytes: int = 0
-    main_bytes: int = 0
-    main_index: Optional[int] = None
 
     @property
     def n_layer(self) -> int:
@@ -86,8 +82,6 @@ class DeviceLoad:
     logits: int = 0
     reserve: int = 0
     kv_per_token: int = 0
-    # True for the device charged ``ModelUnits.main_bytes``.
-    main: bool = False
 
     @property
     def units(self) -> int:
@@ -197,19 +191,13 @@ def _charge(ordered: Sequence[PlanDevice], counts: Sequence[int], gpu_units: lis
         total = sum(ld.units for ld in loads) or 1
         for ld in loads:
             ld.reserve += -(-int(units.spread_bytes) * ld.units // total)
-    if units.main_bytes > 0 and loads:
-        main = next((ld for ld in loads if ld.device.index == units.main_index),
-                    None) or max(loads, key=lambda ld: ld.device.free - ld.need)
-        main.reserve += int(units.main_bytes)
-        main.main = True
     return loads
 
 
 def _rooms(ordered: Sequence[PlanDevice], units: ModelUnits) -> list[int]:
     """Bytes each device can give to units: free memory less the reserve and
-    its share of *spread_bytes* and *main_bytes* (charged as if every device
-    were used)."""
-    spread = -(-(int(units.spread_bytes) + int(units.main_bytes)) // max(1, len(ordered)))
+    its share of *spread_bytes* (charged as if every device were used)."""
+    spread = -(-int(units.spread_bytes) // max(1, len(ordered)))
     return [d.free - int(units.reserve_bytes) - spread for d in ordered]
 
 
