@@ -53,7 +53,8 @@ def _gate(me=None) -> bool:
                 return waited
             if not held and os.environ.get("LOCALM_UNINSTALL") == "1":
                 return waited
-            if mark and not _touch(mark):
+            if mark and not _touch(mark, update if os.environ.get(
+                    "LOCALM_UPDATE_PRIMARY") == update else ""):
                 mark = None
             if held:
                 if not waited:
@@ -81,16 +82,23 @@ def _gate(me=None) -> bool:
     except KeyboardInterrupt:
         sys.exit(130)
     finally:
+        os.environ.pop("LOCALM_UPDATE_PRIMARY", None)
         if mark and os.path.lexists(mark):
             _touch(mark, remove=True)
     return waited
 
 
-def _touch(mark: str, remove: bool = False) -> bool:
-    """Make or *remove* the file that says that this process waits here. The restore
-    program, which ends what an update left running, does not end the waiting ones."""
+def _touch(mark: str, update: str = "", remove: bool = False) -> bool:
+    """Make or *remove* the file that says that this process waits here; it holds the id
+    of the *update* this process goes on with for the user (``LOCALM_UPDATE_PRIMARY``).
+    The restore program, which ends what an update left running, does not end the
+    waiting ones."""
     try:
-        os.unlink(mark) if remove else open(mark, "ab").close()
+        if remove:
+            os.unlink(mark)
+        else:
+            with open(mark, "wb" if update else "ab") as f:
+                f.write(update.encode("ascii"))
     except OSError as e:
         _say(f"{mark}: {e}")
         return False

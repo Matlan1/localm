@@ -23,6 +23,11 @@ from .._venvguard import require_venv
 # test_the_console_script_without_its_dependencies_shows_the_venv_message.
 require_venv()
 
+from .. import _update_parent  # noqa: E402
+
+if _update_parent.wanted(__import__("sys").argv):
+    raise SystemExit(_update_parent.run(__import__("sys").argv))
+
 # sys/click on the package surface for test monkeypatch.
 import sys  # noqa: F401,E402
 import click  # noqa: F401,E402

@@ -531,6 +531,53 @@ def _defer_update_steps(version) -> bool:
     return updater._direction(str(version or ""), _version.read_version()) != "older"
 
 
+def _install_with_applier(asset_id, signature, *, yes: bool, target_version=None,
+                          allow_unverified: bool = False, expect=None) -> None:
+    """Install the build *asset_id* through the program it ships, when it ships one and a
+    waiting ``localm update`` started this process (``localm._update_parent``): prepares
+    and checks it, asks about the other processes of localm it ends, hands it over and
+    exits with ``HANDED_OFF``. Returns when the build ships no such program. Raises
+    LocalmError or ``updater.UnverifiedBuild``."""
+    import os
+
+    from localm import _update_parent, updater_handoff
+    from rich.markup import escape
+    if os.environ.get(_update_parent.WORK) != "1":
+        return
+    prepared = updater_handoff.prepare(asset_id, signature=signature,
+                                       target_version=target_version,
+                                       allow_unverified=allow_unverified, expect_sha256=expect,
+                                       say=_say_step)
+    if prepared.legacy:
+        prepared.discard()
+        return
+    try:
+        if prepared.processes:
+            named = updater_handoff.describe(prepared.processes)
+            console.print(f"[yellow]The update ends these processes of localm:[/yellow] "
+                          f"{escape(named)}. A chat or a command ends; an MCP server is "
+                          "started again by its client.")
+            if yes:
+                console.print("[red]Not installed:[/red] --yes ends nothing that is running. "
+                              "Close them, or run the update without --yes and agree.")
+                prepared.discard()
+                sys.exit(1)
+            if not (sys.stdin.isatty() and click.confirm("  End them and update?", default=False)):
+                console.print("[dim]Not installed.[/dim]")
+                prepared.discard()
+                sys.exit(1)
+        for rel in prepared.edited:
+            console.print(f"[yellow]You changed {escape(rel)}:[/yellow] your version is kept "
+                          "in .localm-update/kept.")
+        updater_handoff.hand_off(prepared, mode="command",
+                                 confirmed=[p["key"] for p in prepared.processes],
+                                 say=_say_step)
+    except BaseException:
+        prepared.discard()
+        raise
+    sys.exit(updater_handoff.HANDED_OFF)
+
+
 def _update_to(updater, version: str, *, yes: bool, allow_unverified: bool) -> None:
     """Install the release *version* (``localm update --to``)."""
     from localm import _version
@@ -570,6 +617,9 @@ def _update_to(updater, version: str, *, yes: bool, allow_unverified: bool) -> N
     accept = False
     while True:
         try:
+            _install_with_applier(asset["id"], rel.get("signature"), yes=yes,
+                                  target_version=rel["version"], allow_unverified=accept,
+                                  expect=expect)
             res = updater.apply(asset["id"], signature=rel.get("signature"),
                                 target_version=rel["version"], allow_unverified=accept,
                                 expect_sha256=expect,
@@ -795,6 +845,7 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool, list_only: bool,
 
     console.print(f"[dim]Downloading and applying {escape(latest)} ...[/dim]")
     try:
+        _install_with_applier(asset["id"], info.get("signature"), yes=yes)
         res = updater.apply(asset["id"], signature=info.get("signature"),
                             defer_runtime=_defer_update_steps(latest),
                             steps_when="at the next start of localm", say=_say_step)

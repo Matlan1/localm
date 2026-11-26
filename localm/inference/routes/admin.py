@@ -418,6 +418,54 @@ def register(app: FastAPI, ctx) -> None:
                          instance_id=getattr(app.state, "instance_id", None))
         res["restarting"] = True
 
+    #: Seconds within which a second press of Update confirms the processes it ends.
+    _CONFIRM_S = 600.0
+
+    async def _with_applier(request: Request, asset_id, **kwargs):
+        """Install the build *asset_id* through the program it ships
+        (``localm.updater_handoff``): prepare and check it, then restart into it. When
+        other processes of localm run, the first press answers ``{applied: false,
+        needs_confirmation: "processes", processes, error}`` naming them; a second press
+        within :data:`_CONFIRM_S` that finds the same ones is the agreement to end them,
+        and needs an owner. Returns None when the build ships no such program
+        (``updater.apply`` installs it then). Raises LocalmError or
+        ``updater.UnverifiedBuild``."""
+        import time as _time
+
+        from localm import updater_handoff
+        prepared = await asyncio.to_thread(_probes_held, updater_handoff.prepare, asset_id,
+                                           **kwargs)
+        if prepared.legacy:
+            prepared.discard()
+            return None
+        keys = sorted(p["key"] for p in prepared.processes)
+        if keys:
+            asked = getattr(app.state, "update_confirm", None)
+            if not (asked and asked[0] == keys and _time.monotonic() - asked[1] < _CONFIRM_S):
+                app.state.update_confirm = (keys, _time.monotonic())
+                prepared.discard()
+                return {"applied": False, "needs_confirmation": "processes",
+                        "processes": prepared.processes,
+                        "error": f"The update to {prepared.new} ends these processes of "
+                                 f"localm: {updater_handoff.describe(prepared.processes)}. A "
+                                 "chat or a command ends; an MCP server is started again by "
+                                 "its client. Press Update now again to continue."}
+            if not _hs.caller_is_operator(request):
+                prepared.discard()
+                raise HTTPException(403, "Ending the other processes of localm for an update "
+                                         "requires an owner (admin) key.")
+        app.state.update_confirm = None
+        port = getattr(app.state, "instance_port", None)
+        prepared.watch = {"host": _watchdog_probe_host(getattr(app.state, "bind_host", None)),
+                          "port": port,
+                          "scheme": getattr(app.state, "instance_scheme", None) or "http"}
+        _request_restart(port=port, instance_id=getattr(app.state, "instance_id", None),
+                         update=prepared)
+        return {"applied": True, "version": prepared.new, "restarting": True,
+                "handed_off": True, "verified": prepared.verified,
+                "verify_reason": prepared.verify_reason, "downgrade": prepared.downgrade,
+                "edited": prepared.edited, "notes": prepared.notes, "available": True}
+
     async def _apply_selected(request: Request, body: dict):
         """Install the release ``body["version"]``, OWNER only. Its asset and
         signature come from the proxy, never from the client. A build whose
@@ -452,6 +500,12 @@ def register(app: FastAPI, ctx) -> None:
         if not asset.get("id"):
             raise HTTPException(400, "This release has no downloadable build attached.")
         try:
+            handed = await _with_applier(request, asset["id"], signature=rel.get("signature"),
+                                         target_version=rel["version"],
+                                         allow_unverified=allow_unverified,
+                                         expect_sha256=sha256)
+            if handed is not None:
+                return handed
             res = await asyncio.to_thread(
                 _probes_held, updater.apply, asset["id"], signature=rel.get("signature"),
                 target_version=rel["version"], allow_unverified=allow_unverified,
@@ -515,6 +569,11 @@ def register(app: FastAPI, ctx) -> None:
         if not asset.get("id"):
             raise HTTPException(400, "This release has no downloadable build attached.")
         try:
+            handed = await _with_applier(request, asset["id"], signature=info.get("signature"))
+            if handed is not None:
+                if handed.get("error"):
+                    handed["error"] = _hs.path_formatter(request)(handed["error"])
+                return handed
             res = await asyncio.to_thread(
                 _probes_held, updater.apply, asset["id"], signature=info.get("signature"),
                 defer_runtime=True)

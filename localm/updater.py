@@ -1551,32 +1551,10 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             run_dir / "build.zip", run_dir / "staging", run_dir / "backup")
 
         try:
-            import hashlib
-            download(asset_id, zip_path, opener=download_opener)
-            data = zip_path.read_bytes()
-            digest = hashlib.sha256(data).hexdigest()
-            if expect_sha256 is not None and digest != str(expect_sha256).strip().lower():
-                raise LocalmError(
-                    "refusing to install: the build differs from the one you confirmed",
-                    reason="the update server sent different bytes this time; "
-                           "choose the version again")
-            # SIGNATURE GATE - runs before verify_zip/extract/swap, i.e. before any
-            # of the downloaded build's code can be extracted or executed.
-            if target_version is None:
-                new_keyset = verify_signature(data, signature)
-                verified, verify_reason = True, None
-            else:
-                assessed = assess_signature(data, signature)
-                new_keyset = assessed["keyset"]
-                verified, verify_reason = assessed["verified"], assessed["reason"]
-                if not verified and not allow_unverified:
-                    raise UnverifiedBuild(str(target_version), verify_reason, digest)
-            if hashlib.sha256(zip_path.read_bytes()).hexdigest() != digest:
-                raise LocalmError(
-                    "refusing to install: the downloaded build changed after its "
-                    "signature was checked",
-                    reason="the file on disk no longer matches the verified bytes; "
-                           "try the update again")
+            new_keyset, verified, verify_reason = _verified_download(
+                asset_id, zip_path, signature=signature, target_version=target_version,
+                allow_unverified=allow_unverified, expect_sha256=expect_sha256,
+                opener=download_opener)
             import zipfile
             try:
                 au.verify_zip(zip_path)
@@ -1846,6 +1824,56 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                 "runtime": runtime_status, "runtime_note": runtime_note,
                 "components": components_status, "components_note": components_note,
                 "kept_for_updates": kept, "git_clone": is_git_clone(target)}
+
+
+def _verified_download(asset_id, zip_path: Path, *, signature, target_version,
+                       allow_unverified: bool, expect_sha256, opener=None) -> tuple:
+    """Download the build *asset_id* to *zip_path* and check its signature before any of
+    its code can be extracted or run. Returns ``(key set it carries or None, verified,
+    reason)``. Raises LocalmError or :class:`UnverifiedBuild` (with *target_version*, a
+    build that does not verify unless *allow_unverified*)."""
+    import hashlib
+
+    from localm.bugreport import LocalmError
+    download(asset_id, zip_path, opener=opener)
+    data = zip_path.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    if expect_sha256 is not None and digest != str(expect_sha256).strip().lower():
+        raise LocalmError(
+            "refusing to install: the build differs from the one you confirmed",
+            reason="the update server sent different bytes this time; "
+                   "choose the version again")
+    if target_version is None:
+        new_keyset = verify_signature(data, signature)
+        verified, verify_reason = True, None
+    else:
+        assessed = assess_signature(data, signature)
+        new_keyset = assessed["keyset"]
+        verified, verify_reason = assessed["verified"], assessed["reason"]
+        if not verified and not allow_unverified:
+            raise UnverifiedBuild(str(target_version), verify_reason, digest)
+    if hashlib.sha256(zip_path.read_bytes()).hexdigest() != digest:
+        raise LocalmError(
+            "refusing to install: the downloaded build changed after its "
+            "signature was checked",
+            reason="the file on disk no longer matches the verified bytes; "
+                   "try the update again")
+    return new_keyset, verified, verify_reason
+
+
+def last_result(*, since: float = 0.0) -> Optional[dict]:
+    """How the last update carried out by the program its build ships ended
+    (``update_mechanism.applier.RESULT``): ``{state, from, to, version, note, notes,
+    lines, at}``. None when none ended after *since* (seconds since the epoch)."""
+    from localm.update_mechanism import applier
+    try:
+        raw = _json.loads((_updates_dir(create=False) / applier.RESULT).read_text(
+            encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict) or float(raw.get("at") or 0) < since:
+        return None
+    return raw
 
 
 def retry_hint(root, args: str) -> str:

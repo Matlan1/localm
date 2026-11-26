@@ -6021,7 +6021,7 @@ def _mark_fds_noninheritable() -> None:
 @_media_runs_again()
 def _do_restart(*, update_watchdog: Optional[dict] = None,
                 port: Optional[int] = None,
-                instance_id: Optional[str] = None) -> None:
+                instance_id: Optional[str] = None, update=None) -> None:
     """Restart this server IN PLACE. Unload the model FIRST (clean native
     teardown, like _do_shutdown - a hard re-exec while it is loaded can segfault),
     clear the crash marker so this intentional restart is not reported as a crash,
@@ -6049,6 +6049,10 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     starts instead, and it would be rolled back again under the running server. The
     plain "restart the server" button (/v1/server/restart) calls this with no
     update_watchdog, so it is entirely unaffected.
+
+    *update*, an ``updater_handoff.Prepared``, is handed over to the program the build
+    ships as the last act before the re-exec (:func:`_hand_off_update`); the re-exec'd
+    process waits for it at the gate of ``localm/__init__.py``.
 
     Free VRAM is captured BEFORE the teardown below so the wait after it (once
     every native free has been issued) can confirm the releases actually landed
@@ -6301,7 +6305,29 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
             except Exception:
                 pass
 
+    if update is not None:
+        _hand_off_update(update, port)
     _execv_restart(port, instance_id, update_steps_done=not deferred)
+
+
+def _hand_off_update(prepared, port: Optional[int]) -> None:
+    """Hand the prepared update over (``updater_handoff.hand_off``) and mark the coming
+    re-exec as the process that goes on with it. When that fails, the update is
+    discarded, the reason is written where Settings shows it, and the restart loads
+    this version again."""
+    from localm import updater_handoff
+    from localm.debuglog import logger as _dbg
+    try:
+        updater_handoff.hand_off(prepared, mode="server",
+                                 confirmed=[p["key"] for p in prepared.processes],
+                                 watch=prepared.watch, relaunch=_restart_argv(port),
+                                 say=_dbg.info)
+    except Exception as e:
+        _dbg.warning("the update to %s was not started: %s", prepared.new, e)
+        updater_handoff.note_failed(prepared, f"The update to {prepared.new} was not "
+                                              f"started: {e}")
+        return
+    os.environ["LOCALM_UPDATE_PRIMARY"] = prepared.id
 
 
 def _finish_pending_runtime_update() -> bool:
@@ -6469,10 +6495,10 @@ def _execv_restart(port: Optional[int], instance_id: Optional[str], *,
 
 def _request_restart(delay: float = 0.25, *, update_watchdog: Optional[dict] = None,
                      port: Optional[int] = None,
-                     instance_id: Optional[str] = None) -> None:
+                     instance_id: Optional[str] = None, update=None) -> None:
     """Run _do_restart shortly after returning, so the 200 response flushes to the
     client before the process re-execs (mirrors _request_shutdown). *update_watchdog*,
-    *port*, and *instance_id* are forwarded to _do_restart unchanged - see its
+    *port*, *instance_id* and *update* are forwarded to _do_restart unchanged - see its
     docstring."""
     import threading
     import time as _t
@@ -6480,7 +6506,7 @@ def _request_restart(delay: float = 0.25, *, update_watchdog: Optional[dict] = N
     def _run():
         _t.sleep(delay)
         _do_restart(update_watchdog=update_watchdog, port=port,
-                   instance_id=instance_id)
+                   instance_id=instance_id, update=update)
 
     threading.Thread(target=_run, daemon=True).start()
 
