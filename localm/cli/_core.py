@@ -647,19 +647,56 @@ def _update_steps_at_start(command) -> None:
     from localm import _version
     done = os.environ.pop("LOCALM_UPDATE_STEPS_DONE", None)
     if done and done == _version.read_version():
+        _old_client_checks(command)
         return
     if os.environ.get("LOCALM_RESTART_IN_PROGRESS") and command in _SERVER_COMMANDS:
-        _defer_update_steps_to_a_restart()
+        if not _defer_update_steps_to_a_restart():
+            _old_client_checks(command)
         return
     _finish_pending_runtime_update(command)
     _finish_pending_component_update(command)
+    _old_client_checks(command)
+
+
+def _old_client_checks(command) -> None:
+    """The checks of the first start after an older localm installed this version with
+    its own updater (``updater_old_clients.at_start``), skipped in a process an update
+    started (``LOCALM_UPDATE_ID``), in localm's hidden commands, in ``localm mcp``
+    (its stdout is the protocol; a later start runs them), in a pip install, in the
+    container image and in a git clone (its files are git's). What they say goes to
+    stderr. When they failed and this version must not go on, print why and exit with
+    status 1."""
+    import os
+    if ("LOCALM_UPDATE_ID" in os.environ or str(command or "").startswith("_")
+            or command == "mcp"):
+        return
+    from rich.markup import escape
+    try:
+        from localm import _version, updater, updater_old_clients
+        root = updater.repo_root()
+        if (updater.is_site_packages_install(root) or updater.in_container_image()
+                or updater.is_git_clone(root)):
+            return
+        from localm.config import home_dir
+        note = updater_old_clients.at_start(
+            root=root, home=home_dir(), version=_version.read_version(),
+            say=lambda m: err_console.print(f"[dim]{escape(m)}[/dim]"),
+            warn=lambda m: err_console.print(f"[yellow]{escape(m)}[/yellow]"),
+            server=command in _SERVER_COMMANDS)
+    except Exception as e:
+        err_console.print(f"[yellow]The checks of the last update could not run "
+                          f"({escape(str(e))}); they run at the next start.[/yellow]")
+        return
+    if note:
+        err_console.print(f"[yellow]{escape(note)}[/yellow]")
+        raise SystemExit(1)
 
 
 # Commands whose process a restart re-executes (a server).
 _SERVER_COMMANDS = frozenset({"gui", "serve"})
 
 
-def _defer_update_steps_to_a_restart() -> None:
+def _defer_update_steps_to_a_restart() -> bool:
     """In a server a restart by an older localm re-executed (one whose restart
     does not carry out the update steps, so ``LOCALM_UPDATE_STEPS_DONE`` is
     unset): when a runtime or component update is pending, or this version's
@@ -667,7 +704,8 @@ def _defer_update_steps_to_a_restart() -> None:
     so the server restarts itself once it is answering, and that restart (this
     version's) carries the steps out with its models unloaded
     (``http_server._finish_pending_runtime_update``). The server first answers,
-    so an older build's update watchdog sees it come up. Never raises."""
+    so an older build's update watchdog sees it come up. Returns whether it set
+    it. Never raises."""
     import os
     try:
         from localm import updater, updater_components, updater_runtime
@@ -680,11 +718,12 @@ def _defer_update_steps_to_a_restart() -> None:
         console.print(f"[yellow]Could not check whether this localm version's runtime and "
                       f"components are installed ({e}); they are checked on the next start."
                       "[/yellow]")
-        return
+        return False
     if needed:
         os.environ["LOCALM_FINISH_UPDATE_AFTER_START"] = "1"
         console.print("[dim]This localm version's native runtime or components are not "
                       "installed yet; localm restarts once to install them.[/dim]")
+    return bool(needed)
 
 
 def _finish_pending_runtime_update(command) -> None:

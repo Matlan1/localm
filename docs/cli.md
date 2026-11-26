@@ -1381,6 +1381,22 @@ and the native runtime only. They say when an update also replaced ComfyUI or th
 inside localm; those return to that version's pins the next time localm starts with an
 internet connection.
 
+When an older localm (0.3.2 to 0.3.4b4) installed this version with its own updater, the
+first start afterwards checks the update: every file is the one the release states, the
+packages are this version's, and this version starts and answers. While the older
+version's update watchdog runs, that watchdog checks the last part, and the update is
+complete once it has ended. When the checks pass, the backup the older updater kept is
+deleted once that watchdog has ended, if it is provably this install's backup from that
+update (localm 0.3.2 keeps no such proof, so its backup stays until a later update
+replaces it), and `rollback.bat` / `rollback.sh` no longer put it back. When they fail,
+the previous version is put back from that backup, and localm says why on the console
+(stderr) and, for a day, in the previous version's Settings > System > Updates (localm
+0.3.3 to 0.3.4b4 list it under the last runtime and component updates); a put-back that
+could not run is tried again at the next start. A backup that is not provably this
+install's is left alone, `rollback.bat` / `rollback.sh` do not put it back either, and
+localm says how to repair the install instead, on the console and in Settings > System >
+Updates. `localm mcp` does not run the checks; the next other start does.
+
 When an update was interrupted in a way that left files of two versions, the next start of
 localm, by any launcher, command, MCP client or script, first puts the previous version
 back (or ends an update that was done) and says so; a start while an update runs waits for

@@ -15,6 +15,7 @@ or, in a server, during its restart.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Callable, Optional
@@ -140,34 +141,12 @@ def _deps(root: Path) -> dict:
             "problems": uc.unsatisfied(reqs, installed)}
 
 
-def installed_parts(root=None) -> dict:
-    """What each part of the install at *root* (default the running one) is
-    at, against this localm version. Read-only, never raises.
-
-    Returns ``{"app", "install_record", "install_record_matches",
-    "install_record_problem", "deps_problems", "runtime", "components", "problems", "consistent",
-    "last_steps"}``:
-    ``app`` the code's version, ``install_record`` the venv's localm record
-    version (None when there is none to compare: no venv, or a pip install;
-    a git clone with a venv is compared like any install) and whether it is
-    ``app`` (False also when the venv has
-    no record at all). A record of another version is a problem
-    (``install_record_problem``) unless an update that kept the dependencies
-    left it (:func:`note_kept_record`), or *root* is a git clone (``.git``
-    present) whose record is an editable install of *root* and whose
-    dependencies are all satisfied,
-    ``deps_problems`` each dependency the venv does not satisfy (a problem),
-    ``runtime``
-    ``{"backend", "current", "target", "matches"}`` (``matches`` None when it
-    cannot be told), ``components`` ``[{"name", "label", "current",
-    "target", "matches"}]`` for every installed component the shallow plan can
-    compare, and ``problems`` one user-facing line per part that disagrees.
-    ``consistent`` is True when ``problems`` is empty. ``last_steps`` holds
-    the runtime and component update results of the last day for this version
-    (:func:`_last_steps`)."""
-    from localm import _version, updater
-    root = Path(root) if root else updater.repo_root()
-    app = _version.read_version()
+def venv_part(root: Path, app: str) -> dict:
+    """The venv of the install at *root* against localm *app* (see
+    :func:`installed_parts`): ``{"install_record", "install_record_matches",
+    "install_record_problem", "deps_problems", "problems"}``, ``problems`` one
+    user-facing line each. Nothing for a pip install. Never raises."""
+    from localm import updater
     problems: list = []
     record, record_matches, deps_problems = None, None, []
     record_problem = False
@@ -196,6 +175,43 @@ def installed_parts(root=None) -> dict:
                             f"{app} needs: " + ", ".join(deps_problems[:5])
                             + (f" (and {len(deps_problems) - 5} more)"
                                if len(deps_problems) > 5 else ""))
+    return {"install_record": record, "install_record_matches": record_matches,
+            "install_record_problem": record_problem, "deps_problems": deps_problems,
+            "problems": problems}
+
+
+def installed_parts(root=None) -> dict:
+    """What each part of the install at *root* (default the running one) is
+    at, against this localm version. Read-only, never raises.
+
+    Returns ``{"app", "install_record", "install_record_matches",
+    "install_record_problem", "deps_problems", "runtime", "components", "problems", "consistent",
+    "last_steps"}``:
+    ``app`` the code's version, ``install_record`` the venv's localm record
+    version (None when there is none to compare: no venv, or a pip install;
+    a git clone with a venv is compared like any install) and whether it is
+    ``app`` (False also when the venv has
+    no record at all). A record of another version is a problem
+    (``install_record_problem``) unless an update that kept the dependencies
+    left it (:func:`note_kept_record`), or *root* is a git clone (``.git``
+    present) whose record is an editable install of *root* and whose
+    dependencies are all satisfied,
+    ``deps_problems`` each dependency the venv does not satisfy (a problem),
+    ``runtime``
+    ``{"backend", "current", "target", "matches"}`` (``matches`` None when it
+    cannot be told), ``components`` ``[{"name", "label", "current",
+    "target", "matches"}]`` for every installed component the shallow plan can
+    compare, and ``problems`` one user-facing line per part that disagrees.
+    ``consistent`` is True when ``problems`` is empty. ``last_steps`` holds
+    the runtime and component update results of the last day for this version
+    (:func:`_last_steps`)."""
+    from localm import _version, updater
+    root = Path(root) if root else updater.repo_root()
+    app = _version.read_version()
+    venv = venv_part(root, app)
+    record, record_matches = venv["install_record"], venv["install_record_matches"]
+    record_problem, deps_problems = venv["install_record_problem"], venv["deps_problems"]
+    problems: list = list(venv["problems"])
     runtime: dict = {"backend": None, "current": None, "target": None, "matches": None}
     try:
         from localm import updater_runtime
@@ -224,7 +240,7 @@ def installed_parts(root=None) -> dict:
         problems.append(f"could not compare the components with this version: {e}")
     return {"app": app, "install_record": record, "install_record_matches": record_matches,
             "install_record_problem": record_problem,
-            "deps_problems": deps_problems, "last_steps": _last_steps(app),
+            "deps_problems": deps_problems, "last_steps": _last_steps(app, root),
             "runtime": runtime, "components": components, "problems": problems,
             "consistent": not problems}
 
@@ -233,12 +249,20 @@ def installed_parts(root=None) -> dict:
 LAST_STEPS_S = 24 * 3600.0
 
 
-def _last_steps(version: Optional[str]) -> list:
+def _same_root(a, b) -> bool:
+    try:
+        return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _last_steps(version: Optional[str], root=None) -> list:
     """The results of the update carried out by the program a build ships
     (``updater.last_result``), the runtime and component updates of the last
     :data:`LAST_STEPS_S` seconds: ``[{"part", "state", "note", "at"}]``. A result
-    recorded under another localm version than *version* is left out; one that
-    names no version (written by an older build) is kept. A note both parts
+    recorded under another localm version than *version*, or naming another install
+    than *root* (a data folder two installs share), is left out; one that names no
+    version or no install (written by an older build) is kept. A note both parts
     recorded (a rollback) is listed once."""
     import time
     out = []
@@ -254,6 +278,8 @@ def _last_steps(version: Optional[str]) -> list:
             if not st or not st.get("note"):
                 continue
             if st.get("version") and _norm_version(st["version"]) != _norm_version(version):
+                continue
+            if root is not None and st.get("root") and not _same_root(st["root"], root):
                 continue
             try:
                 at = float(st.get("at") or 0)
