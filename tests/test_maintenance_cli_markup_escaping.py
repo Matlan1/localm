@@ -222,24 +222,28 @@ class TestUpdateCheckMarkupEscaping:
 
 
 class TestUpdateApplyMarkupEscaping:
-    def test_applied_version_survives_verbatim(self, cli_runner, monkeypatch):
+    def test_the_reason_an_update_was_not_started_survives_verbatim(self, cli_runner,
+                                                                    monkeypatch):
         from localm.cli.maintenance import update_cmd
-        from localm import updater
+        from localm import _update_parent, updater, updater_handoff
+        from localm.bugreport import LocalmError
         monkeypatch.setattr(updater, "available", lambda: True)
         monkeypatch.setattr(updater, "check", lambda **_: {
             "current": "0.1.0", "latest": "0.2.0", "newer": True,
             "comparable": True, "notes": None, "asset": {"id": "abc"},
             "signature": None,
         })
-        monkeypatch.setattr(
-            updater, "apply",
-            lambda asset_id, *, signature=None, say=None, **_: {
-                "version": BRACKET_DROP, "klass": "reboot"})
+        monkeypatch.setenv(_update_parent.WORK, "1")
+
+        def _raise(*_a, **_k):
+            raise LocalmError(BRACKET_STYLE, reason=BRACKET_DROP)
+        monkeypatch.setattr(updater_handoff, "prepare", _raise)
 
         r = cli_runner.invoke(update_cmd, ["--yes"])
-        assert r.exit_code == 0, r.output
+        assert r.exit_code == 1, r.output
+        assert BRACKET_STYLE in r.output, r.output
         assert BRACKET_DROP in r.output, (
-            f"the applied version string must survive verbatim: {r.output!r}")
+            f"the reason must survive verbatim: {r.output!r}")
 
 
 class TestUpdateRollbackMarkupEscaping:
