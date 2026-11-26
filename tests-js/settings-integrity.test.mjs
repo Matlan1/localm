@@ -27,7 +27,8 @@ function app(states, posts = []) {
       return { ok: true, status: 200, json: async () => reply };
     }
     if (u === "/api/integrity") {
-      const s = states[Math.min(i++, states.length - 1)];
+      const s = states.length ? states[Math.min(i++, states.length - 1)]
+        : { pending: false, running: false, result: null };
       return { ok: true, status: 200, json: async () => s };
     }
     return { ok: true, status: 200, json: async () => ({}), text: async () => "" };

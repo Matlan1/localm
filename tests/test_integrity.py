@@ -86,8 +86,8 @@ def test_an_untouched_install_matches_and_the_runtime_folder_is_left_to_its_list
 
 
 def test_an_edited_a_shortened_and_a_deleted_file_are_each_named(install):
-    (install / "localm" / "a.py").write_text("A = 9\n", encoding="utf-8")
-    (install / "localm" / "b.py").write_text("B\n", encoding="utf-8")
+    (install / "localm" / "a.py").write_bytes(b"A = 9\n")
+    (install / "localm" / "b.py").write_bytes(b"B\n")
     (install / "docs" / "c.md").unlink()
     r = integrity.check()
     assert r["differ"] == ["localm/a.py", "localm/b.py"]
@@ -98,7 +98,7 @@ def test_an_edited_a_shortened_and_a_deleted_file_are_each_named(install):
 
 
 def test_a_file_the_release_does_not_list_is_not_reported(install):
-    (install / "localm" / "mine.py").write_text("x\n", encoding="utf-8")
+    (install / "localm" / "mine.py").write_bytes(b"x\n")
     assert integrity.check()["count"] == 0
 
 
@@ -107,7 +107,7 @@ def test_without_a_matching_list_nothing_is_compared_and_the_reason_is_given(ins
     if case == "no statement":
         (install / update_package.NAME).unlink()
     else:
-        (install / "VERSION").write_text("2.0\n", encoding="utf-8")
+        (install / "VERSION").write_bytes(b"2.0\n")
     r = integrity.check()
     assert r["available"] is False and r["count"] == 0
     assert ("git clone" in r["reason"]) if case == "no statement" else ("2.0" in r["reason"])
@@ -127,7 +127,7 @@ def test_a_file_changed_since_the_record_is_read_again_and_reported(install, rea
     integrity.check()
     reads.clear()
     p = install / "localm" / "a.py"
-    p.write_text("A = 9\n", encoding="utf-8")
+    p.write_bytes(b"A = 9\n")
     st = p.stat()
     os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
     r = integrity.check()
@@ -139,7 +139,7 @@ def test_a_full_check_reads_every_file_whatever_the_record_says(install, reads):
     integrity.check()
     p = install / "localm" / "a.py"
     st = p.stat()
-    p.write_text("A = 9\n", encoding="utf-8")
+    p.write_bytes(b"A = 9\n")
     os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
     reads.clear()
     assert integrity.check()["differ"] == [], "same size and time: the record stands"
@@ -163,7 +163,7 @@ def test_a_record_of_another_version_is_not_used(install, reads):
 
 def test_a_kept_file_is_listed_apart_until_the_release_changes_it(install):
     p = install / "localm" / "a.py"
-    p.write_text("A = 9\n", encoding="utf-8")
+    p.write_bytes(b"A = 9\n")
     assert integrity.keep(["localm/a.py"]) == ["localm/a.py"]
     r = integrity.check()
     assert r["differ"] == [] and r["kept"] == ["localm/a.py"] and r["count"] == 0
@@ -187,7 +187,7 @@ def _runtime(install: Path) -> Path:
     (lib / "rocblas").mkdir(parents=True, exist_ok=True)
     (lib / "llama.dll").write_bytes(b"L" * 1000)
     (lib / "rocblas" / "kernel.dat").write_bytes(b"K" * 500)
-    (lib / ".localm-backend").write_text("cpu\n", encoding="utf-8")
+    (lib / ".localm-backend").write_bytes(b"cpu\n")
     return lib
 
 
@@ -266,7 +266,7 @@ def test_a_start_that_is_not_a_server_reads_nothing(install, monkeypatch, reads)
 def test_the_startup_check_keeps_its_result_and_says_it_only_with_the_notice_on(
         install, monkeypatch, notice):
     _settings(monkeypatch, integrity_check_at_start=True, integrity_notice=notice)
-    (install / "localm" / "a.py").write_text("A = 9\n", encoding="utf-8")
+    (install / "localm" / "a.py").write_bytes(b"A = 9\n")
     said: list = []
     thread = integrity.startup("serve", say=said.append, delay=0)
     assert thread is not None and thread.daemon
@@ -351,9 +351,9 @@ def _tree(root: Path) -> dict:
 
 
 def test_repair_writes_exactly_the_differing_files_from_the_signed_build(install, release):
-    (install / "localm" / "a.py").write_text("A = 9\n", encoding="utf-8")
+    (install / "localm" / "a.py").write_bytes(b"A = 9\n")
     (install / "docs" / "c.md").unlink()
-    (install / "localm" / "b.py").write_text("B = 7\n", encoding="utf-8")
+    (install / "localm" / "b.py").write_bytes(b"B = 7\n")
     integrity.keep(["localm/b.py"])
     before = _tree(install)
     said: list = []
@@ -368,7 +368,7 @@ def test_repair_writes_exactly_the_differing_files_from_the_signed_build(install
 
 
 def test_repair_of_a_named_kept_file_puts_it_back_and_ends_keeping_it(install, release):
-    (install / "localm" / "b.py").write_text("B = 7\n", encoding="utf-8")
+    (install / "localm" / "b.py").write_bytes(b"B = 7\n")
     integrity.keep(["localm/b.py"])
     res = integrity.repair(["localm/b.py"], opener=release["opener"])
     assert res["repaired"] == ["localm/b.py"]
@@ -380,7 +380,7 @@ def test_a_build_that_does_not_verify_repairs_nothing(install, release):
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     from localm.bugreport import LocalmError
-    (install / "localm" / "a.py").write_text("A = 9\n", encoding="utf-8")
+    (install / "localm" / "a.py").write_bytes(b"A = 9\n")
     release["key"] = Ed25519PrivateKey.generate()
     before = _tree(install)
     with pytest.raises(LocalmError):
@@ -397,7 +397,7 @@ def test_a_file_the_signed_build_states_otherwise_is_not_written(install, releas
     statement = {"format": update_package.FORMAT, "version": "1.0",
                  "files": update_package.files(tmp), "components": {}}
     release["data"] = _build(files, statement)
-    (install / "localm" / "a.py").write_text("A = 9\n", encoding="utf-8")
+    (install / "localm" / "a.py").write_bytes(b"A = 9\n")
     res = integrity.repair(opener=release["opener"])
     assert res["repaired"] == [] and res["failed"][0]["path"] == "localm/a.py"
     assert "other content" in res["failed"][0]["reason"]
@@ -416,8 +416,8 @@ def test_repair_waits_for_an_update_in_progress(install, release):
     from localm.update_mechanism import job
     record = job.record_path(install)
     record.parent.mkdir(parents=True, exist_ok=True)
-    record.write_text("{}", encoding="utf-8")
-    (install / "localm" / "a.py").write_text("A = 9\n", encoding="utf-8")
+    record.write_bytes(b"{}")
+    (install / "localm" / "a.py").write_bytes(b"A = 9\n")
     with pytest.raises(integrity.IntegrityError, match="update"):
         integrity.repair(opener=release["opener"])
     assert (install / "localm" / "a.py").read_bytes() == b"A = 9\n"
@@ -429,7 +429,7 @@ def test_the_command_lists_keeps_and_reports_its_exit_code(install):
     from click.testing import CliRunner
 
     from localm.cli import main
-    (install / "localm" / "a.py").write_text("A = 9\n", encoding="utf-8")
+    (install / "localm" / "a.py").write_bytes(b"A = 9\n")
     r = CliRunner().invoke(main, ["integrity"])
     assert r.exit_code == 1 and "localm/a.py" in r.output, r.output
     r = CliRunner().invoke(main, ["integrity", "--keep"])
@@ -441,7 +441,7 @@ def test_the_command_lists_keeps_and_reports_its_exit_code(install):
 def test_the_bug_report_carries_counts_and_no_paths(install):
     from localm.bugreport import diagnostics
     assert diagnostics._integrity_counts() == {"checked": False}
-    (install / "localm" / "a.py").write_text("A = 9\n", encoding="utf-8")
+    (install / "localm" / "a.py").write_bytes(b"A = 9\n")
     integrity.run()
     counts = diagnostics.collect_diagnostics()["files_differing"]
     assert counts == {"checked": True, "differ": 1, "missing": 0, "kept": 0,
@@ -476,7 +476,7 @@ def test_the_routes_check_and_keep_for_the_owner_only(install, client):
     owner = {"Authorization": f"Bearer {OWNER_KEY}"}
     r = c.get("/api/integrity", headers=owner)
     assert r.status_code == 200 and r.json()["result"] is None, r.text
-    (install / "localm" / "a.py").write_text("A = 9\n", encoding="utf-8")
+    (install / "localm" / "a.py").write_bytes(b"A = 9\n")
     r = c.post("/api/integrity/check", headers=owner, json={"full": True})
     assert r.status_code == 200 and r.json()["differ"] == ["localm/a.py"], r.text
     assert c.get("/api/integrity", headers=owner).json()["result"]["count"] == 1

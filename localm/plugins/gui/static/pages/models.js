@@ -2777,7 +2777,7 @@ export function renderIntegrity(state) {
 
 async function _integrityState() {
   const r = await fetch("/api/integrity", { headers: authHeaders() });
-  const d = await r.json().catch(() => ({}));
+  const d = (await r.json().catch(() => null)) || {};
   if (!r.ok) throw new Error(d.detail || r.statusText);
   return d;
 }

@@ -350,6 +350,7 @@ def startup(command, *, say: Optional[Callable] = None,
 
     def work():
         time.sleep(delay)
+        began = time.monotonic()
         try:
             from localm.audit import automatic_write_allowed
             result = run(write_record=automatic_write_allowed("server"))
@@ -358,8 +359,8 @@ def startup(command, *, say: Optional[Callable] = None,
             logger.warning("integrity: the check at startup failed: %s", e)
             return
         from localm.debuglog import logger
-        logger.info("integrity: %s (%d of %d read in full)", summary(result),
-                    result["hashed"], result["checked"])
+        logger.info("integrity: %s (%d of %d read in full, %.2f s)", summary(result),
+                    result["hashed"], result["checked"], time.monotonic() - began)
         if result["count"] and notice and say is not None:
             say(f"{summary(result)}. 'localm integrity' lists them; "
                 "'localm integrity --repair' puts them back.")
