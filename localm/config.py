@@ -1282,6 +1282,11 @@ DEFAULT_CONFIG: dict = {
     # False: the update check obeys it like everything else unless an admin
     # opts this one channel out.
     "update_ignore_net_policy": False,
+    # The integrity check (settings_schema.py's integrity_check_at_start and
+    # integrity_notice): whether a start compares localm's files with the list of
+    # the installed release, and whether a difference it finds shows a notice.
+    "integrity_check_at_start": True,
+    "integrity_notice": True,
     # Names of enabled engine plugins (WordPress-style). Managed by the plugin
     # engine (plugin enable/disable, GUI Plugins page) via update_config, NOT the
     # settings form. Declared here for a documented home + default (else the

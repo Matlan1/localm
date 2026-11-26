@@ -935,6 +935,18 @@ CORE_FIELDS: list = [
                  "to Off also turns off update checks. Turn this on to let the "
                  "update channel through regardless.",
                  group="Updates", tier=Tier.OWNER),
+    SettingField("integrity_check_at_start", Widget.TOGGLE,
+                 "Check integrity at startup",
+                 "Compares localm's files with the list of the installed release each "
+                 "time localm starts. Off: nothing is read at startup; the check still "
+                 "runs when you ask for it.",
+                 group="Updates", tier=Tier.CONFIG_WRITE),
+    SettingField("integrity_notice", Widget.TOGGLE,
+                 "Show a notice when files differ",
+                 "When the check at startup finds files that differ from the release, "
+                 "localm shows a notice. Off: the check still runs and its result is "
+                 "still listed under Updates.",
+                 group="Updates", tier=Tier.CONFIG_WRITE),
     SettingField("plugins", Widget.HIDDEN, "Per-plugin config",
                  "Per-plugin settings (e.g. media output dirs). Managed by the "
                  "Plugins/Settings pages and plugin backends, not edited here.",

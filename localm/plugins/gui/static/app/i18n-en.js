@@ -2172,6 +2172,10 @@ export const I18N_EN = {
   "settings.field.updateAllowPrerelease.help": "Also offer release-candidate builds when checking for updates. A prerelease is signed and verified like a stable release but is less field-tested. Turn on only to help test rc builds.",
   "settings.field.updateIgnoreNetPolicy.label": "Check for updates even when network access is off",
   "settings.field.updateIgnoreNetPolicy.help": "The update check normally obeys Network access, so setting that to Off also turns off update checks. Turn this on to let the update channel through regardless.",
+  "settings.field.integrityCheckAtStart.label": "Check integrity at startup",
+  "settings.field.integrityCheckAtStart.help": "Compares localm's files with the list of the installed release each time localm starts. Off: nothing is read at startup; the check still runs when you ask for it.",
+  "settings.field.integrityNotice.label": "Show a notice when files differ",
+  "settings.field.integrityNotice.help": "When the check at startup finds files that differ from the release, localm shows a notice. Off: the check still runs and its result is still listed under Updates.",
 
   // Settings > schema fields: Knowledge
   "settings.field.ragIndexingMode.label": "Indexing folder rule",
