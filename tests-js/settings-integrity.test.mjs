@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadAppWithPages } from "./harness.mjs";
+import { loadAppWithPages, runScript } from "./harness.mjs";
 
 const RESULT = {
   available: true, version: "1.0", count: 2, at: 123.5,
@@ -100,4 +100,49 @@ test("Repair and Keep post to their routes and show the new result", async () =>
   assert.match(text(w, "integrity-action-status"), /Kept as yours: 2 file/);
   await w.integrityRun(true);
   assert.deepEqual(posts[2], { url: "/api/integrity/check", body: { full: true } });
+});
+
+// The two settings render into the Integrity block, which shows without an update
+// channel, and its own Save sends only them.
+test("the integrity settings show and save without an update channel", async () => {
+  const schema = { fields: [
+    { key: "update_allow_prerelease", widget: "toggle", label: "Offer prerelease updates",
+      help: "h", group: "Updates", owner: "core", admin_only: true, default: false },
+    { key: "integrity_check_at_start", widget: "toggle", label: "Check integrity at startup",
+      help: "h", group: "Updates", owner: "core", default: true },
+    { key: "integrity_notice", widget: "toggle", label: "Show a notice when files differ",
+      help: "h", group: "Updates", owner: "core", default: true },
+  ] };
+  const patches = [];
+  const fetchImpl = async (url, opts = {}) => {
+    const u = String(url);
+    const method = opts.method || "GET";
+    const reply = (body) => ({ ok: true, status: 200, text: async () => "", json: async () => body });
+    if (u.includes("/api/capabilities")) {
+      return reply({ scopes: [], open: false, plugins: [], update_available: false,
+        core: { chat: true, models: true, plugins: true, settings: true } });
+    }
+    if (u === "/v1/config/schema") return reply(schema);
+    if (u === "/v1/config" && method === "PATCH") { patches.push(JSON.parse(opts.body)); return reply({}); }
+    if (u === "/v1/config") return reply({ integrity_check_at_start: true, integrity_notice: true });
+    if (u === "/api/integrity") return reply({ pending: false, running: false, result: null });
+    return reply({ models: [], active: "", conversations: [], plugins: [] });
+  };
+  const { window } = loadAppWithPages({ fetchImpl });
+  const drain = async () => { for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0)); };
+  await drain();
+  runScript(window, "refreshSettingsPage();");
+  await drain();
+  const doc = window.document;
+  const block = doc.getElementById("integrity-settings-block");
+  assert.equal(doc.getElementById("app-update-block").hidden, true);
+  assert.equal(block.hidden, false);
+  for (const key of ["integrity_check_at_start", "integrity_notice"]) {
+    assert.ok(block.contains(doc.querySelector(`[data-field-key="${key}"]`)), key);
+  }
+  assert.ok(!block.contains(doc.querySelector('[data-field-key="update_allow_prerelease"]')));
+  doc.querySelector('[data-field-key="integrity_check_at_start"] input').click();
+  doc.getElementById("integrity-settings-save").click();
+  await drain();
+  assert.deepEqual(patches, [{ integrity_check_at_start: false }]);
 });

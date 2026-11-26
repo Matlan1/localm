@@ -1367,6 +1367,14 @@
                   <button class="btn-secondary" id="integrity-keep" data-i18n="settings.integrity.keepButton" hidden>Keep my changes</button>
                 </div>
                 <div id="integrity-action-status" class="sub" role="status" aria-live="polite" hidden></div>
+                <!-- integrity_check_at_start / integrity_notice: schema-driven, rendered
+                     here by refreshSettingsPage's "core-Updates" case in settings.js. -->
+                <div id="integrity-settings-block" hidden>
+                  <div id="integrity-settings" class="settings-fields"></div>
+                  <div class="actions">
+                    <button class="btn-secondary" id="integrity-settings-save" data-i18n="settings.integrity.saveButton">Save integrity settings</button>
+                  </div>
+                </div>
               </div>
 
               <!-- The GUI form of `localm make-launcher`. Its OWN sub-block, not part

@@ -2796,6 +2796,7 @@
   "settings.integrity.fullButton": "Comprobar todos los archivos por completo",
   "settings.integrity.repairButton": "Reparar",
   "settings.integrity.keepButton": "Conservar mis cambios",
+  "settings.integrity.saveButton": "Guardar los ajustes de integridad",
   "settings.integrity.repairing": "Descargando la versión firmada y reparando...",
   "settings.integrity.repaired": "Archivos reparados: {count}. Reinicia localm para usarlos.",
   "settings.integrity.notRepaired": "No reparado: {path} ({reason}).",

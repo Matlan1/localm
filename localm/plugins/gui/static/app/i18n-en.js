@@ -3000,6 +3000,7 @@ export const I18N_EN = {
   "settings.integrity.fullButton": "Check every file in full",
   "settings.integrity.repairButton": "Repair",
   "settings.integrity.keepButton": "Keep my changes",
+  "settings.integrity.saveButton": "Save integrity settings",
   "settings.integrity.repairing": "Fetching the signed release and repairing...",
   "settings.integrity.repaired": "Repaired files: {count}. Restart localm to use them.",
   "settings.integrity.notRepaired": "Not repaired: {path} ({reason}).",

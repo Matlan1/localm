@@ -2613,6 +2613,7 @@
   "settings.integrity.fullButton": "Alle Dateien vollständig prüfen",
   "settings.integrity.repairButton": "Reparieren",
   "settings.integrity.keepButton": "Meine Änderungen behalten",
+  "settings.integrity.saveButton": "Integritätseinstellungen speichern",
   "settings.integrity.repairing": "Signiertes Release wird geladen und repariert...",
   "settings.integrity.repaired": "Reparierte Dateien: {count}. Starte localm neu, um sie zu nutzen.",
   "settings.integrity.notRepaired": "Nicht repariert: {path} ({reason}).",
