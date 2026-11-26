@@ -237,7 +237,7 @@ def test_native_output_survives_a_process_that_dies_in_the_capture(tmp_path):
     import sys
     keep = tmp_path / "trace.native.log"
     code = ("import os\n"
-            "from localm.debuglog import capture_native_stdio\n"
+            "from localm.native_stdio import capture_native_stdio\n"
             f"with capture_native_stdio(keep_path={str(keep)!r}):\n"
             "    os.write(2, b'GGML_ASSERT(buf != NULL) failed\\n')\n"
             "    os._exit(3)\n")
@@ -253,11 +253,11 @@ def test_native_output_survives_a_process_that_dies_in_the_capture(tmp_path):
 
 def test_in_debug_mode_native_output_goes_straight_to_the_debug_log(tmp_path, monkeypatch,
                                                                      capfd):
-    from localm import debuglog
+    from localm import debuglog, native_stdio
     log = tmp_path / "debug.log"
     log.write_text("earlier line\n", encoding="utf-8")
     monkeypatch.setattr(debuglog, "log_file_path", lambda: log)
-    with debuglog.capture_native_stdio(keep_path=str(tmp_path / "unused.log")) as cap:
+    with native_stdio.capture_native_stdio(keep_path=str(tmp_path / "unused.log")) as cap:
         os.write(2, b"load_backend: loaded CPU backend\n")
         assert cap.tail() == "load_backend: loaded CPU backend"
     assert "load_backend" not in "".join(capfd.readouterr())

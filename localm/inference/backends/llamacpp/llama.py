@@ -27,8 +27,8 @@ import uuid
 from typing import (Any, Callable, Generator, Iterable, Iterator, Optional,
                     Sequence)
 
-from localm.debuglog import CapturedNativeStdio as _CapturedStdio  # noqa: F401
-from localm.debuglog import capture_native_stdio as _capture_stdio  # noqa: F401
+from localm.native_stdio import CapturedNativeStdio as _CapturedStdio  # noqa: F401
+from localm.native_stdio import capture_native_stdio as _capture_stdio  # noqa: F401
 from localm.inference import pretokenizer_guard
 from localm.inference.backends.base import PerThread
 from localm.kv_cache import (

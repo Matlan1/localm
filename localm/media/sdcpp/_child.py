@@ -400,9 +400,9 @@ def _off_the_console(fn, payload):
     """``fn(payload)`` with what native code prints on stdout and stderr kept
     off the console: the ggml device and ``load_backend:`` lines a runtime
     prints while it loads and registers its backends. The captured text goes to
-    the debug log in debug mode (``debuglog.capture_native_stdio``); when *fn*
+    the debug log in debug mode (``native_stdio.capture_native_stdio``); when *fn*
     raises, its tail is added to the error."""
-    from localm.debuglog import capture_native_stdio
+    from localm.native_stdio import capture_native_stdio
     with capture_native_stdio(keep_path=_State.native_path) as captured:
         try:
             return fn(payload)
