@@ -59,6 +59,8 @@ def catches_up(tree) -> bool:
         if "\ndef catch_up(" not in text:
             return False
     return True
+
+
 _PART_KEYS = {RUNTIME: {"label", "name", "beside", "backend", "from", "to", "keep", "folders"},
               FOLDERS: {"label"}, COMFYUI: {"label", "removed", "packages"}}
 
