@@ -27,10 +27,11 @@ Backends (``--backend``), so any machine has a working out-of-the-box path:
     the detected GPU architecture on both platforms (Blackwell - sm_100/sm_120 -
     automatically gets the newer 13.x line; every older architecture stays on
     the broad-compatibility 12.x line).
-  * ``hip`` - AMD peak performance via an already-installed system ROCm/HIP
-    toolkit (a real downloadable prebuilt binary on both Windows and Linux;
-    needs that toolkit present to load - see ``_rocm_toolkit_present`` in
-    hwdetect.py).
+  * ``hip`` - AMD peak performance from upstream's ROCm build (a real
+    downloadable prebuilt binary on both Windows and Linux). On Windows setup
+    adds the ROCm libraries it links and the kernels of this machine's GPUs from
+    AMD's own wheels (``hip_libraries.py``); on Linux it needs a system ROCm/HIP
+    toolkit present to load (see ``_rocm_toolkit_present`` in hwdetect.py).
   * ``sycl`` / ``cpu`` - upstream llama.cpp prebuilts. ``sycl`` delivers peak
     Intel performance; the Windows build bundles the whole oneAPI DPC++
     runtime and is self-contained (the auto default on Windows), while the

@@ -488,6 +488,8 @@ def test_a_load_failure_looks_in_the_added_folder_too(tmp_path, monkeypatch):
         (system / name).write_bytes(_pe([]))
     monkeypatch.setattr(vc_runtime, "_system_dir", lambda: system)
     monkeypatch.setattr(_loader, "rocm_runtime_dirs", lambda: [])
+    # A DLL of that name loaded into this process by another test counts as found.
+    monkeypatch.setattr(pe_deps, "_is_loaded", lambda name: False)
     clause = _loader.missing_dll_clause(target, [target / "ggml-hip.dll"])
     assert clause is not None and clause.startswith("hipblas.dll is missing")
     hip_bin = target / ROCM / "bin"
