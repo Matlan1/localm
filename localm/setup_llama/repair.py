@@ -144,8 +144,8 @@ def repair_runtime(*, root=None, say: Optional[Callable] = None,
                       "--url), and no download holds it",
                       "localm setup-llama --from <build folder> --force")
     if not _net_allowed():
-        from localm.config import NET_OFF_DOWNLOAD_REMEDY
-        return refuse("network access is off, so the runtime cannot be downloaded",
+        from localm.config import NET_OFF_DOWNLOAD_REMEDY, net_off_lead
+        return refuse(net_off_lead("the runtime cannot be downloaded"),
                       f"{NET_OFF_DOWNLOAD_REMEDY}; then run: {RETRY}")
     if job.record_path(root).exists() or job.locked(root):
         return refuse("an update of this install is in progress",

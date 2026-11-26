@@ -842,7 +842,7 @@ def test_a_runtime_repair_that_cannot_run_says_why_and_what_repairs_it(
         monkeypatch.setattr(job, "locked", lambda root: True)
     res = _repair_runtime()
     assert res["needed"] and not res["repaired"] and res["error"] and res["fix"], res
-    expected = {"net-off": ("network access is off", "localm integrity --repair"),
+    expected = {"net-off": ("Network access is off", "localm integrity --repair"),
                 "custom": ("installed yourself", "--from"),
                 "unrecorded": ("does not record", "localm setup-llama --force"),
                 "exit-1": ("setup-llama exited 1", "localm setup-llama --backend cpu --force"),

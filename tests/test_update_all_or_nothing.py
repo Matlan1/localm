@@ -657,7 +657,7 @@ def test_the_update_routes_hold_the_torch_probes(monkeypatch):
     held = {ast.unparse(c.args[1]) for c in calls
             if ast.unparse(c.args[0]) == "_probes_held"}
     assert held == {"updater.apply", "updater_parts.repair", "updater.rollback_last",
-                    "updater_handoff.prepare"}
+                    "updater_handoff.prepare", "repair_runtime"}
     assert not [c for c in calls if ast.unparse(c.args[0]) in (
         "updater.apply", "updater_parts.repair", "updater.rollback_last")]
 

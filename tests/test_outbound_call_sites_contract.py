@@ -43,6 +43,9 @@ _CLASSIFIED = {
     ("inference/_hang_alarm.py", "_probe_once"): "self",
     # The applier cannot import localm (``-I -S``); it asks the server it let through.
     ("update_mechanism/applier.py", "whoami"): "self",
+    # The starter after a failed update runs with only the standard library; it asks
+    # whether a localm already answers on the loopback port of the command it starts.
+    ("updater_old_clients.py", "_answers_on"): "fixed-host",
     ("inference/http_engine.py", "HttpEngine.context_capacity"): "operator-cli",
     ("inference/http_engine.py", "HttpEngine.chat_stream"): "operator-cli",
     ("inference/http_engine.py", "remote_model_status"): "operator-cli",

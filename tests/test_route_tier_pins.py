@@ -101,6 +101,8 @@ _GUI_ROUTES = {
     ('api', 'GET', '/api/share/pending'): ('auth',),
     ('api', 'GET', '/api/stats'): ('auth',),
     ('api', 'POST', '/api/upload'): ('scope:config:write',),
+    ('api', 'GET', '/api/update/old-backup'): ('scope:config:read',),
+    ('api', 'POST', '/api/update/old-backup/remove'): ('scope:config:write',),
     ('api', 'GET', '/api/uploads'): ('scope:config:read',),
     ('api', 'DELETE', '/api/uploads/{name}'): ('scope:config:write',),
     ('api', 'GET', '/api/vram-estimate'): ('scope:models:read',),

@@ -1232,22 +1232,32 @@ def _port_of(argv: list) -> Optional[int]:
 
 def _spawn_starter(root, note: Ending, argv: list) -> Optional[str]:
     """Start a starter (:func:`_start_after_watchdogs`, this file run by the install's
-    python with only the standard library) with this process's output streams, which
-    outlives this process; None when it started, else why not. The starter runs the
+    python with only the standard library, told what to start as JSON on its standard
+    input) with this process's output streams, which outlives this process; None when
+    it started, else why not. The starter runs the
     command with this process's program (``sys.executable``)."""
     import subprocess
+
+    from localm import procs
     payload = {"root": str(Path(root)), "old": note.old, "new": note.new,
                "marker": note.marker, "program": sys.executable,
                "pids": note.pids, "argv": list(argv), "cwd": os.getcwd(),
                "until": time.time() + WATCHDOG_WAIT_S, "port": _port_of(argv)}
-    cmd = [_python(root), "-I", "-S", str(Path(__file__).resolve()), _STARTER,
-           json.dumps(payload)]
+    cmd = [_python(root), "-I", "-S", str(Path(__file__).resolve()), _STARTER]
     streams = {k: v for k, v in _std().items() if k != "stdin"}
     try:
-        subprocess.Popen(cmd, cwd=os.getcwd(), env=_env(note.marker), stdin=subprocess.DEVNULL,
-                         close_fds=True, **streams, **_flags())
+        proc = procs.start(cmd, purpose="start after the old update watchdog",
+                           cwd=os.getcwd(), env=_env(note.marker), stdin=subprocess.PIPE,
+                           close_fds=True, **streams, **_flags())
     except OSError as e:
         return str(e)
+    try:
+        assert proc.stdin is not None
+        proc.stdin.write(json.dumps(payload).encode("utf-8"))
+        proc.stdin.close()
+    except OSError as e:
+        proc.kill()
+        return f"the starter could not be told what to start ({e})"
     return None
 
 
@@ -1360,7 +1370,16 @@ def _start_after_watchdogs(payload: dict) -> int:
     return _run([program, "-m", "localm", *argv], _env(marker), os.getcwd(), say)
 
 
+def _starter_main() -> int:
+    """The starter's entry: read what to start from standard input and start it; 2 when
+    that cannot be read."""
+    try:
+        payload = json.loads(sys.stdin.buffer.read(1 << 20))
+    except (OSError, ValueError, RecursionError) as e:
+        print(f"localm: the starter was not told what to start ({e}).", file=sys.stderr)
+        return 2
+    return _start_after_watchdogs(payload)
+
+
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == _STARTER:
-        raise SystemExit(_start_after_watchdogs(json.loads(sys.argv[2])))
-    raise SystemExit(2)
+    raise SystemExit(_starter_main() if sys.argv[1:] == [_STARTER] else 2)
