@@ -68,9 +68,9 @@ def _serve_probe() -> None:
 
 
 @main.command("_update-record", hidden=True)
-@click.option("--from", "old", required=True)
-@click.option("--to", "new", required=True)
-@click.option("--kept", default="[]")
+@click.option("--from", "old", required=True, envvar="LOCALM_RECORD_FROM")
+@click.option("--to", "new", required=True, envvar="LOCALM_RECORD_TO")
+@click.option("--kept", default="[]", envvar="LOCALM_RECORD_KEPT")
 def update_record_cmd(old: str, new: str, kept: str) -> None:
     """Record what an update that is done changed."""
     from localm.cli import update_prepare as prepared

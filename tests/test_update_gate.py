@@ -1204,15 +1204,18 @@ def test_the_gate_loads_the_standard_library_only():
 
 
 def test_the_files_of_a_start_are_never_absent_while_an_update_moves_them():
-    tracked = subprocess.run(["git", "ls-files", *mover.GATE_FILES], cwd=REPO, text=True,
-                             capture_output=True, **HIDDEN).stdout.split()
-    assert set(mover.GATE_FILES) == set(tracked)
     loaded = re.findall(r"^\s+from localm import (\w+)", _text("localm/__init__.py"), re.M)
     assert loaded and {"localm/__init__.py", *(f"localm/{n}.py" for n in loaded)} <= set(mover.GATE_FILES)
     callers = {p for p in (*REPO.glob("*.bat"), *REPO.glob("*.sh"), REPO / "launcher.pyw",
                            REPO / "installer" / "gui.py", REPO / "scripts" / "rollback_update.py")
                if ".localm-update" in p.read_text(encoding="utf-8")}
     assert {p.relative_to(REPO).as_posix() for p in callers} <= set(mover.GATE_FILES)
+    git = shutil.which("git")
+    if not git or not (REPO / ".git").exists():
+        pytest.skip("not a git checkout")
+    tracked = subprocess.run([git, "ls-files", *mover.GATE_FILES], cwd=REPO, text=True,
+                             capture_output=True, check=True, **HIDDEN).stdout.split()
+    assert set(mover.GATE_FILES) == set(tracked)
 
 
 # ---------------------------------------------------------- held files, asking

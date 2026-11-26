@@ -1551,32 +1551,10 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             run_dir / "build.zip", run_dir / "staging", run_dir / "backup")
 
         try:
-            import hashlib
-            download(asset_id, zip_path, opener=download_opener)
-            data = zip_path.read_bytes()
-            digest = hashlib.sha256(data).hexdigest()
-            if expect_sha256 is not None and digest != str(expect_sha256).strip().lower():
-                raise LocalmError(
-                    "refusing to install: the build differs from the one you confirmed",
-                    reason="the update server sent different bytes this time; "
-                           "choose the version again")
-            # SIGNATURE GATE - runs before verify_zip/extract/swap, i.e. before any
-            # of the downloaded build's code can be extracted or executed.
-            if target_version is None:
-                new_keyset = verify_signature(data, signature)
-                verified, verify_reason = True, None
-            else:
-                assessed = assess_signature(data, signature)
-                new_keyset = assessed["keyset"]
-                verified, verify_reason = assessed["verified"], assessed["reason"]
-                if not verified and not allow_unverified:
-                    raise UnverifiedBuild(str(target_version), verify_reason, digest)
-            if hashlib.sha256(zip_path.read_bytes()).hexdigest() != digest:
-                raise LocalmError(
-                    "refusing to install: the downloaded build changed after its "
-                    "signature was checked",
-                    reason="the file on disk no longer matches the verified bytes; "
-                           "try the update again")
+            new_keyset, verified, verify_reason = _verified_download(
+                asset_id, zip_path, signature=signature, target_version=target_version,
+                allow_unverified=allow_unverified, expect_sha256=expect_sha256,
+                opener=download_opener)
             import zipfile
             try:
                 au.verify_zip(zip_path)
@@ -1846,6 +1824,56 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                 "runtime": runtime_status, "runtime_note": runtime_note,
                 "components": components_status, "components_note": components_note,
                 "kept_for_updates": kept, "git_clone": is_git_clone(target)}
+
+
+def _verified_download(asset_id, zip_path: Path, *, signature, target_version,
+                       allow_unverified: bool, expect_sha256, opener=None) -> tuple:
+    """Download the build *asset_id* to *zip_path* and check its signature before any of
+    its code can be extracted or run. Returns ``(key set it carries or None, verified,
+    reason)``. Raises LocalmError or :class:`UnverifiedBuild` (with *target_version*, a
+    build that does not verify unless *allow_unverified*)."""
+    import hashlib
+
+    from localm.bugreport import LocalmError
+    download(asset_id, zip_path, opener=opener)
+    data = zip_path.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    if expect_sha256 is not None and digest != str(expect_sha256).strip().lower():
+        raise LocalmError(
+            "refusing to install: the build differs from the one you confirmed",
+            reason="the update server sent different bytes this time; "
+                   "choose the version again")
+    if target_version is None:
+        new_keyset = verify_signature(data, signature)
+        verified, verify_reason = True, None
+    else:
+        assessed = assess_signature(data, signature)
+        new_keyset = assessed["keyset"]
+        verified, verify_reason = assessed["verified"], assessed["reason"]
+        if not verified and not allow_unverified:
+            raise UnverifiedBuild(str(target_version), verify_reason, digest)
+    if hashlib.sha256(zip_path.read_bytes()).hexdigest() != digest:
+        raise LocalmError(
+            "refusing to install: the downloaded build changed after its "
+            "signature was checked",
+            reason="the file on disk no longer matches the verified bytes; "
+                   "try the update again")
+    return new_keyset, verified, verify_reason
+
+
+def last_result(*, since: float = 0.0) -> Optional[dict]:
+    """How the last update carried out by the program its build ships ended
+    (``update_mechanism.applier.RESULT``): ``{state, from, to, version, note, notes,
+    lines, at}``. None when none ended after *since* (seconds since the epoch)."""
+    from localm.update_mechanism import applier
+    try:
+        raw = _json.loads((_updates_dir(create=False) / applier.RESULT).read_text(
+            encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    if not isinstance(raw, dict) or float(raw.get("at") or 0) < since:
+        return None
+    return raw
 
 
 def retry_hint(root, args: str) -> str:
@@ -2131,10 +2159,16 @@ def _backup_is_restorable(backup_dir: Path) -> bool:
 def rollback_info() -> dict:
     """What :func:`rollback_last` would restore, WITHOUT restoring anything.
 
-    Returns ``{available, backup, version, current}``. ``available`` is False too when
-    the backup's own list (``_apply_update.backup_problem``) shows it incomplete.
+    Returns ``{available, backup, version, current, reinstall}``. ``available`` is False
+    too when the backup's own list (``_apply_update.backup_problem``) shows it incomplete.
     ``version`` is the backed-up build's VERSION, or None when the backup predates that
     file or it is unreadable (reported as unknown, never guessed from the running version).
+
+    An update carried out by the program its build ships keeps no backup once it is done;
+    when the last such update installed the running version and ended after any backup an
+    earlier update left (or there is none), the way
+    back is to install the version it replaced as a chosen release: ``reinstall`` is True
+    and ``version`` is that version.
 
     STRICTLY READ-ONLY: it restores nothing (:func:`rollback_last` MOVES THE
     INSTALL) and does not create ``updates/`` (see :func:`_updates_dir`), so a GUI
@@ -2149,10 +2183,31 @@ def rollback_info() -> dict:
             version = (backup_dir / "VERSION").read_text(encoding="utf-8").strip() or None
         except (OSError, ValueError):
             version = None
+    current = _version.read_version()
+    reinstall = False
+    last = last_result()
+    if (last and last.get("state") == "new" and last.get("from")
+            and _direction(str(last.get("to")), current) == "same"
+            and _direction(str(last["from"]), current) != "same"
+            and (not available or _later_than(last, backup_dir / au.BACKUP_RECORD))):
+        available, reinstall, version = True, True, str(last["from"])
     return {"available": available,
-            "backup": str(backup_dir) if available else None,
+            "backup": str(backup_dir) if available and not reinstall else None,
             "version": version,
-            "current": _version.read_version()}
+            "current": current, "reinstall": reinstall}
+
+
+def _later_than(result: dict, backup_record: Path) -> bool:
+    """Whether the update *result* (:func:`last_result`) ended after the backup whose
+    record is *backup_record* was made: that backup is then of an earlier update."""
+    try:
+        made = backup_record.stat().st_mtime
+    except OSError:
+        return True
+    try:
+        return float(result.get("at") or 0) > made
+    except (TypeError, ValueError):
+        return False
 
 
 def _restore_all(target: Path, backup_dir: Path, names, *, say=None, components=None,

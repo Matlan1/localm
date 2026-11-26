@@ -160,3 +160,78 @@ def test_verify_resolved_via_tls_module_for_loopback_https(monkeypatch, tmp_path
     monkeypatch.setattr(requests, "request", fake_request)
     self_request("GET", "/health", base_url="https://127.0.0.1:8642/v1")
     assert captured["verify"] == str(ca)
+
+
+def test_an_address_of_this_machines_own_network_card_bypasses_the_proxy(monkeypatch):
+    """A server bound to an address of one of this machine's interfaces is reached
+    without the environment's proxy, the same as loopback; any other host keeps it."""
+    import ipaddress
+
+    from localm import bindhost, selfclient
+    monkeypatch.setattr(bindhost, "_interface_addresses",
+                        lambda: frozenset({ipaddress.ip_address("192.0.2.5")}))
+    off = {"http": None, "https": None, "all": None}
+    assert selfclient._proxies("http://192.0.2.5:8080/v1/server/restart") == off
+    assert selfclient._proxies("http://[::1]:8080/") == off
+    assert selfclient._proxies("http://localhost:8080/") == off
+    assert selfclient._proxies("http://198.51.100.7:8080/") is None
+    assert selfclient._proxies("http://localhost.example:8080/") is None
+
+
+def test_a_request_to_this_machines_own_server_never_goes_through_a_proxy(monkeypatch):
+    """With a proxy in the environment and no ``no_proxy``, a call to a loopback address
+    (``self_request``, ``read_activity`` and the restart of another server for an update,
+    ``updater_handoff.restart_servers``) still reaches the server on this machine; any
+    other address keeps the proxies of the environment."""
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from pathlib import Path
+
+    from localm import selfclient, updater_handoff
+
+    asked = []
+
+    class Answer(BaseHTTPRequestHandler):
+        def _answer(self):
+            asked.append((self.command, self.path))
+            body = json.dumps({"operations": []}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        do_GET = do_POST = _answer
+
+        def log_message(self, *_a):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Answer)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_address[1]
+    proxy = "http://192.0.2.1:9"
+    for name in ("http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.setenv(name, proxy)
+        monkeypatch.setenv(name.upper(), proxy)
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("LOCALM_API_KEY", "sekret123")
+    try:
+        for host in ("127.0.0.1", "localhost"):
+            reply = self_request("GET", "/health", timeout=3,
+                                 base_url=f"http://{host}:{port}/v1")
+            assert reply.status_code == 200
+        assert selfclient.read_activity("http", port) == ("ok", {"operations": []})
+        prepared = updater_handoff.Prepared(
+            Path("."), "0" * 32, "1", "2", None, True, None, False, None,
+            servers={"9-9": {"url": f"http://127.0.0.1:{port}/v1", "token": None}})
+        assert updater_handoff.restart_servers(prepared, say=lambda _t: None) == []
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert ("POST", "/v1/server/restart") in asked
+    for url in ("http://127.0.0.1:1/", "http://[::1]:1/", "https://localhost/",
+                "http://127.5.6.7/"):
+        assert selfclient._proxies(url) == {"http": None, "https": None, "all": None}
+    assert selfclient._proxies("http://192.0.2.5:8/") is None
+    assert selfclient._proxies("http://localhost.example/") is None

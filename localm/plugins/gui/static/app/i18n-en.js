@@ -2945,6 +2945,8 @@ export const I18N_EN = {
     "Its signature does not verify: {reason}. Install it only if you trust where it came from.",
   "settings.update.unverifiedConfirm": "Install anyway",
   "settings.update.notInstalled": "Not installed.",
+  "settings.update.processesTitle": "Restart or end these processes of LocaLM?",
+  "settings.update.processesConfirm": "Restart or end them and update",
   "settings.update.installedRestarting": "Installed {version}. Restarting…",
   "settings.update.dataBackup": "Your data from before the downgrade was copied to {path}; copy the files back into the data folder while LocaLM is stopped to restore them.",
   "settings.update.runtimeNote": "Native runtime: {note}.",

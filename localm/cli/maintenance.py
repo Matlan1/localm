@@ -531,6 +531,59 @@ def _defer_update_steps(version) -> bool:
     return updater._direction(str(version or ""), _version.read_version()) != "older"
 
 
+def _install_with_applier(asset_id, signature, *, yes: bool, target_version=None,
+                          allow_unverified: bool = False, expect=None) -> None:
+    """Install the build *asset_id* through the program it ships, when it ships one and a
+    waiting ``localm update`` started this process (``localm._update_parent``): prepares
+    and checks it, asks about the other processes of localm it ends, hands it over and
+    exits with ``HANDED_OFF``. Returns when the build ships no such program. Raises
+    LocalmError or ``updater.UnverifiedBuild``."""
+    import os
+
+    from localm import _update_parent, updater_handoff
+    from rich.markup import escape
+    if os.environ.get(_update_parent.WORK) != "1":
+        return
+    prepared = updater_handoff.prepare(asset_id, signature=signature,
+                                       target_version=target_version,
+                                       allow_unverified=allow_unverified, expect_sha256=expect,
+                                       say=_say_step)
+    if prepared.legacy:
+        prepared.discard()
+        return
+    try:
+        if prepared.processes:
+            named = updater_handoff.describe(prepared.processes)
+            console.print(f"[yellow]The update restarts or ends these processes of "
+                          f"localm:[/yellow] {escape(named)}. A server restarts into the new "
+                          "version by itself; a chat or a command ends; an MCP server is "
+                          "started again by its client.")
+            lost = prepared.lost()
+            if yes and lost:
+                console.print("[red]Not installed:[/red] --yes restarts the servers, ends the "
+                              "MCP servers (their clients start them again) and ends nothing "
+                              f"else that is running: "
+                              f"{escape(updater_handoff.describe(lost))}. Close them, or run "
+                              "the update without --yes and agree.")
+                sys.exit(1)
+            if not yes and not (sys.stdin.isatty()
+                                and click.confirm("  Restart or end them and update?",
+                                                  default=False)):
+                console.print("[dim]Not installed.[/dim]")
+                sys.exit(1)
+        for rel in prepared.edited:
+            console.print(f"[yellow]You changed {escape(rel)}:[/yellow] your version is kept "
+                          "in .localm-update/kept.")
+        updater_handoff.hand_off(prepared, mode="command",
+                                 confirmed=[p["key"] for p in prepared.processes],
+                                 ask=not yes and sys.stdin.isatty() and sys.stderr.isatty(),
+                                 say=_say_step)
+    except BaseException:
+        prepared.discard()
+        raise
+    sys.exit(updater_handoff.HANDED_OFF)
+
+
 def _update_to(updater, version: str, *, yes: bool, allow_unverified: bool) -> None:
     """Install the release *version* (``localm update --to``)."""
     from localm import _version
@@ -570,6 +623,9 @@ def _update_to(updater, version: str, *, yes: bool, allow_unverified: bool) -> N
     accept = False
     while True:
         try:
+            _install_with_applier(asset["id"], rel.get("signature"), yes=yes,
+                                  target_version=rel["version"], allow_unverified=accept,
+                                  expect=expect)
             res = updater.apply(asset["id"], signature=rel.get("signature"),
                                 target_version=rel["version"], allow_unverified=accept,
                                 expect_sha256=expect,
@@ -740,6 +796,14 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool, list_only: bool,
         return
 
     if do_rollback:
+        back = updater.rollback_info()
+        if back.get("reinstall"):
+            if not updater.available():
+                console.print("[yellow]The updater is not configured.[/yellow] Set the update "
+                              f"endpoint in config to install {escape(back['version'])} again.")
+                sys.exit(1)
+            _update_to(updater, back["version"], yes=yes, allow_unverified=False)
+            return
         try:
             updater.rollback_last(say=_say_step)
         except LocalmError as e:
@@ -795,6 +859,7 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool, list_only: bool,
 
     console.print(f"[dim]Downloading and applying {escape(latest)} ...[/dim]")
     try:
+        _install_with_applier(asset["id"], info.get("signature"), yes=yes)
         res = updater.apply(asset["id"], signature=info.get("signature"),
                             defer_runtime=_defer_update_steps(latest),
                             steps_when="at the next start of localm", say=_say_step)

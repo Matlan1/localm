@@ -9,6 +9,10 @@ arguments, 3 another process is updating this install. See :mod:`.restoring`.
 ``<python> -I -S <this folder> setup-done <root>``: setup has made the Python
 environment again; deletes the record it kept for that (:func:`.restoring.end_setup`),
 with the same exit statuses.
+
+``<python> -I -S <this folder> check|apply <root> <id>``: prepare, or carry out, the
+update *id* (:mod:`.applier`); after the id of ``apply``, the command line that starts
+the old version again when the new one fails as a server.
 """
 
 from __future__ import annotations
@@ -48,8 +52,15 @@ def main(argv) -> int:
     status."""
     block_localm()
     load_package()
+    if (len(argv) == 3 or (len(argv) > 3 and argv[0] == "apply")) and argv[0] in (
+            "check", "apply") and len(argv[2]) == 32 and set(argv[2]) <= set("0123456789abcdef"):
+        applier = importlib.import_module(f"{NAME}.applier")
+        if argv[0] == "apply":
+            return applier.apply(argv[1], argv[2], argv[3:])
+        return applier.check(argv[1], argv[2], say=lambda t: print(t, file=sys.stderr, flush=True))
     if len(argv) != 2 or argv[0] not in ("restore", "setup-done"):
-        print("usage: <python> -I -S update_mechanism restore|setup-done <root>", file=sys.stderr)
+        print("usage: <python> -I -S update_mechanism restore|setup-done <root>, or "
+              "check|apply <root> <id>", file=sys.stderr)
         return 2
     restoring = importlib.import_module(f"{NAME}.restoring")
     return (restoring.run if argv[0] == "restore" else restoring.end_setup)(argv[1])

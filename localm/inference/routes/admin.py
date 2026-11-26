@@ -54,6 +54,10 @@ _BUG_REPORT_SAVE_TIMEOUT_S = 2 * _BUG_REPORT_OWN_WORK_TIMEOUT_S
 # independently; this is 2x that pair.
 _BUG_REPORT_UPLOAD_TIMEOUT_S = 60.0
 
+#: Seconds within which a second press of Update confirms the processes it ends; then
+#: the update the first press prepared is discarded.
+_UPDATE_CONFIRM_S = 600.0
+
 
 def _strip_unreleased(markdown: str) -> str:
     """Return *markdown* with the ``[Unreleased]`` section (and its link-reference
@@ -418,6 +422,107 @@ def register(app: FastAPI, ctx) -> None:
                          instance_id=getattr(app.state, "instance_id", None))
         res["restarting"] = True
 
+    #: Held while an update is prepared through the program its build ships.
+    _handing = asyncio.Lock()
+
+    def _discard(prepared) -> None:
+        """Delete what *prepared* holds; a failure is logged."""
+        try:
+            prepared.discard()
+        except Exception as e:
+            from localm.debuglog import logger as _dbg
+            _dbg.warning("the prepared update to %s could not be deleted: %s",
+                         prepared.new, e)
+
+    def _expire(armed) -> None:
+        """Disarm the owner's first press *armed* (``app.state.update_confirm``) once
+        :data:`_UPDATE_CONFIRM_S` has passed and no press took it, and discard what it
+        prepared, in a thread."""
+        if getattr(app.state, "update_confirm", None) is armed:
+            app.state.update_confirm = None
+            asyncio.get_running_loop().run_in_executor(None, _discard, armed[3])
+
+    async def _with_applier(request: Request, asset_id, **kwargs):
+        """:func:`_hand_over` for one press at a time: 409 while another press is
+        preparing an update or one was handed over, with the reply's notes, files and
+        error shown to this caller as :func:`path_formatter` does."""
+        if _handing.locked() or getattr(app.state, "update_handed_off", False):
+            raise HTTPException(409, "An update of localm is already being started.")
+        async with _handing:
+            res = await _hand_over(request, asset_id, **kwargs)
+        if res is not None:
+            show = _hs.path_formatter(request)
+            for key in ("notes", "edited"):
+                res[key] = [show(v) for v in res.get(key) or ()]
+            if res.get("error"):
+                res["error"] = show(res["error"])
+        return res
+
+    async def _hand_over(request: Request, asset_id, **kwargs):
+        """Install the build *asset_id* through the program it ships
+        (``localm.updater_handoff``): prepare and check it, then restart into it. When
+        other processes of localm run, an owner's first press answers ``{applied: false,
+        needs_confirmation: "processes", processes, error}`` naming them and keeps the
+        prepared update; the owner's second press for the same build within
+        :data:`_UPDATE_CONFIRM_S` that finds the same processes is the agreement to end
+        them, and uses what was prepared; once that window has passed, what the first press
+        prepared is discarded (:func:`_expire`). Anyone else gets 403, and the owner's first press
+        stays armed: only an owner's press uses or discards it. Returns None when the build
+        ships no such program (``updater.apply`` installs it then). Raises LocalmError or
+        ``updater.UnverifiedBuild``."""
+        import time as _time
+
+        from localm import updater_handoff
+        target = (asset_id, kwargs.get("target_version"))
+        owner = _hs.caller_is_operator(request)
+        asked = getattr(app.state, "update_confirm", None) if owner else None
+        if owner:
+            app.state.update_confirm = None
+        prepared = None
+        if asked and asked[1] == target and _time.monotonic() - asked[2] < _UPDATE_CONFIRM_S:
+            prepared = await asyncio.to_thread(updater_handoff.look_around, asked[3])
+        elif asked:
+            asked[3].discard()
+        if prepared is None:
+            prepared = await asyncio.to_thread(_probes_held, updater_handoff.prepare,
+                                               asset_id, **kwargs)
+        if prepared.legacy:
+            prepared.discard()
+            return None
+        keys = sorted(p["key"] for p in prepared.processes)
+        if keys:
+            if not owner:
+                prepared.discard()
+                raise HTTPException(403, "Ending the other processes of localm for an update "
+                                         "requires an owner (admin) key.")
+            if not (asked and asked[3] is prepared and asked[0] == keys):
+                armed = (keys, target, _time.monotonic(), prepared)
+                app.state.update_confirm = armed
+                asyncio.get_running_loop().call_later(_UPDATE_CONFIRM_S, _expire, armed)
+                return {"applied": False, "needs_confirmation": "processes",
+                        "processes": prepared.processes,
+                        "error": f"The update to {prepared.new} restarts or ends these "
+                                 "processes of localm: "
+                                 f"{updater_handoff.describe(prepared.processes)}. A server "
+                                 "restarts into the new version by itself; a chat or a command "
+                                 "ends; an MCP server is started again by its client. The "
+                                 "same request again restarts or ends them and updates."}
+        port = getattr(app.state, "instance_port", None)
+        prepared.watch = {"host": _watchdog_probe_host(getattr(app.state, "bind_host", None)),
+                          "port": port,
+                          "scheme": getattr(app.state, "instance_scheme", None) or "http"}
+        app.state.update_handed_off = True
+        kept = getattr(app.state, "update_confirm", None)
+        if kept is not None and kept[3] is not prepared:
+            app.state.update_confirm = None
+            kept[3].discard()
+        _request_restart(port=port, instance_id=getattr(app.state, "instance_id", None),
+                         update=prepared)
+        return {"applied": True, "version": prepared.new, "restarting": True,
+                "handed_off": True, "verified": prepared.verified,
+                "verify_reason": prepared.verify_reason, "downgrade": prepared.downgrade,
+                "edited": prepared.edited, "notes": prepared.notes, "available": True}
+
     async def _apply_selected(request: Request, body: dict):
         """Install the release ``body["version"]``, OWNER only. Its asset and
         signature come from the proxy, never from the client. A build whose
@@ -452,6 +557,12 @@ def register(app: FastAPI, ctx) -> None:
         if not asset.get("id"):
             raise HTTPException(400, "This release has no downloadable build attached.")
         try:
+            handed = await _with_applier(request, asset["id"], signature=rel.get("signature"),
+                                         target_version=rel["version"],
+                                         allow_unverified=allow_unverified,
+                                         expect_sha256=sha256)
+            if handed is not None:
+                return handed
             res = await asyncio.to_thread(
                 _probes_held, updater.apply, asset["id"], signature=rel.get("signature"),
                 target_version=rel["version"], allow_unverified=allow_unverified,
@@ -515,6 +626,9 @@ def register(app: FastAPI, ctx) -> None:
         if not asset.get("id"):
             raise HTTPException(400, "This release has no downloadable build attached.")
         try:
+            handed = await _with_applier(request, asset["id"], signature=info.get("signature"))
+            if handed is not None:
+                return handed
             res = await asyncio.to_thread(
                 _probes_held, updater.apply, asset["id"], signature=info.get("signature"),
                 defer_runtime=True)
@@ -599,7 +713,13 @@ def register(app: FastAPI, ctx) -> None:
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def update_rollback_ep(request: Request):
         """Restore the previous build from the last update backup, then restart in
-        place so the restored code loads. Needs an owner (admin) key (403
+        place so the restored code loads. Without a backup, after an update the program of
+        its build carried out, the version it replaced is installed again as a chosen
+        release (``updater.rollback_info``'s ``reinstall``), answered as ``/api/update/apply``
+        with a version answers (``needs_confirmation`` "processes" or "unverified"); the
+        optional JSON body ``{allow_unverified, sha256}`` of that form confirms an
+        unverified build. A reply that restored or installed it says ``applied: true``.
+        Needs an owner (admin) key (403
         otherwise). Restores every part the update replaced, the same as the CLI:
         the files, the virtual environment as it was before the update's
         dependency step, the native runtime and the components. The reply,
@@ -616,7 +736,24 @@ def register(app: FastAPI, ctx) -> None:
                 "version, which can put back a fixed defect.")
         # Read the target version before restoring, so the reply can name what it put
         # back. rollback_info() is read-only and never calls rollback_last.
-        target_version = (await asyncio.to_thread(updater.rollback_info)).get("version")
+        back = await asyncio.to_thread(updater.rollback_info)
+        if back.get("reinstall"):
+            import json as _json
+            raw = await request.body()
+            try:
+                body = _json.loads(raw) if raw.strip() else {}
+            except (ValueError, RecursionError):
+                raise HTTPException(400, "The request body is not valid JSON.") from None
+            if not isinstance(body, dict):
+                raise HTTPException(400, "The request body must be a JSON object.")
+            res = await _apply_selected(request, {
+                "version": back["version"],
+                **{k: body[k] for k in ("allow_unverified", "sha256") if k in body}})
+            if not res.get("applied") and not res.get("needs_confirmation"):
+                raise HTTPException(500, res.get("error") or res.get("reason")
+                                    or f"{back['version']} could not be installed")
+            return res
+        target_version = back.get("version")
         try:
             res = await asyncio.to_thread(_probes_held, updater.rollback_last)
         except LocalmError as e:
@@ -650,5 +787,6 @@ def register(app: FastAPI, ctx) -> None:
         _request_restart(port=getattr(app.state, "instance_port", None),
                          instance_id=getattr(app.state, "instance_id", None))
         res["restarting"] = True
+        res["applied"] = True
         res["version"] = target_version
         return res

@@ -2976,6 +2976,8 @@
   "settings.update.notesShowLess": "Ver menos",
   "settings.update.nothingToApply": "No hay nada que aplicar.",
   "settings.update.prerelease": "preliminar",
+  "settings.update.processesConfirm": "Reiniciarlos o cerrarlos y actualizar",
+  "settings.update.processesTitle": "¿Reiniciar o cerrar estos procesos de LocaLM?",
   "settings.update.reinstallBody": "{version} es la versión que estás usando. Esto la vuelve a descargar, sustituye con ella el código en ejecución y reinicia el servidor.",
   "settings.update.reinstallConfirm": "Reinstalar",
   "settings.update.reinstallTitle": "¿Reinstalar {version}?",

@@ -4,7 +4,10 @@
 explicit-only; failures roll back and are surfaced, never faked. All proxy calls are
 monkeypatched (no network)."""
 
+from pathlib import Path
 from unittest.mock import MagicMock
+
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -27,6 +30,15 @@ def _get(app, path):
 def _post(app, path):
     with TestClient(app) as c:
         return c.post(path, headers={"Authorization": f"Bearer {app.state.shell_token}"})
+
+
+@pytest.fixture(autouse=True)
+def _builds_without_an_applier(monkeypatch):
+    """The builds these tests install ship no program of their own, so the routes and
+    commands install them with ``updater.apply`` (``updater_handoff.Prepared.legacy``)."""
+    from localm import updater_handoff
+    monkeypatch.setattr(updater_handoff, "prepare", lambda *_a, **_k: updater_handoff.Prepared(
+        Path("."), "0" * 32, "", "", None, True, None, False, None, legacy=True))
 
 
 def _open_mode(monkeypatch):

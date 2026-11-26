@@ -2879,6 +2879,8 @@
   "settings.update.direction.same": "installiert",
   "settings.update.direction.unknown": "Reihenfolge unbekannt",
   "settings.update.prerelease": "Vorabversion",
+  "settings.update.processesConfirm": "Neu starten oder beenden und aktualisieren",
+  "settings.update.processesTitle": "Diese Prozesse von LocaLM neu starten oder beenden?",
   "settings.update.installTitle": "{version} installieren?",
   "settings.update.installBody": "Dies lädt {version} herunter, ersetzt den laufenden LocaLM-Code damit (Sie haben {current}) und startet den Server dann neu.",
   "settings.update.installConfirm": "Installieren",

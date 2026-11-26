@@ -51,6 +51,8 @@ LOCALM_ELSEWHERE = {
     "localm/inference/http_server.py:_execv_restart:execv": "python -m localm gui, same process",
     "localm/update_mechanism/steps_update.py:run_child:Popen":
         "python -m localm, waited for; or python -c import torch, waited for",
+    "localm/update_mechanism/applier.py:Applier._relaunch:Popen":
+        "the command line of the server, python -m localm",
     "scripts/crash_recovery_watchdog.py:relaunch:Popen": "python -m localm gui",
 }
 #: A short tool the starter waits for: a running child of a recorded process.
@@ -65,6 +67,7 @@ TOOLS = {
     "localm/plugins/coder/hooks.py:run_hook:Popen": "a hook command",
     "localm/plugins/coder/tools/base.py:_run_cancellable:Popen": "a shell command",
     "localm/plugins/deps.py:_run_attempts:Popen": "uv, pip",
+    "localm/updater_handoff.py:_run_check:Popen": "the check the update mechanism of a build runs",
     "localm/vc_runtime.py:run_installer:ShellExecuteExW": "Microsoft's runtime installer",
 }
 #: A program of the user: each of these goes through procs.open_for_user.
@@ -101,6 +104,7 @@ STARTED = {
     "localm/portmux.py": 1,
     "localm/updater.py": 1,
     "localm/updater_finish.py": 1,
+    "localm/updater_handoff.py": 1,
 }
 DETACHED = ("start_new_session", "process_group", "preexec_fn", "CREATE_NEW_PROCESS_GROUP",
             "DETACHED_PROCESS", "CREATE_NEW_CONSOLE", "CREATE_BREAKAWAY_FROM_JOB")

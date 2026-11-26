@@ -23,7 +23,7 @@ from functools import partial
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import disk, mover, packages, steps_data
+from . import disk, mover, packages, shared, steps_data
 from .disk import Blocked, Held, Unsafe
 from .mover import StepFailed, Unreadable
 
@@ -518,6 +518,12 @@ def _finish(lock: Lock, record: Record, ask: Optional[disk.Ask]) -> Result:
     return result
 
 
+def undone_note(new, old) -> str:
+    """The note :func:`restore` gives an update from *old* to *new* it undid."""
+    return (f"The update to {new} was undone. localm {old} is in place." if new
+            else "The update was undone.")
+
+
 def restore(lock: Lock, *, wait_s: Optional[float] = None,
             ask: Optional[disk.Ask] = None) -> Result:
     """End the unfinished update of *lock*'s install, if there is one: put the old
@@ -538,8 +544,7 @@ def restore(lock: Lock, *, wait_s: Optional[float] = None,
     if record.phase == DONE:
         return _finish(lock, record, ask)
     result = Result("none" if record.phase == ENDED else "old")
-    undone = (f"The update to {record.new} was undone. localm {record.old} is in place."
-              if record.new else "The update was undone.")
+    undone = undone_note(record.new, record.old)
     if record.phase != ENDED and (
             record.phase != ENDING or mover.has_plans(lock.root, record.id)):
         plans = mover.read_plans(lock.root, record.id)
@@ -676,6 +681,8 @@ def cleanup(lock: Lock, *, keep: Optional[str] = None) -> list:
     for name in ("job.json.tmp", "job.json.gone", "started"):
         with contextlib.suppress(OSError, Held):   # a write that never took effect
             disk.unlink(record_path(lock.root).with_name(name))
+    with contextlib.suppress(OSError, Held, Unsafe):   # stays for the next call
+        _unread_results(lock.root)
     staged = disk.real_folder(lock.root / ".venv") / mover.VENV_FOLDER
     known = set(ids(lock.root))
     with contextlib.suppress(OSError):   # nothing is staged
@@ -690,6 +697,37 @@ def cleanup(lock: Lock, *, keep: Optional[str] = None) -> list:
         with contextlib.suppress(OSError):   # not empty, or never made
             os.rmdir(disk.real_folder(lock.root / venv) / mover.VENV_FOLDER)
     return left
+
+
+#: In a result in the update folder: ``<pid>-<start>`` of the ``localm update`` that
+#: waits for it.
+RESULT_FOR = "for"
+
+
+def result_name(update_id: str) -> str:
+    """The name, in the update folder, of how the update *update_id* ended, for the
+    ``localm update`` that waits for it."""
+    return f"result-{update_id}.json"
+
+
+def _unread_results(root) -> None:
+    """Delete each result in the update folder of *root* (:func:`result_name`) whose
+    ``localm update`` (:data:`RESULT_FOR`) no longer runs, and each that names none.
+    Leaves them all when the processes of the install cannot be listed."""
+    folder = mover.update_folder(root)
+    names = [n for n in os.listdir(folder) if n.startswith("result-") and n.endswith(".json")]
+    procs = shared.also("procs") if names else None
+    if procs is None:
+        return
+    running = {f"{e.pid}-{e.start}"
+               for e in procs.list(disk.short_path(disk.real_folder(root)))}
+    for name in names:
+        try:
+            said = disk.read_json(folder / name, MAX_RECORD_BYTES)
+        except ValueError:
+            said = None
+        if not isinstance(said, dict) or said.get(RESULT_FOR) not in running:
+            disk.unlink(folder / name)
 
 
 def _waited_for(root, update_id: str) -> bool:

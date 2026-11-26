@@ -32,6 +32,9 @@ PREPARED, STEPS_FILE = "prepared.json", "steps.json"
 SILENCE_S = 1800.0
 #: Exit status of ``localm setup-llama --prove`` for a runtime that does not work here.
 UNUSABLE_EXIT = 79
+#: The environment of ``localm _update-record`` (:func:`record`): the version the update
+#: replaced, the one it installed, and the runtimes it kept (JSON).
+RECORD_FROM, RECORD_TO, RECORD_KEPT = "LOCALM_RECORD_FROM", "LOCALM_RECORD_TO", "LOCALM_RECORD_KEPT"
 RUNTIME, FOLDERS, COMFYUI = "runtime", "folders", "comfyui"
 _PART_KEYS = {RUNTIME: {"label", "name", "beside", "backend", "from", "to", "keep", "folders"},
               FOLDERS: {"label"}, COMFYUI: {"label", "removed", "packages"}}
@@ -119,7 +122,7 @@ class Preparing(steps.Work):
         super().__exit__(*exc)
 
 
-def prepare(update: Preparing, *, uv, home, env: Mapping, say: Say) -> dict:
+def prepare(update: steps.Place, *, uv, home, env: Mapping, say: Say) -> dict:
     """Fetch and test everything the steps of *update* need, inside its block. *home* is
     the data folder; *uv* the full path of the uv to run. Writes only below ``<id>`` and
     the same id's folder in the component folders it prepares, and the download caches;
@@ -354,7 +357,8 @@ def record(root, *, old: str, new: str, kept: list, home, env: Mapping, say: Say
     install record, the runtime history, the runtimes *kept* of :class:`Run`). Returns
     None, or why that failed; the update stays done."""
     python = steps_packages.python_in(Path(root) / ".venv")
-    code, last = run_child([python, "-m", "localm", "_update-record", "--from", old, "--to", new,
-                            "--kept", json.dumps(kept)], cwd=root, say=say,
-                           env=child_env(env, root, home, ""))
+    told = {**child_env(env, root, home, ""), RECORD_FROM: str(old), RECORD_TO: str(new),
+            RECORD_KEPT: json.dumps(kept)}
+    code, last = run_child([python, "-m", "localm", "_update-record"], cwd=root, say=say,
+                           env=told)
     return None if code == 0 else f"the update could not be recorded everywhere: {last}"

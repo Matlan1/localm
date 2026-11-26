@@ -234,7 +234,8 @@ LAST_STEPS_S = 24 * 3600.0
 
 
 def _last_steps(version: Optional[str]) -> list:
-    """The results of the runtime and component updates of the last
+    """The results of the update carried out by the program a build ships
+    (``updater.last_result``), the runtime and component updates of the last
     :data:`LAST_STEPS_S` seconds: ``[{"part", "state", "note", "at"}]``. A result
     recorded under another localm version than *version* is left out; one that
     names no version (written by an older build) is kept. A note both parts
@@ -242,8 +243,13 @@ def _last_steps(version: Optional[str]) -> list:
     import time
     out = []
     try:
-        from localm import updater_components, updater_runtime
-        for part, st in (("runtime", updater_runtime.last_status()),
+        from localm import updater, updater_components, updater_runtime
+        update = updater.last_result()
+        if update:
+            update = dict(update, note=" ".join([str(update.get("note") or ""),
+                                                 *map(str, update.get("notes") or ())]).strip())
+        for part, st in (("update", update),
+                         ("runtime", updater_runtime.last_status()),
                          ("components", updater_components.last_status())):
             if not st or not st.get("note"):
                 continue
