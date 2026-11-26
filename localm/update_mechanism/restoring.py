@@ -77,6 +77,7 @@ def _once(root) -> tuple:
             if _waits_for_setup(root) and not in_setup():
                 return FAILED, [f"LocaLM's setup did not finish. Run setup in {root} again."]
             notes: list = []
+            changed = ""
             try:
                 changed = _changed_over(root)
                 if changed:
@@ -96,7 +97,7 @@ def _once(root) -> tuple:
                         return FAILED, [*notes, *why, *ways_out(root)]
             except mover.Unreadable as e:
                 why = [_NOT_BACK + str(e)]
-            aside = _set_aside(lock)
+            aside = _set_aside(lock, added=not changed)
             return (OK, [*notes, aside]) if aside else (FAILED, [*notes, *why, *ways_out(root)])
     except job.Busy as e:
         by = ", ".join(f"{h['name']} (pid {h['pid']})"
@@ -223,16 +224,17 @@ def _waits_for_setup(root) -> bool:
     return isinstance(raw, dict) and raw.get("phase") == SETUP
 
 
-def _set_aside(lock: job.Lock) -> str:
+def _set_aside(lock: job.Lock, *, added: bool = True) -> str:
     """Put what an update that can be neither finished nor undone left away, when the
-    files of the install are exactly those of one release. Under setup the record stays,
+    files of the install are exactly those of one release; with *added*, also only when
+    no file those updates added is there outside that release. Under setup the record stays,
     in phase :data:`SETUP`, until setup has made a new Python environment; otherwise this
     does nothing when Python packages were being replaced. Returns the line that says so,
     or an empty string."""
     root = disk.real_folder(lock.root)
     ids = [n for n in job.ids(root) if job.over_of(root, n) is None]
     version = release_of(root)
-    if not version or _added_left(root, ids) or (not in_setup() and any(
+    if not version or (added and _added_left(root, ids)) or (not in_setup() and any(
             disk.lstat(mover.venv_folder(root, n)) is not None for n in ids)):
         return ""
     stamp = time.strftime("%Y%m%d-%H%M%S")
