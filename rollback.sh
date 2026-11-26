@@ -5,11 +5,17 @@
 #  Run:  bash rollback.sh
 #  Restores the PREVIOUS localm version from the last update's backup. Use it when
 #  an update left localm broken or misbehaving and `localm update --rollback` will
-#  not run because the new build will not start.
+#  not run because the new build will not start. It also undoes an update that was
+#  interrupted.
 #
 #  Optional args pass straight through:  --yes  (skip the confirmation prompt)
 # =============================================================================
 cd "$(dirname "$0")" || exit 1
+
+# An update that is not finished is undone; an older backup is then left alone.
+if [ -e .localm-update/job.json ]; then
+  exec bash scripts/update_gate.sh
+fi
 
 # Prefer the clone's venv python; else any python3/python. The rollback script is
 # stdlib-only and loads the restore helper by file path, so a venv that cannot

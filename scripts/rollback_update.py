@@ -11,6 +11,9 @@ PATH so a broken ``localm`` package cannot stop the rollback. Run it via
 ``rollback.bat`` / ``rollback.sh`` in the install root, or
 ``python scripts/rollback_update.py``.
 
+An update that was interrupted, in an install that keeps a record of it
+(``.localm-update/job.json``), is undone instead (:func:`undo_unfinished`).
+
 It restores the code, the venv and the native runtime. ComfyUI and the uv inside
 localm take localm's own modules to restore, so it leaves them, says so and records
 it; the next start of localm brings them to the pins of the version it restored.
@@ -251,6 +254,16 @@ def _read_names(updates_dir: Path, backup_dir: Path) -> list:
     return [p.name for p in backup_dir.iterdir()]
 
 
+def undo_unfinished(install_root: Path) -> Optional[int]:
+    """Undo an update of *install_root* that was interrupted, with the program every start
+    of localm uses for it, and return the exit status. None when there is none."""
+    if not os.path.lexists(install_root / ".localm-update" / "job.json"):
+        return None
+    import subprocess
+    return subprocess.run([sys.executable, "-I", "-S",
+                           str(install_root / "localm" / "__init__.py")]).returncode
+
+
 def main(argv=None, *, install_root: Path = INSTALL_ROOT, code_root=None,
          why: Optional[str] = None) -> int:
     """Run the rollback. *code_root*, when given, is the localm tree of the build
@@ -333,4 +346,5 @@ def main(argv=None, *, install_root: Path = INSTALL_ROOT, code_root=None,
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    unfinished = undo_unfinished(INSTALL_ROOT)
+    raise SystemExit(main() if unfinished is None else unfinished)

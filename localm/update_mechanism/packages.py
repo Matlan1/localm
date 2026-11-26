@@ -408,7 +408,7 @@ def listing(venv: Path) -> set:
 
 def plan_packages(root, update_id: str, step: str = PACKAGES) -> Plan:
     """The plan that moves what :func:`stage_packages` staged into the venv and takes
-    out what it replaces. Every file in the place of a new one is moved aside, also
+    out what it replaces; the file by which Python finds localm is never absent. Every file in the place of a new one is moved aside, also
     one of another package or of the user, whose own file is kept. Reads only.
 
     Raises :class:`Refused` when nothing is staged or the packages to replace are no
@@ -452,7 +452,8 @@ def plan_packages(root, update_id: str, step: str = PACKAGES) -> Plan:
     number = mover.next_number(root, update_id)
     a = mover.area(root, update_id, step, number)
     plan = mover.build(a, step, number, new, leaving,
-                       identify=disk.quick_identity, edited=edited)
+                       identify=disk.quick_identity, edited=edited,
+                       swap=[r for r, name in dists.items() if name == _OWN and r.endswith(".pth")])
     for op in plan.ops:
         op.dist = (dists if op.old is None else owners).get(op.path, "")
         if op.old is not None:
@@ -583,7 +584,7 @@ def _set_aside(a: Area, plan: Plan, names: set, wait: Wait, out: Outcome) -> Non
         for rel in sorted(listed, key=lambda rel: (rel in last, rel == last[1], rel)):
             path, st = a.find(rel)
             op = ops.get(rel, Op(rel, REMOVE))
-            if st is None or (held and rel in last) or (
+            if st is None or op.swap or (held and rel in last) or (
                     mover.is_old(a, op, wait) or (here and mover.by_installer(rel))):
                 continue
             try:
@@ -603,7 +604,7 @@ def _listed(site: Path, venv: Path, folder: str, name: str) -> dict:
         return _records(site, venv, folder, name)
     except Refused:
         inner = site.relative_to(venv).as_posix()
-        return {f"{inner}/{folder}/{e}": None for e in os.listdir(site / folder)}
+        return {f"{inner}/{folder}/{rel}": None for rel in listing(site / folder)}
 
 
 def _look(a: Area, plan: Plan, names: set, changed: set, wait: Wait, out: Outcome) -> None:

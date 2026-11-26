@@ -53,6 +53,26 @@ ROOT = Path(__file__).resolve().parents[1]
 _SRC = Path(__file__).resolve().parents[1]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
+
+
+def _update_gate() -> None:
+    """Wait for an unfinished update of this install or undo it, before anything of localm
+    is imported, then start this file anew, which may have been replaced."""
+    if ("LOCALM_GATE" in os.environ
+            or not os.path.lexists(ROOT / ".localm-update" / "job.json")):
+        os.environ.pop("LOCALM_GATE", None)
+        return
+    code = subprocess.call([sys.executable, "-I", "-S",
+                            str(ROOT / "scripts" / "update_gate.pyw")])
+    if code == 0:
+        code = subprocess.call([sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]],
+                               env={**os.environ, "LOCALM_GATE": "1"})
+    sys.exit(code)
+
+
+if __name__ == "__main__":
+    os.environ["LOCALM_SETUP"] = "1"
+    _update_gate()
 from localm import setup_spec as spec  # noqa: E402
 
 APP_NAME = "LocaLM"
@@ -914,12 +934,18 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
     # What earlier steps created, so the manifest records exactly that.
     state: dict = {}
 
+    # An update that could not be undone; the new .venv ends it.
+    left_update = ROOT / ".localm-update" / "job.json"
+    left = os.path.lexists(left_update)
+
     def venv(emit):
-        if (ROOT / ".venv").exists() and not plan.replace_venv and not (
+        if left:
+            emit("An update of LocaLM was interrupted: .venv is made again.")
+        elif (ROOT / ".venv").exists() and not plan.replace_venv and not (
                 "venv" in cut_short and not venv_is_ours(ROOT)):
             emit("Keeping the existing .venv.")
             return
-        if "venv" in cut_short and not plan.replace_venv:
+        elif "venv" in cut_short and not plan.replace_venv:
             emit("The previous setup stopped while creating .venv; recreating it.")
         create_venv(plan, emit)
         # uninstall removes .venv only when this marker says setup created it.
@@ -968,6 +994,9 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
                              "again / repair; until then this folder is partly "
                              "updated. Your chats, settings and models are untouched."
                              ) from None
+        if left and _run([str(venv_python(ROOT)), "-I", "-S", str(ROOT / "localm" / "update_mechanism"),
+                          "setup-done", str(ROOT)], emit, plan, allow_fail=True):
+            emit("[!] Setup goes on. Run it again to end the interrupted update.")
     steps.append(Step("Installing LocaLM", install_localm, key="install-localm"))
 
     def install_runtime_pkg(emit):
@@ -2330,7 +2359,8 @@ class Wizard:
         quiet = ({"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
                   "stderr": subprocess.DEVNULL} if os.environ.get(LOG_ENV) else {})
         try:
-            subprocess.Popen([str(exe), "gui"], cwd=str(ROOT), **quiet)
+            subprocess.Popen([str(exe), "gui"], cwd=str(ROOT), **quiet, env={
+                k: v for k, v in os.environ.items() if k != "LOCALM_SETUP"})
         except OSError:
             pass
         self.root.destroy()

@@ -39,7 +39,7 @@ ENDING, MOVING, STEPS, STARTING, DONE, RESTORING = (
 PHASES = (ENDING, MOVING, STEPS, STARTING, DONE, RESTORING)
 
 #: The files that say that an update is over: :data:`DONE`, or undone.
-_ENDED = "ended"
+ENDED = "ended"
 STATE = "state.json"
 #: Seconds :class:`Lock` waits, longer than another process's :func:`locked` has it.
 LOCK_WAIT_S = 2.0
@@ -143,10 +143,10 @@ def _parse(path: Path, phases) -> Optional[Record]:
     return Record(mover.check_id(raw["id"]), raw["phase"], raw["old"], raw["new"])
 
 
-def _over(root, update_id: str) -> Optional[str]:
-    """:data:`DONE` or ``ended`` when the update *update_id* is, None before."""
+def over_of(root, update_id: str) -> Optional[str]:
+    """:data:`DONE` or :data:`ENDED` when the update *update_id* is, None before."""
     work = mover.work_folder(root, update_id)
-    return next((name for name in (DONE, _ENDED) if disk.lstat(work / name) is not None), None)
+    return next((name for name in (DONE, ENDED) if disk.lstat(work / name) is not None), None)
 
 
 def _held(lock: Lock) -> None:
@@ -195,7 +195,7 @@ def start(lock: Lock, update_id: str, *, old: str, new: str) -> Record:
     record in phase ENDING, and delete what others left (:func:`cleanup`). Raises
     :class:`Busy` when another update is unfinished, :class:`Unreadable`,
     :class:`Blocked`, :class:`Unsafe`, :class:`Held` or OSError."""
-    going = _current(lock.root)
+    going = current(lock.root)
     if read(lock.root) is not None or (going is not None and going.phase != ENDING):
         raise Busy("an earlier update of this install is not finished")
     lock.keep = update_id
@@ -216,7 +216,7 @@ def advance(lock: Lock, phase: str) -> Record:
     """Write *phase*, the next one of :data:`PHASES` or a repeat of the current one,
     into the record before that phase begins. Raises ValueError for any other phase
     or without a record, and what :func:`start` raises."""
-    record = _current(lock.root)
+    record = current(lock.root)
     if record is None:
         raise ValueError("there is no update to advance")
     steps = PHASES.index(phase) - PHASES.index(record.phase)
@@ -229,7 +229,8 @@ def advance(lock: Lock, phase: str) -> Record:
 
 # --------------------------------------------------------- which update it is
 
-def _ids(root) -> list:
+def ids(root) -> list:
+    """The ids of the updates that have a folder in the install at *root*."""
     folder = mover.update_folder(root)
     return [] if disk.lstat(folder) is None else _listed(folder)
 
@@ -238,7 +239,7 @@ def _listed(folder: Path) -> list:
     return sorted(n for n in os.listdir(folder) if mover.is_id(n))
 
 
-def _current(root) -> Optional[Record]:
+def current(root) -> Optional[Record]:
     """The unfinished update of the install at *root*, None when there is none. Its
     phase is DONE or ``ended`` exactly when its folder says so. Raises
     :class:`Unreadable` when it cannot be told, :class:`Blocked` when a file cannot be
@@ -251,10 +252,10 @@ def _current(root) -> Optional[Record]:
     if record is None:
         record = _from_folders(root, damaged)
     if record is not None:
-        over = _over(root, record.id)
+        over = over_of(root, record.id)
         gone = disk.lstat(mover.work_folder(root, record.id)) is None
         if over is not None or record.phase == DONE:
-            record.phase = over or (_ENDED if gone else RESTORING)
+            record.phase = over or (ENDED if gone else RESTORING)
     return record
 
 
@@ -263,8 +264,8 @@ def _from_folders(root, damaged: Optional[Unreadable]) -> Optional[Record]:
     record also one that is over or has changed nothing."""
     going: list = []
     others: list = []
-    for update_id in _ids(root):
-        over = _over(root, update_id) is not None
+    for update_id in ids(root):
+        over = over_of(root, update_id) is not None
         if not over and mover.has_plans(root, update_id):
             going.append(update_id)
         elif damaged or (
@@ -364,7 +365,7 @@ def add_part(lock: Lock, folder) -> Lock:
     which is in phase STEPS, and start its record. Returns the lock of the part,
     which the update holds until *lock* is released. Raises :class:`Busy` and what
     :func:`start` raises."""
-    record = _current(lock.root)
+    record = current(lock.root)
     if record is None or record.phase != STEPS:
         raise ValueError("the update is not in its steps")
     own_part(lock.root, record.id, folder)
@@ -373,7 +374,7 @@ def add_part(lock: Lock, folder) -> Lock:
     if here not in named:
         disk.write_json(mover.work_folder(lock.root, record.id) / PARTS, [*named, here])
     part = _lock_part(lock, Path(folder))
-    earlier = _current(part.root)
+    earlier = current(part.root)
     if earlier is not None and earlier.id == record.id:
         return part
     if earlier is not None:
@@ -399,7 +400,7 @@ def _end_parts(lock: Lock, update_id: str, end) -> Result:
                     f"{folder} cannot be reached (if it was deleted, create it as an empty folder)")
                 continue
             part = _lock_part(lock, folder)
-            record = _current(part.root)
+            record = current(part.root)
             if record is None or record.id != update_id:
                 continue
             result = end(part)
@@ -410,7 +411,7 @@ def _end_parts(lock: Lock, update_id: str, end) -> Result:
                                    for p in result.packages]
         except (Busy, Unreadable, Unsafe, Held, OSError, ValueError) as e:
             all_parts.errors.append(f"{folder}: {e}")
-            if isinstance(e, Held):
+            if isinstance(e, (Held, Busy)):
                 all_parts.held.append(e)
     return all_parts
 
@@ -420,7 +421,7 @@ def settle(lock: Lock, *, wait_s: Optional[float] = None) -> Result:
     nothing (state ``busy``) when it is a part of an update that has not ended. A
     part whose update says that it is done is ended as done; everything else is put
     back, waiting *wait_s* for held files. Raises like :func:`restore`."""
-    record = _current(lock.root)
+    record = current(lock.root)
     if record is None:
         cleanup(lock)
         return Result("none")
@@ -430,7 +431,7 @@ def settle(lock: Lock, *, wait_s: Optional[float] = None) -> Result:
         if of is not None and of.id == record.id:
             return Result("busy")
         if record.phase == DONE or (
-                record.phase == STARTING and _over(whole, record.id) == DONE):
+                record.phase == STARTING and over_of(whole, record.id) == DONE):
             return finish(lock)
     return restore(lock, wait_s=wait_s)
 
@@ -441,12 +442,12 @@ def abandon(lock: Lock) -> None:
     kept of the old files goes. Raises :class:`Busy` for a part of an update, OSError
     or :class:`Unsafe`."""
     _held(lock)
-    for update_id in _ids(lock.root):
+    for update_id in ids(lock.root):
         whole = owner(lock.root, update_id)
         if (whole is not None and disk.lstat(mover.update_folder(whole) / update_id) is not None
-                and _over(whole, update_id) != DONE):
+                and over_of(whole, update_id) != DONE):
             raise Busy("an update of localm is not finished")
-    for update_id in _ids(lock.root):
+    for update_id in ids(lock.root):
         if disk.lstat(mover.work_folder(lock.root, update_id) / STATE) is None:
             continue
         if not (remove_staged(lock.root, update_id)
@@ -464,7 +465,7 @@ class Result:
     file and package that is not as it should be, *packages* the packages among them
     (:class:`.mover.Outcome`): installing exactly those again and calling again puts
     the old version back. *notes* are lines for the user; *held* has each
-    :class:`.disk.Held` behind an error or note. Calling again goes on from there."""
+    :class:`.disk.Held` and :class:`Busy` behind an error or note. Calling again goes on from there."""
     state: str
     errors: list = field(default_factory=list)
     packages: list = field(default_factory=list)
@@ -490,7 +491,7 @@ def finish(lock: Lock, *, ask: Optional[disk.Ask] = None) -> Result:
     for another phase, :class:`Unreadable` when a step is not made, and what
     :func:`start` raises."""
     _held(lock)
-    record = _current(lock.root)
+    record = current(lock.root)
     if record is None or record.phase not in (STARTING, DONE):
         raise ValueError("there is no started update to finish")
     if record.phase != DONE:
@@ -530,16 +531,16 @@ def restore(lock: Lock, *, wait_s: Optional[float] = None,
     now (nothing is changed then), :class:`Unsafe` for a link in the place of one of
     the update's folders, :class:`Held` and OSError."""
     _held(lock)
-    record = _current(lock.root)
+    record = current(lock.root)
     if record is None:
         cleanup(lock)
         return Result("none")
     if record.phase == DONE:
         return _finish(lock, record, ask)
-    result = Result("none" if record.phase == _ENDED else "old")
+    result = Result("none" if record.phase == ENDED else "old")
     undone = (f"The update to {record.new} was undone. localm {record.old} is in place."
               if record.new else "The update was undone.")
-    if record.phase != _ENDED and (
+    if record.phase != ENDED and (
             record.phase != ENDING or mover.has_plans(lock.root, record.id)):
         plans = mover.read_plans(lock.root, record.id)
         try:
@@ -567,7 +568,7 @@ def restore(lock: Lock, *, wait_s: Optional[float] = None,
             result.state = "failed"
             return result
         result.notes.insert(0, undone)
-    _close(lock, record, _ENDED, result)
+    _close(lock, record, ENDED, result)
     return result
 
 
@@ -672,14 +673,14 @@ def cleanup(lock: Lock, *, keep: Optional[str] = None) -> list:
     left."""
     _held(lock)
     left = []
-    for name in ("job.json.tmp", "job.json.gone"):
+    for name in ("job.json.tmp", "job.json.gone", "started"):
         with contextlib.suppress(OSError, Held):   # a write that never took effect
             disk.unlink(record_path(lock.root).with_name(name))
     staged = disk.real_folder(lock.root / ".venv") / mover.VENV_FOLDER
-    ids = set(_ids(lock.root))
+    known = set(ids(lock.root))
     with contextlib.suppress(OSError):   # nothing is staged
-        ids.update(_listed(staged))
-    for update_id in sorted(ids - {keep, lock.keep}):
+        known.update(_listed(staged))
+    for update_id in sorted(known - {keep, lock.keep}):
         try:
             if not _delete(lock, update_id):
                 left.append(str(mover.update_folder(lock.root) / update_id))
@@ -697,7 +698,7 @@ def _waited_for(root, update_id: str) -> bool:
     for folder in part_folders(root, update_id):
         if disk.lstat(folder) is None:
             return True
-        record = _current(folder)
+        record = current(folder)
         if record is not None and record.id == update_id:
             return True
     return False
@@ -709,7 +710,7 @@ def _delete(lock: Lock, update_id: str) -> bool:
     Returns False when something is left."""
     root = lock.root
     work = mover.work_folder(root, update_id)
-    over = _over(root, update_id)
+    over = over_of(root, update_id)
     mine = mover.venv_folder(root, update_id)
     if over is None:
         if disk.lstat(work / STATE) is None:

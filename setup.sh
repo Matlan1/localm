@@ -12,7 +12,6 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 export LOCALM_SETUP=1
-
 #   --uninstall (or uninstall / --rollback)  remove LocaLM from this folder
 #   --purge-data        with --uninstall: also delete the saved data
 #   --finish-uninstall  remove the folders an uninstall left for later
@@ -30,6 +29,20 @@ for arg in "$@"; do
     --finish-uninstall|finish-uninstall) FINISH=1 ;;
   esac
 done
+# An update that is not finished may replace this file: it is then started anew. One that
+# is still there then could not be undone; the new .venv ends it.
+LEFTUPDATE=0
+unset LOCALM_UNINSTALL
+if [ "$UNINSTALL$FINISH" != 00 ]; then
+  export LOCALM_UNINSTALL=1
+elif [ -e "./.localm-update/job.json" ]; then
+  if [ -z "${LOCALM_GATE:-}" ]; then
+    bash "./scripts/update_gate.sh" || exit 1
+    LOCALM_GATE=1 exec bash "./setup.sh" "$@"
+  fi
+  LEFTUPDATE=1
+fi
+unset LOCALM_GATE
 
 say() { printf '%s\n' "$*"; }
 ask() {  # ask PROMPT DEFAULT  ->  echoes the answer (the default in --yes mode)
@@ -718,6 +731,10 @@ if [ "$RESUMING" = 1 ] && step_was_open venv && [ -d .venv ] && ! is_our_venv; t
   say ""
   say "  The previous setup stopped while creating .venv; recreating it."
   create_venv
+elif [ "$LEFTUPDATE" = 1 ]; then
+  say "  An update of LocaLM was interrupted: .venv is made again."
+  step_begin venv
+  create_venv
 elif [ -d .venv ]; then
   if is_our_venv; then
     say ""
@@ -914,6 +931,10 @@ install_localm_packages || {
   offer_report "localm install failed during setup" "installing localm and its packages failed - see the error output above."
   exit 1
 }
+if [ "${LEFTUPDATE:-0}" = 1 ]; then
+  .venv/bin/python -I -S localm/update_mechanism setup-done . \
+    || say "  [!] Setup goes on. Run it again to end the interrupted update."
+fi
 
 # Verify the CLI entry point actually landed. Reported live: on a WSL2 clone under
 # a Windows-drive mount (/mnt/c, /mnt/d, ...) the install can report success while

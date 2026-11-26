@@ -93,8 +93,9 @@ def _make_uv_stub(bin_dir: Path) -> None:
     )
 
 
-def _run_install_block(tmp_path: Path, *, call_specs: dict[int, tuple[int, bool]]
-                        ) -> subprocess.CompletedProcess[str]:
+def _run_install_block(tmp_path: Path, *, call_specs: dict[int, tuple[int, bool]],
+                       env_extra: dict[str, str] | None = None,
+                       ) -> subprocess.CompletedProcess[str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     _make_uv_stub(bin_dir)
@@ -123,6 +124,8 @@ def _run_install_block(tmp_path: Path, *, call_specs: dict[int, tuple[int, bool]
     for n, (rc, creates) in call_specs.items():
         env[f"STUB_RC_{n}"] = str(rc)
         env[f"STUB_CREATE_{n}"] = "1" if creates else "0"
+    env.pop("LEFTUPDATE", None)
+    env.update(env_extra or {})
     return subprocess.run([_bash(), "-c", script], capture_output=True, text=True,
                           env=env, cwd=str(tmp_path), timeout=15)
 
@@ -171,6 +174,29 @@ def test_retry_itself_erroring_still_reaches_the_still_missing_warning(tmp_path)
     assert "retrying once" in result.stdout
     assert "STILL missing" in result.stdout
     assert "LOCALM_BIN_OK=0" in result.stdout
+
+
+@pytest.mark.parametrize(("left", "rc", "runs"), [("1", 0, True), ("1", 1, False), ("", 0, False)])
+@pytest.mark.parametrize("ends", [0, 1])
+def test_setup_done_runs_only_after_the_install(tmp_path, left, rc, runs, ends):
+    # setup.sh sets LEFTUPDATE=1 when it found the record of an update it could not undo.
+    # Its own record is ended once localm is installed into the new .venv, never when the
+    # install failed; when that fails, setup says so and goes on. The block also runs with
+    # LEFTUPDATE not set at all.
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    _make_executable(tmp_path / ".venv" / "bin" / "python",
+                     '#!/bin/sh\n[ "$1" = -m ] && exit 1\necho "$@" >> .stub-python-args\n'
+                     f"exit {ends}\n")
+    result = _run_install_block(tmp_path, call_specs={1: (rc, rc == 0)},
+                                env_extra={"LEFTUPDATE": left} if left else None)
+    assert (result.returncode == 0) is (rc == 0), result.stderr
+    assert "unbound variable" not in result.stderr
+    args = tmp_path / ".stub-python-args"
+    assert (args.read_text().strip() if args.exists() else "") == (
+        "-I -S localm/update_mechanism setup-done ." if runs else "")
+    assert ("Setup goes on" in result.stdout) is (runs and ends == 1)
+    if runs:
+        assert "COMPLETED" in result.stdout
 
 
 def test_retry_install_is_guarded_in_source():

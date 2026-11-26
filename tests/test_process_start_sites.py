@@ -20,7 +20,7 @@ PY = [REPO / "launcher.pyw", REPO / "hatch_build.py", REPO / "localm.py",
       *sorted((REPO / "runtime").rglob("*.py")),
       *(REPO / "scripts" / n for n in (
           "crash_recovery_watchdog.py", "report_issue.py", "rollback_update.py",
-          "update_watchdog.py", "verify_release.py"))]
+          "update_gate.pyw", "update_watchdog.py", "verify_release.py"))]
 
 #: The child imports localm: ``python -m localm...`` or a multiprocessing worker, whose
 #: target is a function of localm. The test looks for that in the function.
@@ -56,6 +56,7 @@ LOCALM_ELSEWHERE = {
 #: A short tool the starter waits for: a running child of a recorded process.
 TOOLS = {
     "installer/gui.py:_run:Popen": "one step of setup",
+    "scripts/update_gate.pyw:run:Popen": "the gate (localm/__init__.py as a program)",
     "localm/browser/provision.py:_stream_install:Popen": "playwright install",
     "localm/discover.py:_list_gpus_probe:Popen": "nvidia-smi",
     "localm/discover.py:nvidia_smi_used_by_bus:Popen": "nvidia-smi",

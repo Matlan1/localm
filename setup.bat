@@ -15,13 +15,9 @@ rem  peak performance on NVIDIA/AMD/Intel respectively; CPU for machines
 rem  with no GPU.
 rem ===========================================================================
 cd /d "%~dp0"
+setlocal DisableDelayedExpansion
 set "LOCALM_SETUP_ROOT=%CD%"
-setlocal EnableDelayedExpansion
-set LOCALM_SETUP=1
-title LocaLM setup
-set "HBSEQ=0"
-set "RUNTIME_OK=1"
-set "VCMISSING="
+set "LOCALM_SETUP=1"
 
 rem ---- command-line options ---------------------------------------------------
 rem    uninstall  (or --uninstall / --rollback)  remove LocaLM from this folder
@@ -32,6 +28,7 @@ set "UNINSTALL=0"
 set "PURGE=0"
 set "UNYES=0"
 set "FINISHONLY=0"
+set "LOCALM_UNINSTALL="
 for %%a in (%*) do (
     if /i "%%~a"=="uninstall" set "UNINSTALL=1"
     if /i "%%~a"=="--uninstall" set "UNINSTALL=1"
@@ -40,6 +37,39 @@ for %%a in (%*) do (
     if /i "%%~a"=="--yes" set "UNYES=1"
     if /i "%%~a"=="finish-uninstall" set "FINISHONLY=1"
 )
+if not "%UNINSTALL%%FINISHONLY%"=="00" set "LOCALM_UNINSTALL=1"
+
+rem ---- an update that is not finished --------------------------------------------
+rem  Undoing it may replace this file: the command ends in the new start or in exit.
+rem  One that is still there then could not be undone; the new .venv ends it.
+set "LEFTUPDATE="
+if defined LOCALM_UNINSTALL goto :update_gated
+if not exist "%~dp0.localm-update\job.json" goto :update_gated
+if defined LOCALM_GATE set "LEFTUPDATE=1" & goto :update_gated
+set "LOCALM_GATE=1"
+set "GATE=%~dp0scripts\update_gate.bat"
+call "%%GATE%%" && "%~dp0setup.bat" %* || (
+    pause
+    exit /b 1
+)
+:update_gated
+set "LOCALM_GATE="
+cd /d "%~dp0" || goto :not_here
+goto :here
+:not_here
+echo  setup.bat cannot run from a network folder: "%~dp0"
+echo  Copy the folder to a drive of this computer, or map the share to a drive letter,
+echo  and run setup.bat there.
+if not defined GATE pause
+exit /b 1
+:here
+setlocal EnableDelayedExpansion
+set LOCALM_SETUP=1
+title LocaLM setup
+set "HBSEQ=0"
+set "RUNTIME_OK=1"
+set "VCMISSING="
+
 if "%FINISHONLY%"=="1" goto finish_only
 
 echo.
@@ -367,6 +397,8 @@ if exist ".venv\.localm-venv" set "OURS=1"
 if exist ".venv\Scripts\localm.exe" set "OURS=1"
 if "%RESUMING%"=="1" if not "!OPENSET:;venv;=!"=="!OPENSET!" if "!OURS!"=="0" if exist ".venv" call :jr begin venv & goto venv_resume
 if not exist ".venv" call :jr begin venv & goto venv_create
+if defined LEFTUPDATE echo  An update of LocaLM was interrupted: .venv is made again.
+if defined LEFTUPDATE call :jr begin venv & goto venv_create
 echo.
 set "REPLACEVENV="
 set "VENVKIND=Foreign"
@@ -672,6 +704,7 @@ call :offer_report "localm setup could not read its install list" "python -m loc
 pause
 exit /b 1
 :install_ok
+if defined LEFTUPDATE ".venv\Scripts\python.exe" -I -S localm\update_mechanism setup-done . || echo  [^^!] Setup goes on. Run it again to end the interrupted update.
 call :step_done install-localm || exit /b 99
 
 rem ---- install the native-runtime wheel (self-contained inference) ----------

@@ -45,6 +45,11 @@ import os
 import stat
 import sys
 
+TYPE_CHECKING = False
+if TYPE_CHECKING:
+    import builtins
+    from collections.abc import Callable, Iterable
+
 FOLDER = ".localm-run"
 
 #: The kinds of process :func:`enter` names itself. Anything else is "command"
@@ -1205,10 +1210,13 @@ def _end(entry: Entry, force: bool) -> None:
             os.close(fd)
 
 
-def end_others(install=None, *, timeout: float = 20.0, spare=(), holders=None):
+def end_others(install=None, *, timeout: float = 20.0,
+               spare: "Iterable[Entry | int] | Callable[[builtins.list[Entry]], Iterable[Entry | int]]" = (),
+               holders=None):
     """End every process of the install except this one, every process above it (a
     localm command that waits for this one among them), what this one started, and
-    *spare* (entries or pids). What any other spared process started is not spared.
+    *spare* (entries or pids, or a function that gets the entries of all running processes,
+    oldest first, and says which). What any other spared process started is not spared.
     Watchdogs end first. A process that starts meanwhile is
     ended as well, unless its starter was ended in the same moment and it has no file:
     then nothing names it. A process whose file cannot be read is waited for through most
@@ -1223,18 +1231,20 @@ def end_others(install=None, *, timeout: float = 20.0, spare=(), holders=None):
     install = os.fspath(install or root())
     if not _folder(install)[0]:
         return []
-    named = {s.pid if isinstance(s, Entry) else s for s in spare}
     begun = time.monotonic()
     asked: dict = {}
     me = os.getpid()
     while True:
         table = _table()
         recorded = _recorded(install, table, holders=holders)
+        entries = _sorted(_all(install, table, recorded))
+        named = {s.pid if isinstance(s, Entry) else s
+                 for s in (spare(entries) if callable(spare) else spare)}
         spared = named | _ancestors(me, table) | set(_below(
             me, install, recorded, table, _children(table), lambda *_: False))
         for pid in named:
             spared.update(_starters(pid, install, table))
-        rest = [e for e in _sorted(_all(install, table, recorded)) if e.pid not in spared]
+        rest = [e for e in entries if e.pid not in spared]
         now = time.monotonic()
         for entry in sorted(rest, key=lambda e: "watchdog" not in e.purpose):
             if entry.users is None and now - begun < 0.7 * timeout:

@@ -1376,6 +1376,18 @@ and the native runtime only. They say when an update also replaced ComfyUI or th
 inside localm; those return to that version's pins the next time localm starts with an
 internet connection.
 
+When an update was interrupted in a way that left files of two versions, the next start of
+localm, by any launcher, command, MCP client or script, first puts the previous version
+back (or ends an update that was done) and says so; a start while an update runs waits for
+it. When a program holds a file it names that program: at a terminal it asks whether to try
+again, otherwise localm does not start. `rollback.bat` / `rollback.sh` and setup do the same
+without starting localm. When the update cannot be undone (one of its old files is lost,
+its record is damaged), localm does not start on a mix: run setup in that folder. When the
+files there are not those of one release, setup says so too; then unzip a localm release
+over the folder and run setup (chats, settings and models stay). Setup makes a new Python
+environment, and localm starts again once that is done. `setup --uninstall` always works. A
+release unzipped over an update that was interrupted is not undone: it is the install.
+
 `localm bug-report` needs a working localm. When localm will not start at all (a
 failed install, a broken venv, setup itself failing), use the standalone reporter
 instead: double-click `report-issue.bat` (Windows) or run `bash report-issue.sh`

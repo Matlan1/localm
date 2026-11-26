@@ -597,8 +597,18 @@ def build(a: Area, step: str, number: int, new: Mapping, leaving: Iterable[str],
                 _created(a, changes))
 
 
+#: What a start of localm, however it is made, runs until the gate (``localm/__init__.py``)
+#: has decided; never absent while the files are moved.
+GATE_FILES = (
+    "localm/__init__.py", "localm/procs.py", "scripts/update_gate.bat", "scripts/update_gate.sh",
+    "scripts/update_gate.pyw", "localm.bat", "localm.sh", "localm-launcher.bat",
+    "localm-launcher.sh", "launcher.pyw", "rollback.bat", "rollback.sh",
+    "scripts/rollback_update.py", "setup.bat", "setup.sh", "setup-gui.bat", "setup-gui.sh",
+    "installer/gui.py")
+
+
 def plan_files(root, update_id: str, new_files: Mapping, old_files: Optional[Mapping] = None, *,
-               swap: Iterable[str] = (), protect: Iterable[str]) -> Plan:
+               swap: Iterable[str] = GATE_FILES, protect: Iterable[str]) -> Plan:
     """The plan that turns the install at *root* into the release extracted in
     ``<id>/new``. Reads only.
 
@@ -898,6 +908,7 @@ class _Back:
         self.whole = frozenset(whole)
         self.numbers = {op.path: n for n, op in enumerate(plan.ops)}
         self.unsure = marks.last
+        self.lost = False
         self.failed: set = set()
         self.left: set = set()
         self.theirs: list = []
@@ -907,6 +918,8 @@ class _Back:
         for op in self.plan.ops:   # before anything moves
             if op.old is not None:
                 self._each(op, self._find_source)
+        if self.lost:
+            return
         swaps = [op for op in self.plan.ops if op.swap]
         rest = [op for op in self.plan.ops if not op.swap]
         created = frozenset(self.plan.folders)
@@ -933,6 +946,7 @@ class _Back:
             self._fail(op, e)
 
     def _fail(self, op: Op, why: Exception) -> None:
+        self.lost |= isinstance(why, Refused)
         self.failed.add(op.path)
         self.out.fail(why)
 

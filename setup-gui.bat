@@ -23,6 +23,7 @@ rem  "!" works. See test_setup_gui_runs_from_a_folder_with_a_bang_in_its_path.
 setlocal EnableExtensions DisableDelayedExpansion
 set "LOCALM_SETUP_GUI_SELF=%~f0"
 cd /d "%~dp0"
+set LOCALM_SETUP=1
 
 rem ---- start again with no console window ------------------------------------
 rem  USEBOX=1: messages go to message boxes and the "getting ready" window shows.
@@ -46,11 +47,32 @@ if not "%STARTRC%"=="0" goto start_setup
 exit /b 0
 
 :start_setup
+rem ---- an update that is not finished --------------------------------------------
+rem  Undoing it may replace this file: the command ends in the new start or in exit.
+rem  One that could not be undone is still there then; the window need not ask again.
+if not exist "%~dp0.localm-update\job.json" goto :update_gated
+if defined LOCALM_GATE goto :update_gated
+set "LOCALM_GATE=1"
+set "GATEIN="
+if "%USEBOX%"=="1" set "GATEIN=window"
+set "GATE=%~dp0scripts\update_gate.bat"
+call "%%GATE%%" %GATEIN% && "%~dp0setup-gui.bat" %* || exit /b 1
+:update_gated
+if not exist "%~dp0.localm-update\job.json" set "LOCALM_GATE="
 set "LOCALM_SETUP_GUI_HIDDEN="
 set "LOCALM_SETUP_GUI_INPLACE="
 set "LOCALM_SETUP_GUI_SELF="
 set "LOCALM_SETUP_GUI_CMD="
 for %%n in (1 2 3 4 5) do set "LOCALM_MSG%%n="
+cd /d "%~dp0" || goto :not_here
+goto :here
+:not_here
+set "LOCALM_MSG1=[!] The graphical setup cannot run from a network folder: %~dp0"
+set "LOCALM_MSG2=Copy the folder to a drive of this computer, or map the share to a drive letter, and run setup-gui.bat there."
+if not "%USEBOX%"=="1" echo   [!] The graphical setup cannot run from a network folder: "%~dp0"
+if "%USEBOX%"=="1" call :notify Error
+exit /b 1
+:here
 echo.
 echo   LocaLM graphical setup
 echo.

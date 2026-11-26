@@ -3,7 +3,28 @@ rem localm launcher - double-click to open the graphical launcher.
 rem Lets you pick GUI / chat / server / coder mode, model, debug, and options.
 rem (Use this instead of launcher.pyw - .pyw files have no association when
 rem Python comes from uv; this always uses the clone's own .venv.)
-cd /d "%~dp0"
+
+rem ---- an update that is not finished --------------------------------------------
+rem  Undoing it may replace this file: the command ends in the new start or in exit.
+if not exist "%~dp0.localm-update\job.json" goto :update_gated
+if defined LOCALM_GATE goto :update_gated
+set "LOCALM_GATE=1"
+set "GATE=%~dp0scripts\update_gate.bat"
+call "%%GATE%%" && "%~dp0localm-launcher.bat" %* || (
+    set "LOCALM_GATE="
+    set "GATE="
+    pause
+    exit /b 1
+)
+:update_gated
+set "LOCALM_GATE="
+set "GATE="
+cd /d "%~dp0" || (
+    echo The launcher cannot run from a network folder: "%~dp0"
+    echo Copy the folder to a drive of this computer, or map the share to a drive letter.
+    pause
+    exit /b 1
+)
 
 if exist ".venv\Scripts\pythonw.exe" (
     start "" ".venv\Scripts\pythonw.exe" "launcher.pyw"

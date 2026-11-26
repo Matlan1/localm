@@ -4,7 +4,11 @@
 Puts the install at *root* back after an update that was not finished, or removes
 what a finished one left. Text goes to stderr. Exit status: 0 nothing is left to
 do, 1 the install could not be put back (each reason is named), 2 wrong
-arguments, 3 another process is updating this install.
+arguments, 3 another process is updating this install. See :mod:`.restoring`.
+
+``<python> -I -S <this folder> setup-done <root>``: setup has made the Python
+environment again; deletes the record it kept for that (:func:`.restoring.end_setup`),
+with the same exit statuses.
 """
 
 from __future__ import annotations
@@ -43,24 +47,12 @@ def main(argv) -> int:
     """Run the command line *argv* (without the program) and return the exit
     status."""
     block_localm()
-    job = load_package()
-    if len(argv) != 2 or argv[0] != "restore":
-        print("usage: <python> -I -S update_mechanism restore <root>", file=sys.stderr)
+    load_package()
+    if len(argv) != 2 or argv[0] not in ("restore", "setup-done"):
+        print("usage: <python> -I -S update_mechanism restore|setup-done <root>", file=sys.stderr)
         return 2
-    try:
-        with job.Lock(argv[1]) as lock:
-            result = job.restore(lock)
-    except job.Busy as e:
-        print(str(e), file=sys.stderr)
-        return 3
-    except (job.Unreadable, job.Unsafe, job.Held, OSError) as e:
-        print(f"The interrupted update could not be undone: {e}", file=sys.stderr)
-        return 1
-    for line in result.notes:
-        print(line, file=sys.stderr)
-    for line in result.errors:
-        print(f"The interrupted update could not be undone: {line}", file=sys.stderr)
-    return 1 if result.errors else 0
+    restoring = importlib.import_module(f"{NAME}.restoring")
+    return (restoring.run if argv[0] == "restore" else restoring.end_setup)(argv[1])
 
 
 if __name__ == "__main__":

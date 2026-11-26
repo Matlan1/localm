@@ -844,7 +844,7 @@ def test_a_lazy_import_of_localm_raises_in_the_applier(tmp_path):
              "    try:\n        import localm\n"
              "    except ImportError:\n        print('REFUSED', file=sys.stderr)\n"
              "    else:\n        print('IMPORTED', file=sys.stderr)\n")
-    anchor = "    _held(lock)\n    record = _current(lock.root)\n    if record is None:\n        cleanup(lock)\n"
+    anchor = "    _held(lock)\n    record = current(lock.root)\n    if record is None:\n        cleanup(lock)\n"
     assert text.count(anchor) == 1
     job_py.write_text(text.replace(anchor, probe + anchor), encoding="utf-8")
     root = um.install(tmp_path / "root")

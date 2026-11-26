@@ -49,7 +49,7 @@ class Held(Exception):
     all."""
 
     def __init__(self, path, reason) -> None:
-        self.path, self.reason, self.holders = str(path), str(reason), _holders(path)
+        self.path, self.reason, self.holders = str(path), str(reason), holders_of(path)
         by = ", ".join(f"{h['name']} (pid {h['pid']})" for h in self.holders)
         super().__init__(f"{path} cannot be used ({reason}){by and ', held by ' + by}")
 
@@ -58,7 +58,9 @@ class Blocked(Held):
     """A file that cannot be read now; nothing is known about what it holds."""
 
 
-def _holders(path) -> list:
+def holders_of(path) -> list:
+    """The programs that hold the file *path*, ``[{"pid", "name"}]``, as far as the system
+    tells."""
     try:
         if sys.platform == "win32":
             return shared.apply_update.rm_holders([path])

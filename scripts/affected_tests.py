@@ -134,6 +134,9 @@ _BUILTIN_PLUGINS = ("localm/plugins/builtin/*",)
 _WORKFLOWS = (".github/workflows/*",)
 _RERANK_CORPUS = ("tests/fixtures/rag_rerank_eval/*",)
 _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
+    "tests/test_update_gate.py": (
+        ("localm/update_mechanism/*.py", "*.bat", "*.sh", "launcher.pyw", "installer/gui.py"),
+        "builds its install from the update mechanism and reads every launch script"),
     "tests/test_check_pins.py": (_LOCALM_PY, "greps every tracked localm/*.py for pin-shaped constants"),
     "tests/test_embedding_model_writers_refuse_a_chat_model.py": (
         _LOCALM_PY, "reads every localm/*.py for embedding_model config writers"),
@@ -143,7 +146,7 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
     "tests/test_process_start_sites.py": (
         ("localm/*.py", "installer/*.py", "runtime/*.py", "launcher.pyw", "hatch_build.py",
          "localm.py", "scripts/crash_recovery_watchdog.py", "scripts/report_issue.py",
-         "scripts/rollback_update.py", "scripts/update_watchdog.py",
+         "scripts/rollback_update.py", "scripts/update_gate.pyw", "scripts/update_watchdog.py",
          "scripts/verify_release.py"),
         "walks the AST of every shipped Python file for process starts"),
     "tests/test_process_tree_guard.py": (

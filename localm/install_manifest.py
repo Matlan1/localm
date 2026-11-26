@@ -1485,6 +1485,27 @@ def _kept_venv_folders(root: Path) -> list[Path]:
     return out
 
 
+def _update_items(root: Path, *, purge_data: bool) -> list:
+    """What updates left in the clone at *root* and in its runtime package: removed,
+    except files of the user that an update replaced, which go with *purge_data* only.
+    Those of the Python environment go with it."""
+    items = []
+    for folder in (root / ".localm-update", root.joinpath(*_DEFAULT_LIB).parent / ".localm-update"):
+        if _is_link(folder) or not folder.is_dir():
+            continue
+        kept = folder / "kept"
+        if purge_data or _is_link(kept) or not kept.is_dir() or not any(kept.iterdir()):
+            items.append(_Item(folder, "update", "remove"))
+            continue
+        items += [_Item(p, "update", "remove") for p in sorted(folder.iterdir()) if p != kept]
+        items.append(_Item(kept, "update", "keep", "files of your own that an update replaced"))
+    kept = root / ".venv" / ".localm-kept"
+    if not _is_link(kept) and kept.is_dir() and any(kept.iterdir()):
+        items.append(_Item(kept, "note", "note", "files of your own that an update replaced; "
+                           "they are removed with the Python environment"))
+    return items
+
+
 def _plan(root: Path, m: Optional[dict], *, purge_data: bool,
           defer_runtime: bool, old_root: str = "") -> tuple[list[_Item], list]:
     items: list[_Item] = []
@@ -1528,6 +1549,7 @@ def _plan(root: Path, m: Optional[dict], *, purge_data: bool,
                                "not a LocaLM environment (no setup marker)"))
     for kept in _kept_venv_folders(root):
         items.append(_Item(kept, "venv-copy", "remove"))
+    items += _update_items(root, purge_data=purge_data)
 
     # Portable Python tooling.
     for key, name in RUNTIME_DIRS.items():
@@ -2285,7 +2307,8 @@ def _classify(report: dict, it: _Item, *, force: bool, dry_run: bool,
             except OSError:
                 report["skipped"].append((it.path, "not empty - kept"))
                 return
-        elif it.kind in ("data", "runtime", "venv", "venv-copy", "data-entry", "lib"):
+        elif it.kind in ("data", "runtime", "venv", "venv-copy", "update", "data-entry",
+                         "lib"):
             _remove_entry(p)
         elif p.is_dir() and not _is_link(p):
             report["refused"].append((it.path, "expected a file, found a folder"))
@@ -2294,7 +2317,7 @@ def _classify(report: dict, it: _Item, *, force: bool, dry_run: bool,
             _remove_entry(p)
         report["removed"].append(it.path)
     except OSError as e:
-        if it.kind == "venv-copy":
+        if it.kind in ("venv-copy", "update"):
             report["refused"].append((it.path, f"could not remove it: {e} - delete it by hand"))
             report["partial"] = True
         else:
