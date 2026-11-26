@@ -48,7 +48,9 @@ HANDOFF_KEYS = frozenset({"mode", "starter", "confirmed", "home", "old", "new", 
 #: The keys a hand-off may carry besides :data:`HANDOFF_KEYS`. ``restarting``:
 #: ``[<pid>-<start>, purpose]`` of each other server that was asked to restart into the
 #: update.
-MORE_KEYS = frozenset({"restarting"})
+#: ``ancestors``: ``<pid>-<start>`` of each process above the starter, which goes on
+#: running (the one that shows the window of the app) and is neither ended nor named.
+MORE_KEYS = frozenset({"restarting", "ancestors"})
 SERVER, COMMAND = "server", "command"
 #: Seconds the process that goes on for the user has to report at the gate.
 ARRIVE_S = 120.0
@@ -218,7 +220,10 @@ class Applier:
             starter_runs = any(f"{e.pid}-{e.start}" == self.h["starter"]
                                for e in procs.list(self.proot))
             for name in sorted(os.listdir(folder)):
-                if not name.startswith("waiting-") or starter_runs:
+                # A starter that re-executed itself in place (POSIX execv) keeps its pid
+                # and start time: it waits under its own key.
+                if not name.startswith("waiting-") or (
+                        starter_runs and name[len("waiting-"):] != self.h["starter"]):
                     continue
                 try:
                     said = (folder / name).read_text(encoding="ascii").strip()
@@ -268,6 +273,7 @@ class Applier:
         running = procs.list(root, holders=holders)
         waiting = restoring._waiting(self.root, running)
         agreed = set(self.h["confirmed"]) | {self.h["starter"]}
+        above = set(self.h.get("ancestors") or ())
         by_key = {(e.pid, e.start): e for e in running}
 
         def agreed_to(e) -> bool:
@@ -282,11 +288,13 @@ class Applier:
             return False
 
         def spare(entries) -> set:
-            found = restoring._waiting(self.root, entries)
+            found = restoring._waiting(self.root, entries) | {
+                e.pid for e in entries if f"{e.pid}-{e.start}" in above}
             return found | {e.pid for e in entries
                             if e.parent and e.parent[0] in found and not e.recorded}
 
-        others = [e for e in running if e.recorded and e.pid not in waiting and e.pid != os.getpid()]
+        others = [e for e in running if e.recorded and e.pid not in waiting
+                  and e.pid != os.getpid() and f"{e.pid}-{e.start}" not in above]
         refused = [e for e in others if not agreed_to(e)]
         if refused:
             raise Abandoned("these processes of localm run and nobody agreed to end them: "
@@ -308,6 +316,10 @@ class Applier:
         h, watch = self.h, self.h.get("watch") or {}
         if not self.primary or not watch.get("port"):
             return None
+        if not self._primary_runs():
+            self.say(f"The server ended before localm {h['new']} could be started in it; "
+                     "the next start of localm runs it.")
+            return None
         started = mover.update_folder(self.root) / "started"
         with open(started.with_name("started.tmp"), "w", encoding="ascii") as f:
             f.write(f"{self.id} {self.primary}")
@@ -322,8 +334,7 @@ class Applier:
             if not self._primary_runs():
                 return f"localm {h['new']} ended right after it started ({seen or 'no answer'})"
             try:
-                with urllib.request.urlopen(url, timeout=5) as r:   # noqa: S310 (own loopback)
-                    version = str(json.loads(r.read(65536)).get("version") or "")
+                version = whoami(url)
                 if version == h["new"]:
                     return None
                 seen = f"it answered version {version!r}"
@@ -380,6 +391,22 @@ class Applier:
             except (OSError, disk.Unsafe, disk.Held) as e:
                 restoring.say(f"The result of the update could not be written to {path}: {e}")
         return result
+
+
+def whoami(url: str) -> str:
+    """The version the server at *url* (its own ``/whoami`` on this machine) answers,
+    asked without a proxy and, over https, without checking its certificate: the server
+    is this install's own, on a loopback address, and may use localm's own certificate.
+    Raises OSError or ValueError."""
+    import ssl
+    handlers: list = [urllib.request.ProxyHandler({})]
+    if url.startswith("https://"):
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        handlers.append(urllib.request.HTTPSHandler(context=ctx))
+    with urllib.request.build_opener(*handlers).open(url, timeout=5) as r:
+        return str(json.loads(r.read(65536)).get("version") or "")
 
 
 def read_handoff(stream) -> dict:

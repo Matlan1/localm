@@ -67,7 +67,8 @@ def _gate(me=None) -> bool:
             elif phase != "setup":
                 _say("An update of LocaLM was interrupted. Putting the previous version back...")
             waited = True
-            window = _window(root, me) and not _chosen(folder, update, me)
+            window = (_window(root, me) and not _chosen(folder, update, me)
+                      and os.environ.get("LOCALM_UPDATE_PRIMARY") != update)
             code = _put_back(root, folder, update, window)
             if code == 0:
                 break

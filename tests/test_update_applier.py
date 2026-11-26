@@ -27,20 +27,20 @@ root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 with open(os.path.join(root, 'VERSION')) as f:
     version = f.read()
 args = sys.argv[1:]
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class Answer(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({'version': version}).encode()
+        self.send_response(200)
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *_a):
+        pass
 if args[:1] == ['_update-probe']:
     if os.path.exists(os.path.join(root, 'FAILS')):
         print('it fails on purpose', flush=True)
         sys.exit(1)
-    from http.server import BaseHTTPRequestHandler, HTTPServer
-    class Answer(BaseHTTPRequestHandler):
-        def do_GET(self):
-            body = json.dumps({'version': version}).encode()
-            self.send_response(200)
-            self.send_header('Content-Length', str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-        def log_message(self, *_a):
-            pass
     server = HTTPServer(('127.0.0.1', 0), Answer)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print(json.dumps({'port': server.server_address[1]}), flush=True)
@@ -67,6 +67,15 @@ if args[:1] == ['update']:
 said = {'localm': localm.__version__, 'part': part.V, 'VERSION': version, 'argv': args,
         'during': os.path.exists(os.path.join(root, '.localm-update', 'job.json'))}
 print('STARTED ' + json.dumps(said), flush=True)
+if args[:1] == ['serve']:
+    server = HTTPServer(('127.0.0.1', int(args[1])), Answer)
+    if args[2:]:
+        import ssl
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(args[2], args[3])
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    sys.stdin.read()
 if args[:1] == ['stay']:
     sys.stdin.read()
 """
@@ -109,18 +118,21 @@ class Update(Install):
     def version(self) -> str:
         return (self.root / "VERSION").read_text(encoding="utf-8")
 
-    def apply(self, *, confirmed=(), starter: str = "0-0", restarting=()) -> subprocess.Popen:
+    def apply(self, *, confirmed=(), starter: str = "0-0", restarting=(), ancestors=(),
+              mode: str = applier.COMMAND, watch=None, relaunch=None,
+              **env) -> subprocess.Popen:
         """Start the applier with its hand-off and return it once it holds the update."""
         program = self.root / ".localm-update" / ID / "applier" / "update_mechanism"
         proc = subprocess.Popen(
             [sys.executable, "-I", "-S", str(program), "apply", str(self.root), ID],
-            cwd=str(self.root), env=self.env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, **HIDDEN)
+            cwd=str(self.root), env=self.env(**env), stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **HIDDEN)
         assert proc.stdin is not None and proc.stdout is not None
         proc.stdin.write(json.dumps({
-            "mode": applier.COMMAND, "starter": starter, "confirmed": list(confirmed),
-            "home": str(self.root / "home"), "old": "1", "new": "2", "watch": None,
-            "relaunch": None, "restarting": list(restarting)}) + "\n")
+            "mode": mode, "starter": starter, "confirmed": list(confirmed),
+            "home": str(self.root / "home"), "old": "1", "new": "2", "watch": watch,
+            "relaunch": relaunch, "restarting": list(restarting),
+            "ancestors": list(ancestors)}) + "\n")
         proc.stdin.close()
         assert proc.stdout.readline().strip() == "ready", proc.stderr.read()
         return proc
@@ -362,6 +374,101 @@ def test_the_other_servers_of_this_install_are_asked_to_restart(tmp_path, monkey
         assert updater_handoff.servers_of(processes) == {}
     finally:
         http.shutdown()
+
+
+def _key_of(pid: int) -> str:
+    """``<pid>-<start>`` of the Python that runs as *pid*, as the process record has it:
+    on Windows the venv's python.exe starts the interpreter as its child."""
+    from localm import procs
+    deadline = time.monotonic() + 30
+    while True:
+        table = procs._table()
+        child = [p for p, row in table.items() if row[0] == pid]
+        if child or os.name != "nt" or time.monotonic() > deadline:
+            break
+        time.sleep(0.05)
+    here = child[0] if child else pid
+    return f"{here}-{procs._text(table[here][1])}"
+
+
+def _free_port() -> int:
+    import socket
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+@pytest.mark.parametrize("in_place", [False, True])
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_a_server_restarts_into_the_update_and_answers_with_the_new_version(
+        tmp_path, in_place, scheme):
+    """Server mode: the server that started the update waits at the gate after its
+    restart, is let through at STARTING and must answer ``/whoami`` with the new version.
+    *in_place*: it restarted as the same process (POSIX execv keeps its pid and start
+    time, so it waits under the starter's own key). Over https it uses localm's own
+    certificate; a proxy in the environment is not used for this own loopback address."""
+    from localm import tls
+    update = Update(tmp_path / "inst")
+    port = _free_port()
+    serve = ["serve", str(port)]
+    if scheme == "https":
+        serve += list(tls.ensure_cert(tmp_path / "tls"))
+    code = ("import runpy, sys; sys.stdin.readline(); sys.argv[1:] = " + repr(serve)
+            + "; runpy.run_module('localm', run_name='__main__', alter_sys=True)")
+    server = subprocess.Popen([sys.executable, "-c", code], cwd=str(update.root),
+                              env=update.env(LOCALM_UPDATE_PRIMARY=ID), stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                              **HIDDEN)
+    assert server.stdin is not None
+    proxy = "http://192.0.2.1:9"
+    proc = update.apply(starter=_key_of(server.pid) if in_place else "0-0",
+                        mode=applier.SERVER,
+                        watch={"host": "127.0.0.1", "port": port, "scheme": scheme},
+                        HTTP_PROXY=proxy, HTTPS_PROXY=proxy, NO_PROXY="")
+    server.stdin.write("go\n")
+    server.stdin.flush()
+    try:
+        _, err = proc.communicate(timeout=300)
+    finally:
+        server.stdin.close()
+        out, _ = _end(server)[0]
+    assert proc.returncode == 0, err
+    assert update.version() == "2" and update.result()["state"] == "new"
+    assert {_started(out)[k] for k in ("localm", "part", "VERSION")} == {"2"}
+
+
+def test_a_server_that_is_gone_before_it_is_started_leaves_the_new_version(update):
+    """The server that waited for the update ended before STARTING: the new version,
+    which passed its own check, stays, and the old one is not started again."""
+    marker = update.root / "home" / "relaunched"
+    port = _free_port()
+    proc = update.apply(mode=applier.SERVER,
+                        watch={"host": "127.0.0.1", "port": port, "scheme": "http"},
+                        relaunch=[sys.executable, "-c", f"open({str(marker)!r}, 'w')"])
+    server = update.popen("-m", "localm", "serve", str(port), LOCALM_UPDATE_PRIMARY=ID)
+    _waits(update)
+    server.kill()
+    server.communicate()
+    _, err = proc.communicate(timeout=300)
+    time.sleep(1)
+    assert proc.returncode == 0, err
+    assert update.version() == "2" and not marker.exists()
+    assert "the next start of localm runs it" in err
+
+
+def test_a_process_above_the_starter_goes_on_and_does_not_stop_the_update(update):
+    """A launcher above the process that started the update (it shows the window of the
+    app) is neither ended nor a process nobody agreed to end."""
+    launcher, entry = _stay(update)
+    proc = update.apply(ancestors=[f"{entry.pid}-{entry.start}"])
+    waiting = update.waiter()
+    try:
+        (_, err), _ = _end(proc, waiting)
+        assert proc.returncode == 0, err
+        assert update.version() == "2" and launcher.poll() is None
+    finally:
+        launcher.stdin.close()
+        _end(launcher)
 
 
 def test_the_hand_off_must_be_complete():

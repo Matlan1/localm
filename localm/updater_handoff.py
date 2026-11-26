@@ -189,34 +189,57 @@ def _key(entry) -> str:
     return f"{entry.pid}-{entry.start}"
 
 
-def other_processes(root) -> list:
-    """The running processes of the install at *root* that an update ends: every recorded
-    one but this process, those above it and those it started."""
+def ancestors(root) -> list:
+    """``<pid>-<start>`` of each running process of the install at *root* above this one
+    (a launcher that shows the window of the app): an update neither ends nor names
+    them (``ancestors`` of the hand-off)."""
+    return [_key(e) for e in _family(root)[1]]
+
+
+def _family(root) -> tuple:
+    """``(running, above)``: the running processes of the install at *root*, and those
+    of them above this process."""
     from localm import procs
     from localm.update_mechanism import disk
     me = procs.current()
     if me is None:
-        return []
+        return [], []
     running = procs.list(disk.short_path(disk.real_folder(root)))
     by_key = {(e.pid, e.start): e for e in running}
-    mine = {(me.pid, me.start)}
+    above, seen = [], {(me.pid, me.start)}
     up = me.parent
-    while up and tuple(up) not in mine:
-        mine.add(tuple(up))
+    while up and tuple(up) not in seen:
+        seen.add(tuple(up))
         entry = by_key.get(tuple(up))
-        up = entry.parent if entry else None
+        if entry is None:
+            break
+        above.append(entry)
+        up = entry.parent
+    return running, above
 
-    def is_mine(e) -> bool:
+
+def other_processes(root) -> list:
+    """The running processes of the install at *root* that an update ends: every recorded
+    one but this process, those above it (:func:`ancestors`) and those it started."""
+    from localm import procs
+    me = procs.current()
+    running, above = _family(root)
+    if me is None:
+        return []
+    by_key = {(e.pid, e.start): e for e in running}
+    skip = {(e.pid, e.start) for e in above}
+
+    def started_by_me(e) -> bool:
         seen = set()
         while e is not None and (e.pid, e.start) not in seen:
             seen.add((e.pid, e.start))
-            if (e.pid, e.start) in mine or (e.parent and tuple(e.parent) == (me.pid, me.start)):
+            if (e.pid, e.start) == (me.pid, me.start):
                 return True
             e = by_key.get(tuple(e.parent)) if e.parent else None
         return False
 
-    return [{"key": _key(e), "pid": e.pid, "purpose": e.purpose}
-            for e in running if e.recorded and not is_mine(e)]
+    return [{"key": _key(e), "pid": e.pid, "purpose": e.purpose} for e in running
+            if e.recorded and (e.pid, e.start) not in skip and not started_by_me(e)]
 
 
 def servers_of(processes: list) -> dict:
@@ -288,7 +311,8 @@ def hand_off(prepared: Prepared, *, mode: str, confirmed: list, watch: Optional[
                 updater._backup_data_for_downgrade(prepared.new)
         handoff = {"mode": mode, "starter": _key(me), "confirmed": list(confirmed),
                    "home": str(config.HOME_DIR), "old": prepared.old, "new": prepared.new,
-                   "watch": watch, "relaunch": relaunch, "restarting": prepared.restarting()}
+                   "watch": watch, "relaunch": relaunch, "restarting": prepared.restarting(),
+                   "ancestors": ancestors(prepared.root)}
         program = prepared.root / ".localm-update" / prepared.id / "applier" / shared._PACKAGE.name
         flags = _hidden() if mode == "server" else (
             {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
