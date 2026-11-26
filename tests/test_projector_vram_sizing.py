@@ -186,10 +186,16 @@ def test_a_placement_never_leaves_a_device_short_of_the_projector(tmp_path):
     from localm.inference.backends.llamacpp._gpu_plan import plan_placement
     units = _units(_two_gpu_model(tmp_path), _projector(tmp_path))
     # Every layer fits the two devices with half the projector on each, but not
-    # with the whole projector on either of them.
-    free = 450_000
+    # with the whole projector on each of them.
+    charge = _charge_of(units)
+    unit_bytes = [w + kv for w, kv in zip(units.layer_bytes, units.layer_kv, strict=True)]
+    unit_bytes.append(units.output_bytes + units.logits_bytes)
+    total, largest = sum(unit_bytes), max(unit_bytes)
+    assert largest < charge // 2
+    free = (total + 2 * OVERHEAD + charge) // 2 + largest
+    assert 2 * free < total + 2 * (OVERHEAD + charge)
     halves = plan_placement(_devices(free, free), dataclasses.replace(
-        units, reserve_bytes=OVERHEAD, spread_bytes=_charge_of(units)))
+        units, reserve_bytes=OVERHEAD + charge // 2))
     assert halves.full_offload and halves.fits
     plan = plan_placement(_devices(free, free), units)
     assert plan.fits and plan.loads and not plan.full_offload
