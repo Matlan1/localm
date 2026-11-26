@@ -613,6 +613,21 @@ def test_repeated_plan_mode_refusals_stop_the_run_without_calling_them_failures(
     assert agent._last_run_ok is False
 
 
+def test_a_task_that_keeps_asking_for_run_tests_in_plan_mode_stops_on_the_refusals(
+        tmp_path, capsys):
+    agent = _agent(tmp_path)
+    agent.set_plan_mode(True)
+    replies = iter([_tc("run_tests")] * 6 + ["Done."])
+    with patch.object(agent, "_call_llm", side_effect=lambda *a, **k: next(replies)):
+        final = agent.chat("run the tests")
+    shown = capsys.readouterr()
+    assert final.startswith("[stopped: plan mode refused run_tests 4 times in a row")
+    assert "failed" not in final
+    assert "failed 4 times" not in shown.out + shown.err
+    assert "circuit breaker" not in shown.out + shown.err
+    assert agent._last_run_ok is False
+
+
 def test_leaving_plan_mode_starts_the_refusal_count_again(tmp_path):
     agent = _agent(tmp_path)
     agent.set_plan_mode(True)
