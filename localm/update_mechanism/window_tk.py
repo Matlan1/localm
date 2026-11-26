@@ -18,6 +18,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import queue
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -76,7 +77,6 @@ def _windows_light() -> int:
 
 def _command(argv: list) -> str:
     """What *argv* prints; empty when it cannot run. Raises OSError."""
-    import subprocess
     done = subprocess.run(argv, capture_output=True, text=True, timeout=5,
                           stdin=subprocess.DEVNULL,
                           creationflags=_HIDDEN if sys.platform == "win32" else 0)
@@ -100,7 +100,6 @@ def theme(platform: str = sys.platform, windows_light: Callable[[], int] = _wind
           desktop: Callable[[], str] = _desktop_scheme) -> str:
     """``dark`` or ``light``: the theme the user chose for apps (Windows) or the desktop's
     dark preference (macOS, Linux); ``light`` where none can be read."""
-    import subprocess
     try:
         if platform == "win32":
             return "dark" if windows_light() == 0 else "light"
@@ -187,13 +186,15 @@ class UpdateWindow:
             font=(family, _px(SIZES["primary"])), fg=ON_ACCENT, bg=c["accent"],
             activeforeground=ON_ACCENT, activebackground=c["accent"], relief="flat",
             bd=0, highlightthickness=0, padx=px, pady=py, cursor="hand2")
+        # The 1 px border of .btn-secondary: the button inside a frame of that colour.
+        edge = tk.Frame(self.buttons, bg=c["border"])
         self.cancel = tk.Button(
-            self.buttons, text="Cancel", command=lambda: self._pressed(CANCEL),
+            edge, text="Cancel", command=lambda: self._pressed(CANCEL),
             font=(family, _px(SIZES["secondary"])), fg=c["text-dim"], bg=c["bg"],
             activeforeground=c["text"], activebackground=c["bg"], relief="flat", bd=0,
-            highlightthickness=1, highlightbackground=c["border"],
-            highlightcolor=c["text-dim"], padx=sx, pady=sy, cursor="hand2")
-        self.cancel.pack(side="right", padx=(8, 0))
+            highlightthickness=0, padx=sx, pady=sy, cursor="hand2")
+        self.cancel.pack(padx=1, pady=1)
+        edge.pack(side="right", padx=(8, 0))
         self.again.pack(side="right")
 
     def lines(self) -> list:
@@ -252,6 +253,21 @@ class UpdateWindow:
         self._closed()
 
 
+def _icon(tk_root) -> None:
+    """The icon of the GUI (``icon-192.png``) on the window, from the install this program
+    updates (``<root>/.localm-update/<id>/applier/update_mechanism``); Tk's own icon stays
+    where that file cannot be read."""
+    import tkinter as tk
+    try:
+        root = Path(__file__).resolve().parents[4]
+        image = tk.PhotoImage(master=tk_root, file=str(
+            root / "localm" / "plugins" / "gui" / "static" / "icon-192.png"))
+    except (IndexError, tk.TclError):
+        return
+    tk_root.iconphoto(True, image)
+    tk_root._localm_icon = image   # Tk drops an image nothing in Python holds
+
+
 def main() -> int:
     """The program: see the module."""
     def out(text: str) -> None:
@@ -277,6 +293,7 @@ def main() -> int:
         messages.put(None)
 
     window = UpdateWindow(tk_root, out)
+    _icon(tk_root)
     threading.Thread(target=read, daemon=True).start()
     out(SHOWN)
 

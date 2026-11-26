@@ -69,7 +69,6 @@ TOOLS = {
     "localm/plugins/deps.py:_run_attempts:Popen": "uv, pip",
     "localm/updater_handoff.py:_run_check:Popen": "the check the update mechanism of a build runs",
     "localm/update_mechanism/window.py:Window.start:Popen": "the small update window",
-    "localm/update_mechanism/window_tk.py:_command:run": "defaults, gsettings: the dark preference of the desktop",
     "localm/vc_runtime.py:run_installer:ShellExecuteExW": "Microsoft's runtime installer",
 }
 #: A program of the user: each of these goes through procs.open_for_user.
