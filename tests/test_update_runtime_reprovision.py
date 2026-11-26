@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from localm import _apply_update as au
 from localm import _version, updater, updater_runtime
 from localm.bugreport import LocalmError
+from tests._old_client_update import old_client_update
 from tests._net_config import set_config
 from tests._update_signing import envelope, keyset
 
@@ -292,85 +293,11 @@ def _marker(inst):
     return (_lib(inst) / ".localm-backend").read_text(encoding="utf-8")
 
 
-def test_update_reprovisions_the_runtime_to_the_new_pin(install, tmp_path):
-    data, sig = _release()
-    calls = []
-    res = updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                        runner=_fake_setup_llama(install, "b1355-cpu-b11908", calls=calls))
-    assert res["klass"] == "runtime"
-    assert res["runtime"]["state"] == "updated", res["runtime"]
-    assert _marker(install) == "amd-rocm b1355-cpu-b11908"
-    assert calls[0][1:] == ["-m", "localm", "setup-llama", "--backend", "amd-rocm",
-                            "--force", "--yes", "--keep-choice"]
-    assert calls[0][0] == sys.executable
-    assert updater_runtime.read_pending() is None
-    assert "b1349-cpu-b11719 -> b1355-cpu-b11908" in res["runtime_note"]
-
-
-def test_deps_and_runtime_both_run_in_that_order(install, tmp_path, monkeypatch):
-    uv = tmp_path / "uvbin" / ("uv.exe" if sys.platform == "win32" else "uv")
-    uv.parent.mkdir()
-    uv.write_bytes(b"")
-    uv.chmod(0o755)
-    monkeypatch.setattr(updater, "_uv_for_deps", lambda t: str(uv))
-    data, sig = _release(deps='"click", "httpx"')
-    calls = []
-    res = updater.apply(1, signature=sig, installed=install,
-                        download_opener=_download(data),
-                        runner=_fake_setup_llama(install, "b1355-cpu-b11908", calls=calls))
-    assert [c[0] for c in calls] == [str(uv), sys.executable]
-    assert res["runtime"]["state"] == "updated"
-
-
-def test_a_failed_reprovision_rolls_back_the_runtime_and_the_code(install, monkeypatch):
-    monkeypatch.setattr(updater_runtime, "_runtime_loads",
-                        lambda lib, backend, sl: (False, "the restored runtime does not load"))
-    before = au._tree_signature(_lib(install))
-    data, sig = _release()
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                      runner=_fake_setup_llama(install, "x", rc=1))
-    assert au._tree_signature(_lib(install)) == before
-    assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.1", "code rolled back"
-    assert "rolled back" in ei.value.summary and "put back" in ei.value.reason
-    assert updater_runtime.last_status()["state"] == "failed"
-    assert updater_runtime.read_pending() is None
-
-
-def test_a_fallback_with_a_previous_runtime_that_does_not_load_counts_as_failed(install,
-                                                                                monkeypatch):
-    monkeypatch.setattr(updater_runtime, "_runtime_loads",
-                        lambda lib, backend, sl: (False, "the restored runtime does not load"))
-    before = au._tree_signature(_lib(install))
-    data, sig = _release()
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                      runner=_fake_setup_llama(install, "b11928", backend="vulkan"))
-    assert "vulkan" in ei.value.reason
-    assert updater_runtime.last_status()["state"] == "failed"
-    assert au._tree_signature(_lib(install)) == before
-    assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.1"
-    assert _marker(install) == "amd-rocm b1349-cpu-b11719"
-
-
-def test_a_user_pin_is_never_reprovisioned_and_the_summary_names_it(install, cfg):
-    _provision(install, "vulkan", "b11600")
-    cfg["llama_runtime_pin"] = "b11600"
-    data, sig = _release()
-    res = updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                        runner=lambda c: pytest.fail(f"unexpected step {c}"))
-    assert res["klass"] == "reboot"
-    assert res["runtime_note"] == ("kept your pinned llama.cpp build b11600; this release "
-                                   "ships b11928")
-
-
 def test_the_server_defers_the_reprovision_to_its_restart(install):
     data, sig = _release()
-    res = updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                        runner=lambda c: pytest.fail(f"unexpected step {c}"),
-                        defer_runtime=True)
-    assert res["klass"] == "runtime" and res["runtime"] is None
-    assert res["runtime_note"].endswith("while localm restarts")
+    res = old_client_update(install, data, runner=lambda c: pytest.fail(f"unexpected step {c}"),
+                            defer=True)
+    assert res["runtime"] is None
     pending = updater_runtime.read_pending()
     assert (pending["backend"], pending["target"]) == ("amd-rocm", "b1355-cpu-b11908")
     status = updater_runtime.finish_pending(
@@ -379,55 +306,14 @@ def test_the_server_defers_the_reprovision_to_its_restart(install):
     assert updater_runtime.read_pending() is None
 
 
-def test_a_stale_pending_reprovision_is_dropped_by_an_update_that_needs_none(install):
-    data, sig = _release()
-    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                  defer_runtime=True)
-    assert updater_runtime.read_pending() is not None
-    data, sig = _release("0.3.3", pins=_PINS_031)
-    updater.apply(1, signature=sig, installed=install, download_opener=_download(data))
-    assert updater_runtime.read_pending() is None
-
-
 def test_rollback_restores_the_runtime_the_update_replaced(install):
     data, sig = _release()
-    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                  runner=_fake_setup_llama(install, "b1355-cpu-b11908"))
+    old_client_update(install, data, runner=_fake_setup_llama(install, 'b1355-cpu-b11908'))
     assert _marker(install) == "amd-rocm b1355-cpu-b11908"
     updater.rollback_last(installed=install)
     assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.1"
     assert _marker(install) == "amd-rocm b1349-cpu-b11719"
     assert (_lib(install) / "llama.dll").read_bytes().startswith(b"old-dll")
-
-
-def test_rollback_after_an_update_without_a_runtime_step_leaves_the_runtime(install):
-    data, sig = _release()
-    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                  runner=_fake_setup_llama(install, "b1355-cpu-b11908"))
-    data, sig = _release("0.3.3")
-    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                  runner=lambda c: pytest.fail(f"unexpected step {c}"))
-    assert not au.runtime_snapshot_dir(updater._backup_dir()).exists(), \
-        "the older update's runtime copy goes with its backup"
-    updater.rollback_last(installed=install)
-    assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.2"
-    assert _marker(install) == "amd-rocm b1355-cpu-b11908"
-
-
-def test_a_downgrade_returns_the_runtime_to_the_old_pins_and_names_what_it_keeps(install,
-                                                                                 monkeypatch):
-    monkeypatch.setattr(_version, "read_version", lambda: "0.3.2")
-    _provision(install, "amd-rocm", "b1355-cpu-b11908")
-    (install / "VERSION").write_text("0.3.2", encoding="utf-8")
-    old_updater = '_SIG_FORMAT = "localm-update-sig/2"\n\n\ndef verify_signature(d, s):\n    return None\n'
-    data, sig = _release("0.3.1", pins=_PINS_031, extra={"localm/updater.py": old_updater})
-    res = updater.apply(1, signature=sig, target_version="0.3.1", installed=install,
-                        download_opener=_download(data),
-                        runner=_fake_setup_llama(install, "b1349-cpu-b11719"))
-    assert res["downgrade"] is True
-    assert res["runtime"]["state"] == "updated"
-    assert _marker(install) == "amd-rocm b1349-cpu-b11719"
-    assert res["kept_for_updates"] == ["this version's update signature check and trusted keys"]
 
 
 # ------------------------- a runtime held by a process -----------------------
@@ -504,32 +390,9 @@ def _real_library(lib: Path) -> Path:
     return dst
 
 
-@pytest.mark.skipif(not (sys.platform == "win32" or sys.platform.startswith("linux")),
-                    reason="holder detection covers Windows and Linux")
-def test_a_foreign_holder_refuses_the_update_with_nothing_changed(install):
-    held = _real_library(_lib(install))
-    before = au._tree_signature(_lib(install))
-    holder = _hold_foreign(held)
-    try:
-        data, sig = _release()
-        with pytest.raises(LocalmError) as ei:
-            updater.apply(1, signature=sig, installed=install,
-                          download_opener=_download(data),
-                          runner=lambda c: pytest.fail(f"must not provision while held: {c}"))
-        assert _alive(holder.holder_pid), "a process of another program is never stopped"
-    finally:
-        _release_hold(holder)
-    assert "nothing was updated" in ei.value.summary
-    assert f"pid {holder.holder_pid}" in ei.value.reason and ei.value.reason.startswith("close ")
-    assert au._tree_signature(_lib(install)) == before
-    assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.1"
-    assert updater_runtime.read_pending() is None
-
-
 def test_the_restart_boot_does_not_start_a_download(install, monkeypatch):
     data, sig = _release()
-    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                  defer_runtime=True)
+    old_client_update(install, data, defer=True)
     from localm.cli import _core
     monkeypatch.setattr(updater, "repo_root", lambda: install)
     monkeypatch.setenv("LOCALM_RESTART_IN_PROGRESS", "1")
@@ -545,8 +408,7 @@ def test_the_restart_boot_does_not_start_a_download(install, monkeypatch):
                     reason="holder detection covers Windows and Linux")
 def test_a_foreign_holder_refuses_the_rollback_with_nothing_changed(install):
     data, sig = _release()
-    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                  runner=_fake_setup_llama(install, "b1355-cpu-b11908"))
+    old_client_update(install, data, runner=_fake_setup_llama(install, 'b1355-cpu-b11908'))
     held = _real_library(_lib(install))
     before = au._tree_signature(_lib(install))
     holder = _hold_foreign(held)
@@ -565,8 +427,7 @@ def test_a_foreign_holder_refuses_the_rollback_with_nothing_changed(install):
 
 def test_the_restart_path_carries_out_a_pending_reprovision(install, monkeypatch):
     data, sig = _release()
-    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                  defer_runtime=True)
+    old_client_update(install, data, defer=True)
     import localm.inference.backends.llamacpp._loader as loader
     import localm.inference.http_server as hs
     stopped = []
@@ -585,8 +446,7 @@ def test_a_runtime_step_that_rolls_the_update_back_stays_visible_with_what_to_do
                                                                                  monkeypatch):
     from localm import updater_parts
     data, sig = _release()
-    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                  defer_runtime=True)
+    old_client_update(install, data, defer=True)
     import localm.inference.http_server as hs
     monkeypatch.setattr(updater, "repo_root", lambda: install)
     monkeypatch.setattr(updater_runtime, "_runtime_loads",
@@ -608,8 +468,7 @@ def test_a_later_failed_step_is_named_after_a_rollback_that_restores_the_runtime
                                                                                  monkeypatch):
     from localm import updater_components, updater_parts
     data, sig = _release()
-    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                  defer_runtime=True)
+    old_client_update(install, data, defer=True)
     monkeypatch.setattr(updater, "repo_root", lambda: install)
     fake = _fake_setup_llama(install, "b1355-cpu-b11908")
     monkeypatch.setattr(subprocess, "run",
@@ -774,8 +633,7 @@ def test_first_start_only_for_commands_that_load_the_runtime(updated_by_an_old_u
 
 def test_a_pending_reprovision_of_a_rolled_back_version_is_dropped(install):
     data, sig = _release()
-    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                  defer_runtime=True)
+    old_client_update(install, data, defer=True)
     assert updater_runtime.read_pending()["version"] == "0.3.2"
     updater.rollback_last(installed=install)
     assert updater_runtime.finish_pending(
@@ -790,8 +648,7 @@ def test_a_runtime_released_while_waiting_is_reprovisioned(install):
     import threading
     held = _real_library(_lib(install))
     data, sig = _release()
-    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                  defer_runtime=True)
+    old_client_update(install, data, defer=True)
     holder = _hold(held)
     threading.Timer(1.0, _release_hold, args=(holder,)).start()
     status = updater_runtime.finish_pending(
@@ -846,32 +703,9 @@ def _home():
 
 @pytest.mark.skipif(sys.platform != "win32" and not sys.platform.startswith("linux"),
                     reason="holder detection covers Windows and Linux")
-def test_the_update_stops_this_installs_background_server_and_swaps(install):
-    _real_library(_lib(install))
-    server, server_pid, worker_pid, entry = _background_server(install, _home())
-    said = []
-    try:
-        data, sig = _release()
-        res = updater.apply(1, signature=sig, installed=install,
-                            download_opener=_download(data), say=said.append,
-                            runner=_fake_setup_llama(install, "b1355-cpu-b11908"))
-        assert not _alive(worker_pid) and not _alive(server_pid)
-    finally:
-        _release_hold(server)
-    assert res["runtime"]["state"] == "updated", res["runtime"]
-    assert _marker(install) == "amd-rocm b1355-cpu-b11908"
-    assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.2"
-    assert not entry.exists(), "the stopped server's registry entry is removed"
-    assert f"Stopping the background localm server (pid {server_pid})..." in said
-    assert any(m.startswith("Replacing the amd-rocm runtime") for m in said), said
-
-
-@pytest.mark.skipif(sys.platform != "win32" and not sys.platform.startswith("linux"),
-                    reason="holder detection covers Windows and Linux")
 def test_the_rollback_stops_this_installs_background_server_and_restores_both(install):
     data, sig = _release()
-    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                  runner=_fake_setup_llama(install, "b1355-cpu-b11908"))
+    old_client_update(install, data, runner=_fake_setup_llama(install, 'b1355-cpu-b11908'))
     _real_library(_lib(install))
     server, server_pid, worker_pid, _entry = _background_server(install, _home())
     said = []
@@ -889,8 +723,7 @@ def test_the_rollback_stops_this_installs_background_server_and_restores_both(in
                     reason="holder detection covers Windows and Linux")
 def test_a_rollback_from_the_half_state_brings_the_runtime_back_too(install):
     data, sig = _release()
-    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                  runner=_fake_setup_llama(install, "b1355-cpu-b11908"))
+    old_client_update(install, data, runner=_fake_setup_llama(install, 'b1355-cpu-b11908'))
     (install / "VERSION").write_text("0.3.1", encoding="utf-8")
     (install / "localm" / "__init__.py").write_text("# 0.3.1", encoding="utf-8")
     _real_library(_lib(install))
@@ -906,8 +739,7 @@ def test_a_rollback_from_the_half_state_brings_the_runtime_back_too(install):
 
 def test_a_runtime_that_cannot_be_restored_leaves_the_code_too(install, monkeypatch):
     data, sig = _release()
-    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                  runner=_fake_setup_llama(install, "b1355-cpu-b11908"))
+    old_client_update(install, data, runner=_fake_setup_llama(install, 'b1355-cpu-b11908'))
     before = au._tree_signature(_lib(install))
     real = au.restore_runtime
     calls = []
@@ -925,39 +757,6 @@ def test_a_runtime_that_cannot_be_restored_leaves_the_code_too(install, monkeypa
 
 # ------------------------- a release build that does not work -----------------
 
-def test_a_fallback_with_a_previous_runtime_that_loads_is_kept_and_the_update_goes_on(
-        install, monkeypatch):
-    monkeypatch.setattr(updater_runtime, "_runtime_loads", lambda lib, backend, sl: (True, ""))
-    data, sig = _release()
-    res = updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                        runner=_fake_setup_llama(install, "b11928", backend="vulkan"))
-    assert res["runtime"]["state"] == "kept", res["runtime"]
-    assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.2", "the update went on"
-    assert _marker(install) == "amd-rocm b1349-cpu-b11719"
-    assert updater_runtime.kept_runtime(_lib(install)) == {
-        "backend": "amd-rocm", "kept": "b1349-cpu-b11719", "target": "b1355-cpu-b11908",
-        "why": "setup-llama installed the vulkan runtime instead of amd-rocm"}
-    assert "kept the amd-rocm runtime b1349-cpu-b11719" in res["runtime_note"]
-    assert "To try it again: localm setup-llama --backend amd-rocm --force" in res["runtime_note"]
-    assert updater_runtime.last_status()["state"] == "kept"
-    after = updater_runtime.plan(install, install)
-    assert after["reprovision"] is False and "kept the amd-rocm runtime" in after["note"]
-
-
-def test_a_failed_setup_keeps_the_previous_runtime_but_tries_the_release_again(
-        install, monkeypatch):
-    monkeypatch.setattr(updater_runtime, "_runtime_loads", lambda lib, backend, sl: (True, ""))
-    data, sig = _release()
-    res = updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                        runner=_fake_setup_llama(install, "x", rc=1))
-    assert res["runtime"]["state"] == "kept"
-    assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.2"
-    assert "could not be installed (setup-llama exited 1)" in res["runtime_note"]
-    assert "tried again on the next start" in res["runtime_note"]
-    assert updater_runtime.kept_runtime(_lib(install)) is None
-    assert updater_runtime.plan(install, install)["reprovision"] is True
-
-
 def test_the_kept_record_is_not_part_of_the_runtime_and_never_writes_into_a_snapshot(tmp_path):
     lib = _provision(tmp_path / "inst", "vulkan", "b11757")
     snap = tmp_path / "snap"
@@ -970,19 +769,6 @@ def test_the_kept_record_is_not_part_of_the_runtime_and_never_writes_into_a_snap
     updater_runtime._record_kept(lib, "vulkan", "b11757", "b12000", "did not load")
     assert '"b11928"' in twin.read_text(encoding="utf-8")
     assert updater_runtime.kept_runtime(lib)["target"] == "b12000"
-
-
-def test_a_previous_runtime_that_does_not_load_either_still_rolls_the_update_back(
-        install, monkeypatch):
-    monkeypatch.setattr(updater_runtime, "_runtime_loads",
-                        lambda lib, backend, sl: (False, "registered no GPU device"))
-    data, sig = _release()
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                      runner=_fake_setup_llama(install, "x", rc=1))
-    assert "does not load either (registered no GPU device)" in ei.value.reason
-    assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.1"
-    assert updater_runtime.kept_runtime(_lib(install)) is None
 
 
 def test_a_kept_record_for_another_build_or_backend_does_not_stop_the_reprovision(tmp_path, cfg):
@@ -1080,8 +866,7 @@ def test_a_restored_runtime_with_no_recorded_build_is_kept_and_names_how_to_try_
 def test_a_missing_visual_cpp_runtime_does_not_roll_the_runtime_back(install):
     from localm.setup_spec import VC_RUNTIME_ABSENT_EXIT
     data, sig = _release()
-    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                  defer_runtime=True)
+    old_client_update(install, data, defer=True)
     placed = _fake_setup_llama(install, "b1355-cpu-b11908")
 
     def run(cmd):

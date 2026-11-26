@@ -3,6 +3,8 @@
 issue_tracker so no network). Apply is user-initiated; failures are surfaced, not
 faked."""
 
+from pathlib import Path
+
 import pytest
 from click.testing import CliRunner
 
@@ -92,61 +94,56 @@ def test_update_check_reports_available(monkeypatch):
     assert "Run `localm update` to apply" in r.output
 
 
-def test_update_applies_with_yes(monkeypatch):
+def _newer(monkeypatch):
     monkeypatch.setattr(updater, "available", lambda: True)
     monkeypatch.setattr(updater, "check", lambda: {
         "current": "0.1.0", "latest": "v0.2.0", "newer": True, "notes": "", "asset": {"id": 3}})
+
+
+def test_update_hands_the_update_over_with_yes(monkeypatch):
+    from localm import _update_parent, updater_handoff
+    _newer(monkeypatch)
+    monkeypatch.setenv(_update_parent.WORK, "1")
     captured = {}
 
-    def fake_apply(aid, **kw):
+    def prepare(aid, **kw):
         captured["aid"] = aid
-        return {"applied": True, "version": "0.2.0", "klass": "reboot", "backup": "b"}
+        return updater_handoff.Prepared(Path("."), "0" * 32, "0.1.0", "0.2.0", None, True,
+                                        None, False, None)
 
-    monkeypatch.setattr(updater, "apply", fake_apply)
+    monkeypatch.setattr(updater_handoff, "prepare", prepare)
+    monkeypatch.setattr(updater_handoff, "hand_off",
+                        lambda prepared, **kw: captured.update(mode=kw["mode"], new=prepared.new))
     r = CliRunner().invoke(main, ["update", "--yes"])
-    assert captured["aid"] == 3
-    assert "Updated to 0.2.0" in r.output
-    assert "Restart localm" in r.output
+    assert r.exit_code == _update_parent.HANDED_OFF, r.output
+    assert captured == {"aid": 3, "mode": "command", "new": "0.2.0"}
 
 
 def test_update_apply_failure_is_surfaced(monkeypatch):
+    from localm import _update_parent, updater_handoff
     from localm.bugreport import LocalmError
-    monkeypatch.setattr(updater, "available", lambda: True)
-    monkeypatch.setattr(updater, "check", lambda: {
-        "current": "0.1.0", "latest": "v0.2.0", "newer": True, "notes": "", "asset": {"id": 3}})
+    _newer(monkeypatch)
+    monkeypatch.setenv(_update_parent.WORK, "1")
 
     def boom(aid, **kw):
-        raise LocalmError("the post-update step failed; rolled back", reason="uv exited 1")
+        raise LocalmError("the update was not started; nothing was changed",
+                          reason="its check ended with 1")
 
-    monkeypatch.setattr(updater, "apply", boom)
+    monkeypatch.setattr(updater_handoff, "prepare", boom)
     r = CliRunner().invoke(main, ["update", "--yes"])
-    assert "Update failed" in r.output and "rolled back" in r.output
+    assert r.exit_code == 1
+    assert "Update failed" in r.output and "its check ended with 1" in r.output
 
 
-def test_update_setup_class_warns_to_run_setup(monkeypatch):
-    monkeypatch.setattr(updater, "available", lambda: True)
-    monkeypatch.setattr(updater, "check", lambda: {
-        "current": "0.1.0", "latest": "v0.2.0", "newer": True, "notes": "", "asset": {"id": 3}})
-    monkeypatch.setattr(updater, "apply", lambda aid, **kw: {
-        "applied": True, "version": "0.2.0", "klass": "setup", "backup": "b"})
-    for script in ("setup.bat", "setup.sh"):
-        monkeypatch.setattr(updater, "setup_script", lambda script=script: script)
-        r = CliRunner().invoke(main, ["update", "--yes"])
-        assert f"needs {script} re-run" in r.output, script
-
-
-def test_update_of_a_git_clone_says_git_lists_the_replaced_files(monkeypatch):
-    monkeypatch.setattr(updater, "available", lambda: True)
-    monkeypatch.setattr(updater, "check", lambda: {
-        "current": "0.1.0", "latest": "v0.2.0", "newer": True, "notes": "", "asset": {"id": 3}})
-    for clone in (True, False):
-        monkeypatch.setattr(updater, "apply", lambda aid, clone=clone, **kw: {
-            "applied": True, "version": "0.2.0", "klass": "reboot", "backup": "b",
-            "git_clone": clone})
-        r = CliRunner().invoke(main, ["update", "--yes"])
-        output = " ".join(r.output.split())
-        assert ("This install is a git clone, so git now lists the files the update "
-                "replaced as changed" in output) is clone
+def test_an_update_not_started_by_the_localm_command_changes_nothing(monkeypatch):
+    from localm import _update_parent, updater_handoff
+    _newer(monkeypatch)
+    monkeypatch.delenv(_update_parent.WORK, raising=False)
+    monkeypatch.setattr(updater_handoff, "prepare",
+                        lambda *a, **k: pytest.fail("prepared without its waiting parent"))
+    r = CliRunner().invoke(main, ["update", "--yes"])
+    assert r.exit_code == 1
+    assert "start it with the localm command" in " ".join(r.output.split())
 
 
 def test_update_rollback(monkeypatch):

@@ -14,6 +14,7 @@ import pytest
 
 from localm import _apply_update as au
 from tests._held_file import held
+from tests._old_client_update import backup_and_swap
 
 
 def _make_zip(path, files, wrap=None):
@@ -77,17 +78,6 @@ def test_extract_descends_into_wrapper(tmp_path):
 
 # --------------------------- swap entries -------------------------------
 
-def test_swap_entries_excludes_never_touch(tmp_path):
-    staged = tmp_path / "s"
-    (staged / "localm").mkdir(parents=True)
-    (staged / ".venv").mkdir()
-    (staged / "home").mkdir()
-    (staged / "VERSION").write_text("0.2.0")
-    names = au.swap_entries(staged)
-    assert "localm" in names and "VERSION" in names
-    assert ".venv" not in names and "home" not in names
-
-
 # --------------------- swap + backup + rollback -------------------------
 
 def _fake_install(root):
@@ -109,34 +99,13 @@ def _staged_build(root):
     (root / "pyproject.toml").write_text("[project]", encoding="utf-8")
 
 
-def test_swap_applies_changes_deletions_and_preserves_never_touch(tmp_path):
-    inst, staged, bdir = tmp_path / "inst", tmp_path / "staged", tmp_path / "bak"
-    inst.mkdir(); staged.mkdir()
-    _fake_install(inst)
-    _staged_build(staged)
-
-    names = au.swap_with_backup(staged, inst, bdir)
-
-    # New content swapped in.
-    assert (inst / "localm" / "__init__.py").read_text() == "new"
-    assert (inst / "localm" / "added.py").exists()
-    assert (inst / "VERSION").read_text().strip() == "0.2.0"
-    assert (inst / "pyproject.toml").exists()
-    # Upstream deletion applied (whole-tree replace of localm/).
-    assert not (inst / "localm" / "gone.py").exists()
-    # Never-touch trees untouched.
-    assert (inst / ".venv" / "marker").read_text() == "keep"
-    assert (inst / "home" / "config.json").read_text() == "user data"
-    assert "VERSION" in names and ".venv" not in names
-
-
 def test_rollback_restores_exact_pre_apply_state(tmp_path):
     inst, staged, bdir = tmp_path / "inst", tmp_path / "staged", tmp_path / "bak"
     inst.mkdir(); staged.mkdir()
     _fake_install(inst)
     _staged_build(staged)
 
-    names = au.swap_with_backup(staged, inst, bdir)
+    names = backup_and_swap(staged, inst, bdir)
     au.rollback(bdir, inst, names)
 
     assert (inst / "localm" / "__init__.py").read_text() == "old"
@@ -191,61 +160,6 @@ def test_a_held_file_does_not_stop_the_rest_of_its_folder_coming_back(tmp_path, 
     assert (inst / "localm" / "z.py").read_text(encoding="utf-8") == "OLD"
 
 
-@_WINDOWS_HOLDS
-def test_a_file_held_during_the_swap_leaves_the_previous_files_in_place(tmp_path):
-    inst, staged, bdir = tmp_path / "inst", tmp_path / "staged", tmp_path / "bak"
-    inst.mkdir()
-    staged.mkdir()
-    _fake_install(inst)
-    _staged_build(staged)
-    (inst / "localm" / "z_last.py").write_text("old", encoding="utf-8")
-    raised = None
-    with held(inst / "localm" / "z_last.py"):
-        try:
-            au.swap_with_backup(staged, inst, bdir)
-        except RuntimeError as e:
-            raised = e
-    assert (inst / "localm" / "__init__.py").read_text(encoding="utf-8") == "old"
-    assert (inst / "localm" / "gone.py").read_text(encoding="utf-8") == "removed upstream"
-    assert (inst / "VERSION").read_text(encoding="utf-8").strip() == "0.1.0"
-    assert not (inst / "pyproject.toml").exists()
-    assert raised is not None and "rollback also failed" in str(raised)
-    assert (bdir / "localm" / "__init__.py").exists(), "the backup is kept for a manual restore"
-
-
-@_WINDOWS_HOLDS
-def test_a_backup_that_cannot_be_completed_is_removed_and_nothing_is_swapped(tmp_path):
-    inst, staged, bdir = tmp_path / "inst", tmp_path / "staged", tmp_path / "bak"
-    inst.mkdir()
-    staged.mkdir()
-    _fake_install(inst)
-    _staged_build(staged)
-    raised = None
-    with held(inst / "localm" / "gone.py", exclusive=True):
-        try:
-            au.swap_with_backup(staged, inst, bdir)
-        except au.BackupFailed as e:
-            raised = e
-    assert not bdir.exists(), "no partial backup stays behind"
-    assert (inst / "localm" / "__init__.py").read_text(encoding="utf-8") == "old"
-    assert (inst / "VERSION").read_text(encoding="utf-8").strip() == "0.1.0"
-    assert raised is not None
-
-
-def test_a_swap_that_was_undone_removes_its_backup(tmp_path, monkeypatch):
-    inst, staged, bdir = tmp_path / "inst", tmp_path / "staged", tmp_path / "bak"
-    inst.mkdir()
-    staged.mkdir()
-    _fake_install(inst)
-    _staged_build(staged)
-    monkeypatch.setattr(au, "apply_files",
-                        lambda *a, **k: (_ for _ in ()).throw(OSError("swap boom")))
-    with pytest.raises(OSError, match="swap boom"):
-        au.swap_with_backup(staged, inst, bdir)
-    assert (inst / "localm" / "__init__.py").read_text(encoding="utf-8") == "old"
-    assert not bdir.exists()
-
-
 # --------- preserve provisioned native binaries across a swap -----------
 # The runtime wheel's lib/ holds the .dll/.so that `localm setup-llama` provisions.
 # They are gitignored, so a build.zip carries only the empty scaffold.
@@ -291,54 +205,19 @@ def test_preserve_within_helpers():
     assert au._name_has_preserved("localm") is False
 
 
-def test_swap_preserves_provisioned_binaries_and_updates_scaffold(tmp_path):
-    inst, staged, bdir = tmp_path / "i", tmp_path / "s", tmp_path / "b"
-    inst.mkdir(); staged.mkdir()
-    _install_with_runtime(inst)
-    _staged_with_runtime(staged)
-
-    au.swap_with_backup(staged, inst, bdir)
-
-    # Provisioned binaries SURVIVE.
-    assert (inst / _LIB / "llama.dll").read_bytes() == b"PROVISIONED-NATIVE-BINARY"
-    assert (inst / _LIB / "ggml-base.dll").exists()
-    # ... while the rest of runtime/ (scaffold source) still updates.
-    assert (inst / "runtime/localm_llama_runtime/__init__.py").read_text() == "SCAFFOLD_V2"
-    assert (inst / "runtime" / "README.md").read_text() == "rt v2"
-    # backup skips the preserved binaries (nothing to restore; avoids copying them).
-    assert not (bdir / _LIB / "llama.dll").exists()
-
-
 def test_rollback_keeps_provisioned_binaries_and_restores_scaffold(tmp_path):
     inst, staged, bdir = tmp_path / "i", tmp_path / "s", tmp_path / "b"
     inst.mkdir(); staged.mkdir()
     _install_with_runtime(inst)
     _staged_with_runtime(staged)
 
-    names = au.swap_with_backup(staged, inst, bdir)
+    names = backup_and_swap(staged, inst, bdir)
     au.rollback(bdir, inst, names)
 
     # Binaries never left; scaffold restored to its pre-apply content.
     assert (inst / _LIB / "llama.dll").read_bytes() == b"PROVISIONED-NATIVE-BINARY"
     assert (inst / "runtime/localm_llama_runtime/__init__.py").read_text() == "SCAFFOLD_V1"
     assert (inst / "runtime" / "README.md").read_text() == "rt v1"
-
-
-def test_swap_does_not_choke_on_a_held_open_binary(tmp_path):
-    """While localm runs, a loaded DLL is file-locked on Windows, and a swap that
-    deletes it raises WinError 32 and can strand a half-applied tree. The preserve
-    keeps the swap off the binary entirely, so it completes with the binary intact.
-    On POSIX an open file is deletable, so this also pins that the binary is
-    preserved rather than replaced by the empty scaffold."""
-    inst, staged, bdir = tmp_path / "i", tmp_path / "s", tmp_path / "b"
-    inst.mkdir(); staged.mkdir()
-    _install_with_runtime(inst)
-    _staged_with_runtime(staged)
-
-    with open(inst / _LIB / "llama.dll", "rb") as _held:   # simulate the running process
-        au.swap_with_backup(staged, inst, bdir)            # must not raise
-    assert (inst / _LIB / "llama.dll").read_bytes() == b"PROVISIONED-NATIVE-BINARY"
-    assert (inst / "runtime/localm_llama_runtime/__init__.py").read_text() == "SCAFFOLD_V2"
 
 
 # --------------------------- post-swap cmd ------------------------------
@@ -506,7 +385,7 @@ class TestRollbackRefusesPoisonedManifestNames:
 
     @pytest.mark.parametrize("name", ["home", ".venv", ".git", "issues", "qa"])
     def test_never_touch_name_is_refused(self, tmp_path, name):
-        """swap_entries EXCLUDES NEVER_TOUCH, so a manifest naming one is poisoned
+        """An update never replaces a NEVER_TOUCH name, so a manifest naming one is poisoned
         by construction. It matters most on a portable install, where `home` sits
         INSIDE the install root: rolling back an entry named `home` would delete
         the user's models, chat history and auth keys, and the backup does not
@@ -565,20 +444,6 @@ def test_rollback_raises_when_a_restore_fails(tmp_path, monkeypatch):
         au.rollback(bdir, inst, ["localm"])
 
 
-def test_swap_with_backup_surfaces_double_failure(tmp_path, monkeypatch):
-    staged, inst, bdir = tmp_path / "s", tmp_path / "i", tmp_path / "b"
-    staged.mkdir(); inst.mkdir()
-    (staged / "VERSION").write_text("0.2.0", encoding="utf-8")
-
-    def raise_os(*a, **k):
-        raise OSError("boom")
-
-    monkeypatch.setattr(au, "apply_files", raise_os)   # swap fails
-    monkeypatch.setattr(au, "rollback", raise_os)      # AND rollback fails
-    with pytest.raises(RuntimeError, match="rollback also failed"):
-        au.swap_with_backup(staged, inst, bdir)
-
-
 # --------- _prune surfaces a file it cannot remove (do not hide) ---------
 # _prune RETURNS the file-removal failures so the caller surfaces them, while a
 # benign already-empty-dir rmdir failure stays swallowed.
@@ -621,7 +486,7 @@ def test_rollback_surfaces_prune_unlink_failure(tmp_path, monkeypatch):
     inst.mkdir(); staged.mkdir()
     _install_with_runtime(inst)
     _staged_with_runtime(staged)
-    names = au.swap_with_backup(staged, inst, bdir)          # inst/runtime now scaffold V2
+    names = backup_and_swap(staged, inst, bdir)          # inst/runtime now scaffold V2
 
     real_unlink = au.Path.unlink
 
@@ -633,34 +498,6 @@ def test_rollback_surfaces_prune_unlink_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(au.Path, "unlink", flaky_unlink)
     with pytest.raises(RuntimeError, match="rollback incomplete"):
         au.rollback(bdir, inst, names)
-
-
-def test_apply_files_logs_prune_failure_without_raising(tmp_path, monkeypatch, caplog):
-    """On the FORWARD apply path a stale file that cannot be pruned is LOGGED, not raised:
-    a leftover file must not brick an otherwise-good update, but must stay visible."""
-    import logging
-    inst, staged = tmp_path / "i", tmp_path / "s"
-    inst.mkdir(); staged.mkdir()
-    _install_with_runtime(inst)
-    _staged_with_runtime(staged)
-    # A file the new build DROPPED (present in the install runtime, absent in staged) so
-    # apply_files' _prune(keep_src=...) actually tries to remove it.
-    dropped = inst / "runtime" / "localm_llama_runtime" / "old_helper.py"
-    dropped.write_text("dropped by the new build", encoding="utf-8")
-    names = au.swap_entries(staged)
-
-    real_unlink = au.Path.unlink
-
-    def flaky_unlink(self, *a, **k):
-        if self.name == "old_helper.py":
-            raise OSError("locked by AV")
-        return real_unlink(self, *a, **k)
-
-    monkeypatch.setattr(au.Path, "unlink", flaky_unlink)
-    with caplog.at_level(logging.WARNING, logger="localm"):
-        au.apply_files(staged, inst, names)                  # must NOT raise
-    assert "could not remove" in caplog.text
-    assert dropped.exists()                                  # the un-prunable file stayed
 
 
 def test_prune_swallows_empty_dir_rmdir_failure(tmp_path, monkeypatch):

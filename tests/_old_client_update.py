@@ -34,6 +34,53 @@ def _copy(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
+def backup_and_swap(root, inst, backup_dir, names=None) -> list:
+    """Back up the top-level entries *names* (default: every entry of the extracted
+    release *root* an update replaces) of the install *inst* into *backup_dir* with its
+    list, then put *root*'s versions in their place, the way an older localm's updater
+    does: a name holding a ``PRESERVE_WITHIN`` folder (the native runtime) is backed up
+    and replaced around that folder. Returns the names."""
+    root, inst, backup_dir = Path(root), Path(inst), Path(backup_dir)
+    names = (sorted(p.name for p in root.iterdir() if p.name not in au.NEVER_TOUCH)
+             if names is None else list(names))
+    shutil.rmtree(backup_dir, ignore_errors=True)
+    backup_dir.mkdir(parents=True)
+    for name in names:
+        src = inst / name
+        if not src.exists():
+            continue
+        if src.is_dir() and au._name_has_preserved(name):
+            au._copy_into(src, backup_dir / name, name)
+        else:
+            _copy(src, backup_dir / name)
+    files = sorted(p.relative_to(backup_dir).as_posix() for p in backup_dir.rglob("*")
+                   if p.is_file() and "__pycache__" not in p.parts)
+    (backup_dir / au.BACKUP_RECORD).write_text(
+        json.dumps({"names": names, "files": files}), encoding="utf-8")
+    for name in names:
+        src, dst = root / name, inst / name
+        if not src.exists():
+            continue
+        if au._name_has_preserved(name):
+            au._copy_into(src, dst, name)
+            for d in sorted(dst.rglob("*"), key=lambda q: len(q.parts), reverse=True):
+                rel = d.relative_to(dst)
+                if au._within_preserved(f"{name}/{rel.as_posix()}") or (src / rel).exists():
+                    continue
+                if d.is_dir():
+                    if not any(d.iterdir()):
+                        d.rmdir()
+                else:
+                    d.unlink()
+            continue
+        if dst.is_dir():
+            shutil.rmtree(dst)
+        elif dst.exists():
+            dst.unlink()
+        _copy(src, dst)
+    return names
+
+
 def old_client_update(inst, data: bytes, *, runner=None, defer: bool = False,
                       say=None) -> dict:
     """Install the build zip *data* into the install *inst* the way an older localm's
@@ -54,27 +101,11 @@ def old_client_update(inst, data: bytes, *, runner=None, defer: bool = False,
     zip_path.write_bytes(data)
     root = au.extract(zip_path, work / "staging")
     version = (root / "VERSION").read_text(encoding="utf-8").strip()
-    names = sorted(p.name for p in root.iterdir() if p.name not in au.NEVER_TOUCH)
     rt_plan = updater_runtime.plan(root, inst)
     comp_plans = uc.plan(root, inst, deep=False)
     deps_changed = _deps(root) != _deps(inst)
 
-    shutil.rmtree(backup_dir, ignore_errors=True)
-    backup_dir.mkdir(parents=True)
-    for name in names:
-        if (inst / name).exists():
-            _copy(inst / name, backup_dir / name)
-    files = sorted(p.relative_to(backup_dir).as_posix() for p in backup_dir.rglob("*")
-                   if p.is_file() and "__pycache__" not in p.parts)
-    (backup_dir / au.BACKUP_RECORD).write_text(
-        json.dumps({"names": names, "files": files}), encoding="utf-8")
-    for name in names:
-        dst = inst / name
-        if dst.is_dir():
-            shutil.rmtree(dst)
-        elif dst.exists():
-            dst.unlink()
-        _copy(root / name, dst)
+    names = backup_and_swap(root, inst, backup_dir)
     shutil.rmtree(work, ignore_errors=True)
     (updir / "applied_names.json").write_text(json.dumps(names), encoding="utf-8")
 

@@ -5,15 +5,15 @@ exercised here (it has its own detached-helper tests)."""
 
 import json
 import pathlib
-import subprocess
 import sys
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from localm import _version, updater
+from localm import _version, updater, updater_handoff
 from localm.bugreport import LocalmError
 from tests._exe_stub import write_exe_stub
+from tests._old_client_update import old_client_update
 from tests._net_config import set_config
 from tests._update_signing import envelope, keyset
 
@@ -317,77 +317,6 @@ def test_refuse_downgrade_refuses_when_the_installed_version_is_unreadable(
 
 # ------------------------------ classify --------------------------------
 
-def test_classify_reboot_when_deps_unchanged(tmp_path):
-    inst, stg = tmp_path / "i", tmp_path / "s"
-    inst.mkdir(); stg.mkdir()
-    _write_pyproject(inst, ["click", "fastapi"])
-    _write_pyproject(stg, ["click", "fastapi"])
-    assert updater.classify(stg, inst) == "reboot"
-
-
-def test_classify_deps_when_changed(tmp_path):
-    inst, stg = tmp_path / "i", tmp_path / "s"
-    inst.mkdir(); stg.mkdir()
-    _write_pyproject(inst, ["click"])
-    _write_pyproject(stg, ["click", "httpx"])
-    assert updater.classify(stg, inst) == "deps"
-
-
-def test_classify_deps_when_extra_changes(tmp_path):
-    inst, stg = tmp_path / "i", tmp_path / "s"
-    inst.mkdir(); stg.mkdir()
-    _write_pyproject(inst, ["click"], extras={"voice": ["faster-whisper"]})
-    _write_pyproject(stg, ["click"], extras={"voice": ["faster-whisper", "soundfile"]})
-    assert updater.classify(stg, inst) == "deps"
-
-
-def test_classify_setup_on_python_change(tmp_path):
-    inst, stg = tmp_path / "i", tmp_path / "s"
-    inst.mkdir(); stg.mkdir()
-    _write_pyproject(inst, ["click"], requires_python="==3.12.*")
-    _write_pyproject(stg, ["click"], requires_python="==3.13.*")
-    assert updater.classify(stg, inst) == "setup"
-
-
-def test_classify_setup_when_requires_python_removed(tmp_path):
-    # Installed pins requires-python; the staged build drops it -> still a setup change.
-    inst, stg = tmp_path / "i", tmp_path / "s"
-    inst.mkdir(); stg.mkdir()
-    _write_pyproject(inst, ["click"], requires_python="==3.12.*")
-    (stg / "pyproject.toml").write_text(
-        '[project]\nname = "localm"\ndependencies = ["click"]\n', encoding="utf-8")
-    assert updater.classify(stg, inst) == "setup"
-
-
-def test_classify_manifest_escalates_to_runtime(tmp_path):
-    inst, stg = tmp_path / "i", tmp_path / "s"
-    inst.mkdir(); stg.mkdir()
-    _write_pyproject(inst, ["click"])
-    _write_pyproject(stg, ["click"])
-    assert updater.classify(stg, inst, manifest={"needs": "runtime"}) == "runtime"
-
-
-def test_classify_takes_max_of_manifest_and_auto(tmp_path):
-    inst, stg = tmp_path / "i", tmp_path / "s"
-    inst.mkdir(); stg.mkdir()
-    _write_pyproject(inst, ["click"])
-    _write_pyproject(stg, ["click", "httpx"])         # auto-detect deps
-    # manifest says only reboot, but deps detected -> deps wins (escalate, never down)
-    assert updater.classify(stg, inst, manifest={"needs": "reboot"}) == "deps"
-
-
-def test_read_manifest(tmp_path):
-    (tmp_path / "update.json").write_text(
-        json.dumps({"version": "0.2.0", "needs": "deps"}), encoding="utf-8")
-    assert updater.read_manifest(tmp_path)["needs"] == "deps"
-    assert updater.read_manifest(tmp_path / "nope") == {}
-
-
-def test_class_summary_is_human():
-    for k in ("reboot", "deps", "runtime", "setup"):
-        assert isinstance(updater.class_summary(k), str) and updater.class_summary(k)
-
-
 # ------------------------------ download --------------------------------
 
 def test_download_streams_to_file(tmp_path, monkeypatch):
@@ -507,30 +436,6 @@ def _config(monkeypatch, tmp_path):
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
 
 
-def test_apply_reboot_swaps_and_reports(tmp_path, monkeypatch, sig_env):
-    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
-    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
-    inst = _fake_install(tmp_path, deps=("click",))
-    op, sig = _signed_build("0.2.0", ["click"])
-    res = updater.apply(5, installed=inst, signature=sig, download_opener=op)
-    assert res["applied"] is True and res["version"] == "0.2.0"
-    assert res["klass"] == "reboot"  # deps unchanged
-    assert (inst / "VERSION").read_text().strip() == "0.2.0"
-    assert (inst / "localm" / "__init__.py").read_text() == "# 0.2.0"
-
-
-def test_apply_deps_runs_post_command(tmp_path, monkeypatch, sig_env, no_uv):
-    _config(monkeypatch, tmp_path)
-    inst = _fake_install(tmp_path, deps=("click",))
-    uv = _fake_uv(inst / ".uv")
-    ran = []
-    op, sig = _signed_build("0.2.0", ["click", "httpx"])
-    res = updater.apply(5, installed=inst, signature=sig, download_opener=op,
-                        runner=lambda c: ran.append(c) or 0)
-    assert res["klass"] == "deps"
-    assert ran and ran[0][:3] == [str(uv), "sync", "--frozen"]
-
-
 def _signed_build_without_lock(version, deps):
     import io
     import zipfile
@@ -547,20 +452,6 @@ def _signed_build_without_lock(version, deps):
     return opener, envelope(data, [_TEST_PRIV])
 
 
-def test_apply_deps_refuses_a_build_without_a_lock_before_the_swap(
-        tmp_path, monkeypatch, sig_env, no_uv):
-    _config(monkeypatch, tmp_path)
-    inst = _fake_install(tmp_path, deps=("click",))
-    _fake_uv(inst / ".uv")
-    ran = []
-    op, sig = _signed_build_without_lock("0.2.0", ["click", "httpx"])
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(5, installed=inst, signature=sig, download_opener=op,
-                      runner=lambda c: ran.append(c) or 0)
-    assert "nothing was changed" in ei.value.summary and "uv.lock" in ei.value.reason
-    assert ran == [] and (inst / "VERSION").read_text().strip() == "0.1.0"
-
-
 def test_apply_under_net_mode_off_is_refused_before_anything_is_downloaded(
         tmp_path, monkeypatch, sig_env, no_uv):
     _config(monkeypatch, tmp_path)
@@ -571,163 +462,11 @@ def test_apply_under_net_mode_off_is_refused_before_anything_is_downloaded(
     downloads = []
     op, sig = _signed_build("0.2.0", ["click", "httpx"])
     with pytest.raises(LocalmError) as ei:
-        updater.apply(5, installed=inst, signature=sig,
-                      download_opener=lambda *a: downloads.append(a) or op(*a),
-                      runner=lambda c: ran.append(c) or 0)
+        updater_handoff.prepare(5, installed=inst, signature=sig,
+                                download_opener=lambda *a: downloads.append(a) or op(*a))
     assert ei.value.stage == "network_off"
     assert downloads == []
     assert ran == [] and (inst / "VERSION").read_text().strip() == "0.1.0"
-
-
-def test_apply_deps_under_net_mode_off_runs_with_the_update_exemption(
-        tmp_path, monkeypatch, sig_env, no_uv):
-    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w",
-                                     "update_ignore_net_policy": True})
-    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
-    monkeypatch.setenv("LOCALM_NET_MODE", "off")
-    inst = _fake_install(tmp_path, deps=("click",))
-    uv = _fake_uv(inst / ".uv")
-    ran = []
-    op, sig = _signed_build("0.2.0", ["click", "httpx"])
-    res = updater.apply(5, installed=inst, signature=sig, download_opener=op,
-                        runner=lambda c: ran.append(c) or 0)
-    assert res["klass"] == "deps" and ran[0][:3] == [str(uv), "sync", "--frozen"]
-
-
-def test_apply_deps_uses_the_contained_uv_that_is_not_on_path(tmp_path, monkeypatch, sig_env, no_uv):
-    """The reported failure: a Portable install whose uv lives in .uv and nowhere on PATH."""
-    _config(monkeypatch, tmp_path)
-    inst = _fake_install(tmp_path, deps=("click",))
-    uv = _fake_uv(inst / ".uv")
-    ran = []
-    op, sig = _signed_build("0.2.0", ["click", "httpx"])
-    updater.apply(5, installed=inst, signature=sig, download_opener=op,
-                  runner=lambda c: ran.append(c) or 0)
-    assert ran[0][0] == str(uv)
-    assert (inst / "VERSION").read_text().strip() == "0.2.0"
-
-
-def test_apply_deps_uses_the_uv_on_path_when_the_install_has_none(tmp_path, monkeypatch, sig_env, no_uv):
-    _config(monkeypatch, tmp_path)
-    inst = _fake_install(tmp_path, deps=("click",))
-    on_path = _fake_uv(tmp_path / "somebin")
-    monkeypatch.setenv("PATH", str(on_path.parent))
-    ran = []
-    op, sig = _signed_build("0.2.0", ["click", "httpx"])
-    updater.apply(5, installed=inst, signature=sig, download_opener=op,
-                  runner=lambda c: ran.append(c) or 0)
-    assert pathlib.Path(ran[0][0]).samefile(on_path)
-    assert not (inst / ".uv").exists()
-
-
-def test_apply_deps_uses_the_shared_uv_the_install_record_names(tmp_path, monkeypatch, sig_env, no_uv):
-    """A user's own uv, chosen at setup and recorded: found by its recorded path
-    even though it is on no PATH, and preferred over a different uv on PATH."""
-    _config(monkeypatch, tmp_path)
-    inst = _fake_install(tmp_path, deps=("click",))
-    own = _fake_uv(tmp_path / "my-uv-home")
-    other = _fake_uv(tmp_path / "otherbin")
-    monkeypatch.setenv("PATH", str(other.parent))
-    (inst / ".localm-install.json").write_text(
-        json.dumps({"schema": 3, "uv_exe": str(own)}), encoding="utf-8")
-    ran = []
-    op, sig = _signed_build("0.2.0", ["click", "httpx"])
-    updater.apply(5, installed=inst, signature=sig, download_opener=op,
-                  runner=lambda c: ran.append(c) or 0)
-    assert ran[0][0] == str(own)
-
-
-def test_apply_deps_installs_the_pinned_uv_when_the_install_has_none(tmp_path, monkeypatch, sig_env, no_uv):
-    _config(monkeypatch, tmp_path)
-    inst = _fake_install(tmp_path, deps=("click",))
-    from localm import uv_tool
-    boots = []
-
-    def fake_bootstrap(root, **kw):
-        boots.append(pathlib.Path(root))
-        return _fake_uv(pathlib.Path(root) / ".uv")
-
-    monkeypatch.setattr(uv_tool, "bootstrap_uv", fake_bootstrap)
-    ran = []
-    op, sig = _signed_build("0.2.0", ["click", "httpx"])
-    res = updater.apply(5, installed=inst, signature=sig, download_opener=op,
-                        runner=lambda c: ran.append(c) or 0)
-    assert res["applied"] is True and boots == [inst]
-    assert ran[0][0] == str(inst / ".uv" / _UV_NAME)
-    recorded = json.loads((inst / ".localm-install.json").read_text(encoding="utf-8"))
-    assert pathlib.Path(recorded["uv_dir"]) == (inst / ".uv").resolve()
-
-
-def test_apply_deps_without_any_uv_refuses_before_swapping_and_says_what_it_tried(
-        tmp_path, monkeypatch, sig_env, no_uv):
-    _config(monkeypatch, tmp_path)
-    inst = _fake_install(tmp_path, deps=("click",))
-    from localm import uv_tool
-    from localm.bugreport import LocalmError
-
-    def failing_bootstrap(root, **kw):
-        raise uv_tool.UvBootstrapError("could not download the uv 0.13.4 installer: offline")
-
-    monkeypatch.setattr(uv_tool, "bootstrap_uv", failing_bootstrap)
-    ran = []
-    op, sig = _signed_build("0.2.0", ["click", "httpx"])
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(5, installed=inst, signature=sig, download_opener=op,
-                      runner=lambda c: ran.append(c) or 0)
-    text = f"{ei.value.summary} {ei.value.reason}"
-    assert "uv" in ei.value.summary and "Errno" not in text
-    assert str(inst / ".uv") in text and "PATH" in text and "offline" in text
-    assert ran == []
-    assert (inst / "VERSION").read_text().strip() == "0.1.0"
-    assert (inst / "localm" / "__init__.py").read_text() == "# 0.1.0"
-
-
-def test_apply_without_a_deps_change_never_needs_uv(tmp_path, monkeypatch, sig_env, no_uv):
-    _config(monkeypatch, tmp_path)
-    inst = _fake_install(tmp_path, deps=("click",))
-    from localm import uv_tool
-
-    def boom(root, **kw):
-        raise AssertionError("a reboot-class update must not look for or install uv")
-
-    monkeypatch.setattr(uv_tool, "bootstrap_uv", boom)
-    op, sig = _signed_build("0.2.0", ["click"])
-    res = updater.apply(5, installed=inst, signature=sig, download_opener=op)
-    assert res["klass"] == "reboot" and res["applied"] is True
-
-
-def test_apply_deps_names_the_uv_it_could_not_start(tmp_path, monkeypatch, sig_env, no_uv):
-    """A uv that vanishes between the look-up and the run rolls back with its path
-    in the reason, not a bare Errno 2."""
-    _config(monkeypatch, tmp_path)
-    inst = _fake_install(tmp_path, deps=("click",))
-    uv = _fake_uv(inst / ".uv")
-    from localm.bugreport import LocalmError
-
-    def runner(cmd):
-        raise FileNotFoundError(2, "No such file or directory", cmd[0])
-
-    op, sig = _signed_build("0.2.0", ["click", "httpx"])
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(5, installed=inst, signature=sig, download_opener=op, runner=runner)
-    assert f"could not start {uv}" in ei.value.reason
-    assert (inst / "VERSION").read_text().strip() == "0.1.0"
-
-
-def test_apply_deps_prefers_the_uv_bundled_in_the_environment(tmp_path, monkeypatch, sig_env, no_uv):
-    """The uv package's own binary wins over the install's .uv copy and PATH."""
-    _config(monkeypatch, tmp_path)
-    inst = _fake_install(tmp_path, deps=("click",))
-    _fake_uv(inst / ".uv")
-    monkeypatch.setenv("PATH", str(_fake_uv(tmp_path / "pathbin").parent))
-    bundled = _fake_uv(tmp_path / "venv" / "Scripts")
-    from localm import uv_tool
-    monkeypatch.setattr(uv_tool, "bundled_uv", lambda: str(bundled))
-    ran = []
-    op, sig = _signed_build("0.2.0", ["click", "httpx"])
-    updater.apply(5, installed=inst, signature=sig, download_opener=op,
-                  runner=lambda c: ran.append(c) or 0)
-    assert ran[0][0] == str(bundled)
 
 
 def _counting_swaps(monkeypatch):
@@ -736,31 +475,6 @@ def _counting_swaps(monkeypatch):
     real = au.swap_with_backup
     monkeypatch.setattr(au, "swap_with_backup", lambda *a, **k: swaps.append(a) or real(*a, **k))
     return swaps
-
-
-@pytest.mark.parametrize("program, says", [
-    ("missing", "was not found"),
-    ("uv", "is not a full path"),
-])
-def test_apply_refuses_before_swapping_when_the_deps_program_cannot_run(
-        tmp_path, monkeypatch, sig_env, no_uv, program, says):
-    """A deps update whose uv cannot be started is refused before any file moves:
-    no swap, no post-swap run, no rollback, and the message says how to repair."""
-    _config(monkeypatch, tmp_path)
-    inst = _fake_install(tmp_path, deps=("click",))
-    uv = str(tmp_path / "gone" / _UV_NAME) if program == "missing" else program
-    monkeypatch.setattr(updater, "_uv_for_deps", lambda target: uv)
-    swaps = _counting_swaps(monkeypatch)
-    from localm.bugreport import LocalmError
-    ran = []
-    op, sig = _signed_build("0.2.0", ["click", "httpx"])
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(5, installed=inst, signature=sig, download_opener=op,
-                      runner=lambda c: ran.append(c) or 0)
-    assert swaps == [] and ran == []
-    assert "nothing was changed" in ei.value.summary and "deps" in ei.value.summary
-    assert uv in ei.value.reason and says in ei.value.reason and "setup" in ei.value.reason
-    assert (inst / "VERSION").read_text().strip() == "0.1.0"
 
 
 def _plan_a_runtime_reprovision(monkeypatch):
@@ -773,35 +487,6 @@ def _plan_a_runtime_reprovision(monkeypatch):
     monkeypatch.setattr(updater_runtime, "stop_own_holders",
                         lambda *a, **k: stopped.append(a) or [])
     return stopped
-
-
-def test_apply_refuses_before_stopping_or_swapping_when_the_runtime_interpreter_is_missing(
-        tmp_path, monkeypatch, sig_env):
-    """The runtime step runs this interpreter again; when it is gone the update is
-    refused before any process is stopped and before the swap."""
-    _config(monkeypatch, tmp_path)
-    inst = _fake_install(tmp_path, deps=("click",))
-    stopped = _plan_a_runtime_reprovision(monkeypatch)
-    gone = str(tmp_path / "no-python" / "python.exe")
-    monkeypatch.setattr(sys, "executable", gone)
-    swaps = _counting_swaps(monkeypatch)
-    from localm.bugreport import LocalmError
-    op, sig = _signed_build("0.2.0", ["click"])
-    with pytest.raises(LocalmError) as ei:
-        updater.apply(5, installed=inst, signature=sig, download_opener=op, defer_runtime=True)
-    assert swaps == [] and stopped == []
-    assert "runtime" in ei.value.summary and gone in ei.value.reason
-    assert (inst / "VERSION").read_text().strip() == "0.1.0"
-
-
-def test_apply_with_the_interpreter_present_goes_on_to_the_runtime_step(tmp_path, monkeypatch, sig_env):
-    """Control for the refusal above: the same planned re-provision applies."""
-    _config(monkeypatch, tmp_path)
-    inst = _fake_install(tmp_path, deps=("click",))
-    stopped = _plan_a_runtime_reprovision(monkeypatch)
-    op, sig = _signed_build("0.2.0", ["click"])
-    res = updater.apply(5, installed=inst, signature=sig, download_opener=op, defer_runtime=True)
-    assert res["applied"] is True and res["klass"] == "runtime" and len(stopped) == 1
 
 
 def test_deps_env_points_a_contained_install_at_its_own_cache(tmp_path, monkeypatch):
@@ -819,51 +504,17 @@ def test_deps_env_points_a_contained_install_at_its_own_cache(tmp_path, monkeypa
     assert "UV_CACHE_DIR" not in updater._deps_env(inst)
 
 
-def test_apply_rolls_back_on_post_command_failure(tmp_path, monkeypatch, sig_env, no_uv):
-    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
-    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
-    inst = _fake_install(tmp_path, deps=("click",))
-    _fake_uv(inst / ".uv")
-    op, sig = _signed_build("0.2.0", ["click", "httpx"])
-    from localm.bugreport import LocalmError
-    with pytest.raises(LocalmError):
-        updater.apply(5, installed=inst, signature=sig, download_opener=op,
-                      runner=lambda c: 1)  # post step fails -> rollback
-    # Rolled back to the pre-apply state.
-    assert (inst / "VERSION").read_text().strip() == "0.1.0"
-    assert (inst / "localm" / "__init__.py").read_text() == "# 0.1.0"
-
-
 def test_rollback_last_restores(tmp_path, monkeypatch, sig_env):
     set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
     inst = _fake_install(tmp_path, deps=("click",))
-    op, sig = _signed_build("0.2.0", ["click"])
-    updater.apply(5, installed=inst, signature=sig, download_opener=op)
+    op, _sig = _signed_build("0.2.0", ["click"])
+    op(None, None, None, tmp_path / "build.zip")
+    old_client_update(inst, (tmp_path / "build.zip").read_bytes())
     assert (inst / "VERSION").read_text().strip() == "0.2.0"
     updater.rollback_last(installed=inst)
     assert (inst / "VERSION").read_text().strip() == "0.1.0"
     assert (inst / "localm" / "__init__.py").read_text() == "# 0.1.0"
-
-
-def test_apply_surfaces_rollback_failure(tmp_path, monkeypatch, sig_env, no_uv):
-    """If the post-update step fails AND rollback also fails, apply() must say so
-    (manual recovery needed) - never report a clean rollback over a broken install."""
-    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
-    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
-    inst = _fake_install(tmp_path, deps=("click",))
-    _fake_uv(inst / ".uv")
-    from localm import _apply_update as au
-    from localm.bugreport import LocalmError
-
-    def rb_fail(*a, **k):
-        raise OSError("rollback boom")
-
-    monkeypatch.setattr(au, "rollback", rb_fail)
-    op, sig = _signed_build("0.2.0", ["click", "httpx"])   # deps -> post cmd
-    with pytest.raises(LocalmError, match="rollback failed"):
-        updater.apply(5, installed=inst, signature=sig, download_opener=op,
-                      runner=lambda c: 1)  # post step fails -> rollback attempted -> also fails
 
 
 def test_rollback_last_without_backup_raises(tmp_path, monkeypatch):
@@ -923,14 +574,12 @@ def test_rollback_last_reports_a_failed_restore_as_a_localm_error(tmp_path, monk
 def test_setup_script_names_this_platforms_script(monkeypatch):
     monkeypatch.setattr(updater.sys, "platform", "linux")
     assert updater.setup_script() == "setup.sh"
-    assert "setup.sh" in updater.class_summary("setup")
     monkeypatch.setattr(updater.sys, "platform", "win32")
     assert updater.setup_script() == "setup.bat"
-    assert "setup.bat" in updater.class_summary("setup")
 
 
 @pytest.mark.parametrize("what, call", [
-    ("update", lambda: updater.apply(5, signature="x")),
+    ("update", lambda: updater_handoff.prepare(5, signature="x")),
     ("rollback", lambda: updater.rollback_last()),
 ])
 def test_the_container_image_refuses_an_update_and_a_rollback_before_anything(
@@ -962,20 +611,6 @@ def test_in_container_image_reads_the_marker(monkeypatch, value, expected):
     assert updater.in_container_image() is expected
 
 
-def test_an_update_of_a_git_clone_says_so(tmp_path, monkeypatch, sig_env):
-    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
-    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
-    inst = _fake_install(tmp_path, deps=("click",))
-    op, sig = _signed_build("0.2.0", ["click"])
-    assert updater.apply(5, installed=inst, signature=sig, download_opener=op)[
-        "git_clone"] is False
-    (inst / ".git").mkdir()
-    op, sig = _signed_build("0.3.0", ["click"])
-    res = updater.apply(5, installed=inst, signature=sig, download_opener=op)
-    assert res["git_clone"] is True
-    assert (inst / ".git").is_dir(), "the update leaves the clone's .git alone"
-
-
 def test_a_signed_archive_with_an_unsafe_path_is_a_named_refusal(tmp_path, monkeypatch, sig_env):
     import io
     import zipfile
@@ -993,8 +628,8 @@ def test_a_signed_archive_with_an_unsafe_path_is_a_named_refusal(tmp_path, monke
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)
     with pytest.raises(LocalmError) as ei:
-        updater.apply(5, installed=inst, signature=envelope(data, [_TEST_PRIV]),
-                      download_opener=opener)
+        updater_handoff.prepare(5, installed=inst, signature=envelope(data, [_TEST_PRIV]),
+                                download_opener=opener)
     assert ei.value.summary == "refusing to install: the download is not a localm build"
     assert "unsafe path" in ei.value.reason
     assert (inst / "VERSION").read_text().strip() == "0.1.0"
@@ -1008,42 +643,6 @@ def test_rollback_last_falls_back_to_backup_listing_without_manifest(tmp_path, m
     updater.rollback_last(installed=install)
     assert (install / "existing.txt").read_text(encoding="utf-8") == "OLD-preapply"  # restored
     assert (install / "brand_new").exists()   # fallback cannot remove an unrecorded new entry
-
-
-def test_apply_removes_stale_manifest_when_write_fails(tmp_path, monkeypatch, sig_env, caplog):
-    """A failed applied_names.json write must NOT leave the PREVIOUS update's
-    manifest in place: the updates dir persists across updates, and a stale
-    manifest would make a later rollback remove or restore the WRONG top-level
-    set. apply() unlinks it before the swap and WARNS on the failed write."""
-    import logging
-    from pathlib import Path
-    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
-    home = tmp_path / "home"
-    monkeypatch.setattr("localm.config.home_dir", lambda: home)
-    inst = _fake_install(tmp_path, deps=("click",))
-
-    # Update #1 records a manifest for real (drives the actual swap, no mocks).
-    op1, sig1 = _signed_build("0.2.0", ["click"])
-    updater.apply(5, installed=inst, signature=sig1, download_opener=op1)
-    manifest = home / "updates" / "applied_names.json"
-    assert manifest.is_file()
-
-    # Update #2: only the manifest write fails (the swap itself still runs for real).
-    real_write = Path.write_text
-
-    def flaky_write(self, *a, **k):
-        if self.name == "applied_names.json":
-            raise OSError("disk full")
-        return real_write(self, *a, **k)
-
-    monkeypatch.setattr(Path, "write_text", flaky_write)
-    op2, sig2 = _signed_build("0.3.0", ["click"])
-    with caplog.at_level(logging.WARNING, logger="localm"):
-        res = updater.apply(5, installed=inst, signature=sig2, download_opener=op2)
-
-    assert res["applied"] is True and res["version"] == "0.3.0"
-    assert not manifest.exists()   # stale #1 manifest NOT left behind (unlinked before swap)
-    assert "could not record the update manifest" in caplog.text
 
 
 def test_rollback_last_warns_on_corrupt_manifest_and_falls_back(tmp_path, monkeypatch, caplog):
@@ -1079,64 +678,6 @@ def test_rollback_last_treats_a_hostile_manifest_as_unreadable(
     assert (install / "brand_new").exists()
 
 
-def test_apply_early_abort_preserves_prior_manifest(tmp_path, monkeypatch, sig_env):
-    """The manifest unlink sits AFTER download/verify/extract, so an EARLY abort
-    (bad signature, downgrade, corrupt zip) leaves the PREVIOUS update's
-    still-valid applied_names.json intact."""
-    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
-    home = tmp_path / "home"
-    monkeypatch.setattr("localm.config.home_dir", lambda: home)
-    inst = _fake_install(tmp_path, deps=("click",))
-
-    # A prior successful update recorded a manifest.
-    op1, sig1 = _signed_build("0.2.0", ["click"])
-    updater.apply(5, installed=inst, signature=sig1, download_opener=op1)
-    manifest = home / "updates" / "applied_names.json"
-    before = manifest.read_text(encoding="utf-8")
-    assert before   # non-empty
-
-    # A later update aborts EARLY at the signature gate (before extract/swap/unlink).
-    from localm.bugreport import LocalmError
-    op2, _sig2 = _signed_build("0.3.0", ["click"])
-    with pytest.raises(LocalmError):
-        updater.apply(5, installed=inst, signature=None, download_opener=op2)  # unsigned -> refused
-
-    # The prior manifest is untouched: the unlink never ran (it is downstream of the gate).
-    assert manifest.read_text(encoding="utf-8") == before
-
-
-def test_apply_warns_when_prior_manifest_unlink_fails(tmp_path, monkeypatch, sig_env, caplog):
-    """If the previous applied_names.json cannot be unlinked with a
-    non-FileNotFound OSError (e.g. a lock), apply() WARNS rather than crashing,
-    and the subsequent write still overwrites it."""
-    import logging
-    from pathlib import Path
-    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
-    home = tmp_path / "home"
-    monkeypatch.setattr("localm.config.home_dir", lambda: home)
-    inst = _fake_install(tmp_path, deps=("click",))
-    op1, sig1 = _signed_build("0.2.0", ["click"])
-    updater.apply(5, installed=inst, signature=sig1, download_opener=op1)
-    manifest = home / "updates" / "applied_names.json"
-    assert manifest.is_file()
-
-    real_unlink = Path.unlink
-
-    def flaky_unlink(self, *a, **k):
-        if self.name == "applied_names.json":
-            raise OSError("locked by AV")   # a non-FileNotFound OSError
-        return real_unlink(self, *a, **k)
-
-    monkeypatch.setattr(Path, "unlink", flaky_unlink)
-    op2, sig2 = _signed_build("0.3.0", ["click"])
-    with caplog.at_level(logging.WARNING, logger="localm"):
-        res = updater.apply(5, installed=inst, signature=sig2, download_opener=op2)
-
-    assert res["applied"] is True and res["version"] == "0.3.0"
-    assert "could not remove the previous update manifest" in caplog.text
-    assert manifest.exists()   # the write below the failed unlink still overwrote it
-
-
 # --------------- apply() single-flight / concurrency ----------------------
 #
 # apply() takes a cross-process mkdir lock (_apply_lock) and uses a unique
@@ -1148,241 +689,6 @@ def _setup_apply_env(tmp_path, monkeypatch):
     home = tmp_path / "home"
     monkeypatch.setattr("localm.config.home_dir", lambda: home)
     return home, _fake_install(tmp_path, deps=("click",))
-
-
-def test_apply_second_concurrent_call_refused_without_download(tmp_path, monkeypatch, sig_env):
-    """A second apply() while the lock is held is refused BEFORE it downloads
-    anything. Driven deterministically via re-entrancy - the outer call's own
-    opener attempts a second apply() - and asserted as a call-count of zero on
-    the blocked call's opener."""
-    home, inst = _setup_apply_env(tmp_path, monkeypatch)
-    op, sig = _signed_build("0.2.0", ["click"])
-    from localm.bugreport import LocalmError
-
-    inner_calls = {"n": 0}
-    inner_error = {}
-
-    def outer_opener(url, headers, timeout, dest):
-        def inner_opener(*a, **k):
-            inner_calls["n"] += 1
-        try:
-            updater.apply(5, installed=inst, signature=sig, download_opener=inner_opener)
-        except LocalmError as e:
-            inner_error["e"] = e
-        op(url, headers, timeout, dest)   # let the outer call proceed normally
-
-    updater.apply(5, installed=inst, signature=sig, download_opener=outer_opener)
-
-    assert inner_calls["n"] == 0, "the blocked second call must never attempt a download"
-    assert "already being applied" in str(inner_error.get("e", ""))
-
-
-def test_apply_concurrent_threads_exactly_one_proceeds_backup_has_old_content(
-        tmp_path, monkeypatch, sig_env):
-    """Two REAL concurrent threads meet at the lock via a barrier, and the
-    CONTENT of the backup must hold the PRE-update build, never a NEW one, so
-    the losing call's backup step never ran against an already-swapped
-    install."""
-    import threading
-    home, inst = _setup_apply_env(tmp_path, monkeypatch)
-    op, sig = _signed_build("0.2.0", ["click"])
-    from localm.bugreport import LocalmError
-
-    barrier = threading.Barrier(2)
-    results = {}
-
-    def worker(key):
-        barrier.wait(timeout=5)
-        try:
-            results[key] = ("ok", updater.apply(5, installed=inst, signature=sig,
-                                                 download_opener=op))
-        except Exception as e:
-            results[key] = ("err", e)
-
-    t1 = threading.Thread(target=worker, args=("a",))
-    t2 = threading.Thread(target=worker, args=("b",))
-    t1.start(); t2.start()
-    t1.join(timeout=10); t2.join(timeout=10)
-
-    outcomes = [results.get("a", ("missing",))[0], results.get("b", ("missing",))[0]]
-    assert outcomes.count("ok") == 1, f"exactly one apply should have proceeded: {results}"
-    assert outcomes.count("err") == 1, f"the other must be refused, not silently dropped: {results}"
-    _, err = results["a"] if results["a"][0] == "err" else results["b"]
-    assert isinstance(err, LocalmError)
-    assert "already being applied" in str(err)
-
-    backup_init = home / "updates" / "backup" / "localm" / "__init__.py"
-    assert backup_init.read_text(encoding="utf-8") == "# 0.1.0", \
-        "the backup must hold the PRE-update build, not either NEW one"
-    assert (inst / "localm" / "__init__.py").read_text(encoding="utf-8") == "# 0.2.0"
-
-
-def test_apply_fresh_lock_is_not_reclaimed(tmp_path, monkeypatch, sig_env):
-    """No pid recorded (an older-format lock) -> the age-only FALLBACK path;
-    fresh age -> not stale."""
-    home, inst = _setup_apply_env(tmp_path, monkeypatch)
-    from localm.bugreport import LocalmError
-    (home / "updates" / "apply.lock").mkdir(parents=True)   # fresh - well within the stale window
-
-    called = {"n": 0}
-    with pytest.raises(LocalmError, match="already being applied"):
-        updater.apply(5, installed=inst, signature="x",
-                      download_opener=lambda *a: called.__setitem__("n", called["n"] + 1))
-    assert called["n"] == 0
-
-
-def test_apply_stale_lock_is_reclaimed(tmp_path, monkeypatch, sig_env):
-    """No pid recorded (an older-format lock, or a crash between mkdir and the
-    pid write) -> falls back to age. A lock older than the threshold must not
-    strand every future update forever."""
-    import os
-    import time as _time
-    home, inst = _setup_apply_env(tmp_path, monkeypatch)
-    monkeypatch.setattr(updater, "_APPLY_LOCK_STALE_S", 0.01)
-    op, sig = _signed_build("0.2.0", ["click"])
-
-    lock_dir = home / "updates" / "apply.lock"
-    lock_dir.mkdir(parents=True)
-    old = _time.time() - 10
-    os.utime(lock_dir, (old, old))
-
-    res = updater.apply(5, installed=inst, signature=sig, download_opener=op)
-    assert res["applied"] is True
-    assert not lock_dir.exists()   # released again once the reclaimed run finished
-
-
-def test_apply_lock_with_dead_pid_reclaimed_immediately_regardless_of_age(
-        tmp_path, monkeypatch, sig_env):
-    """Liveness, not elapsed time, is the PRIMARY staleness signal: a lock
-    recording a CONFIRMED-DEAD pid is reclaimed right away, even with the age
-    threshold set so high it would never expire on its own."""
-    home, inst = _setup_apply_env(tmp_path, monkeypatch)
-    monkeypatch.setattr(updater, "_APPLY_LOCK_STALE_S", 10 ** 9)
-    op, sig = _signed_build("0.2.0", ["click"])
-
-    lock_dir = home / "updates" / "apply.lock"
-    lock_dir.mkdir(parents=True)
-    (lock_dir / "pid").write_text("0", encoding="utf-8")   # 0 is never a live pid
-
-    res = updater.apply(5, installed=inst, signature=sig, download_opener=op)
-    assert res["applied"] is True
-
-
-def test_apply_lock_with_live_pid_never_reclaimed_even_past_stale_threshold(
-        tmp_path, monkeypatch, sig_env):
-    """A lock recording a LIVE pid is never reclaimed, even with the age
-    threshold set so low it would expire almost instantly on age alone.
-    download() has no cap on total duration, only a per-socket-op timeout, so a
-    large build on a slow link can legitimately run a long time."""
-    import os
-    import time as _time
-    home, inst = _setup_apply_env(tmp_path, monkeypatch)
-    monkeypatch.setattr(updater, "_APPLY_LOCK_STALE_S", 0.01)
-    from localm.bugreport import LocalmError
-
-    lock_dir = home / "updates" / "apply.lock"
-    lock_dir.mkdir(parents=True)
-    (lock_dir / "pid").write_text(str(os.getpid()), encoding="utf-8")   # us - definitely alive
-    old = _time.time() - 10
-    os.utime(lock_dir, (old, old))
-
-    called = {"n": 0}
-    with pytest.raises(LocalmError, match="already being applied"):
-        updater.apply(5, installed=inst, signature="x",
-                      download_opener=lambda *a: called.__setitem__("n", called["n"] + 1))
-    assert called["n"] == 0
-
-
-def test_apply_lock_released_after_success(tmp_path, monkeypatch, sig_env):
-    home, inst = _setup_apply_env(tmp_path, monkeypatch)
-    op, sig = _signed_build("0.2.0", ["click"])
-    updater.apply(5, installed=inst, signature=sig, download_opener=op)
-    assert not (home / "updates" / "apply.lock").exists()
-
-
-def test_apply_lock_released_after_early_failure(tmp_path, monkeypatch, sig_env):
-    home, inst = _setup_apply_env(tmp_path, monkeypatch)
-    op, sig = _signed_build("0.2.0", ["click"])
-    from localm.bugreport import LocalmError
-    with pytest.raises(LocalmError):
-        updater.apply(5, installed=inst, signature="AAAA", download_opener=op)  # bad signature
-    assert not (home / "updates" / "apply.lock").exists()
-
-
-def test_apply_cleans_up_run_scratch_after_success(tmp_path, monkeypatch, sig_env):
-    home, inst = _setup_apply_env(tmp_path, monkeypatch)
-    op, sig = _signed_build("0.2.0", ["click"])
-    updater.apply(5, installed=inst, signature=sig, download_opener=op)
-    runs_dir = home / "updates" / "runs"
-    assert not runs_dir.exists() or not any(runs_dir.iterdir())
-
-
-def test_apply_preserves_run_backup_when_swap_and_rollback_both_fail(tmp_path, monkeypatch, sig_env):
-    """When BOTH the swap and its own internal rollback fail, the run's backup
-    survives on disk; the surfaced error message names its exact path as where
-    to recover from manually."""
-    home, inst = _setup_apply_env(tmp_path, monkeypatch)
-    from localm import _apply_update as au
-
-    monkeypatch.setattr(au, "apply_files", lambda *a, **k: (_ for _ in ()).throw(OSError("swap boom")))
-    monkeypatch.setattr(au, "rollback", lambda *a, **k: (_ for _ in ()).throw(OSError("rollback boom")))
-    op, sig = _signed_build("0.2.0", ["click"])
-    with pytest.raises(LocalmError, match="manual recovery needed") as ei:
-        updater.apply(5, installed=inst, signature=sig, download_opener=op)
-    assert "rollback also failed" in ei.value.reason
-
-    runs_dir = home / "updates" / "runs"
-    backups = list(runs_dir.glob("*/backup")) if runs_dir.exists() else []
-    assert len(backups) == 1 and backups[0].is_dir()
-    assert (backups[0] / "localm" / "__init__.py").read_text(encoding="utf-8") == "# 0.1.0"
-    assert not (home / "updates" / "apply.lock").exists()   # still released despite the double failure
-
-
-@pytest.mark.skipif(sys.platform != "win32", reason="the real hold is a Windows file handle")
-def test_a_failed_backup_leaves_no_run_behind_and_keeps_the_previous_manifest(
-        tmp_path, monkeypatch, sig_env):
-    from localm.bugreport import LocalmError
-    from tests._held_file import held
-    home, inst = _setup_apply_env(tmp_path, monkeypatch)
-    op, sig = _signed_build("0.2.0", ["click"])
-    updater.apply(5, installed=inst, signature=sig, download_opener=op)
-    manifest = home / "updates" / "applied_names.json"
-    recorded = manifest.read_text(encoding="utf-8")
-    op, sig = _signed_build("0.3.0", ["click"])
-    errors = []
-    with held(inst / "localm" / "__init__.py", exclusive=True):
-        for _attempt in range(2):
-            try:
-                updater.apply(5, installed=inst, signature=sig, download_opener=op)
-            except LocalmError as e:
-                errors.append(e)
-    runs = home / "updates" / "runs"
-    assert not runs.exists() or list(runs.iterdir()) == [], "a retry on a full disk adds nothing"
-    assert manifest.read_text(encoding="utf-8") == recorded
-    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.2.0"
-    assert (inst / "localm" / "__init__.py").read_text(encoding="utf-8") == "# 0.2.0"
-    assert (home / "updates" / "backup" / "VERSION").read_text(encoding="utf-8") == "0.1.0"
-    assert len(errors) == 2 and "nothing was updated" in errors[0].summary
-
-
-def test_a_swap_that_was_undone_leaves_no_run_behind_and_keeps_the_previous_manifest(
-        tmp_path, monkeypatch, sig_env):
-    from localm import _apply_update as au
-    home, inst = _setup_apply_env(tmp_path, monkeypatch)
-    op, sig = _signed_build("0.2.0", ["click"])
-    updater.apply(5, installed=inst, signature=sig, download_opener=op)
-    manifest = home / "updates" / "applied_names.json"
-    recorded = manifest.read_text(encoding="utf-8")
-    monkeypatch.setattr(au, "apply_files",
-                        lambda *a, **k: (_ for _ in ()).throw(OSError("swap boom")))
-    op, sig = _signed_build("0.3.0", ["click"])
-    with pytest.raises(LocalmError, match="so it was rolled back") as ei:
-        updater.apply(5, installed=inst, signature=sig, download_opener=op)
-    assert "swap boom" in ei.value.reason
-    runs = home / "updates" / "runs"
-    assert not runs.exists() or list(runs.iterdir()) == []
-    assert manifest.read_text(encoding="utf-8") == recorded
-    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.2.0"
 
 
 # ------------------------ spawn_health_watchdog ---------------------------
@@ -1398,105 +704,6 @@ def _capturing_popen(calls):
     return popen
 
 
-def test_spawn_health_watchdog_builds_expected_argv_and_env(tmp_path, monkeypatch):
-    home = tmp_path / "home"
-    monkeypatch.setattr("localm.config.home_dir", lambda: home)
-    calls = []
-    ok = updater.spawn_health_watchdog(
-        host="127.0.0.1", port=8642, scheme="http", expect_version="0.2.0",
-        popen=_capturing_popen(calls))
-    assert ok is True
-    assert len(calls) == 1
-    argv, kwargs = calls[0]
-    assert argv[0] == sys.executable
-    assert argv[1] == str(updater._watchdog_script())
-    assert "--host" in argv and argv[argv.index("--host") + 1] == "127.0.0.1"
-    assert "--port" in argv and argv[argv.index("--port") + 1] == "8642"
-    assert "--scheme" in argv and argv[argv.index("--scheme") + 1] == "http"
-    assert ("--expect-version" in argv
-            and argv[argv.index("--expect-version") + 1] == "0.2.0")
-    assert ("--install-root" in argv
-            and argv[argv.index("--install-root") + 1] == str(updater.repo_root()))
-    assert ("--log-file" in argv
-            and argv[argv.index("--log-file") + 1] == str(home / "updates" / "watchdog.log"))
-    assert kwargs["stdin"] == subprocess.DEVNULL
-    assert kwargs["stdout"] == subprocess.DEVNULL
-    assert kwargs["stderr"] == subprocess.DEVNULL
-    assert kwargs["env"]["LOCALM_HOME"] == str(home)
-    assert "--relaunch-argv" not in argv
-
-
-def test_spawn_health_watchdog_passes_the_command_line_to_start_again(tmp_path, monkeypatch):
-    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
-    calls = []
-    relaunch = [sys.executable, "-m", "localm", "gui", "--no-browser", "-p", "8642"]
-    assert updater.spawn_health_watchdog(
-        host="127.0.0.1", port=8642, scheme="http", expect_version="0.2.0",
-        relaunch_argv=relaunch, popen=_capturing_popen(calls)) is True
-    argv = calls[0][0]
-    assert json.loads(argv[argv.index("--relaunch-argv") + 1]) == relaunch
-
-
-def test_spawn_health_watchdog_leaves_the_relaunch_out_for_an_older_watchdog(tmp_path,
-                                                                            monkeypatch):
-    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
-    old = tmp_path / "scripts" / "update_watchdog.py"
-    old.parent.mkdir()
-    old.write_text("ap.add_argument('--log-file')\n", encoding="utf-8")
-    monkeypatch.setattr(updater, "_watchdog_script", lambda: old)
-    calls = []
-    assert updater.spawn_health_watchdog(
-        host="127.0.0.1", port=8642, scheme="http", expect_version="0.2.0",
-        relaunch_argv=["python", "-m", "localm", "gui"], popen=_capturing_popen(calls)) is True
-    argv = calls[0][0]
-    assert argv[1] == str(old)
-    assert "--relaunch-argv" not in argv
-
-
-def test_spawn_health_watchdog_posix_uses_start_new_session(tmp_path, monkeypatch):
-    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
-    monkeypatch.setattr(sys, "platform", "linux")
-    calls = []
-    updater.spawn_health_watchdog(host="127.0.0.1", port=1, scheme="http",
-                                  expect_version="1", popen=_capturing_popen(calls))
-    _, kwargs = calls[0]
-    assert kwargs.get("start_new_session") is True
-    assert "creationflags" not in kwargs
-
-
-def test_spawn_health_watchdog_windows_uses_no_window_flags(tmp_path, monkeypatch):
-    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
-    monkeypatch.setattr(sys, "platform", "win32")
-    calls = []
-    updater.spawn_health_watchdog(host="127.0.0.1", port=1, scheme="http",
-                                  expect_version="1", popen=_capturing_popen(calls))
-    _, kwargs = calls[0]
-    assert "start_new_session" not in kwargs
-    assert kwargs["creationflags"] & 0x08000000   # CREATE_NO_WINDOW
-    assert not kwargs["creationflags"] & 0x00000008   # never DETACHED_PROCESS
-    assert kwargs["creationflags"] & 0x00000200   # CREATE_NEW_PROCESS_GROUP
-
-
-def test_spawn_health_watchdog_never_raises_when_popen_fails(tmp_path, monkeypatch):
-    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
-
-    def boom(argv, **kwargs):
-        raise OSError("no processes for you")
-
-    ok = updater.spawn_health_watchdog(host="127.0.0.1", port=1, scheme="http",
-                                       expect_version="1", popen=boom)
-    assert ok is False
-
-
-def test_spawn_health_watchdog_missing_script_returns_false(tmp_path, monkeypatch):
-    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
-    monkeypatch.setattr(updater, "_watchdog_script", lambda: tmp_path / "nope.py")
-    calls = []
-    ok = updater.spawn_health_watchdog(host="127.0.0.1", port=1, scheme="http",
-                                       expect_version="1", popen=_capturing_popen(calls))
-    assert ok is False
-    assert calls == []
-
 def test_is_site_packages_install_recognises_a_pip_install():
     import sysconfig
 
@@ -1506,10 +713,10 @@ def test_is_site_packages_install_recognises_a_pip_install():
     assert updater.is_site_packages_install(pathlib.Path(__file__).parent) is False
 
 
-def test_apply_refuses_to_swap_a_release_tree_into_site_packages(monkeypatch, tmp_path):
-    # apply() swaps a whole release tree into repo_root(). On a pip install that
+def test_an_update_refuses_to_replace_a_release_tree_in_site_packages(monkeypatch, tmp_path):
+    # An update replaces the release tree at repo_root(). On a pip install that
     # root is site-packages, shared with every other installed package, so the
-    # swap would overwrite unrelated packages and leave pip unaware of what is
+    # update would overwrite unrelated packages and leave pip unaware of what is
     # on disk. It must refuse BEFORE downloading anything.
     import sysconfig
     from localm.bugreport import LocalmError
@@ -1521,38 +728,22 @@ def test_apply_refuses_to_swap_a_release_tree_into_site_packages(monkeypatch, tm
     monkeypatch.setattr(updater, "download",
                         lambda *a, **k: downloads.append(a))
 
-    # Catch EVERYTHING: without the guard apply() runs on and dies inside the
+    # Catch EVERYTHING: without the guard prepare() runs on and dies inside the
     # stubbed download with an unrelated error, which would escape a narrow
     # except and stop the data assertion below from ever speaking.
     exc = None
     try:
-        updater.apply("asset-1", signature="sig")
+        updater_handoff.prepare("asset-1", signature="sig")
     except Exception as e:
         exc = e
     # DATA first: nothing was fetched, so nothing could be swapped.
-    assert downloads == [], f"apply() downloaded despite a pip install: {downloads}"
-    assert exc is not None, "apply() did not refuse a site-packages install"
+    assert downloads == [], f"prepare() downloaded despite a pip install: {downloads}"
+    assert exc is not None, "prepare() did not refuse a site-packages install"
     assert isinstance(exc, LocalmError), f"refused with the wrong error: {exc!r}"
     assert "pip" in str(exc).lower()
 
 
-def test_apply_records_one_update_applied_event(tmp_path, monkeypatch, sig_env):
-    import json
-    monkeypatch.setenv("LOCALM_MODE", "full")
-    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
-    home = tmp_path / "home"
-    monkeypatch.setattr("localm.config.home_dir", lambda: home)
-    monkeypatch.setattr("localm.config.HOME_DIR", home)
-    inst = _fake_install(tmp_path, deps=("click",))
-    op, sig = _signed_build("0.2.0", ["click"])
-    updater.apply(5, installed=inst, signature=sig, download_opener=op)
-    lines = (home / "logs" / "management.jsonl").read_text(encoding="utf-8").splitlines()
-    (ev,) = [json.loads(x) for x in lines]
-    assert ev["kind"] == "update_applied"
-    assert (ev["version_from"], ev["version_to"]) == ("0.1.0", "0.2.0")
-
-
-def test_apply_refuses_a_build_that_changes_on_disk_after_the_signature_check(
+def test_an_update_refuses_a_build_that_changes_on_disk_after_the_signature_check(
         tmp_path, monkeypatch, sig_env):
     set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
@@ -1577,7 +768,149 @@ def test_apply_refuses_a_build_that_changes_on_disk_after_the_signature_check(
     monkeypatch.setattr(au, "extract",
                         lambda *a, **k: extracted.append(a) or None)
     with pytest.raises(LocalmError) as e:
-        updater.apply(5, installed=inst, signature=sig, download_opener=_opener)
+        updater_handoff.prepare(5, installed=inst, signature=sig, download_opener=_opener)
     assert "changed after its signature was checked" in str(e.value)
     assert extracted == []
     assert (inst / "VERSION").read_text().strip() != "0.2.0"
+
+
+# ----------------------- the management log line of an update -------------------
+
+def _result(home, **fields):
+    from localm.update_mechanism import applier
+    (home / "updates").mkdir(parents=True, exist_ok=True)
+    (home / "updates" / applier.RESULT).write_text(json.dumps(
+        {"state": "new", "from": "0.1.0", "to": "0.2.0", "version": "0.2.0", "note": "",
+         "notes": [], "lines": [], "at": 100.0, **fields}), encoding="utf-8")
+
+
+@pytest.fixture
+def full_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALM_MODE", "full")
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
+    home = tmp_path / "home"
+    monkeypatch.setattr("localm.config.home_dir", lambda: home)
+    monkeypatch.setattr("localm.config.HOME_DIR", home)
+    monkeypatch.setattr(_version, "read_version", lambda: "0.2.0")
+    return home
+
+
+def _events(home) -> list:
+    path = home / "logs" / "management.jsonl"
+    return ([json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()]
+            if path.exists() else [])
+
+
+def test_the_version_an_update_installed_records_it_once(full_home):
+    _result(full_home)
+    assert updater.log_applied_update(full_home) is True
+    assert updater.log_applied_update(full_home) is False, "recorded once"
+    (ev,) = _events(full_home)
+    assert ev["kind"] == "update_applied"
+    assert (ev["version_from"], ev["version_to"]) == ("0.1.0", "0.2.0")
+
+
+@pytest.mark.parametrize("fields", [{"state": "old"}, {"to": "0.3.0"}])
+def test_an_update_that_did_not_install_the_running_version_is_not_recorded(full_home,
+                                                                            fields):
+    _result(full_home, **fields)
+    assert updater.log_applied_update(full_home) is False
+    assert _events(full_home) == []
+
+
+def test_a_later_update_to_the_same_version_is_recorded_again(full_home):
+    _result(full_home)
+    assert updater.log_applied_update(full_home) is True
+    _result(full_home, at=10.0 ** 11)
+    assert updater.log_applied_update(full_home) is True
+    assert len(_events(full_home)) == 2
+
+
+def test_privacy_mode_records_no_update(full_home, monkeypatch):
+    monkeypatch.setenv("LOCALM_MODE", "privacy")
+    _result(full_home)
+    assert updater.log_applied_update(full_home) is False
+    assert not (full_home / "logs").exists()
+
+
+def test_every_start_records_the_update_it_finds(full_home, monkeypatch):
+    from localm.cli import _core
+    _result(full_home)
+    monkeypatch.delenv("LOCALM_UPDATE_ID", raising=False)
+    _core._log_applied_update("serve")
+    _core._log_applied_update("_update-probe")
+    assert len(_events(full_home)) == 1
+    monkeypatch.setenv("LOCALM_UPDATE_ID", "0" * 32)
+    _result(full_home, at=10.0 ** 11)
+    _core._log_applied_update("serve")
+    assert len(_events(full_home)) == 1, "a process an update started records nothing"
+
+
+# ------------------- the lock of a rollback and a repair ------------------------
+
+@pytest.fixture
+def lock_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setattr("localm.config.home_dir", lambda: home)
+    return home
+
+
+def test_a_second_holder_of_the_lock_is_refused_at_once(lock_home):
+    from localm.bugreport import LocalmError
+    with updater._apply_lock():
+        with pytest.raises(LocalmError, match="already being applied"):
+            with updater._apply_lock():
+                pass
+    assert not (lock_home / "updates" / "apply.lock").exists()
+
+
+def test_the_lock_is_given_up_after_a_failure_inside_it(lock_home):
+    with pytest.raises(RuntimeError):
+        with updater._apply_lock():
+            raise RuntimeError("boom")
+    assert not (lock_home / "updates" / "apply.lock").exists()
+
+
+def test_a_fresh_lock_without_a_pid_is_not_reclaimed(lock_home):
+    from localm.bugreport import LocalmError
+    (lock_home / "updates" / "apply.lock").mkdir(parents=True)
+    with pytest.raises(LocalmError, match="already being applied"):
+        with updater._apply_lock():
+            pass
+
+
+def test_an_old_lock_without_a_pid_is_reclaimed(lock_home, monkeypatch):
+    import os
+    import time as _time
+    monkeypatch.setattr(updater, "_APPLY_LOCK_STALE_S", 0.01)
+    lock_dir = lock_home / "updates" / "apply.lock"
+    lock_dir.mkdir(parents=True)
+    old = _time.time() - 10
+    os.utime(lock_dir, (old, old))
+    with updater._apply_lock():
+        assert (lock_dir / "pid").read_text(encoding="utf-8") == str(os.getpid())
+    assert not lock_dir.exists()
+
+
+def test_a_lock_of_a_dead_pid_is_reclaimed_whatever_its_age(lock_home, monkeypatch):
+    monkeypatch.setattr(updater, "_APPLY_LOCK_STALE_S", 10 ** 9)
+    lock_dir = lock_home / "updates" / "apply.lock"
+    lock_dir.mkdir(parents=True)
+    (lock_dir / "pid").write_text("0", encoding="utf-8")   # 0 is never a live pid
+    with updater._apply_lock():
+        pass
+
+
+def test_a_lock_of_a_running_pid_is_never_reclaimed(lock_home, monkeypatch):
+    import os
+    import time as _time
+    from localm.bugreport import LocalmError
+    monkeypatch.setattr(updater, "_APPLY_LOCK_STALE_S", 0.01)
+    lock_dir = lock_home / "updates" / "apply.lock"
+    lock_dir.mkdir(parents=True)
+    (lock_dir / "pid").write_text(str(os.getpid()), encoding="utf-8")
+    old = _time.time() - 10
+    os.utime(lock_dir, (old, old))
+    with pytest.raises(LocalmError, match="already being applied"):
+        with updater._apply_lock():
+            pass

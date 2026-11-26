@@ -58,8 +58,8 @@ def _opener(data: bytes):
 
 
 def _apply(inst, data, sig):
-    return updater.apply(5, installed=inst, signature=sig,
-                         download_opener=_opener(data), runner=lambda c: 0)
+    from tests._update_install import install_build
+    return install_build(inst, data, sig)
 
 
 def _installed_version(inst: Path) -> str:
@@ -170,6 +170,8 @@ def _real_apply_with(monkeypatch, tmp_path, data):
     monkeypatch.setattr(updater, "is_site_packages_install", lambda t: False)
     monkeypatch.setattr(updater, "download",
                         lambda aid, dest, **kw: Path(dest).write_bytes(data) and Path(dest))
+    from localm import _update_parent
+    monkeypatch.setenv(_update_parent.WORK, "1")
     return inst
 
 

@@ -406,7 +406,7 @@ def test_legacy_override_survives_self_update_via_migration(tmp_path, monkeypatc
     # End to end: a legacy override present BEFORE an update is preserved AFTER it
     # because migration moved it under home/ (the updater's NEVER_TOUCH tree).
     import localm.config as cfg
-    from localm import _apply_update as up
+    from tests._old_client_update import backup_and_swap
 
     install = tmp_path / "install"
     home = install / "home"
@@ -432,7 +432,7 @@ def test_legacy_override_survives_self_update_via_migration(tmp_path, monkeypatc
     (staged / "localm" / "image_gen").mkdir(parents=True)
     (staged / "localm" / "image_gen" / "flux_workflow.example.json").write_text(
         "{}", encoding="utf-8")
-    swapped = up.swap_with_backup(staged, install, tmp_path / "backup")
+    swapped = backup_and_swap(staged, install, tmp_path / "backup")
     assert "localm" in swapped and "home" not in swapped     # home is NEVER_TOUCH
 
     # 4. The override survived the update and still resolves as active.
@@ -442,7 +442,7 @@ def test_legacy_override_survives_self_update_via_migration(tmp_path, monkeypatc
 
 def test_in_package_override_is_destroyed_by_update_without_migration(tmp_path):
     # An override left inside localm/ is wiped by the whole-tree package swap.
-    from localm import _apply_update as up
+    from tests._old_client_update import backup_and_swap
 
     install = tmp_path / "install"
     pkg_img = install / "localm" / "image_gen"
@@ -452,7 +452,7 @@ def test_in_package_override_is_destroyed_by_update_without_migration(tmp_path):
 
     staged = tmp_path / "staged"
     (staged / "localm" / "image_gen").mkdir(parents=True)
-    up.swap_with_backup(staged, install, tmp_path / "backup")
+    backup_and_swap(staged, install, tmp_path / "backup")
     assert not legacy.exists()
 
 

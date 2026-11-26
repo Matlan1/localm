@@ -52,8 +52,6 @@ class Prepared:
     verify_reason: Optional[str]
     downgrade: bool
     keyset: Optional[dict]
-    #: Install with :func:`localm.updater.apply` instead; :func:`prepare` never sets it.
-    legacy: bool = False
     #: The other processes of this install, ``{"key", "pid", "purpose"}``.
     processes: list = field(default_factory=list)
     #: Files the user edited that the update replaces.
@@ -107,9 +105,9 @@ def _env(home) -> dict:
 def prepare(asset_id, *, signature=None, target_version=None, allow_unverified=False,
             expect_sha256=None, download_opener=None, installed=None,
             say: Optional[Callable[[str], None]] = None) -> Prepared:
-    """Download the build *asset_id*, check its signature and version as
-    :func:`localm.updater.apply` does, extract it into ``<root>/.localm-update/<id>/new``
-    and run its ``check``. Nothing of the install changes. Raises LocalmError or
+    """Download the build *asset_id*, check its signature (``updater._verified_download``)
+    and version, extract it into ``<root>/.localm-update/<id>/new`` and run its
+    ``check``. Nothing of the install changes. Raises LocalmError or
     ``updater.UnverifiedBuild``; with nothing left behind."""
     import zipfile
 
@@ -188,12 +186,10 @@ def _ready_older(root: Path, new_folder: Path, new_version: str, target_version)
     """Make the extracted release *new_folder*, which ships no update program, ready for
     this build's: a release chosen by version (*target_version*) from before 0.3.2 gets
     this build's signature check and one from 0.3.1 or earlier the uv this install uses
-    (``updater._install_trust_bridge``, ``updater._install_uv_bridge``), as
-    :func:`localm.updater.apply` gives them; and a release without the list of its files
-    (``update_package.NAME``), or one a bridge changed, gets that list made from its
-    verified files. A list the release ships is checked against it first
-    (``update_package.check``), as :func:`localm.updater.apply` checks it. Returns the notes
-    for the user. Raises LocalmError."""
+    (``updater._install_trust_bridge``, ``updater._install_uv_bridge``); and a release
+    without the list of its files (``update_package.NAME``), or one a bridge changed, gets
+    that list made from its verified files. A list the release ships is checked against it
+    first (``update_package.check``). Returns the notes for the user. Raises LocalmError."""
     from localm import update_package, updater
     from localm.bugreport import LocalmError
     from localm.update_mechanism import shared
@@ -437,7 +433,7 @@ def hand_off(prepared: Prepared, *, mode: str, confirmed: list, watch: Optional[
     :data:`HANDED_OFF`; with *ask*, the user at its terminal is asked "Try again" or
     "Cancel" about a file another program holds or a process that does not end. Raises
     LocalmError with the update discarded."""
-    from localm import config, procs, updater
+    from localm import config, procs
     from localm.bugreport import LocalmError
     from localm.update_mechanism import shared
     say = say or (lambda _t: None)
@@ -445,12 +441,7 @@ def hand_off(prepared: Prepared, *, mode: str, confirmed: list, watch: Optional[
     try:
         if me is None:
             raise LocalmError("the update was not started", reason=procs.problem())
-        if prepared.keyset is not None:
-            updater._save_keyset(prepared.keyset)
-        if prepared.target_version is not None:
-            updater._carry_trust_forward()
-            if prepared.downgrade:
-                updater._backup_data_for_downgrade(prepared.new)
+        keep_before_start(prepared)
         handoff = {"mode": mode, "starter": _key(me), "confirmed": list(confirmed),
                    "home": str(config.HOME_DIR), "old": prepared.old, "new": prepared.new,
                    "watch": watch, "restarting": prepared.restarting(),
@@ -494,6 +485,21 @@ def hand_off(prepared: Prepared, *, mode: str, confirmed: list, watch: Optional[
     if work is not None:
         work.recorded()
     _not_restarting(prepared, restart_servers(prepared, say))
+
+
+def keep_before_start(prepared: Prepared) -> None:
+    """What :func:`hand_off` keeps before it starts the applier of *prepared*: the key set
+    the verified build carries (``updater._save_keyset``) and, for a release chosen by
+    version, the key set this install trusts (``updater._carry_trust_forward``) and, for an
+    older one, a copy of the data an older version may not read
+    (``updater._backup_data_for_downgrade``). Raises LocalmError."""
+    from localm import updater
+    if prepared.keyset is not None:
+        updater._save_keyset(prepared.keyset)
+    if prepared.target_version is not None:
+        updater._carry_trust_forward()
+        if prepared.downgrade:
+            updater._backup_data_for_downgrade(prepared.new)
 
 
 def note_failed(prepared: Prepared, text: str) -> None:

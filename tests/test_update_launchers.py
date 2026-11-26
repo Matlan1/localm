@@ -246,22 +246,6 @@ def test_extract_keeps_the_execute_permission_the_archive_records(tmp_path, crea
 
 
 @posix_only
-def test_an_extracted_build_keeps_its_modes_through_the_swap(tmp_path):
-    z = _build_zip(tmp_path / "build.zip", {
-        "localm.sh": (0o100755, b"#!/bin/sh\n"),
-        "VERSION": (0o100644, b"9.9.9\n"),
-        "pyproject.toml": (0o100644, b""),
-    }, create_system=0)
-    staged = au.extract(z, tmp_path / "staging")
-    install = tmp_path / "install"
-    install.mkdir()
-    (install / "localm.sh").write_bytes(b"old\n")
-    os.chmod(install / "localm.sh", 0o644)
-    au.apply_files(staged, install, au.swap_entries(staged))
-    assert _mode(install / "localm.sh") & 0o100
-
-
-@posix_only
 def test_restore_executables_sets_only_the_listed_files(tmp_path):
     for rel in ("localm.sh", "setup.sh", "README.md"):
         (tmp_path / rel).write_text("x", encoding="utf-8")
@@ -282,7 +266,7 @@ def _finish_install(tmp_path: Path) -> Path:
 
 
 def _run_finish(install: Path, result: Path):
-    """The command line localm.updater_finish.run uses."""
+    """The command line the updater of localm 0.3.3 to 0.3.4b4 runs it with."""
     from localm import updater_finish
     cmd = [sys.executable, "-I", "-X", "utf8", "-u", str(install / updater_finish.MODULE),
            "0.3.3", "0.3.4", "reboot", str(result)]
@@ -330,10 +314,9 @@ def test_the_finishing_step_does_nothing_on_windows(tmp_path):
 
 def test_the_finishing_step_takes_over_no_built_in_step(tmp_path):
     from localm import updater_finish
-    assert updater_finish.present(ROOT)
+    assert (ROOT / updater_finish.MODULE).is_file()
     install = _finish_install(tmp_path)
     result = tmp_path / "finish-result.json"
     done = _run_finish(install, result)
     assert done.returncode == 0, done.stdout + done.stderr
     assert not result.exists()
-    assert updater_finish._read_result(result, None) == frozenset()

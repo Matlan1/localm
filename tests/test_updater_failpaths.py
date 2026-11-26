@@ -1,124 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Failure-path coverage for the self-updater: the post-step CRASH (runner raises,
-distinct from a non-zero exit), the corrupt-manifest fallback, and the
-backend-detection fallback. Everything uses the apply()/download injectables, so
-no test touches the real install or the network."""
+"""Failure-path coverage for the self-updater: the backend-detection fallback and the
+download failures. Everything uses injectables, so no test touches the real install or
+the network."""
 
-import io
-import zipfile
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from localm import _version, updater
+from localm import updater
 from localm.bugreport import LocalmError
-from tests._update_signing import envelope, keyset
-
-# A throwaway signing key so the apply() crash-path tests pass the signature gate
-# and exercise the ROLLBACK logic they are about.
-_PRIV = Ed25519PrivateKey.generate()
-_RECOVERY = [Ed25519PrivateKey.generate() for _ in range(3)]
-
-
-# --------------------------- read_manifest --------------------------------
-
-def test_read_manifest_corrupt_json_falls_back_to_empty(tmp_path):
-    # A corrupt manifest must NOT raise; classify() then relies on auto-detection.
-    (tmp_path / "update.json").write_text("{ this is not valid json ", encoding="utf-8")
-    assert updater.read_manifest(tmp_path) == {}
-
-
-def test_read_manifest_absent_is_empty(tmp_path):
-    assert updater.read_manifest(tmp_path) == {}
-
-
-def test_read_manifest_unreadable_dir_is_empty(tmp_path):
-    # staged_dir does not exist at all -> still {} (never raises).
-    assert updater.read_manifest(tmp_path / "nope") == {}
-
-
-def test_read_manifest_valid(tmp_path):
-    (tmp_path / "update.json").write_text('{"needs": "runtime"}', encoding="utf-8")
-    assert updater.read_manifest(tmp_path) == {"needs": "runtime"}
-
-
-# --------------------------- apply(): crash path --------------------------
-
-def _signed_build(version, deps):
-    """A build zip (bytes) + its signature envelope under the test key; returns
-    ``(download_opener, signature)`` so apply()'s signature gate accepts it."""
-    buf = io.BytesIO()
-    pyproject = ('[project]\nname = "localm"\ndependencies = ['
-                 + ", ".join(f'"{d}"' for d in deps) + ']\n')
-    with zipfile.ZipFile(buf, "w") as z:
-        z.writestr("VERSION", version)
-        z.writestr("pyproject.toml", pyproject)
-        z.writestr("uv.lock", "version = 1\n")
-        z.writestr("localm/__init__.py", f"# {version}")
-    data = buf.getvalue()
-    sig = envelope(data, [_PRIV])
-
-    def dl(url, headers, timeout, dest):
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(data)
-    return dl, sig
-
-
-def _pin_sig_env(monkeypatch):
-    monkeypatch.setattr(updater, "_PINNED_KEYSET", keyset(1, [_PRIV], _RECOVERY))
-    monkeypatch.setattr(_version, "read_version", lambda: "0.1.0")
-
-
-def _fake_install(tmp_path, deps=("click",)):
-    inst = tmp_path / "inst"
-    (inst / "localm").mkdir(parents=True)
-    (inst / "localm" / "__init__.py").write_text("# 0.1.0", encoding="utf-8")
-    (inst / "VERSION").write_text("0.1.0", encoding="utf-8")
-    (inst / "pyproject.toml").write_text(
-        '[project]\nname = "localm"\ndependencies = ['
-        + ", ".join(f'"{d}"' for d in deps) + ']\n', encoding="utf-8")
-    return inst
-
-
-def test_apply_rolls_back_when_post_step_raises(tmp_path, monkeypatch):
-    """The runner RAISING (not just exiting non-zero) is a distinct branch: it
-    still rolls back and surfaces a 'crashed' LocalmError, never a half-applied
-    tree."""
-    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
-    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
-    _pin_sig_env(monkeypatch)
-    inst = _fake_install(tmp_path, deps=("click",))
-
-    def crashing_runner(cmd):
-        raise RuntimeError("uv exploded")
-
-    op, sig = _signed_build("0.2.0", ["click", "httpx"])   # deps -> post cmd
-    with pytest.raises(LocalmError, match="crashed"):
-        updater.apply(5, installed=inst, signature=sig,
-                      download_opener=op, runner=crashing_runner)
-    # Rolled back to the pre-apply state on the crash path too.
-    assert (inst / "VERSION").read_text().strip() == "0.1.0"
-    assert (inst / "localm" / "__init__.py").read_text() == "# 0.1.0"
-
-
-def test_apply_crash_then_rollback_failure_demands_manual_recovery(tmp_path, monkeypatch):
-    """The post step CRASHES and rollback ALSO fails: apply() says manual
-    recovery is needed rather than reporting a clean rollback."""
-    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
-    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
-    _pin_sig_env(monkeypatch)
-    inst = _fake_install(tmp_path, deps=("click",))
-    from localm import _apply_update as au
-    monkeypatch.setattr(au, "rollback", lambda *a, **k: (_ for _ in ()).throw(OSError("rb boom")))
-
-    def crashing_runner(cmd):
-        raise RuntimeError("uv exploded")
-
-    op, sig = _signed_build("0.2.0", ["click", "httpx"])
-    with pytest.raises(LocalmError, match="rollback failed"):
-        updater.apply(5, installed=inst, signature=sig,
-                      download_opener=op, runner=crashing_runner)
-
 
 # --------------------------- _installed_backend ---------------------------
 # _installed_backend() PRESERVES whatever backend is already installed
