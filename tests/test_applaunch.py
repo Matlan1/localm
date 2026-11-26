@@ -365,6 +365,14 @@ def test_a_dll_that_could_not_be_replaced_is_reported(tmp_path, monkeypatch):
                and "localm make-launcher --force" in p for p in res.problems)
 
 
+def test_an_exe_held_by_a_running_launcher_says_how_to_finish(tmp_path, monkeypatch):
+    res = _fake_windows_build(tmp_path, monkeypatch, versions={"exe": _NEW, "base": _NEW},
+                              fail_dll="python.exe")
+    assert res.ok is False
+    assert any("could not build LocaLM.exe" in p and "close every LocaLM window" in p
+               for p in res.problems)
+
+
 def test_a_launcher_on_another_python_is_reported(tmp_path, monkeypatch):
     res = _fake_windows_build(tmp_path, monkeypatch, versions={"exe": _OLD, "base": _NEW})
     assert res.ok is False

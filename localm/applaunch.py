@@ -296,6 +296,9 @@ def make_windows_launcher(*, force: bool = False) -> LauncherResult:
                         if replaced_running else ""))
     except OSError as e:
         text = f"could not build {dst.name}: {e}"
+        if isinstance(e, PermissionError):
+            text += (". A running LocaLM can hold it: close every LocaLM window and "
+                     "run `localm make-launcher --force` again.")
         return LauncherResult(ok=False, path=dst, notes=[text], problems=[text])
 
     stamped = False
