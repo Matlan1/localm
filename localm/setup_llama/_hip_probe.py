@@ -52,7 +52,9 @@ def main(argv: list) -> int:
         sys.stderr.write(f"no amdhip64_*.dll in {folder}")
         return 2
     try:
-        os.add_dll_directory(str(folder))
+        add_dll_directory = getattr(os, "add_dll_directory", None)
+        if add_dll_directory is not None:
+            add_dll_directory(str(folder))
         hip = ctypes.CDLL(str(runtime))
     except OSError as e:
         sys.stderr.write(f"{runtime.name} did not load: {e}")
