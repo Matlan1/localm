@@ -44,15 +44,25 @@ rem  Undoing it may replace this file: the command ends in the new start or in e
 rem  One that is still there then could not be undone; the new .venv ends it.
 set "LEFTUPDATE="
 if defined LOCALM_UNINSTALL goto :update_gated
-if not exist ".localm-update\job.json" goto :update_gated
+if not exist "%~dp0.localm-update\job.json" goto :update_gated
 if defined LOCALM_GATE set "LEFTUPDATE=1" & goto :update_gated
 set "LOCALM_GATE=1"
-call scripts\update_gate.bat && "%~dp0setup.bat" %* || (
+set "GATE=%~dp0scripts\update_gate.bat"
+call "%%GATE%%" && "%~dp0setup.bat" %* || (
     pause
     exit /b 1
 )
 :update_gated
 set "LOCALM_GATE="
+cd /d "%~dp0" || goto :not_here
+goto :here
+:not_here
+echo  setup.bat cannot run from a network folder: %~dp0
+echo  Copy the folder to a drive of this computer, or map the share to a drive letter,
+echo  and run setup.bat there.
+pause
+exit /b 1
+:here
 setlocal EnableDelayedExpansion
 set LOCALM_SETUP=1
 title LocaLM setup
@@ -694,7 +704,7 @@ call :offer_report "localm setup could not read its install list" "python -m loc
 pause
 exit /b 1
 :install_ok
-if defined LEFTUPDATE del /q ".localm-update\job.json"
+if defined LEFTUPDATE ".venv\Scripts\python.exe" -I -S localm\update_mechanism setup-done . || echo  [^^!] Setup goes on. Run it again to end the interrupted update.
 call :step_done install-localm || exit /b 99
 
 rem ---- install the native-runtime wheel (self-contained inference) ----------

@@ -994,8 +994,9 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
                              "again / repair; until then this folder is partly "
                              "updated. Your chats, settings and models are untouched."
                              ) from None
-        if left:
-            left_update.unlink(missing_ok=True)
+        if left and _run([str(venv_python(ROOT)), "-I", "-S", str(ROOT / "localm" / "update_mechanism"),
+                          "setup-done", str(ROOT)], emit, plan, allow_fail=True):
+            emit("[!] Setup goes on. Run it again to end the interrupted update.")
     steps.append(Step("Installing LocaLM", install_localm, key="install-localm"))
 
     def install_runtime_pkg(emit):

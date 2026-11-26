@@ -710,7 +710,20 @@ def test_files_of_another_release_that_are_not_all_of_it(inst, listed, setup):
     before = um.tree(inst.root)
     done = inst.gate(**({"LOCALM_SETUP": "1"} if setup else {}))
     assert done.code == 1 and um.tree(inst.root) == before and inst.phase() == job.STEPS
-    assert "unzip it over" in done.err and "another release" in done.err
+    assert "unzip it over" in done.err and "was changed since its update was interrupted" in done.err
+    assert "another release" not in done.err
+
+
+@pytest.mark.parametrize("setup", [True, False])
+def test_an_edited_gate_file_is_called_changed_not_another_release(inst, setup):
+    inst.go(job.STEPS)
+    path = inst.root / "localm" / "__init__.py"
+    path.write_text(path.read_text(encoding="utf-8") + "# mine\n", encoding="utf-8")
+    before = um.tree(inst.root)
+    done = inst.gate(**({"LOCALM_SETUP": "1"} if setup else {}))
+    assert done.code == 1 and um.tree(inst.root) == before and inst.phase() == job.STEPS, done.err
+    assert "localm/__init__.py of LocaLM was changed since its update was interrupted" in done.err
+    assert "another release" not in done.err and "unzip it over" in done.err
 
 
 @pytest.mark.parametrize("version,over", [("2", {}), ("2", {**NEW, "update-package.json": _statement(NEW, "2")}),
@@ -828,6 +841,28 @@ def test_update_gate_bat_over_the_network(tmp_path):
     assert done.returncode == 0 and inst.is_old(), (done.stdout, done.stderr)
 
 
+@nt_only
+@pytest.mark.parametrize("script,until", [
+    ("setup.bat", "setlocal EnableDelayedExpansion"),
+    ("setup-gui.bat", 'set "LOCALM_SETUP_GUI_HIDDEN="'),
+    ("localm-launcher.bat", 'if exist ".venv\\Scripts\\pythonw.exe"'),
+    ("rollback.bat", "rem Prefer the clone's venv Python")])
+def test_a_batch_script_undoes_it_over_the_network(tmp_path, script, until):
+    inst = Install(make_windows_clone(tmp_path, "localm.bat"))
+    drive, rest = os.path.splitdrive(inst.root)
+    unc = f"\\\\127.0.0.1\\{drive[0]}${rest}"
+    if not os.path.isdir(unc):
+        pytest.skip("this account cannot reach the drive over the network")
+    head = _text(script).split(until)[0] + "echo BEGINS %LOCALM_GATE%.\n"
+    (inst.root / script).write_bytes(head.replace("\n", "\r\n").encode())
+    inst.old = um.tree(inst.root)
+    inst.go(job.STEPS)
+    done = _cmd(inst, f'call "{unc}\\{script}" --yes', LOCALM_SETUP_GUI_INPLACE="1")
+    assert inst.is_old(), (done.stdout, done.stderr)
+    if script == "setup.bat":
+        assert "cannot run from a network folder" in done.stdout and "BEGINS" not in done.stdout, done.stdout
+
+
 _SETUPS = {"setup.bat": ("setlocal EnableDelayedExpansion", "[%LEFTUPDATE%]"),
            "setup.sh": ("say() {", "[$LEFTUPDATE]")}
 
@@ -867,16 +902,24 @@ def test_setup_goes_on_with_a_new_environment_and_always_uninstalls(tmp_path, sc
 def test_the_new_environment_ends_it_in_every_setup(inst, monkeypatch):
     bat, sh = _text("setup.bat"), _text("setup.sh")
     assert bat.index("if defined LEFTUPDATE call :jr begin venv & goto venv_create") < bat.index(":venv_create\n")
-    assert bat.index(":install_ok") < bat.index('if defined LEFTUPDATE del /q ".localm-update\\job.json"') < (
-        bat.index("call :step_done install-localm"))
+    done = 'localm\\update_mechanism setup-done . || echo  [^^!] Setup goes on.'
+    assert bat.index(":install_ok") < bat.index(
+        'if defined LEFTUPDATE ".venv\\Scripts\\python.exe" -I -S ' + done) < bat.index("call :step_done install-localm")
     assert sh.index('elif [ "$LEFTUPDATE" = 1 ]') < sh.index("install_localm_packages || {") < sh.index(
-        'if [ "${LEFTUPDATE:-0}" = 1 ]; then rm -f ./.localm-update/job.json; fi') < sh.index(
-        "step_done install-localm")
+        'if [ "${LEFTUPDATE:-0}" = 1 ]; then\n  .venv/bin/python -I -S localm/update_mechanism setup-done . \\\n'
+        '    || say "  [!] Setup goes on.') < sh.index("step_done install-localm")
     gui = runpy.run_path(str(REPO / "installer" / "gui.py"), run_name="gui")
     made: list = []
     scope = gui["build_steps"].__globals__
+
+    def run(cmd, emit, plan, **k):
+        if "setup-done" in cmd:
+            return subprocess.run([sys.executable, *cmd[1:]], text=True, capture_output=True,
+                                  timeout=60, **HIDDEN).returncode
+        made.append(inst.phase())
+        return 0
     scope.update(ROOT=inst.root, uv_argv=lambda *a: list(a), create_venv=lambda plan, emit: made.append((inst.root / ".venv").mkdir(
-        exist_ok=True)), _run=lambda *a, **k: made.append(inst.phase()))
+        exist_ok=True)), _run=run)
     (inst.root / ".venv").mkdir()
     inst.record.write_text('{"id": "", "phase": "setup"}')
     steps = {step.key: step.run for step in gui["build_steps"](gui["Plan"]())}
@@ -884,7 +927,28 @@ def test_the_new_environment_ends_it_in_every_setup(inst, monkeypatch):
     steps["venv"](said_.append)
     assert made == [None] and "made again" in said_[0] and inst.phase() == "setup"
     steps["install-localm"](said_.append)
-    assert made[1:] == ["setup"] and not inst.record.exists()
+    assert made[1:] == ["setup"] and not inst.record.exists(), said_
+
+
+@pytest.mark.parametrize("phase", [restoring.SETUP, job.STEPS, job.ENDING, "damaged"])
+def test_setup_deletes_only_the_record_it_kept_itself(inst, phase):
+    if phase == restoring.SETUP:
+        inst.record.parent.mkdir(exist_ok=True)
+        inst.record.write_text('{"id": "' + "0" * 32 + '", "phase": "setup"}')
+    else:
+        inst.go(job.STEPS if phase == "damaged" else phase)
+        if phase == "damaged":
+            inst.record.write_bytes(b"\0" * 40)
+    before = inst.record.read_bytes()
+    done = inst.run("-I", "-S", str(inst.root / "localm" / "update_mechanism"), "setup-done", ".")
+    assert done.code == 0, done.err
+    if phase == restoring.SETUP:
+        assert not inst.record.exists() and done.err == ""
+    else:
+        assert inst.record.read_bytes() == before and "it stays" in done.err
+    with job.Lock(inst.root):
+        held = inst.run("-I", "-S", str(inst.root / "localm" / "update_mechanism"), "setup-done", ".")
+    assert held.code == restoring.BUSY and "stays" in held.err
 
 
 # ------------------------------------------------- what the gate cannot do
@@ -922,6 +986,47 @@ def test_an_account_that_may_not_write_the_install_waits_for_a_running_update(in
     assert ran(inst.localm(), "1")
     monkeypatch.setattr(localm.os, "open", lambda *a: (_ for _ in ()).throw(PermissionError()))
     assert localm._held(folder)
+
+
+def test_at_a_terminal_a_lock_this_account_may_not_open_ends_the_wait(inst, monkeypatch, capsys):
+    inst.go(job.STEPS)
+    real_open, ran_ = os.open, []
+
+    def open_(path, *a, **k):
+        if os.path.basename(path) == "lock":
+            raise PermissionError(13, "denied", path)
+        return real_open(path, *a, **k)
+
+    def sleep(_s):
+        ran_.append("slept")
+        if ran_.count("slept") > 20:
+            raise KeyboardInterrupt
+    monkeypatch.setattr(localm, "__file__", str(inst.root / "localm" / "__init__.py"))
+    monkeypatch.setattr(localm, "_NAME_S", 0.0)
+    monkeypatch.setattr(localm, "_tty", lambda stream: True)
+    monkeypatch.setattr(localm, "_put_back", lambda *a: ran_.append("restore") or 1)
+    monkeypatch.setattr(time, "sleep", sleep)
+    monkeypatch.setattr(localm.os, "open", open_)
+    with pytest.raises(SystemExit) as end:
+        localm._gate()
+    monkeypatch.undo()
+    err = capsys.readouterr().err
+    assert end.value.code == 1 and ran_ == ["restore"], (ran_, err)
+    assert "may not open" in err and "account that installed it" in err
+
+
+def test_setup_puts_nothing_aside_while_a_file_an_update_added_is_left(inst, monkeypatch):
+    inst.go(job.STEPS)
+    um.write(inst.root, {**OLD, "update-package.json": _statement(OLD, "1")})
+    assert (inst.root / "localm" / "only2.py").exists()
+    monkeypatch.setattr(restoring.steps_update, "put_back", lambda *a, **k: job.Result("failed", ["why"]))
+    monkeypatch.setenv("LOCALM_SETUP", "1")
+    code, lines = restoring._once(inst.root)
+    assert code == restoring.FAILED and inst.phase() == job.STEPS, lines
+    assert "unzip it over" in "\n".join(lines) and (inst.root / ".localm-update" / ID).is_dir()
+    (inst.root / "localm" / "only2.py").unlink()
+    code, lines = restoring._once(inst.root)
+    assert code == restoring.OK and inst.phase() == restoring.SETUP and "LocaLM 1" in "\n".join(lines), lines
 
 
 def test_what_cannot_be_written_is_said_once(inst, monkeypatch):

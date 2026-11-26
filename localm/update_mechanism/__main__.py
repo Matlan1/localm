@@ -5,6 +5,10 @@ Puts the install at *root* back after an update that was not finished, or remove
 what a finished one left. Text goes to stderr. Exit status: 0 nothing is left to
 do, 1 the install could not be put back (each reason is named), 2 wrong
 arguments, 3 another process is updating this install. See :mod:`.restoring`.
+
+``<python> -I -S <this folder> setup-done <root>``: setup has made the Python
+environment again; deletes the record it kept for that (:func:`.restoring.end_setup`),
+with the same exit statuses.
 """
 
 from __future__ import annotations
@@ -44,10 +48,11 @@ def main(argv) -> int:
     status."""
     block_localm()
     load_package()
-    if len(argv) != 2 or argv[0] != "restore":
-        print("usage: <python> -I -S update_mechanism restore <root>", file=sys.stderr)
+    if len(argv) != 2 or argv[0] not in ("restore", "setup-done"):
+        print("usage: <python> -I -S update_mechanism restore|setup-done <root>", file=sys.stderr)
         return 2
-    return importlib.import_module(f"{NAME}.restoring").run(argv[1])
+    restoring = importlib.import_module(f"{NAME}.restoring")
+    return (restoring.run if argv[0] == "restore" else restoring.end_setup)(argv[1])
 
 
 if __name__ == "__main__":

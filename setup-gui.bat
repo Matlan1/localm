@@ -50,14 +50,15 @@ exit /b 0
 rem ---- an update that is not finished --------------------------------------------
 rem  Undoing it may replace this file: the command ends in the new start or in exit.
 rem  One that could not be undone is still there then; the window need not ask again.
-if not exist ".localm-update\job.json" goto :update_gated
+if not exist "%~dp0.localm-update\job.json" goto :update_gated
 if defined LOCALM_GATE goto :update_gated
 set "LOCALM_GATE=1"
 set "GATEIN="
 if "%USEBOX%"=="1" set "GATEIN=window"
-call scripts\update_gate.bat %GATEIN% && "%~dp0setup-gui.bat" %* || exit /b 1
+set "GATE=%~dp0scripts\update_gate.bat"
+call "%%GATE%%" %GATEIN% && "%~dp0setup-gui.bat" %* || exit /b 1
 :update_gated
-if not exist ".localm-update\job.json" set "LOCALM_GATE="
+if not exist "%~dp0.localm-update\job.json" set "LOCALM_GATE="
 set "LOCALM_SETUP_GUI_HIDDEN="
 set "LOCALM_SETUP_GUI_INPLACE="
 set "LOCALM_SETUP_GUI_SELF="

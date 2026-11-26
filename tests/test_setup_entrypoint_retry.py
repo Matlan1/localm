@@ -176,19 +176,27 @@ def test_retry_itself_erroring_still_reaches_the_still_missing_warning(tmp_path)
     assert "LOCALM_BIN_OK=0" in result.stdout
 
 
-@pytest.mark.parametrize(("left", "rc", "kept"), [("1", 0, False), ("1", 1, True), ("", 0, True)])
-def test_the_record_of_an_interrupted_update_goes_only_after_the_install(tmp_path, left, rc, kept):
+@pytest.mark.parametrize(("left", "rc", "runs"), [("1", 0, True), ("1", 1, False), ("", 0, False)])
+@pytest.mark.parametrize("ends", [0, 1])
+def test_setup_done_runs_only_after_the_install(tmp_path, left, rc, runs, ends):
     # setup.sh sets LEFTUPDATE=1 when it found the record of an update it could not undo.
-    # The record goes once localm is installed into the new .venv, never when the install
-    # failed. The block also runs with LEFTUPDATE not set at all.
-    record = tmp_path / ".localm-update" / "job.json"
-    record.parent.mkdir()
-    record.write_text("{}", encoding="utf-8")
+    # Its own record is ended once localm is installed into the new .venv, never when the
+    # install failed; when that fails, setup says so and goes on. The block also runs with
+    # LEFTUPDATE not set at all.
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    _make_executable(tmp_path / ".venv" / "bin" / "python",
+                     '#!/bin/sh\n[ "$1" = -m ] && exit 1\necho "$@" >> .stub-python-args\n'
+                     f"exit {ends}\n")
     result = _run_install_block(tmp_path, call_specs={1: (rc, rc == 0)},
                                 env_extra={"LEFTUPDATE": left} if left else None)
     assert (result.returncode == 0) is (rc == 0), result.stderr
     assert "unbound variable" not in result.stderr
-    assert record.exists() is kept
+    args = tmp_path / ".stub-python-args"
+    assert (args.read_text().strip() if args.exists() else "") == (
+        "-I -S localm/update_mechanism setup-done ." if runs else "")
+    assert ("Setup goes on" in result.stdout) is (runs and ends == 1)
+    if runs:
+        assert "COMPLETED" in result.stdout
 
 
 def test_retry_install_is_guarded_in_source():

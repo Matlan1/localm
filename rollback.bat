@@ -22,8 +22,9 @@ for %%A in (%*) do (
 )
 
 rem An update that is not finished is undone; an older backup is then left alone.
-if exist ".localm-update\job.json" (
-    call scripts\update_gate.bat
+set "GATE=%~dp0scripts\update_gate.bat"
+if exist "%~dp0.localm-update\job.json" (
+    call "%%GATE%%"
     call set "RC=%%errorlevel%%"
     echo.
     if defined HOLD pause

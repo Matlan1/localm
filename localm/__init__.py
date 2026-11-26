@@ -70,6 +70,12 @@ def _gate(me=None) -> bool:
             code = _put_back(root, folder, update, window)
             if code == 0:
                 break
+            if code != 3 and _denied(folder):
+                account = os.environ.get("USERNAME") or os.environ.get("USER") or "this account"
+                _say(f"The account {account} may not open {os.path.join(folder, 'lock')}, so it "
+                     f"cannot tell whether an update of LocaLM runs. Start LocaLM with the account "
+                     f"that installed it.")
+                sys.exit(1)
             if window or (code != 3 and not _held(folder)) or time.monotonic() >= end:
                 sys.exit(1)
     except KeyboardInterrupt:
@@ -153,6 +159,17 @@ def _held(folder: str) -> bool:
         return True
     finally:
         os.close(fd)
+
+
+def _denied(folder: str) -> bool:
+    """Whether this account may not open the lock of the update at all."""
+    try:
+        os.close(os.open(os.path.join(folder, "lock"), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)))
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def _chosen(folder: str, update: str, me) -> bool:

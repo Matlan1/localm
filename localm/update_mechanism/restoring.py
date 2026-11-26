@@ -78,9 +78,10 @@ def _once(root) -> tuple:
                 return FAILED, [f"LocaLM's setup did not finish. Run setup in {root} again."]
             notes: list = []
             try:
-                if _is_another_release(root):
-                    why = ["LocaLM was replaced by another release while an update of it was "
-                           "not finished."]
+                changed = _changed_over(root)
+                if changed:
+                    why = [f"{changed} of LocaLM was changed since its update was interrupted: "
+                           "it is neither the version before the update nor the one after it."]
                 else:
                     running = _end_running(lock)
                     if running:
@@ -174,21 +175,44 @@ def ways_out(root) -> list:
             f"models stay). Setup with --uninstall removes LocaLM."]
 
 
-def _is_another_release(root) -> bool:
-    """Whether another release was put over the install: what tells one release from
-    another is neither as the unfinished update found it nor as it leaves it."""
+def _changed_over(root) -> str:
+    """What tells one release from another and is neither as the unfinished update found
+    it nor as it leaves it (another release was put over the install, or the user changed
+    it), or an empty string."""
     record = job.current(root)
     if (record is None or record.phase in (job.DONE, job.ENDED)
             or not mover.has_plans(root, record.id)):
-        return False
+        return ""
     ops = [op for plan in mover.read_plans(root, record.id) if plan.step == mover.FILES
            for op in plan.ops]
     for rel in (shared.update_package.NAME, "localm/__init__.py"):
         known = [i for op in ops if op.path == rel for i in (op.old, op.new, *op.release) if i]
         path = disk.real_folder(root) / rel
         if known and disk.lstat(path) is not None and not any(disk.same(path, i) for i in known):
-            return True
-    return False
+            return rel
+    return ""
+
+
+def end_setup(root) -> int:
+    """Delete the record that setup keeps in phase :data:`SETUP` while it makes the Python
+    environment again, once that stands. A record in any other phase is of an update and
+    stays. Returns :data:`OK` (deleted, or nothing to delete), :data:`BUSY` (another
+    process holds the lock of the update) or :data:`FAILED`; each but OK is said."""
+    root = os.path.abspath(root)
+    try:
+        with job.Lock(root):
+            if _waits_for_setup(root):
+                disk.unlink(job.record_path(root))
+            elif disk.lstat(job.record_path(root)) is not None:
+                say(f"{job.record_path(root)} is of an update, not of setup: it stays.")
+        return OK
+    except job.Busy as e:
+        say(f"{e}. The record of the interrupted update stays; run setup again once that "
+            "has ended.")
+        return BUSY
+    except (OSError, disk.Held) as e:
+        say(f"The record of the interrupted update could not be deleted: {e}. Run setup again.")
+        return FAILED
 
 
 def _waits_for_setup(root) -> bool:
@@ -208,7 +232,7 @@ def _set_aside(lock: job.Lock) -> str:
     root = disk.real_folder(lock.root)
     ids = [n for n in job.ids(root) if job.over_of(root, n) is None]
     version = release_of(root)
-    if not version or (not in_setup() and any(
+    if not version or _added_left(root, ids) or (not in_setup() and any(
             disk.lstat(mover.venv_folder(root, n)) is not None for n in ids)):
         return ""
     stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -230,19 +254,49 @@ def _set_aside(lock: job.Lock) -> str:
 def release_of(root) -> str:
     """The version of the release whose statement the install at *root* has, when every
     file it states is there as stated, else an empty string."""
-    package = shared.update_package
+    stated = _statement(root)
     try:
-        raw = disk.read_file(Path(root) / package.NAME, package.MAX_BYTES)
-        stated = package.parse((raw or b"").decode("utf-8"))
         a = mover.area(root, "0" * 32, mover.FILES, 1)
-        for rel, identity in stated["files"].items():
+        for rel, identity in (stated or {"files": {}})["files"].items():
             if a.inside(rel):
                 path, st = a.find(rel)
                 if st is None or not disk.same(path, identity, disk.Wait(0)):
                     return ""
-        return stated["version"]
+        return stated["version"] if stated else ""
     except (OSError, ValueError, disk.Unsafe, disk.Held):
         return ""
+
+
+def _statement(root) -> Optional[dict]:
+    """The statement of the release the install at *root* has, None when it has none
+    that can be read."""
+    package = shared.update_package
+    try:
+        raw = disk.read_file(Path(root) / package.NAME, package.MAX_BYTES)
+        return package.parse((raw or b"").decode("utf-8"))
+    except (OSError, ValueError, disk.Unsafe, disk.Held):
+        return None
+
+
+def _added_left(root, ids: list) -> bool:
+    """Whether a file that one of the updates *ids* added is there and is not a file of
+    the release the install now has: the files are then not those of one release."""
+    stated = set((_statement(root) or {"files": {}})["files"])
+    try:
+        a = mover.area(root, "0" * 32, mover.FILES, 1)
+        for update_id in ids:
+            try:
+                plans = mover.read_plans(root, update_id) if mover.has_plans(root, update_id) else []
+            except mover.Unreadable:   # damaged plans: only the stated files are looked at
+                continue
+            for plan in plans:
+                for op in plan.ops if plan.step == mover.FILES else ():
+                    if op.old is None and op.path not in stated and a.inside(op.path) and (
+                            a.find(op.path)[1] is not None):
+                        return True
+    except (OSError, disk.Unsafe, disk.Held):
+        return True
+    return False
 
 
 # ---------------------------------------------- what it needs of the install
