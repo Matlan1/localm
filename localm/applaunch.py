@@ -256,10 +256,21 @@ def _copy_replacing_possibly_running_exe(src: Path, dst: Path) -> bool:
             if old.exists():
                 old.unlink()
             dst.rename(old)
-            shutil.copy2(src, dst)
         except OSError as e:
             # Surface the original failure as the primary error; the fallback's
             # own error rides along as __context__.
+            raise copy_err from e
+        try:
+            shutil.copy2(src, dst)
+        except OSError as e:
+            # The renamed-aside copy goes back, so dst is the old file again
+            # rather than missing or half written.
+            try:
+                dst.unlink(missing_ok=True)
+                old.rename(dst)
+            except OSError as restore_err:
+                raise OSError(f"{e}; the old copy could not be put back and stays "
+                              f"at {old} ({restore_err})") from copy_err
             raise copy_err from e
         try:
             old.unlink()
@@ -294,6 +305,11 @@ def make_windows_launcher(*, force: bool = False) -> LauncherResult:
         notes.append(f"built {dst.name} from {base.name} + {len(dlls)} runtime DLL(s)"
                      + (" (it was running; renamed the old copy aside to replace it)"
                         if replaced_running else ""))
+        if dll_failures:
+            _problem(notes, problems,
+                     f"could not replace {', '.join(dll_failures)}, so {dst.name} can "
+                     "keep running the old Python. Close every LocaLM window and run "
+                     "`localm make-launcher --force` again.")
     except OSError as e:
         text = f"could not build {dst.name}: {e}"
         if isinstance(e, PermissionError):
@@ -329,13 +345,7 @@ def make_windows_launcher(*, force: bool = False) -> LauncherResult:
                               problems=problems)
 
     _ensure_bare_start(notes, problems)
-    refreshed = True
-    if dll_failures:
-        refreshed = False
-        _problem(notes, problems,
-                 f"could not replace {', '.join(dll_failures)}, so {dst.name} can keep "
-                 "running the old Python. Close every LocaLM window and run "
-                 "`localm make-launcher --force` again.")
+    refreshed = not dll_failures
     stale = _stale_python_problem(dst, base)
     if stale is not None:
         refreshed = False

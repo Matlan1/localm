@@ -176,12 +176,25 @@ _LOCAL_BUILD_HINT = ("To install without this download, provision from a local b
                      "<archive-url>'.")
 
 
+def _release_tag(url: str) -> Optional[str]:
+    """The tag in a GitHub release-download *url*
+    (``.../releases/download/<tag>/<file>``), else None."""
+    head, sep, rest = url.partition("/releases/download/")
+    tag = rest.split("/", 1)[0] if sep else ""
+    return tag or None
+
+
 def _http_error_message(url: str, e: urllib.error.HTTPError) -> str:
     """The failure text for an HTTP error status answering the download of
     *url*, worded by what the status means."""
     status = f"HTTP {e.code}: {e.reason}" if e.reason else f"HTTP {e.code}"
     if e.code in (404, 410):
-        if "/releases/download/" in url:
+        tag = _release_tag(url)
+        if tag is not None and tag in (_sl._PINNED_TAG, _sl._ROCM_TAG, _sl._ROCM_CPU_TAG):
+            what = (f"{tag} is a release localm pins, and this archive of it is "
+                    "missing, so retrying will not help. Please report it with "
+                    "'localm bug-report'.")
+        elif tag is not None:
             what = ("the release tag or the archive named in it does not exist. "
                     "Retrying will not help: check the tag you asked for against the "
                     "project's published releases, or run 'localm setup-llama --tag "

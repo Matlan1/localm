@@ -1746,13 +1746,16 @@ def test_a_tag_that_does_not_exist_is_named_as_such(world):
 
 
 @pytest.mark.parametrize("status, fragment", [
+    (404, f"(HTTP 404: Not Found): {PIN} is a release localm pins, and this archive of it "
+          "is missing, so retrying will not help. Please report it with 'localm "
+          "bug-report'."),
     (403, "(HTTP 403: Forbidden): access is denied"),
     (503, "(HTTP 503: Service Unavailable): this is on the server's side, not your "
           "connection. Retry in a while."),
 ])
 def test_other_http_statuses_are_worded_by_meaning(world, status, fragment):
     url, _ = _upstream_win_vulkan(world)
-    reason = {403: "Forbidden", 503: "Service Unavailable"}[status]
+    reason = {404: "Not Found", 403: "Forbidden", 503: "Service Unavailable"}[status]
     world.serve(url, urllib.error.HTTPError(url, status, reason, hdrs=None, fp=None))
     r = world.invoke("--backend", "vulkan")
     assert r.exit_code == 1

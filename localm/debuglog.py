@@ -949,70 +949,88 @@ def native_stderr_target() -> Optional[int]:
 
 class CapturedNativeStdio:
     """Holder yielded by :func:`capture_native_stdio`; ``tail()`` reads whatever
-    native text landed on either stream while the block was open."""
+    landed in its file from offset *start* on while the block was open."""
 
-    def __init__(self, out_path: str, err_path: str) -> None:
-        self._out_path = out_path
-        self._err_path = err_path
-
-    def _read(self, path: str) -> str:
-        try:
-            with open(path, encoding="utf-8", errors="replace") as fh:
-                return fh.read()
-        except OSError:
-            return ""
+    def __init__(self, path: str, start: int = 0) -> None:
+        self.path = path
+        self._start = start
 
     def tail(self, max_chars: int = 1500) -> str:
-        """The last *max_chars* of the captured stdout then stderr text, ""
-        when nothing was captured or the files cannot be read. The order of
-        lines between the two streams is not kept (they are separate files)."""
-        text = "\n".join(s for s in (self._read(self._out_path),
-                                      self._read(self._err_path)) if s).strip()
+        """The last *max_chars* of the captured text, "" when nothing was
+        captured or the file cannot be read."""
+        try:
+            with open(self.path, "rb") as fh:
+                fh.seek(self._start)
+                data = fh.read()
+        except OSError:
+            return ""
+        text = data.decode("utf-8", errors="replace").strip()
         return text[-max_chars:] if len(text) > max_chars else text
 
 
+def _flush_python_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(Exception):
+            stream.flush()
+
+
 @contextlib.contextmanager
-def capture_native_stdio():
-    """Redirect fd 1 (stdout) and fd 2 (stderr) into temp files for the block,
-    for native output whose stream is not documented: the banner a ggml build
-    prints while its native library loads and registers its backends (device
-    and ``load_backend:`` lines). On exit the captured text is appended to the
-    debug log in debug mode (:func:`native_stderr_target`) and the temp files
-    are removed, so a caller that wants ``tail()`` reads it inside the block.
+def capture_native_stdio(keep_path: Optional[str] = None):
+    """Redirect fd 1 (stdout) and fd 2 (stderr) into one file for the block, for
+    native output whose stream is not documented: the banner a ggml build prints
+    while its native library loads and registers its backends (device and
+    ``load_backend:`` lines). Yields a :class:`CapturedNativeStdio`.
+
+    In debug mode the descriptors point straight at the debug log (appended), so
+    the text is there even when the process aborts inside the block. Otherwise
+    they point at *keep_path* (truncated first) or a new temp file, which is
+    removed when the block ends; a process that aborts inside the block leaves
+    it, so a parent that named *keep_path* can read it. Read ``tail()`` inside
+    the block.
 
     This only moves the OS-level descriptors. A logging record emitted in the
     block reaches the debug-mode console mirror, which writes to its own
     duplicate of stderr; pair it with :func:`suppress_console_mirror` to keep
     those off the console too."""
-    import tempfile
-    out_fd, out_path = tempfile.mkstemp(prefix="localm_loadlib_", suffix=".out.log")
-    err_fd, err_path = tempfile.mkstemp(prefix="localm_loadlib_", suffix=".err.log")
+    fd = None
+    start = 0
+    remove = True
+    path = log_file_path()
+    if path is not None:
+        drain_debug_log()
+        try:
+            fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT)
+            start = os.fstat(fd).st_size
+            remove = False
+            target = str(path)
+        except OSError as e:
+            logger.warning("debuglog: could not open the debug log %s for native "
+                           "output (%s); it goes to a temp file instead", path, e)
+            fd = None
+    if fd is None:
+        if keep_path:
+            target = keep_path
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+        else:
+            import tempfile
+            fd, target = tempfile.mkstemp(prefix="localm_loadlib_", suffix=".log")
+    _flush_python_stdio()
     saved_out = os.dup(1)
     saved_err = os.dup(2)
-    os.dup2(out_fd, 1)
-    os.dup2(err_fd, 2)
-    os.close(out_fd)
-    os.close(err_fd)
+    os.dup2(fd, 1)
+    os.dup2(fd, 2)
+    os.close(fd)
     try:
-        yield CapturedNativeStdio(out_path, err_path)
+        yield CapturedNativeStdio(target, start)
     finally:
+        _flush_python_stdio()
         os.dup2(saved_out, 1)
         os.dup2(saved_err, 2)
         os.close(saved_out)
         os.close(saved_err)
-        target_fd = native_stderr_target()
-        if target_fd is not None:
-            try:
-                for p in (out_path, err_path):
-                    with open(p, "rb") as src:
-                        os.write(target_fd, src.read())
-            except OSError:
-                pass
-            finally:
-                os.close(target_fd)
-        for p in (out_path, err_path):
+        if remove:
             with contextlib.suppress(OSError):
-                os.unlink(p)
+                os.unlink(target)
 
 
 def record_native_line(text: str) -> None:

@@ -903,6 +903,8 @@ class _LoopMixin:
                                            # the session-wide flag, set in the finally.
         self._last_verify_state = None     # per-run: this run is unverified until
                                            # its own gate says otherwise
+        self._plan_refusals = {}           # per-run: plan-mode refusals per tool
+        self._abort_plan_refused = None
         self._refused_quotations = []
         self._denied_unconfirmed = []      # per-run: see Agent.denied_unconfirmed
         self._reply_limit = None           # per-run: see _raise_reply_limit

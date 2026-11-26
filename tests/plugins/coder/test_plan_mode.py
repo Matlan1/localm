@@ -607,7 +607,7 @@ def test_repeated_plan_mode_refusals_stop_the_run_without_calling_them_failures(
     assert agent._abort_streak_tool is None
     assert agent._abort_plan_refused == name
     message = agent._check_post_batch_breakers()
-    assert message.startswith(f"[stopped: plan mode refused {name} 4 times in a row, so it "
+    assert message.startswith(f"[stopped: plan mode refused {name} 4 times in this run, so it "
                               "never ran")
     assert "failed" not in message
     assert agent._last_run_ok is False
@@ -621,11 +621,23 @@ def test_a_task_that_keeps_asking_for_run_tests_in_plan_mode_stops_on_the_refusa
     with patch.object(agent, "_call_llm", side_effect=lambda *a, **k: next(replies)):
         final = agent.chat("run the tests")
     shown = capsys.readouterr()
-    assert final.startswith("[stopped: plan mode refused run_tests 4 times in a row")
+    assert final.startswith("[stopped: plan mode refused run_tests 4 times in this run")
     assert "failed" not in final
     assert "failed 4 times" not in shown.out + shown.err
     assert "circuit breaker" not in shown.out + shown.err
     assert agent._last_run_ok is False
+
+
+def test_the_next_task_after_a_refusal_stop_starts_counting_again(tmp_path):
+    agent = _agent(tmp_path)
+    agent.set_plan_mode(True)
+    replies = iter([_tc("run_tests")] * 4 + [_tc("run_tests"), "I will propose a plan."])
+    with patch.object(agent, "_call_llm", side_effect=lambda *a, **k: next(replies)):
+        first = agent.chat("run the tests")
+        second = agent.chat("continue")
+    assert first.startswith("[stopped: plan mode refused run_tests 4 times")
+    assert not second.startswith("[stopped")
+    assert agent._plan_refusals == {"run_tests": 1}
 
 
 def test_leaving_plan_mode_starts_the_refusal_count_again(tmp_path):

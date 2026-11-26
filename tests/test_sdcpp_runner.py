@@ -230,3 +230,48 @@ def test_a_load_failure_carries_the_captured_native_lines(monkeypatch, capfd):
     assert "could not load the stable-diffusion.cpp runtime from rt" in reply[1]
     assert "ggml_vulkan: vkCreateInstance failed" in reply[1]
     assert "ggml_vulkan" not in out + err
+
+
+def test_native_output_survives_a_process_that_dies_in_the_capture(tmp_path):
+    import subprocess
+    import sys
+    keep = tmp_path / "trace.native.log"
+    code = ("import os\n"
+            "from localm.debuglog import capture_native_stdio\n"
+            f"with capture_native_stdio(keep_path={str(keep)!r}):\n"
+            "    os.write(2, b'GGML_ASSERT(buf != NULL) failed\\n')\n"
+            "    os._exit(3)\n")
+    env = dict(os.environ)
+    env.pop("LOCALM_DEBUG", None)
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                       timeout=120, env=env,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    assert r.returncode == 3, r.stderr
+    assert "GGML_ASSERT" not in r.stderr
+    assert "GGML_ASSERT(buf != NULL) failed" in keep.read_text(encoding="utf-8")
+
+
+def test_in_debug_mode_native_output_goes_straight_to_the_debug_log(tmp_path, monkeypatch,
+                                                                     capfd):
+    from localm import debuglog
+    log = tmp_path / "debug.log"
+    log.write_text("earlier line\n", encoding="utf-8")
+    monkeypatch.setattr(debuglog, "log_file_path", lambda: log)
+    with debuglog.capture_native_stdio(keep_path=str(tmp_path / "unused.log")) as cap:
+        os.write(2, b"load_backend: loaded CPU backend\n")
+        assert cap.tail() == "load_backend: loaded CPU backend"
+    assert "load_backend" not in "".join(capfd.readouterr())
+    assert log.read_text(encoding="utf-8").endswith("load_backend: loaded CPU backend\n")
+    assert not (tmp_path / "unused.log").exists()
+
+
+def test_the_parent_reports_the_native_output_of_a_worker_that_died(tmp_path):
+    from localm.media.sdcpp import _child
+    r = SdRunner()
+    r._crash_trace_path = tmp_path / "sdcpp-worker.trace"
+    native = Path(_child.native_output_path(r._crash_trace_path))
+    native.write_text("ggml_vulkan: Found 1 Vulkan devices:\nGGML_ASSERT(x) failed\n",
+                      encoding="utf-8")
+    detail = r._crash_detail()
+    assert "Native output: GGML_ASSERT(x) failed." in detail
+    assert not native.exists()

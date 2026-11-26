@@ -60,7 +60,15 @@ _HOST_VIS_VAR = "GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM"
 _HOST_VIS_OPT_OUT = frozenset({"0", "false", "off", "no", ""})
 
 
+def native_output_path(crash_trace_path) -> Optional[str]:
+    """Where the worker writes the native load output (``_off_the_console``)
+    outside debug mode: beside its crash trace, so the parent can read it when the
+    worker dies in the load. None without a crash trace path."""
+    return f"{crash_trace_path}.native.log" if crash_trace_path else None
+
+
 class _State:
+    native_path: Optional[str] = None
     lib: Optional[ctypes.CDLL] = None
     ctx: Optional[int] = None
     crash_fh: Optional[TextIO] = None
@@ -395,7 +403,7 @@ def _off_the_console(fn, payload):
     the debug log in debug mode (``debuglog.capture_native_stdio``); when *fn*
     raises, its tail is added to the error."""
     from localm.debuglog import capture_native_stdio
-    with capture_native_stdio() as captured:
+    with capture_native_stdio(keep_path=_State.native_path) as captured:
         try:
             return fn(payload)
         except Exception as e:
@@ -1004,6 +1012,7 @@ def _do_generate_video(payload, cancel_event):
 def worker_main(req_q, resp_q, cancel_event, crash_trace_path=None) -> None:
     """Child entry point: serve commands until "shutdown" or a closed queue."""
     _arm_crash_trace(crash_trace_path)
+    _State.native_path = native_output_path(crash_trace_path)
     from localm.debuglog import attach_child_logging
     attach_child_logging()
     from localm._mp_spawn import (ignore_interrupt_signals, install_parent_death_watchdog,
