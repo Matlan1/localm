@@ -6464,14 +6464,6 @@
             {
                 "code": "reportArgumentType",
                 "range": {
-                    "startColumn": 44,
-                    "endColumn": 62,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportArgumentType",
-                "range": {
                     "startColumn": 21,
                     "endColumn": 39,
                     "lineCount": 1

@@ -629,6 +629,9 @@ class VramSizingMixin:
 
     # VRAM the MoE expert cache takes (moe_cache_mib), 0 when it is off.
     _MOE_CACHE_BYTES = 0
+    # VRAM charged for a projector's compute buffer beyond its weights. See
+    # test_the_projector_charge_covers_the_measured_buffers.
+    _PROJECTOR_COMPUTE_BYTES = 400 * 1024 ** 2
 
     def _moe_cache_charge(self) -> int:
         """``_MOE_CACHE_BYTES`` for a model with routed experts, else 0."""
@@ -678,6 +681,9 @@ class VramSizingMixin:
         is charged in equal parts to the layers that keep one. A draft model on
         the GPU (:meth:`_draft_model_vram_bytes`) is split over the same devices
         as the target, so it is charged to them in proportion to their shares.
+        The projector (:meth:`_projector_vram_bytes`) goes on one device, which
+        the plan cannot know, so every device that receives a layer or the
+        output layer is charged all of it, beside ``_VRAM_OVERHEAD_BYTES``.
         A plan that writes a split or reports a shortfall is
         returned only when :func:`localm.discover.runtime_split_devices_match`
         confirms the device numbering; when the runtime instead keeps the
@@ -756,7 +762,8 @@ class VramSizingMixin:
                 "fit_kw": dict(output_bytes=int(output_bytes),
                                layer_kv_bytes=layer_kv, n_gpu_layers=int(gpu_layers),
                                logits_bytes=logits,
-                               reserve_bytes=int(self._VRAM_OVERHEAD_BYTES),
+                               reserve_bytes=int(self._VRAM_OVERHEAD_BYTES
+                                                 + self._projector_vram_bytes()),
                                spread_bytes=int(self._draft_model_vram_bytes())),
             }
         except Exception as e:
@@ -847,8 +854,10 @@ class VramSizingMixin:
         routed-expert bytes, its KV cache for *kv_tokens* tokens (default
         ``_plan_kv_tokens()``) and per
         token, the recurrent state of the blocks that keep one, the output
-        layer and the logits of one batch, ``_VRAM_OVERHEAD_BYTES`` per device
-        and a draft model or MoE cache shared among the devices. MTP / nextn
+        layer and the logits of one batch, ``_VRAM_OVERHEAD_BYTES`` and the
+        whole projector (:meth:`_projector_vram_bytes`, which goes on one
+        device the plan cannot know) per device, and a draft model or MoE cache
+        shared among the devices. MTP / nextn
         blocks are charged only with MTP enabled, as their draft context. None
         when the header cannot be read. Never raises."""
         try:
@@ -910,7 +919,7 @@ class VramSizingMixin:
                 layer_bytes=layer_bytes, expert_bytes=expert_bytes,
                 layer_kv=layer_kv, kv_per_token=kv_per_token,
                 output_bytes=int(output), logits_bytes=int(logits),
-                reserve_bytes=int(self._VRAM_OVERHEAD_BYTES),
+                reserve_bytes=int(self._VRAM_OVERHEAD_BYTES) + self._projector_vram_bytes(),
                 spread_bytes=int(self._draft_model_vram_bytes()) + self._moe_cache_charge())
         except Exception as e:
             from localm.debuglog import logger as _dbg
@@ -1376,7 +1385,7 @@ class VramSizingMixin:
         VRAM covers the target's GPU weights (every layer, or ``n_gpu_layers``
         of them when fewer are configured), its KV cache for ``self.n_ctx``
         tokens, the compute overhead, any MTP draft context, the recurrent
-        state and the draft charge. A draft model that does not fit runs on the
+        state, the projector and the draft charge. A draft model that does not fit runs on the
         CPU, so it never takes GPU layers or devices from the target. Reads
         free VRAM, so it must not run on an event loop thread."""
         on_gpu = True
@@ -1406,7 +1415,8 @@ class VramSizingMixin:
                     need = (model + self.n_ctx * self._kv_bytes_per_token()
                             + self._split_overhead_bytes(split_devices or 1)
                             + self._mtp_draft_context_vram_bytes()
-                            + self._recurrent_state_vram_bytes() + charge)
+                            + self._recurrent_state_vram_bytes()
+                            + self._projector_vram_bytes() + charge)
                     on_gpu = free >= need
         self.draft_model_on_gpu = on_gpu
         return on_gpu
@@ -1585,6 +1595,68 @@ class VramSizingMixin:
             except OSError:
                 continue
         return total
+
+    def _projector_file_bytes(self) -> int:
+        """Bytes on disk of the vision or audio projector (``mmproj_path``)
+        this load opens (``gguf_file_bytes``, as :meth:`_model_bytes` reads the
+        model's). 0 with no projector, for a model llama.py opens no projector
+        for (an encoder-decoder or a diffusion model), and when the file cannot
+        be read (logged at debug). Memoised per instance."""
+        cached = getattr(self, "_projector_file_bytes_cached", None)
+        if cached is not None:
+            return cached
+        size = 0
+        raw = getattr(self, "mmproj_path", None)
+        if raw:
+            from localm.model_manager.gguf import (
+                _GGUF_ENCODER_DECODER_ARCHITECTURES, gguf_architecture, gguf_file_bytes)
+            size = gguf_file_bytes(Path(raw))
+            if size <= 0:
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("projector %s could not be read; sizing charges "
+                           "nothing for it", Path(raw).name)
+                size = 0
+            elif (self._keeps_no_kv_cache()
+                  or gguf_architecture(Path(self.model_path))
+                  in _GGUF_ENCODER_DECODER_ARCHITECTURES):
+                size = 0
+        self._projector_file_bytes_cached = size
+        return size
+
+    @staticmethod
+    def _projector_forced_to_cpu() -> bool:
+        """True when ``LOCALM_MTMD_CPU`` keeps the projector on the CPU."""
+        from localm.inference.backends.llamacpp._abi import env_on
+        return env_on("LOCALM_MTMD_CPU")
+
+    def _projector_vram_bytes(self) -> int:
+        """VRAM the projector of this load takes on the GPU:
+        :meth:`_projector_file_bytes` plus ``_PROJECTOR_COMPUTE_BYTES`` for its
+        compute buffer, or 0 when there is none to open or ``LOCALM_MTMD_CPU``
+        keeps it on the CPU."""
+        size = self._projector_file_bytes()
+        if size <= 0 or self._projector_forced_to_cpu():
+            return 0
+        return size + self._PROJECTOR_COMPUTE_BYTES
+
+    def _cpu_projector_bytes(self, layers_on_gpu: bool = True) -> int:
+        """System RAM the projector of this load takes when it opens on the
+        CPU (no layer on a GPU when *layers_on_gpu* is False, or
+        ``LOCALM_MTMD_CPU``): :meth:`_projector_file_bytes`; else 0."""
+        if layers_on_gpu and not self._projector_forced_to_cpu():
+            return 0
+        return self._projector_file_bytes()
+
+    def _gpu_fixed_bytes(self, split_devices: int) -> int:
+        """VRAM a load with any layer on the GPU takes beside its weights and
+        main KV cache, whatever its layer count: the compute overhead for
+        *split_devices* devices (``_split_overhead_bytes``), the draft source
+        (``_spec_extra_vram_bytes``), the recurrent state and the projector
+        (:meth:`_projector_vram_bytes`)."""
+        return (self._split_overhead_bytes(split_devices)
+                + self._spec_extra_vram_bytes()
+                + self._recurrent_state_vram_bytes()
+                + self._projector_vram_bytes())
 
     def _vram_model_bytes(self, n_cpu_moe: int) -> int:
         """VRAM-resident weight bytes for a load that keeps the routed experts
@@ -1846,9 +1918,8 @@ class VramSizingMixin:
         ``need`` is the VRAM-resident weights (``_effective_model_bytes_for_vram``,
         so without the input-layer tensors and the routed experts this load's
         n_cpu_moe pins; only the offloaded fraction of them below 99 layers),
-        plus the KV cache for ``self.n_ctx`` tokens, plus ``overhead`` (the
-        per-device compute overhead, the draft source and the recurrent
-        state)."""
+        plus the KV cache for ``self.n_ctx`` tokens, plus ``overhead``
+        (:meth:`_gpu_fixed_bytes`)."""
         free, total, split_devices = self._split_free_total_bytes()
         if free is None:
             free = self._free_vram_bytes()
@@ -1863,9 +1934,7 @@ class VramSizingMixin:
         else:
             layers = self._cached_layer_count() or self._ASSUMED_LAYERS
             weights = int(model_bytes * min(1.0, gpu_layers / layers))
-        overhead = (self._split_overhead_bytes(split_devices)
-                    + self._spec_extra_vram_bytes()
-                    + self._recurrent_state_vram_bytes())
+        overhead = self._gpu_fixed_bytes(split_devices)
         return (weights + kv_cache + overhead, free, total, split_devices,
                 kv_cache, overhead)
 
@@ -2081,8 +2150,9 @@ class VramSizingMixin:
         """
         Derive a context ceiling from available resources.
 
-        Budget = free VRAM - model weights - fixed overhead - the configured
-        embedder's expected footprint (see embedder_ctx_reservation_bytes).
+        Budget = free VRAM - model weights - fixed overhead - the projector
+        (:meth:`_projector_vram_bytes`) - the configured embedder's expected
+        footprint (see embedder_ctx_reservation_bytes).
         The KV cost per token is estimated from the model's size class
         (larger models have more layers and wider KV heads; sliding-window
         models need less, so the estimate stays conservative). A draft source
@@ -2152,7 +2222,8 @@ class VramSizingMixin:
         fits available system RAM (``sysstats.system_ram``) beside the weights a
         load with *gpu_layers* on the GPU keeps there
         (:meth:`_cpu_held_weight_bytes`, the whole file when that count fails,
-        plus :meth:`_cpu_draft_weight_bytes`; with no block on the GPU also the
+        plus :meth:`_cpu_draft_weight_bytes` and :meth:`_cpu_projector_bytes`;
+        with no block on the GPU also the
         recurrent state) and :data:`HOST_RAM_HEADROOM_BYTES`, and never fewer
         than fit beside the weights without the headroom, up to
         ``_AUTO_CTX_FALLBACK``, so the answer never falls as available RAM
@@ -2166,6 +2237,7 @@ class VramSizingMixin:
         if held is None:
             held = self._model_bytes()
         held += self._cpu_draft_weight_bytes(gpu_layers > 0)
+        held += self._cpu_projector_bytes(gpu_layers > 0)
         if gpu_layers <= 1:
             held += self._recurrent_state_vram_bytes()
         per_token = max(1, ram_per_token)
@@ -2234,7 +2306,8 @@ class VramSizingMixin:
             budget = (free - model - self._split_overhead_bytes(split_devices)
                       - embedder_ctx_reservation_bytes()
                       - spec_fixed
-                      - self._recurrent_state_vram_bytes())
+                      - self._recurrent_state_vram_bytes()
+                      - self._projector_vram_bytes())
             gpu_per_token = max(1, int(per_token * share) + spec_per_token)
             limits.append(max(0, budget) // gpu_per_token)
         if ram_share > 0:
@@ -2392,15 +2465,12 @@ class VramSizingMixin:
         """``(model, kv, overhead)`` bytes a full GPU offload of this load
         charges: the VRAM-resident weights with the CONFIGURED n_cpu_moe
         (``_vram_model_bytes``; never an automatic choice of an earlier
-        load), the KV cache for :meth:`_plan_kv_tokens` tokens, and the compute
-        overhead for *split_devices* devices plus the draft source (MTP draft
-        context or draft model) and the recurrent state."""
+        load), the KV cache for :meth:`_plan_kv_tokens` tokens, and
+        :meth:`_gpu_fixed_bytes` for *split_devices* devices (the compute
+        overhead, the draft source, the recurrent state and the projector)."""
         model = self._vram_model_bytes(int(getattr(self, "n_cpu_moe", 0) or 0))
         kv = self._plan_kv_tokens() * self._kv_bytes_per_token()
-        overhead = (self._split_overhead_bytes(split_devices)
-                    + self._spec_extra_vram_bytes()
-                    + self._recurrent_state_vram_bytes())
-        return model, kv, overhead
+        return model, kv, self._gpu_fixed_bytes(split_devices)
 
     def full_offload_vram_bytes(self) -> Optional[int]:
         """Free VRAM this load needs for every layer to go on the GPU: the
@@ -2635,8 +2705,9 @@ class VramSizingMixin:
         (the load's resolved value) with ``n_cpu_moe_auto`` (True when the
         automatic sizing chose it). An "auto" record also carries
         ``free_bytes``, ``total_bytes``, ``model_bytes``, ``kv_bytes`` and
-        ``overhead_bytes`` from *budget*, and ``cause`` for a placement that
-        left weights off the GPU."""
+        ``overhead_bytes`` from *budget*, ``projector_bytes`` (the part of
+        ``overhead_bytes`` that is the projector, :meth:`_projector_vram_bytes`),
+        and ``cause`` for a placement that left weights off the GPU."""
         record = {"mode": mode, "layers": layers, "n_ctx": self.n_ctx,
                   "n_cpu_moe": self._load_n_cpu_moe(),
                   "n_cpu_moe_auto": bool(budget is not None
@@ -2644,7 +2715,8 @@ class VramSizingMixin:
         if budget is not None:
             record.update(free_bytes=budget.free, total_bytes=budget.total,
                           model_bytes=budget.model, kv_bytes=budget.kv,
-                          overhead_bytes=budget.overhead)
+                          overhead_bytes=budget.overhead,
+                          projector_bytes=self._projector_vram_bytes())
         if cause is not None:
             record["cause"] = cause
         self.last_gpu_sizing = record
@@ -2775,9 +2847,9 @@ class VramSizingMixin:
                           ) -> tuple[Optional[int], Optional[int], bool]:
         """``(host, read, per_token)`` for a load with *gpu_layers* (reaching a
         GPU when *on_gpu*) and *n_cpu_moe*: the weight bytes it keeps in system
-        RAM, the part of them the CPU reads while generating, and whether those
-        are read on every token (pinned routed experts or a draft model on the
-        CPU). ``(None, None, False)`` when a byte count fails. Changes nothing."""
+        RAM (with a projector on the CPU, :meth:`_cpu_projector_bytes`), the
+        part of them the CPU reads while generating, and whether those are read
+        on every token (pinned routed experts or a draft model on the CPU). ``(None, None, False)`` when a byte count fails. Changes nothing."""
         full = gpu_layers >= self._DEFAULT_GPU_LAYERS
         per_token = False
         try:
@@ -2791,7 +2863,8 @@ class VramSizingMixin:
             lookup = self._cpu_row_lookup_bytes(gpu_layers if on_gpu else 0)
             read = host if lookup is None else max(0, host - lookup)
             draft = self._cpu_draft_weight_bytes(on_gpu)
-            return host + draft, read + draft, per_token or draft > 0
+            projector = self._cpu_projector_bytes(on_gpu)
+            return host + draft + projector, read + draft, per_token or draft > 0
         except Exception as exc:
             from localm.debuglog import logger as _dbg
             _dbg.debug("mmap: host-resident byte count failed (%s)", type(exc).__name__)
