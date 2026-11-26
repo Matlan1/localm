@@ -114,6 +114,7 @@ VISIBLE_FIELD_GROUP = {
     "embedding_gpu_layers": "Embeddings",
     "suggest_plugins": "Plugins", "auto_install_plugin_deps": "Plugins",
     "update_allow_prerelease": "Updates", "update_ignore_net_policy": "Updates",
+    "integrity_check_at_start": "Updates", "integrity_notice": "Updates",
     "rag_indexing_mode": "Knowledge", "rag_allowed_roots": "Knowledge",
     "rag_denied_roots": "Knowledge", "rag_classify_unknown_files": "Knowledge",
     "rag_rerank": "Knowledge", "rag_rerank_model": "Knowledge",
