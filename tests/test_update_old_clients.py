@@ -405,14 +405,15 @@ def test_a_program_that_is_no_interpreter_is_never_an_old_watchdog(monkeypatch, 
     interpreter or in LocaLM.exe, so only those count when they cannot be read."""
     root = tmp_path / "install"
     monkeypatch.setattr(oc, "_by_ps", lambda: False)
-    rows = [(956, 4, "C:\\Windows\\System32\\LsaIso.exe", 100)]
+    lsa = str(tmp_path / "System32" / "LsaIso.exe")
+    rows = [(956, 4, lsa, 100)]
     monkeypatch.setattr(install_manifest, "list_processes", lambda: list(rows))
     read = []
     monkeypatch.setattr(oc, "_argv", lambda pid: read.append(pid))
     assert oc.watchdogs(root) == [] and read == []
-    for program in ("C:\\py\\python.exe", "C:\\py\\pythonw.exe", "/usr/bin/python3.12",
-                    "C:\\x\\.venv\\localm-app\\LocaLM.exe"):
-        rows[:] = [(956, 4, "C:\\Windows\\System32\\LsaIso.exe", 100), (57, 4, program, 100)]
+    for name in ("python.exe", "pythonw.exe", "python3.12", "LocaLM.exe"):
+        program = str(tmp_path / "bin" / name)
+        rows[:] = [(956, 4, lsa, 100), (57, 4, program, 100)]
         untold: list = []
         assert oc.watchdogs(root, untold=untold) is None, program
         assert [r[0] for r in untold] == [57]
