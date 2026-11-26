@@ -631,12 +631,14 @@ def test_a_task_that_keeps_asking_for_run_tests_in_plan_mode_stops_on_the_refusa
 def test_the_next_task_after_a_refusal_stop_starts_counting_again(tmp_path):
     agent = _agent(tmp_path)
     agent.set_plan_mode(True)
-    replies = iter([_tc("run_tests")] * 4 + [_tc("run_tests"), "I will propose a plan."])
+    replies = iter([_tc("run_tests")] * 4
+                   + [_tc("run_tests", path="tests"), "I will propose a plan."])
     with patch.object(agent, "_call_llm", side_effect=lambda *a, **k: next(replies)):
         first = agent.chat("run the tests")
         second = agent.chat("continue")
     assert first.startswith("[stopped: plan mode refused run_tests 4 times")
-    assert not second.startswith("[stopped")
+    assert "I will propose a plan." in second
+    assert "[stopped" not in second
     history = " ".join(str(m.get("content")) for m in agent._messages)
     assert "Plan mode has refused 'run_tests' 4 times" in history
     assert "Plan mode has refused 'run_tests' 5 times" not in history
