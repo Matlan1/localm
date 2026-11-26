@@ -637,7 +637,9 @@ def test_the_next_task_after_a_refusal_stop_starts_counting_again(tmp_path):
         second = agent.chat("continue")
     assert first.startswith("[stopped: plan mode refused run_tests 4 times")
     assert not second.startswith("[stopped")
-    assert agent._plan_refusals == {"run_tests": 1}
+    history = " ".join(str(m.get("content")) for m in agent._messages)
+    assert "Plan mode has refused 'run_tests' 4 times" in history
+    assert "Plan mode has refused 'run_tests' 5 times" not in history
 
 
 def test_leaving_plan_mode_starts_the_refusal_count_again(tmp_path):

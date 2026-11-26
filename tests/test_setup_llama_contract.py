@@ -803,9 +803,11 @@ def test_amd_rocm_build_that_does_not_load_gets_no_cpu_overlay(world):
 def test_amd_rocm_cpu_overlay_download_failure_keeps_the_build(world):
     _amd_rocm_release(world)
     r = world.invoke("--backend", "amd-rocm")
-    _assert_kept_the_amd_rocm_cpu_backend(world, r, "ArtifactError: the connection was "
-                                                    "interrupted after 0 of an unknown number "
-                                                    "of bytes (HTTP Error 404: Not Found)")
+    _assert_kept_the_amd_rocm_cpu_backend(world, r, "ArtifactError: the server has no file at "
+                                                    "https://github.com/ggml-org/llama.cpp/"
+                                                    "releases/download/b12617/llama-b12617-bin-"
+                                                    "win-cpu-x64.zip (HTTP 404: Not Found): "
+                                                    "b12617 is a release localm pins")
     assert world.probe_calls == 2
 
 
