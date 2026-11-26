@@ -58,6 +58,16 @@ test("a matching install hides Repair and Keep, and a runtime without a list say
   assert.equal(w.document.getElementById("integrity-keep").hidden, true);
 });
 
+test("files that could not be read are listed, and a runtime list that cannot be read says why", () => {
+  const w = app([]);
+  w.renderIntegrity({ result: { ...RESULT, count: 0, differ: [], missing: [], kept: [],
+    unreadable: ["localm/c.py"],
+    runtime: { present: true, listed: false, differ: [], missing: [], unreadable: ["llama.dll"],
+               error: "PermissionError: Permission denied" } } });
+  assert.deepEqual(items(w), ["could not be read: localm/c.py", "could not be read: llama.dll",
+    "The native runtime's list of its files could not be read (PermissionError: Permission denied)."]);
+});
+
 test("no list to compare with gives the reason; no result yet says when it runs", () => {
   const w = app([]);
   w.renderIntegrity({ result: { available: false, reason: "this install has no list" } });
