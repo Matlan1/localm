@@ -411,6 +411,9 @@ def parse(raw) -> Plan:
         ops = [_parse_op(o) for o in raw["ops"]]
         if len({op.path for op in ops}) != len(ops):
             raise ValueError("it names a file twice")
+        # _go and _Back make the files that are never absent first, in the plan's order.
+        if [op.swap for op in ops] != sorted((op.swap for op in ops), reverse=True):
+            raise ValueError("a file that is never absent comes after one that is not")
         return Plan(raw["step"], raw["number"], ops, [disk.clean(f) for f in raw["folders"]],
                     raw["dists"], raw["before"])
     except (ValueError, TypeError, KeyError, AttributeError, Unsafe) as e:
@@ -548,16 +551,16 @@ class Marks:
 
 def build(a: Area, step: str, number: int, new: Mapping, leaving: Iterable[str], *,
           identify: Callable[[Path], dict], edited: Callable[[str, dict], bool],
-          swap: Iterable[str] = (), keep_equal: bool = False, last: bool = False) -> Plan:
+          swap: Iterable[str] = (), keep_equal: bool = False) -> Plan:
     """The plan that puts the files *new* (``{path: identity}``, staged in the area's
     *new* folder) into *a* and takes the files *leaving* out, as far as they are
     there. Reads only.
 
     *identify* gives the identity of a file that is there, *edited* whether a file
     that goes is the user's own; an identity without a checksum gets that of the
-    content. *keep_equal*: a file that is already the new one stays.
-    *last*: the paths of *swap* go last instead of first, in that order, and those of them
-    that are removed after them. Raises :class:`Refused` for a path that is taken by something else,
+    content. *keep_equal*: a file that is already the new one stays. The paths of *swap*
+    go first, in that order (:func:`_go` makes them in the order of the plan).
+    Raises :class:`Refused` for a path that is taken by something else,
     :class:`Unsafe` for one through a link, :class:`.disk.Held` or OSError."""
     swap = list(swap)
     wait = Wait()
@@ -595,12 +598,8 @@ def build(a: Area, step: str, number: int, new: Mapping, leaving: Iterable[str],
         _check_taken(a, rel, gone)
     first = sorted((op for op in changes if op.swap), key=lambda op: swap.index(op.path))
     rest = [op for op in changes if not op.swap]
-    if last:
-        gone_last = [removes.pop(r) for r in [r for r in swap if r in removes]]
-        ops = [*(removes[r] for r in sorted(removes)), *rest, *first, *gone_last]
-    else:
-        ops = [*first, *(removes[r] for r in sorted(removes)), *rest]
-    return Plan(step, number, ops, _created(a, changes))
+    return Plan(step, number, [*first, *(removes[r] for r in sorted(removes)), *rest],
+                _created(a, changes))
 
 
 #: What a start of localm, however it is made, runs until the gate (``localm/__init__.py``)
@@ -613,17 +612,44 @@ GATE_FILES = (
     "installer/gui.py")
 
 
-#: :data:`GATE_FILES` in the order they go last (``plan_files`` *last*): into a release
-#: without the gate the launchers go first and the gate itself, ``localm/__init__.py``,
-#: after them, so that every start before it still waits at the gate; ``localm/procs.py``,
-#: which that gate imports, goes after the gate.
-GATE_FILES_LAST = (*(f for f in GATE_FILES if f not in ("localm/__init__.py", "localm/procs.py")),
-                   "localm/__init__.py", "localm/procs.py")
+#: The gate itself.
+GATE = "localm/__init__.py"
+#: :data:`GATE_FILES` in the order they go into a release without the gate, after every
+#: other step (:func:`plan_gate`): the launchers, then ``localm/procs.py`` (the gate goes
+#: on without it), and the gate itself last, so that every start before it still waits at
+#: the gate.
+GATE_FILES_LAST = (*(f for f in GATE_FILES if f not in (GATE, "localm/procs.py")),
+                   "localm/procs.py", GATE)
+
+
+def is_gate(rel: str) -> bool:
+    """Whether *rel* is one of :data:`GATE_FILES`."""
+    return rel in GATE_FILES
+
+
+def is_not_gate(rel: str) -> bool:
+    """Whether *rel* is none of :data:`GATE_FILES`."""
+    return rel not in GATE_FILES
+
+
+#: The plans :func:`plan_gate` makes, by the paths each takes: every gate file but the
+#: gate, which a release may lack (taken out after the others), then the gate alone.
+GATE_PLANS = (lambda rel: is_gate(rel) and rel != GATE, lambda rel: rel == GATE)
+
+
+def plan_gate(root, update_id: str, part: int, new_files: Mapping,
+              old_files: Optional[Mapping], *, protect: Iterable[str]) -> Plan:
+    """The plan *part* (0 or 1, :data:`GATE_PLANS`) of the gate files of an update into a
+    release without the gate, made after every other step, each after the one before is
+    made: :func:`plan_files` of those paths only, in the order of :data:`GATE_FILES_LAST`.
+    The other files went before with *among* :func:`is_not_gate` and no *swap*."""
+    return plan_files(root, update_id, new_files, old_files, swap=GATE_FILES_LAST,
+                      protect=protect, among=GATE_PLANS[part])
 
 
 def plan_files(root, update_id: str, new_files: Mapping, old_files: Optional[Mapping] = None, *,
                swap: Iterable[str] = GATE_FILES, protect: Iterable[str],
-               last: bool = False) -> Plan:
+               among: Optional[Callable[[str], bool]] = None) -> Plan:
     """The plan that turns the install at *root* into the release extracted in
     ``<id>/new``. Reads only.
 
@@ -631,7 +657,8 @@ def plan_files(root, update_id: str, new_files: Mapping, old_files: Optional[Map
     installed one to ``{"sha256", "size"}`` (the ``files`` of their statements).
     A file only *old_files* names is removed; with None nothing is removed and every
     file that differs counts as the user's own. *swap* are the paths that go first,
-    in that order, and are never absent. With *last* they go last (:func:`build`). *protect* are the user's own folders below
+    in that order, and are never absent. *among*: only the paths it is true for are
+    planned (an update whose files go in two plans). *protect* are the user's own folders below
     *root* besides the ones no update touches (a data or models folder kept there),
     relative to *root*; they are left alone with everything in them.
 
@@ -648,7 +675,8 @@ def plan_files(root, update_id: str, new_files: Mapping, old_files: Optional[Map
 
     def covered(rel: str) -> bool:
         disk.clean(rel)
-        return a.inside(rel) and not _protected(rel, protect)
+        return (a.inside(rel) and not _protected(rel, protect)
+                and (among is None or among(rel)))
 
     new = {rel: {k: stated[rel][k] for k in ("sha256", "size")} for rel in stated if covered(rel)}
     wait = Wait()
@@ -667,7 +695,7 @@ def plan_files(root, update_id: str, new_files: Mapping, old_files: Optional[Map
     plan = build(a, FILES, number, new,
                  [rel for rel in old_files or () if covered(rel)],
                  identify=lambda path: disk.content_identity(path, wait), edited=edited,
-                 swap=swap, keep_equal=True, last=last)
+                 swap=swap, keep_equal=True)
     for op in plan.ops:
         was = (old_files or {}).get(op.path) if op.edited else None
         op.release = [{k: was[k] for k in ("sha256", "size")}] if was else []

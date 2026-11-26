@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -19,6 +20,8 @@ PROGRAM = Path(__file__).with_name("window_tk.py")
 SHOW_S = 20.0
 #: Seconds the outcome stays in the window before it closes itself.
 END_S = 5.0
+#: Seconds a question waits for its answer; then it is answered Cancel.
+ASK_S = 30 * 60.0
 #: What the program prints: the two answers to a question, and that it shows the window.
 AGAIN, CANCEL, SHOWN = "again", "cancel", "shown"
 
@@ -28,11 +31,15 @@ AGAIN, CANCEL, SHOWN = "again", "cancel", "shown"
 class Window:
     """The window of one update, shown by the program :data:`PROGRAM` in its own
     process. Each method returns at once except :meth:`ask`, which waits for the
-    user."""
+    user at most :data:`ASK_S` seconds. *say* is the update's log: what the window
+    could not do, and that it is gone, are said there."""
 
-    def __init__(self, proc: subprocess.Popen) -> None:
-        self.proc = proc
+    def __init__(self, proc: subprocess.Popen, say: Callable[[str], None]) -> None:
+        self.proc, self._say = proc, say
         self.gone = False
+        #: The lines the program printed after ``shown``; None once its output ended.
+        self._out: queue.SimpleQueue = queue.SimpleQueue()
+        threading.Thread(target=self._read, daemon=True).start()
 
     @classmethod
     def start(cls, say: Callable[[str], None], program=None,
@@ -58,14 +65,44 @@ class Window:
         reader.join(show_s)
         said = first[0].strip() if first else ""
         if said == SHOWN:
-            return cls(proc)
+            return cls(proc, say)
         try:
             why = str(json.loads(said).get("error"))
-        except (ValueError, AttributeError):
+        except (ValueError, AttributeError, RecursionError):
             why = said or f"it did not open within {show_s:.0f} s"
         say(f"The update window cannot be shown ({why}); the update goes on without it.")
         _stop(proc)
         return None
+
+    def _read(self) -> None:
+        """Pass the program's answers on to :meth:`ask` and say its notes."""
+        assert self.proc.stdout is not None
+        try:
+            for line in self.proc.stdout:
+                line = line.strip()
+                if line in (AGAIN, CANCEL):
+                    self._out.put(line)
+                    continue
+                try:
+                    note = json.loads(line).get("note")
+                except (ValueError, AttributeError, RecursionError):
+                    note = None
+                if isinstance(note, str):
+                    self._say(note)
+        except (OSError, ValueError):
+            pass
+        self._out.put(None)
+
+    def _lost(self, how: str) -> None:
+        """Say that the window is gone, *how*, once, with the program's exit status."""
+        if not self.gone:
+            self.gone = True
+            try:
+                status = self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                status = None
+            self._say(f"The update window {how} (exit status {status}); the update goes on "
+                      f"without it.")
 
     def _send(self, message: dict) -> bool:
         if self.gone:
@@ -76,24 +113,38 @@ class Window:
             self.proc.stdin.flush()
             return True
         except (OSError, ValueError):
-            self.gone = True
+            self._lost("closed")
             return False
 
     def say(self, text: str) -> None:
         self._send({"say": text})
 
-    def ask(self, text: str) -> bool:
-        """Ask *text* in the window: True for Try again. Cancel when the window is
-        gone."""
-        if not self._send({"ask": text}):
+    def ask(self, text: str, closing: Optional[str] = CANCEL,
+            limit_s: Optional[float] = None) -> bool:
+        """Ask *text* in the window: True for Try again. Closing the window answers
+        *closing* (``again``, ``cancel``, or None: the window stays and asks on). Cancel
+        when the window is gone or nobody answers within *limit_s* (:data:`ASK_S`)
+        seconds; both are said in the log."""
+        while True:   # an answer to an earlier question that came too late
+            try:
+                if self._out.get_nowait() is None:
+                    self._lost("closed")
+            except queue.Empty:
+                break
+        limit_s = ASK_S if limit_s is None else limit_s
+        if not self._send({"ask": text, "closing": closing}):
             return False
-        assert self.proc.stdout is not None
         try:
-            answer = self.proc.stdout.readline().strip()
-        except (OSError, ValueError):
-            answer = ""
-        if answer not in (AGAIN, CANCEL):
-            self.gone = True
+            answer = self._out.get(timeout=limit_s)
+        except queue.Empty:
+            took = f"{limit_s / 60:.0f} minutes" if limit_s >= 120 else f"{limit_s:.0f} s"
+            why = f"Nobody answered within {took}: Cancel."
+            self._say(f"The update window asked: {text} {why}")
+            self._send({"unask": why})
+            return False
+        if answer is None:
+            self._lost("closed while it asked")
+            return False
         return answer == AGAIN
 
     def end(self, text: str, wait_s: float = END_S + 10.0) -> None:
@@ -108,6 +159,7 @@ class Window:
         try:
             self.proc.wait(timeout=wait_s)
         except subprocess.TimeoutExpired:
+            self._say(f"The update window did not close within {wait_s:.0f} s; it is ended.")
             _stop(self.proc)
         self.gone = True
 

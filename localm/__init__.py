@@ -243,15 +243,21 @@ def _put_back(root: str, folder: str, update: str, window: bool) -> int:
 if __name__ == "__main__":
     _gate()
 else:
-    from localm import procs as _procs
-
-    _procs.enter()
+    try:
+        from localm import procs as _procs
+        _me = _procs.enter, _procs.current, _procs.__file__
+    except (ImportError, AttributeError):
+        # An update into a release without this gate puts its localm/procs.py in place
+        # (or takes it out) just before this file: the gate decides without the record.
+        _me = None
+    if _me is not None:
+        _me[0]()
     _round = globals().get("_round", 0) + 1
-    if _gate(_procs.current()) and _round < 3:
+    if _gate(_me[1]() if _me is not None else None) and _round < 3:
         # The files just put in place are read instead of the ones this began with, whose
         # compiled copies may have the same size and time.
         import importlib.util
-        for _file in (__file__, _procs.__file__):
+        for _file in (__file__, *(_me[2:] if _me is not None else ())):
             try:
                 os.unlink(importlib.util.cache_from_source(_file))
             except OSError:

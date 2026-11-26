@@ -191,12 +191,22 @@ def _ready_older(root: Path, new_folder: Path, new_version: str, target_version)
     (``updater._install_trust_bridge``, ``updater._install_uv_bridge``), as
     :func:`localm.updater.apply` gives them; and a release without the list of its files
     (``update_package.NAME``), or one a bridge changed, gets that list made from its
-    verified files. Returns the notes for the user. Raises LocalmError."""
+    verified files. A list the release ships is checked against it first
+    (``update_package.check``), as :func:`localm.updater.apply` checks it. Returns the notes
+    for the user. Raises LocalmError."""
     from localm import update_package, updater
     from localm.bugreport import LocalmError
     from localm.update_mechanism import shared
     notes: list = []
     bridged = False
+    statement = new_folder / update_package.NAME
+    if statement.is_file():
+        try:
+            update_package.check(new_folder, new_version,
+                                 shared.updater_components.stated_components)
+        except update_package.PackageError as e:
+            raise LocalmError("the update package does not match what it states, so nothing "
+                              "was updated", reason=str(e)) from None
     if target_version is not None:
         if updater._needs_trust_bridge(new_folder):
             updater._install_trust_bridge(new_folder)
@@ -208,7 +218,6 @@ def _ready_older(root: Path, new_folder: Path, new_version: str, target_version)
             notes.append(f"localm {new_version} keeps the uv this version uses to apply "
                          "later updates.")
             bridged = True
-    statement = new_folder / update_package.NAME
     if bridged or not statement.is_file():
         try:
             listed = {"format": update_package.FORMAT, "version": new_version,

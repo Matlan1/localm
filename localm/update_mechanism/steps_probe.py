@@ -95,12 +95,18 @@ def _version_of(python, root, *, version: str, env: Mapping, flags: dict,
     except subprocess.TimeoutExpired:
         return f"localm {version} did not start within {limit_s:.0f} seconds"
     lines = [line.rstrip() for line in (done.stdout + done.stderr).splitlines() if line.strip()]
-    said = lines[-1] if lines else ""
     if done.returncode != 0:
         return f"localm {version} does not start{_tail(lines[-40:])}"
-    if not said.endswith(f" {version}"):
-        return f"localm {version} could not be checked: it said {said[:200]!r}"
+    # The version line click's version option prints on standard output.
+    said = [m[1] for m in map(_VERSION_LINE.search, done.stdout.splitlines()) if m]
+    if said != [version]:
+        shown = said[0] if said else (lines[-1] if lines else "")
+        return f"localm {version} could not be checked: it said {shown[:200]!r}"
     return None
+
+
+#: The line ``localm --version`` prints: ``localm, version <version>``.
+_VERSION_LINE = re.compile(r"^localm, version (\S+)\s*$")
 
 
 def _ask(port: int, deadline: float) -> Optional[str]:

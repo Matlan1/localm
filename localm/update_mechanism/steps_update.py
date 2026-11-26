@@ -36,9 +36,29 @@ UNUSABLE_EXIT = 79
 #: replaced, the one it installed, and the runtimes it kept (JSON).
 RECORD_FROM, RECORD_TO, RECORD_KEPT = "LOCALM_RECORD_FROM", "LOCALM_RECORD_TO", "LOCALM_RECORD_KEPT"
 RUNTIME, FOLDERS, COMFYUI = "runtime", "folders", "comfyui"
-#: The note of an update into a release that ships no update program (``prepare`` *older*).
+#: The note of an update into a release that ships no update program (``prepare`` *older*)
+#: and brings its parts to its pins when it starts (:func:`catches_up`).
 OLDER_NOTE = ("The native runtime, the other components and PyTorch are brought to what this "
               "version pins when it starts.")
+#: The same for a release that does not (0.3.1 and earlier).
+OLDER_NOTE_AS_THEY_ARE = (
+    "The native runtime, the other components and PyTorch stay as they are: this version "
+    "does not bring them to what it pins. Run 'localm setup-llama --force' after the "
+    "update for its llama.cpp runtime, and its setup (setup.bat or setup.sh) for the rest.")
+
+
+def catches_up(tree) -> bool:
+    """Whether the localm tree at *tree* brings its native runtime and its components to
+    what it pins when it starts (``catch_up`` in its ``updater_runtime`` and
+    ``updater_components``, from 0.3.2 on). Reads the files as text."""
+    for name in ("updater_runtime.py", "updater_components.py"):
+        try:
+            text = (Path(tree) / "localm" / name).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        if "\ndef catch_up(" not in text:
+            return False
+    return True
 _PART_KEYS = {RUNTIME: {"label", "name", "beside", "backend", "from", "to", "keep", "folders"},
               FOLDERS: {"label"}, COMFYUI: {"label", "removed", "packages"}}
 
@@ -136,8 +156,9 @@ def prepare(update: steps.Place, *, uv, home, env: Mapping, say: Say,
 
     *older*: the new tree is a release that ships no update program of its own
     (``updater_handoff.prepare`` gave it this one); only its Python packages are
-    prepared, and that release brings its runtime and components to its own pins at its
-    first start, as every such release does.
+    prepared. A release that :func:`catches_up` brings its runtime and components to its
+    own pins at its first start (:data:`OLDER_NOTE`); for one that does not, the note
+    says that they stay as they are (:data:`OLDER_NOTE_AS_THEY_ARE`).
 
     Raises :class:`.mover.Refused` (the update cannot be made; nothing changed) and
     OSError."""
@@ -146,8 +167,10 @@ def prepare(update: steps.Place, *, uv, home, env: Mapping, say: Say,
     extras = steps_packages.used_extras(root, future.tree, uv, env=env)
     sync = future.sync(extras)
     if older:
+        note = OLDER_NOTE if catches_up(mover.work_folder(root, update_id) / "new") \
+            else OLDER_NOTE_AS_THEY_ARE
         spec = {"sync": sync, "format": FORMAT, "torch": [], "uv": None, "parts": [],
-                "kept": [], "notes": [OLDER_NOTE]}
+                "kept": [], "notes": [note]}
         _check(spec)
         disk.write_json(work / STEPS_FILE, spec)
         return spec

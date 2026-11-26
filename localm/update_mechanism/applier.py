@@ -26,7 +26,8 @@ can be shown the update goes on without it and says so in its log.
 A release that ships no update program of its own (an older one, chosen with ``localm
 update --to``) is installed by this program, copied there by the installed version
 (:func:`is_older`): its files by its own list, its Python packages from its own lock, and
-the rest by that release when it starts (``steps_update.prepare`` *older*).
+the rest by that release when it starts, where it does (``steps_update.prepare``
+*older*).
 """
 
 from __future__ import annotations
@@ -174,6 +175,9 @@ class Applier:
         #: end): True to try again, False to cancel. None: nobody is asked.
         self.ask: Optional[Callable[[str], bool]] = (
             terminal_ask() if handoff.get("ask") and handoff["mode"] == COMMAND else None)
+        #: :attr:`ask` while the old version is put back, where closing the window is
+        #: no answer.
+        self.ask_back = self.ask
 
     def _held(self, held) -> bool:
         return self.ask is not None and self.ask(f"{held}. Close that program, then try again.")
@@ -181,7 +185,7 @@ class Applier:
     def _held_back(self, held) -> bool:
         """:meth:`_held` while the old version is put back: cancel then leaves the
         install neither old nor new, which the question says with the ways out."""
-        return self.ask is not None and self.ask(
+        return self.ask_back is not None and self.ask_back(
             f"{held}. Close that program, then try again. Cancel leaves localm "
             f"{self.h['old']} not put back completely: " + " ".join(restoring.ways_out(self.root)))
 
@@ -198,7 +202,9 @@ class Applier:
         self.window = window.Window.start(restoring.say, program)
         if self.window is None:
             return
-        self.ask = self.window.ask
+        shown = self.window
+        self.ask = shown.ask
+        self.ask_back = lambda text: shown.ask(text, closing=None)
         for line in self.lines:
             self.window.say(line)
 
@@ -238,17 +244,24 @@ class Applier:
             old = _statement(self.root)
             if new is None:
                 raise mover.Refused("the new version carries no list of its files")
-            # Into a release without the gate, the gate goes last (GATE_FILES_LAST).
-            plan = mover.plan_files(self.root, self.id, new["files"],
-                                    old["files"] if old else None, protect=_protect(self.root),
-                                    **({"swap": mover.GATE_FILES_LAST, "last": True}
+            ask = self._held if self.ask is not None else None
+            files = (new["files"], old["files"] if old else None)
+            # Into a release without the gate, the gate files go in a plan of their own
+            # after every other step (mover.GATE_FILES_LAST).
+            plan = mover.plan_files(self.root, self.id, *files, protect=_protect(self.root),
+                                    **({"swap": (), "among": mover.is_not_gate}
                                        if self.older else {}))
             mover.write_plan(self.root, self.id, plan)
-            ask = self._held if self.ask is not None else None
             mover.forward(self.root, self.id, plan, ask=ask)
             job.advance(lock, job.STEPS)
             carried = steps_update.run(lock, self.id, uv=uv, home=self.home, env=self.env,
                                        say=self.say, ask=ask)
+            for part in range(len(mover.GATE_PLANS)) if self.older else ():
+                gate = mover.plan_gate(self.root, self.id, part, *files,
+                                       protect=_protect(self.root))
+                if gate.ops:
+                    mover.write_plan(self.root, self.id, gate)
+                    mover.forward(self.root, self.id, gate, ask=ask)
             job.advance(lock, job.STARTING)
             self.say(f"Starting localm {h['new']}...")
             why = steps_probe.probe(steps_update.steps_packages.python_in(self.root / ".venv"),

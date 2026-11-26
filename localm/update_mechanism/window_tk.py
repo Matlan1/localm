@@ -5,12 +5,15 @@ the question "Try again" or "Cancel". A program, run by :class:`.window.Window` 
 ``<python> -I -S window_tk.py``; standard library only.
 
 Each line on its standard input is one JSON object: ``{"say": text}`` adds a line of
-progress, ``{"ask": text}`` shows *text* with the buttons Try again and Cancel and prints
-``again`` or ``cancel`` on its standard output, ``{"end": text}`` shows the outcome and
-closes the window after :data:`END_S` seconds. The end of its standard input before the
-outcome closes it at once. The window cannot be closed while the update runs; closing it
-while it asks answers Cancel. Its first line on standard output is ``shown``, or
-``{"error": reason}`` when no window can be shown here.
+progress, ``{"ask": text, "closing": answer}`` shows *text* with the buttons Try again
+and Cancel and prints ``again`` or ``cancel`` on its standard output, ``{"unask": text}``
+takes the question back and adds *text* as progress, ``{"end": text}`` shows the outcome
+and closes the window after :data:`END_S` seconds. The end of its standard input before
+the outcome closes it at once. The window cannot be closed while the update runs; closing
+it while it asks answers *closing* (``cancel`` when the message names none), and with
+*closing* null the window stays and asks on. Its first line on standard output is
+``shown``, or ``{"error": reason}`` when no window can be shown here; ``{"note": text}``
+lines say what the window could not do.
 """
 
 from __future__ import annotations
@@ -61,6 +64,10 @@ SIZES = {"logo": 18, "body": 14.5, "primary": 14, "secondary": 13}
 PADDING = {"primary": (10, 22), "secondary": (9, 16)}
 #: The text of ``.btn-primary``.
 ON_ACCENT = "#fff"
+#: The token of the border of the Cancel button per theme: ``.btn-secondary``'s
+#: ``--border``, and in the dark theme, where that border barely shows on ``--bg`` and Tk
+#: has no hover, the border ``.btn-secondary:hover`` gets (``--text-dim``).
+EDGE = {"dark": "text-dim", "light": "border"}
 #: The key of Windows' own setting for the theme of apps.
 _PERSONALIZE = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
 _HIDDEN = 0x08000000  # CREATE_NO_WINDOW
@@ -69,10 +76,13 @@ _HIDDEN = 0x08000000  # CREATE_NO_WINDOW
 # ------------------------------------------------------------------ the theme
 
 def _windows_light() -> int:
-    """``AppsUseLightTheme`` of the user (1 light, 0 dark), read only. Raises OSError."""
-    import winreg
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _PERSONALIZE, 0, winreg.KEY_READ) as key:
-        return int(winreg.QueryValueEx(key, "AppsUseLightTheme")[0])
+    """``AppsUseLightTheme`` of the user (1 light, 0 dark), read only. Raises OSError,
+    also on a system that is not Windows."""
+    if sys.platform == "win32":
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _PERSONALIZE, 0, winreg.KEY_READ) as key:
+            return int(winreg.QueryValueEx(key, "AppsUseLightTheme")[0])
+    raise OSError("the theme of apps is a setting of Windows")
 
 
 def _command(argv: list) -> str:
@@ -144,6 +154,8 @@ class UpdateWindow:
         import tkinter as tk
         self.root, self._answer, self._closed = tk_root, answer, closed
         self.asking = False
+        #: What closing the window answers to the question it shows; None: nothing.
+        self.closing: str | None = CANCEL
         self.ended = False
         self.theme = which or theme()
         c = self.colours = THEMES[self.theme]
@@ -187,7 +199,7 @@ class UpdateWindow:
             activeforeground=ON_ACCENT, activebackground=c["accent"], relief="flat",
             bd=0, highlightthickness=0, padx=px, pady=py, cursor="hand2")
         # The 1 px border of .btn-secondary: the button inside a frame of that colour.
-        edge = tk.Frame(self.buttons, bg=c["border"])
+        edge = tk.Frame(self.buttons, bg=c[EDGE[self.theme]])
         self.cancel = tk.Button(
             edge, text="Cancel", command=lambda: self._pressed(CANCEL),
             font=(family, _px(SIZES["secondary"])), fg=c["text-dim"], bg=c["bg"],
@@ -210,10 +222,12 @@ class UpdateWindow:
         self.text.configure(state="disabled")
         self.text.see("end")
 
-    def ask(self, text: str) -> None:
-        """Show *text* with the buttons; the answer goes to *answer*. A minimized window
-        comes back for it."""
+    def ask(self, text: str, closing: str | None = CANCEL) -> None:
+        """Show *text* with the buttons; the answer goes to *answer*. Closing the window
+        answers *closing*; with None it does nothing. A minimized window comes back for
+        it."""
         self.asking = True
+        self.closing = closing
         self.question.configure(text=text)
         self.question.pack(fill="x", padx=16, pady=(10, 8))
         self.buttons.pack(fill="x", padx=16, pady=(0, 16))
@@ -238,9 +252,17 @@ class UpdateWindow:
         self.say(text)
         self.root.after(int(close_after_s * 1000), self.close)
 
+    def unask(self, text: str) -> None:
+        """Take the question back without an answer and add *text* as progress."""
+        self.asking = False
+        self.question.pack_forget()
+        self.buttons.pack_forget()
+        self.say(text)
+
     def _close_pressed(self) -> None:
         if self.asking:
-            self._pressed(CANCEL)
+            if self.closing is not None:
+                self._pressed(self.closing)
         elif self.ended:
             self.close()
 
@@ -253,19 +275,36 @@ class UpdateWindow:
         self._closed()
 
 
-def _icon(tk_root) -> None:
-    """The icon of the GUI (``icon-192.png``) on the window, from the install this program
-    updates (``<root>/.localm-update/<id>/applier/update_mechanism``); Tk's own icon stays
-    where that file cannot be read."""
+#: The icon of the GUI, below the folder of an install or of a source tree.
+ICON = ("localm", "plugins", "gui", "static", "icon-192.png")
+
+
+def icon_file(here=None):
+    """The icon of the GUI (:data:`ICON`) in the nearest folder above *here* (this file)
+    that has it: the install this program updates
+    (``<root>/.localm-update/<id>/applier/update_mechanism``) or the tree it is in. None
+    when no folder above has it."""
+    for folder in Path(here or __file__).resolve().parents:
+        candidate = folder.joinpath(*ICON)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _icon(tk_root, here=None):
+    """Put the icon of the GUI (:func:`icon_file`) on the window. Returns None, or why
+    Tk's own icon stays."""
     import tkinter as tk
+    path = icon_file(here)
+    if path is None:
+        return f"no {'/'.join(ICON)} above {Path(here or __file__).resolve().parent}"
     try:
-        root = Path(__file__).resolve().parents[4]
-        image = tk.PhotoImage(master=tk_root, file=str(
-            root / "localm" / "plugins" / "gui" / "static" / "icon-192.png"))
-    except (IndexError, tk.TclError):
-        return
+        image = tk.PhotoImage(master=tk_root, file=str(path))
+    except tk.TclError as e:
+        return f"{path} cannot be read: {e}"
     tk_root.iconphoto(True, image)
     tk_root._localm_icon = image   # Tk drops an image nothing in Python holds
+    return None
 
 
 def main() -> int:
@@ -288,14 +327,16 @@ def main() -> int:
         for line in sys.stdin:
             try:
                 messages.put(json.loads(line))
-            except ValueError:
+            except (ValueError, RecursionError):
                 continue
         messages.put(None)
 
     window = UpdateWindow(tk_root, out)
-    _icon(tk_root)
+    no_icon = _icon(tk_root)
     threading.Thread(target=read, daemon=True).start()
     out(SHOWN)
+    if no_icon:
+        out(json.dumps({"note": f"The update window shows Tk's icon: {no_icon}."}))
 
     def poll() -> None:
         while True:
@@ -313,7 +354,10 @@ def main() -> int:
             if isinstance(message.get("say"), str):
                 window.say(message["say"])
             elif isinstance(message.get("ask"), str):
-                window.ask(message["ask"])
+                closing = message.get("closing", CANCEL)
+                window.ask(message["ask"], closing if closing in (AGAIN, CANCEL) else None)
+            elif isinstance(message.get("unask"), str):
+                window.unask(message["unask"])
             elif isinstance(message.get("end"), str):
                 window.end(message["end"])
         tk_root.after(100, poll)

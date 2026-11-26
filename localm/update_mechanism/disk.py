@@ -46,12 +46,13 @@ class Held(Exception):
 
     *path* is the file, *reason* what the system says and *holders* the programs that
     hold it, ``[{"pid", "name"}]``, as far as the system tells; ``str()`` names them
-    all."""
+    all, the path in its usual form (:func:`short_path`)."""
 
     def __init__(self, path, reason) -> None:
         self.path, self.reason, self.holders = str(path), str(reason), holders_of(path)
         by = ", ".join(f"{h['name']} (pid {h['pid']})" for h in self.holders)
-        super().__init__(f"{path} cannot be used ({reason}){by and ', held by ' + by}")
+        super().__init__(f"{short_path(Path(path))} cannot be used ({reason})"
+                         f"{by and ', held by ' + by}")
 
 
 class Blocked(Held):

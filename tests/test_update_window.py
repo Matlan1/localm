@@ -11,12 +11,14 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
 from localm.update_mechanism import applier, window, window_tk
 from tests import _update_mechanism as um
 from tests._no_window import allow_window
+from tests._tk_root import build_tk_root, collect_tk_garbage  # noqa: F401
 from tests.test_update_applier import Update, _end, _free_port
 from tests.test_update_gate import HIDDEN, ID, REPO
 
@@ -28,10 +30,7 @@ def update(tmp_path):
 
 def _tk_root():
     import tkinter as tk
-    try:
-        root = tk.Tk()
-    except tk.TclError as e:
-        pytest.skip(f"no Tk window can be made here: {e}")
+    root = build_tk_root(tk.Tk)
     root.withdraw()
     return root
 
@@ -130,6 +129,36 @@ def test_the_window_program_opens_and_closes_itself_after_the_outcome(tmp_path):
     assert window_tk.END_S - 1 <= took < window_tk.END_S + 10
 
 
+def test_the_icon_of_the_gui_is_found_above_the_program_wherever_it_runs(tmp_path):
+    """The icon is the GUI's, found in the nearest folder above the program that has it:
+    the source tree, or the install whose update copy runs it."""
+    icon = REPO / "localm" / "plugins" / "gui" / "static" / "icon-192.png"
+    assert window_tk.icon_file(window.PROGRAM) == icon
+    install = tmp_path / "inst"
+    um.write(install, {"localm/plugins/gui/static/icon-192.png": ""})
+    run = install / ".localm-update" / ID / "applier" / "update_mechanism" / "window_tk.py"
+    assert window_tk.icon_file(run) == install / "localm/plugins/gui/static/icon-192.png"
+    assert window_tk.icon_file(tmp_path / "elsewhere" / "window_tk.py") is None
+
+
+def test_a_window_without_the_icon_says_so_in_the_log(tmp_path):
+    """The real program, copied where no icon is above it: it shows Tk's icon and the
+    update's log says why."""
+    for name in ("window.py", "window_tk.py"):
+        (tmp_path / name).write_bytes((window.PROGRAM.parent / name).read_bytes())
+    stand_in = tmp_path / "withdrawn.py"
+    stand_in.write_text(_WITHDRAWN.replace("PROGRAM", repr(str(tmp_path / "window_tk.py"))),
+                        encoding="utf-8")
+    said: list = []
+    shown = window.Window.start(said.append, stand_in)
+    if shown is None:
+        pytest.skip(f"no window can be made here: {said}")
+    shown.end("Done.", wait_s=window.END_S + 20)
+    assert len(said) == 1 and said[0].startswith("The update window shows Tk's icon: no "
+                                                 "localm/plugins/gui/static/icon-192.png "
+                                                 "above "), said
+
+
 @pytest.mark.parametrize("light, want", [(1, "light"), (0, "dark")])
 def test_the_window_follows_the_theme_windows_gives_apps(light, want):
     """``AppsUseLightTheme`` 1 is light and 0 dark; a setting that cannot be read is
@@ -146,6 +175,8 @@ def test_the_window_follows_the_theme_windows_gives_apps(light, want):
         assert root.cget("bg") == c["bg"] and shown.text.cget("fg") == c["text-dim"]
         assert shown.heading.cget("fg") == c["text"]
         assert shown.again.cget("bg") == c["accent"] and shown.cancel.cget("fg") == c["text-dim"]
+        assert shown.cancel.master.cget("bg") == c[window_tk.EDGE[want]]
+        assert window_tk.EDGE == {"dark": "text-dim", "light": "border"}
         shown.close()
 
 
@@ -213,29 +244,125 @@ def test_without_a_window_the_update_is_told_why_and_goes_on(monkeypatch, tmp_pa
     assert "TclError" in said[0]
 
 
-#: A window program that shows nothing: it writes what it was sent to the file
-#: ``window.log`` beside it and answers the questions with ``ANSWERS`` in order.
+#: A window program that shows nothing: it writes what it was sent to the file ``LOG``
+#: (outside the update's folder, which the update deletes) and answers the questions
+#: with ``ANSWERS`` in order: ``hang`` answers nothing, ``exit`` ends the program.
 _FAKE = """\
-import json, os, sys
-log = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'window.log'), 'a',
-           encoding='utf-8')
+import json, sys
+log = open(LOG, 'a', encoding='utf-8')
 answers = iter(ANSWERS)
 print('shown', flush=True)
 for line in sys.stdin:
     log.write(line)
     log.flush()
     if 'ask' in json.loads(line):
-        print(next(answers, 'cancel'), flush=True)
+        answer = next(answers, 'cancel')
+        if answer == 'exit':
+            sys.exit(4)
+        if answer != 'hang':
+            print(answer, flush=True)
 """
 
 
-def test_a_server_update_asks_in_its_window_about_a_process_in_the_way(update):
+def _fake(path, log, answers) -> Path:
+    """The program :data:`_FAKE` at *path*, logging to *log*, answering *answers*."""
+    path.write_text(_FAKE.replace("LOG", repr(str(log))).replace("ANSWERS", repr(answers)),
+                    encoding="utf-8")
+    return path
+
+
+def _sent(log) -> list:
+    return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+
+
+def test_a_question_nobody_answers_is_cancelled_at_its_deadline(tmp_path):
+    """A window that never answers (nobody at the desktop, a stalled window): the
+    question is answered Cancel once its time is up, taken back in the window, and the
+    log says so; the window still gets the outcome."""
+    log = tmp_path / "window.log"
+    said: list = []
+    shown = window.Window.start(said.append, _fake(tmp_path / "w.py", log, ["hang"]))
+    assert shown is not None, said
+    begun = time.monotonic()
+    assert shown.ask("x.dll is held by editor (pid 9).", limit_s=1.0) is False
+    assert 1.0 <= time.monotonic() - begun < 10
+    assert said == ["The update window asked: x.dll is held by editor (pid 9). "
+                    "Nobody answered within 1 s: Cancel."]
+    shown.end("The update to 2 was not started.")
+    sent = _sent(log)
+    assert sent[0] == {"ask": "x.dll is held by editor (pid 9).", "closing": "cancel"}
+    assert sent[1] == {"unask": "Nobody answered within 1 s: Cancel."}
+    assert sent[-1] == {"end": "The update to 2 was not started."}
+
+
+def test_a_window_that_ends_while_it_asks_is_cancel_and_is_said(tmp_path):
+    """The window program ends while it asks: Cancel at once, and the log says that the
+    window is gone; later lines and questions go nowhere and wait for nothing."""
+    log = tmp_path / "window.log"
+    said: list = []
+    shown = window.Window.start(said.append, _fake(tmp_path / "w.py", log, ["exit"]))
+    assert shown is not None, said
+    begun = time.monotonic()
+    assert shown.ask("Still held.") is False
+    assert time.monotonic() - begun < 10
+    assert said == ["The update window closed while it asked (exit status 4); the update "
+                    "goes on without it."]
+    shown.say("Putting localm 1 back...")
+    assert shown.ask("Again?") is False and shown.gone
+    shown.end("Done.")
+    assert len(said) == 1
+
+
+def test_a_late_answer_does_not_answer_the_next_question(tmp_path):
+    """An answer that comes after its question was taken back is not taken for the
+    answer to the next one."""
+    log = tmp_path / "window.log"
+    shown = window.Window.start(lambda _t: None,
+                                _fake(tmp_path / "w.py", log, ["again", "hang"]))
+    assert shown is not None
+    shown._out.put(window.AGAIN)   # as if it came in after its question timed out
+    assert shown.ask("Held.", limit_s=1.0) is True
+    shown._out.put(window.AGAIN)
+    assert shown.ask("Held again.", limit_s=1.0) is False
+    shown.end("Done.")
+
+
+def test_the_put_back_question_cannot_be_answered_by_closing_the_window(tmp_path):
+    """While the old version is put back, Cancel leaves a mix: closing the window is no
+    answer then (``closing`` null), the window stays and asks on; any other question is
+    answered Cancel by closing it."""
+    log = tmp_path / "window.log"
+    update = applier.Applier.__new__(applier.Applier)
+    update.lines, update.window = ["Replacing..."], None
+    update.show_window(_fake(tmp_path / "w.py", log, ["cancel", "again"]))
+    assert update.window is not None
+    assert update.ask is not None and update.ask_back is not None
+    assert update.ask("Held.") is False
+    assert update.ask_back("Held while putting back.") is True
+    update.close_window("Done.")
+    asks = [m for m in _sent(log) if "ask" in m]
+    assert asks == [{"ask": "Held.", "closing": "cancel"},
+                    {"ask": "Held while putting back.", "closing": None}]
+    with allow_window():
+        root = _tk_root()
+        answers: list = []
+        closed: list = []
+        real = window_tk.UpdateWindow(root, answers.append, lambda: closed.append(True))
+        real.ask("Held while putting back.", closing=None)
+        real._close_pressed()
+        assert answers == [] and real.asking and not closed
+        real.cancel.invoke()
+        assert answers == [window_tk.CANCEL]
+        real.close()
+
+
+def test_a_server_update_asks_in_its_window_about_a_process_in_the_way(update, tmp_path):
     """Server mode, whose console nobody sees: a process nobody agreed to end is named in
     the window with Try again and Cancel; Try again looks again, Cancel leaves the old
     version, and the window gets every line and the outcome."""
     run = update.root / ".localm-update" / ID / "applier" / "update_mechanism"
-    (run / "window_tk.py").write_text(_FAKE.replace("ANSWERS", repr(["again", "cancel"])),
-                                      encoding="utf-8")
+    log = tmp_path / "window.log"
+    _fake(run / "window_tk.py", log, ["again", "cancel"])
     other = subprocess.Popen([sys.executable, "-m", "localm", "stay"], cwd=str(update.root),
                              env=update.env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, text=True, **HIDDEN)
@@ -248,8 +375,8 @@ def test_a_server_update_asks_in_its_window_about_a_process_in_the_way(update):
         (_, err), _ = _end(proc, waiting)
         assert proc.returncode == 1, err
         assert update.is_old()
-        sent = [json.loads(line) for line in
-                (run / "window.log").read_text(encoding="utf-8").splitlines()]
+        assert log.is_file(), err
+        sent = _sent(log)
         asks = [m["ask"] for m in sent if "ask" in m]
         assert len(asks) == 2 and all("nobody agreed to end" in a for a in asks), sent
         assert sent[-1] == {"end": update.result()["note"]}
