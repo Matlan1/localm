@@ -454,7 +454,8 @@ def hand_off(prepared: Prepared, *, mode: str, confirmed: list, watch: Optional[
         handoff = {"mode": mode, "starter": _key(me), "confirmed": list(confirmed),
                    "home": str(config.HOME_DIR), "old": prepared.old, "new": prepared.new,
                    "watch": watch, "restarting": prepared.restarting(),
-                   "ancestors": ancestors(prepared.root), "ask": bool(ask)}
+                   "ancestors": ancestors(prepared.root), "ask": bool(ask),
+                   **({"downgrade": True} if prepared.downgrade else {})}
         program = prepared.root / ".localm-update" / prepared.id / "applier" / shared._PACKAGE.name
         flags = _hidden() if mode == "server" else (
             {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"

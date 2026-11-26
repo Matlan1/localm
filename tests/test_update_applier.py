@@ -138,7 +138,7 @@ class Update(Install):
         return (self.root / "VERSION").read_text(encoding="utf-8")
 
     def apply(self, *, confirmed=(), starter: str = "0-0", restarting=(), ancestors=(),
-              mode: str = applier.COMMAND, watch=None, relaunch=None,
+              mode: str = applier.COMMAND, watch=None, relaunch=None, downgrade=False,
               **env) -> subprocess.Popen:
         """Start the applier with its hand-off and return it once it holds the update."""
         program = self.root / ".localm-update" / ID / "applier" / "update_mechanism"
@@ -152,7 +152,7 @@ class Update(Install):
             "mode": mode, "starter": starter, "confirmed": list(confirmed),
             "home": str(self.root / "home"), "old": "1", "new": "2", "watch": watch,
             "restarting": list(restarting),
-            "ancestors": list(ancestors)}) + "\n")
+            "ancestors": list(ancestors), **({"downgrade": True} if downgrade else {})}) + "\n")
         proc.stdin.close()
         proc.stdin = None   # communicate flushes an open stdin on POSIX
         assert proc.stdout.readline().strip() == "ready", proc.stderr.read()
@@ -195,6 +195,21 @@ def test_an_update_runs_through_and_the_new_version_starts(update):
     started = next(json.loads(ln[8:]) for ln in out.splitlines() if ln.startswith("STARTED "))
     assert {started[k] for k in ("localm", "part", "VERSION")} == {"2"}
     assert update.result()["state"] == "new"
+
+
+@pytest.mark.parametrize("downgrade, said", [(False, "Updated to localm 2."),
+                                             (True, "Went back to localm 2.")])
+def test_the_outcome_is_said_once_and_a_downgrade_says_it_went_back(update, downgrade, said):
+    """The console and the result say the outcome in one line, once; an update to an
+    older release says that it went back to it."""
+    proc = update.apply(downgrade=downgrade)
+    waiting = update.waiter()
+    (_, err), _ = _end(proc, waiting)
+    assert proc.returncode == 0, err
+    assert update.result()["note"] == said
+    lines = err.splitlines()
+    assert lines.count(said) == 1, lines
+    assert not [ln for ln in lines if ln != said and ("Updated to" in ln or "Went back" in ln)]
 
 
 def test_a_new_version_that_does_not_start_is_undone_and_says_why(tmp_path):

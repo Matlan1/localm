@@ -244,12 +244,12 @@ class UpdateWindow:
         self._answer(which)
 
     def end(self, text: str, close_after_s: float = END_S) -> None:
-        """Show the outcome *text* and close the window after *close_after_s* seconds."""
+        """Show the outcome *text* as the heading and close the window after
+        *close_after_s* seconds; the lines of progress stay as they are."""
         if self.asking:
             self._pressed(CANCEL)
         self.ended = True
         self.heading.configure(text=text)
-        self.say(text)
         self.root.after(int(close_after_s * 1000), self.close)
 
     def unask(self, text: str) -> None:

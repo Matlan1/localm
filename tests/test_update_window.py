@@ -73,8 +73,11 @@ def test_the_window_shows_the_progress_asks_and_closes_itself():
         shown._close_pressed()
         assert answers == [window_tk.AGAIN, window_tk.CANCEL, window_tk.CANCEL]
         assert not closed
+        shown.say("Starting localm 2...")
+        before = shown.lines()
         shown.end("Updated to localm 2.", close_after_s=0.2)
         assert shown.heading.cget("text") == "Updated to localm 2."
+        assert shown.lines() == before, "the outcome is the heading, not another line"
         _pump(root, lambda: bool(closed))
         assert closed == [True]
 
@@ -379,8 +382,10 @@ def test_a_server_update_asks_in_its_window_about_a_process_in_the_way(update, t
         sent = _sent(log)
         asks = [m["ask"] for m in sent if "ask" in m]
         assert len(asks) == 2 and all("nobody agreed to end" in a for a in asks), sent
-        assert sent[-1] == {"end": update.result()["note"]}
-        assert any("was not started" in m.get("say", "") for m in sent)
+        # The outcome once, as the window's heading; the lines say what led to it.
+        note = update.result()["note"]
+        assert sent[-1] == {"end": note} and "was not started" in note
+        assert note not in [m.get("say") for m in sent], sent
     finally:
         other.stdin.close()
         _end(other)

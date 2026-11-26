@@ -66,7 +66,8 @@ HANDOFF_KEYS = frozenset({"mode", "starter", "confirmed", "home", "old", "new", 
 #: user agreed, like every other process.
 #: ``ask``: true when, in mode ``command``, the user is at the terminal of ``localm
 #: update`` and is asked "Try again" or "Cancel" about what is in the way.
-MORE_KEYS = frozenset({"restarting", "ancestors", "ask"})
+#: ``downgrade``: true when *new* is older than *old*; the outcome then says "Went back to".
+MORE_KEYS = frozenset({"restarting", "ancestors", "ask", "downgrade"})
 SERVER, COMMAND = "server", "command"
 #: The purpose of the process that shows the window of the app.
 LAUNCHER = "launcher"
@@ -179,6 +180,11 @@ class Applier:
         #: no answer; None: :attr:`ask` itself.
         self.ask_back: Optional[Callable[[str], bool]] = None
 
+    def _installed(self) -> str:
+        """The outcome of an update that installed the new version."""
+        verb = "Went back to" if self.h.get("downgrade") else "Updated to"
+        return f"{verb} localm {self.h['new']}."
+
     def _held(self, held) -> bool:
         return self.ask is not None and self.ask(f"{held}. Close that program, then try again.")
 
@@ -284,7 +290,7 @@ class Applier:
                                       say=self.say, older=self.older)
         except (*steps.STEP_ERRORS, ValueError) as e:
             why = f"The record of what this update installed could not be written: {e}"
-        return self._result("new", f"Updated to localm {h['new']}.",
+        return self._result("new", self._installed(),
                             notes=[*carried.notes, *done.notes, *([why] if why else [])])
 
     def _back(self, lock: job.Lock, uv, reason: str) -> dict:
@@ -302,7 +308,7 @@ class Applier:
             back = job.Result("failed", [str(e)])
         steps_update.discard(self.root, self.id)
         if back.state == "new":
-            return self._result("new", f"Updated to localm {h['new']}.", notes=back.notes)
+            return self._result("new", self._installed(), notes=back.notes)
         if back.errors or back.state != "old":
             errors = back.errors or [f"the way back ended as {back.state!r}"]
             return self._result(
@@ -544,7 +550,11 @@ class Applier:
         result = {"state": state, "from": h["old"], "to": h["new"],
                   "version": h["new"] if state == "new" else h["old"], "note": text,
                   "notes": [str(n) for n in notes or ()], "lines": self.lines, "at": time.time()}
-        for line in [text, *result["notes"]]:
+        # The window shows the outcome as its heading (close_window), not as a line.
+        shown, self.window = self.window, None
+        self.say(text)
+        self.window = shown
+        for line in result["notes"]:
             self.say(line)
         places = [(self.home / "updates" / RESULT, result)]
         if h["mode"] == COMMAND:
@@ -636,6 +646,7 @@ def read_handoff(stream) -> dict:
             or not all(isinstance(raw[v], str) and _VERSION.fullmatch(raw[v])
                        for v in ("old", "new")) \
             or not isinstance(raw["home"], str) or not isinstance(raw.get("ask", False), bool) \
+            or not isinstance(raw.get("downgrade", False), bool) \
             or not (watch is None or (isinstance(watch, dict) and all(
                 isinstance(watch.get(k), t) or watch.get(k) is None
                 for k, t in (("host", str), ("port", int), ("scheme", str))))):
