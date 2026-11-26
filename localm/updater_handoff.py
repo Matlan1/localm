@@ -157,14 +157,20 @@ def prepare(asset_id, *, signature=None, target_version=None, allow_unverified=F
             raise LocalmError("the update was not started; nothing was changed",
                               reason=str(found.get("refused") or f"its check ended with {code}"))
         out.edited, out.notes = list(found.get("edited") or ()), list(found.get("notes") or ())
-        out.processes = other_processes(root)
-        out.servers = servers_of(out.processes)
-        for p in out.processes:
-            p["restarts"] = p["key"] in out.servers
-        return out
+        return look_around(out)
     except BaseException:
         work.__exit__(None, None, None)
         raise
+
+
+def look_around(prepared: Prepared) -> Prepared:
+    """Fill in what else of the install runs now: :attr:`Prepared.processes` and
+    :attr:`Prepared.servers`. Returns *prepared*."""
+    prepared.processes = other_processes(prepared.root)
+    prepared.servers = servers_of(prepared.processes)
+    for p in prepared.processes:
+        p["restarts"] = p["key"] in prepared.servers
+    return prepared
 
 
 def _run_check(program: Path, root: Path, update_id: str, say: Callable[[str], None]) -> int:

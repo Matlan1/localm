@@ -376,21 +376,6 @@ def test_the_other_servers_of_this_install_are_asked_to_restart(tmp_path, monkey
         http.shutdown()
 
 
-def _key_of(pid: int) -> str:
-    """``<pid>-<start>`` of the Python that runs as *pid*, as the process record has it:
-    on Windows the venv's python.exe starts the interpreter as its child."""
-    from localm import procs
-    deadline = time.monotonic() + 30
-    while True:
-        table = procs._table()
-        child = [p for p, row in table.items() if row[0] == pid]
-        if child or os.name != "nt" or time.monotonic() > deadline:
-            break
-        time.sleep(0.05)
-    here = child[0] if child else pid
-    return f"{here}-{procs._text(table[here][1])}"
-
-
 def _free_port() -> int:
     import socket
     with socket.socket() as sock:
@@ -413,15 +398,27 @@ def test_a_server_restarts_into_the_update_and_answers_with_the_new_version(
     serve = ["serve", str(port)]
     if scheme == "https":
         serve += list(tls.ensure_cert(tmp_path / "tls"))
-    code = ("import runpy, sys; sys.stdin.readline(); sys.argv[1:] = " + repr(serve)
-            + "; runpy.run_module('localm', run_name='__main__', alter_sys=True)")
+    # In place: a recorded server of the old version enters the gate again in the same
+    # process, as the image a POSIX execv starts does, then runs the new version.
+    code = "\n".join([
+        "import os, runpy, sys",
+        *(["import localm", "from localm import procs", "me = procs.current()",
+           "print(f'{me.pid}-{me.start}', flush=True)"] if in_place else []),
+        "sys.stdin.readline()",
+        *([f"os.environ['LOCALM_UPDATE_PRIMARY'] = {ID!r}", "localm._gate(me)",
+           "for name in [m for m in sys.modules if m.split('.')[0] == 'localm']:",
+           "    del sys.modules[name]"] if in_place else []),
+        f"sys.argv[1:] = {serve!r}",
+        "runpy.run_module('localm', run_name='__main__', alter_sys=True)"])
     server = subprocess.Popen([sys.executable, "-c", code], cwd=str(update.root),
-                              env=update.env(LOCALM_UPDATE_PRIMARY=ID), stdin=subprocess.PIPE,
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                              **HIDDEN)
-    assert server.stdin is not None
+                              env=update.env(**({} if in_place else {
+                                  "LOCALM_UPDATE_PRIMARY": ID})),
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True, **HIDDEN)
+    assert server.stdin is not None and server.stdout is not None
+    starter = server.stdout.readline().strip() if in_place else "0-0"
     proxy = "http://192.0.2.1:9"
-    proc = update.apply(starter=_key_of(server.pid) if in_place else "0-0",
+    proc = update.apply(starter=starter,
                         mode=applier.SERVER,
                         watch={"host": "127.0.0.1", "port": port, "scheme": scheme},
                         HTTP_PROXY=proxy, HTTPS_PROXY=proxy, NO_PROXY="")
