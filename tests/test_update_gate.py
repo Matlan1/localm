@@ -188,16 +188,19 @@ def test_without_a_record_the_gate_does_nothing(inst):
     assert ran(done, "1") and done.err == "" and not done.said["subprocess"]
 
 
-def test_a_process_record_that_cannot_be_imported_stops_the_start(inst):
-    """Only a ``localm/procs.py`` that is not there, or one without ``enter`` and
-    ``current`` (an older release's, put in place by an update), lets the gate go on
-    without the process record; any other failure to import it stops the start, loudly."""
+def test_a_process_record_that_cannot_be_imported_does_not_stop_the_start(inst):
+    """The gate decides without the record, and when the repair cannot even be loaded
+    (this small install has no ``localm/procs_repair.py``), the start says why and
+    goes on. ``tests/test_procs_repair.py`` covers the repair itself."""
     procs = inst.root / "localm" / "procs.py"
     procs.write_text("import localm_no_such_module_for_the_gate\n" + procs.read_text(encoding="utf-8"),
                      encoding="utf-8")
     done = inst.localm()
-    assert done.code != 0 and not done.said, done.out
-    assert "ModuleNotFoundError" in done.err and "localm_no_such_module_for_the_gate" in done.err
+    assert done.code == 0 and ran(done, "1"), (done.out, done.err)
+    assert "No module named 'localm_no_such_module_for_the_gate'" in done.err
+    assert "localm runs without it" in done.err
+    assert "its repair failed: ImportError: cannot import name 'procs_repair'" in done.err
+    assert not inst.record.exists()
 
 
 @pytest.mark.parametrize("phase", [job.ENDING, job.MOVING, job.STEPS, job.STARTING])
@@ -1257,8 +1260,14 @@ def test_the_gate_loads_the_standard_library_only():
 
 
 def test_the_files_of_a_start_are_never_absent_while_an_update_moves_them():
+    """The repair of the process record is loaded only after the gate let the start
+    through, inside a ``try`` whose failure is said and does not stop the start."""
+    text = _text("localm/__init__.py")
     loaded = [a or b for a, b in re.findall(r"^\s+(?:from localm import (\w+)|import localm\.(\w+))",
-                                            _text("localm/__init__.py"), re.M)]
+                                            text, re.M)]
+    assert "procs_repair" in loaded
+    assert re.search(r"^ +try:\n +from localm import procs_repair as _repair\n", text, re.M)
+    loaded.remove("procs_repair")
     assert loaded and {"localm/__init__.py", *(f"localm/{n}.py" for n in loaded)} <= set(mover.GATE_FILES)
     callers = {p for p in (*REPO.glob("*.bat"), *REPO.glob("*.sh"), REPO / "launcher.pyw",
                            REPO / "installer" / "gui.py", REPO / "scripts" / "rollback_update.py")

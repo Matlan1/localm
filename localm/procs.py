@@ -666,8 +666,9 @@ def _purpose(argv) -> str:
 
 def enter() -> None:
     """Record this process. Called once, by ``localm/__init__.py``, before anything
-    else of localm is imported. Never raises: a process that cannot be recorded has no
-    entry (:func:`current`)."""
+    else of localm is imported, or, when this module could not be imported then, by
+    :mod:`localm.procs_repair` once it is repaired. Never raises: a process that cannot
+    be recorded has no entry (:func:`current`)."""
     global _CURRENT, _PLACE, _PROBLEM
     if os.environ.get("LOCALM_CONTAINER_IMAGE"):
         _PROBLEM = "the container image keeps no record"
