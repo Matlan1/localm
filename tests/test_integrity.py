@@ -384,8 +384,10 @@ def test_the_end_of_the_command_ends_a_check_that_is_reading(install, monkeypatc
     reading = threading.Event()
     release_read = threading.Event()
     real = runtime_files.sha256
+    read: list = []
 
     def slow(path):
+        read.append(Path(path).name)
         reading.set()
         release_read.wait(10)
         return real(path)
@@ -403,6 +405,7 @@ def test_the_end_of_the_command_ends_a_check_that_is_reading(install, monkeypatc
     stopper.join(10)
     thread.join(10)
     assert not thread.is_alive()
+    assert len(read) == 1, f"the check read on after its end: {read}"
     assert integrity.state()["result"] is None, "a check ended midway keeps no result"
 
 
