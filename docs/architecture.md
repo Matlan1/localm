@@ -281,7 +281,7 @@ macOS; no llama-cpp-python). Key behaviour:
   context holds that many sequences in one unified KV cache and a scheduler
   thread in the worker decodes every running reply in one batch per step, each
   sampled with its own sampler (so a grammar binds only its own reply) and each
-  keeping its own cached prefix. See [llamacpp-binding.md](llamacpp-binding.md).
+  keeping its own cached prefix. See [llamacpp-binding.md](https://github.com/Matlan1/localm/blob/master/docs/llamacpp-binding.md).
 - **Sampler chain**: grammar (GBNF), repetition penalty, top-k, top-p,
   min-p, temperature, dist; greedy when temperature is 0.
 - **Multi-Token Prediction (MTP) speculative decoding**: a model trained
@@ -289,7 +289,7 @@ macOS; no llama-cpp-python). Key behaviour:
   batch through a dedicated draft context, instead of a separate draft model. Off
   by default (`mtp_enabled`) and engages only where the runtime can build
   and feed a real draft head for that model; see
-  [llamacpp-binding.md](llamacpp-binding.md) for the mechanism.
+  [llamacpp-binding.md](https://github.com/Matlan1/localm/blob/master/docs/llamacpp-binding.md) for the mechanism.
 - **N-gram (prompt lookup) speculative decoding**: any model can draft the
   tokens that followed the same few tokens earlier in the conversation and
   verify them the same way, with no second model and no extra VRAM. Off by

@@ -424,7 +424,7 @@ See [docs/architecture.md](docs/architecture.md) for the full module map and des
 - **No Python wheel** tied to a specific Python/CUDA version
 - Any prebuilt `llama.dll` works: Ollama's DLL, a custom build, any binary
 
-See [docs/llamacpp-binding.md](docs/llamacpp-binding.md) for the binding internals: struct layouts, ABI checks, and the full sampler chain.
+See [docs/llamacpp-binding.md](https://github.com/Matlan1/localm/blob/master/docs/llamacpp-binding.md) for the binding internals: struct layouts, ABI checks, and the full sampler chain.
 
 ## Documentation
 
@@ -435,14 +435,14 @@ See [docs/llamacpp-binding.md](docs/llamacpp-binding.md) for the binding interna
 | [docs/plugin-interop.md](docs/plugin-interop.md) | Foreign-ecosystem interop: importing plugins from other tools over the MCP spine |
 | [docs/skills.md](docs/skills.md) | The Agent Skills (`SKILL.md`) importer for the coder agent |
 | [docs/gui.md](docs/gui.md) | The web GUI: chat, coder sessions, studios, Jobs, approvals, security notes |
-| [docs/gui-design.md](docs/gui-design.md) | The GUI design standard for contributors |
+| [docs/gui-design.md](https://github.com/Matlan1/localm/blob/master/docs/gui-design.md) | The GUI design standard for contributors |
 | [docs/jobs.md](docs/jobs.md) | Scheduled jobs: the scheduler, `localm job` CLI, `/api/jobs`, the Jobs tab |
 | [docs/mcp.md](docs/mcp.md) | MCP in both directions: serving models, consuming tool servers |
 | [docs/server-api.md](docs/server-api.md) | HTTP API: OpenAI endpoints, management routes, auth, CORS |
 | [docs/api-reference.md](docs/api-reference.md) | Generated API reference: every route, parameter and schema in the server's OpenAPI schema |
 | [docs/ollama-api.md](docs/ollama-api.md) | The Ollama-compatible API on the same server and port |
 | [docs/architecture.md](docs/architecture.md) | Design notes |
-| [docs/llamacpp-binding.md](docs/llamacpp-binding.md) | The ctypes binding internals |
+| [docs/llamacpp-binding.md](https://github.com/Matlan1/localm/blob/master/docs/llamacpp-binding.md) | The ctypes binding internals |
 | [docs/gpu-setup.md](docs/gpu-setup.md) | GPU/DLL setup |
 | [docs/linux-setup.md](docs/linux-setup.md) | Running localm on Linux: venv, runtime, GPU notes |
 | [docs/flux-setup.md](docs/flux-setup.md) | ComfyUI FLUX image pipeline (shared by music/video) |
@@ -456,7 +456,7 @@ See [docs/llamacpp-binding.md](docs/llamacpp-binding.md) for the binding interna
 | [docs/network.md](docs/network.md) | Internet access for coder and chat: modes, domain rules, SSRF guard |
 | [docs/tls.md](docs/tls.md) | API keys, TLS, and reverse proxies for LAN serving |
 | [docs/security.md](docs/security.md) | The security model: authentication, scopes, trust boundaries, updates, verifying a release |
-| [docs/development.md](docs/development.md) | Setting up a development checkout and running the checks |
+| [docs/development.md](https://github.com/Matlan1/localm/blob/master/docs/development.md) | Setting up a development checkout and running the checks |
 | [docs/docker.md](docs/docker.md) | Running the API server in Docker: images, first-run key, volume, certificate, GPU |
 | [docs/privacy.md](docs/privacy.md) | Privacy modes and diagnostics: what localm saves, what it never does, the two independent dials that control it, and how the update check respects network policy |
 | [docs/naming.md](docs/naming.md) | Reaching localm by name on your LAN: the localm.local mDNS address |

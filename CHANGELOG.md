@@ -14,12 +14,24 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ### Added
 - Feedback and Suggestion in Settings > System, opened from a "feedback" button in the sidebar, and `localm feedback` in a terminal: send a comment, question or idea to the maintainer without a GitHub account. Only your text and the localm version are included, and you see it before it is sent.
 - **Revoking a key lists the jobs it ran.** `DELETE /v1/keys/{id}` answers with `jobs`.
+- Privacy mode: choose whether generated images, music and video are kept (Settings > Privacy & data > Keep in privacy mode). Off by default: results can be seen and saved while localm runs and are then removed, ComfyUI's copies included.
+- `/save-media` in `localm run` keeps a copy of a generated file.
+- `localm integrity` and Settings > System > Updates > Integrity compare localm's files with the installed release, list any that differ, and keep your changes or repair those files from the signed release. A server checks in the background after it starts; Check integrity at startup turns that off.
 
 ### Changed
 - **The bundled AMD ROCm llama.cpp runtime moved from b1372 to b1384.** An update, or the next start, replaces the installed one on its own.
 - **localm's managed ComfyUI now installs v0.46.0, up from v0.45.0.** An existing install picks it up with `localm comfy update --reinstall-requirements` (this release's Python requirements changed).
 - **A login survives a change of port, and two installs on one machine keep separate logins.** The session cookie is named by the install instead of the port. A login made before the update is kept; the key is asked for once when the browser also holds a login cookie of an older version that has ended or belongs to another install, and once after the data folder moved. A browser has one login per install: signing in with another key ends the earlier login.
 - The automated browser uses Chromium 159; after the update, the Browser page offers the one-time download again.
+- `localm image`, `localm music` and `localm video` in privacy mode ask before saving a result without `-o`, and need `-o` when there is no terminal.
+- Stopping or restarting localm cancels running image, music and video jobs whose result privacy mode does not keep, and `localm stop` waits up to 12 seconds longer while one is ended.
+- `localm coder --ci` follows the configured session mode.
+- The runtime test of `localm setup-llama` loads and runs a tiny model.
+- `localm comfy update --reinstall-requirements` fetches the Python packages before it changes anything and puts the replaced ones back when the update fails.
+- `localm setup-llama` no longer counts a build as broken when its load test could not be run.
+- Updating from the app or with `localm update` hands the update to the new version's own program, which ends or restarts what runs, replaces the files and starts the new version; a new version that does not start is undone and the reason is shown in Settings.
+- After localm 0.3.2 to 0.3.4b4 install a newer version with their own updater, its first start checks the update; when the checks pass the backup the older updater kept is deleted, and when they fail the previous version is put back and localm says why.
+- Updating from the GUI shows a small window with the progress, in the look of the GUI and the system's light or dark theme; it asks Try again or Cancel when another program is in the way and closes itself at the end. Going back with `localm update --to` to a release that ships no update program of its own is carried out by the update program of the installed version.
 
 ### Fixed
 - On Windows, clicking Launch in the launcher with an API key entered no longer waits several seconds before LocaLM starts.
@@ -73,6 +85,36 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - A chat's system prompt and sampling values follow it to another browser.
 - One unreadable picture no longer makes the chat stop sending the earlier pictures.
 - Copy and chat summaries no longer cut a message at a mention of `<think>`.
+- Several "remember that ..." requests in one message are all saved, and the reply says for each one whether it was saved.
+- Memory keeps fewer facts taken from the assistant's answer to a question.
+- A scheduled memory job in privacy mode no longer loads a model, or fails when none is registered.
+- Switching to privacy mode while memory distils facts ends the pass, and it writes nothing more.
+- `/remember` and saving in the memory dialog answer at once instead of waiting for the embedding model.
+- The default embedding model is no longer downloaded automatically when another usable one is registered and none was chosen, and the Download button is offered only when the network policy allows it. Clearing the Embedding model setting counts as none chosen.
+- The memory chip says when an installed embedding model could not be loaded, instead of that none is installed.
+- `localm memory add` no longer prints terminal control characters from the fact.
+- Privacy mode in the coder cleans Git Bash history on Windows, and the `/export` question names the file it writes.
+- A saved bug report no longer says it was sent.
+- Opening the app no longer creates an empty `uploads` folder.
+- On AMD ROCm, localm no longer leaves empty `comgr-*` folders in the temp folder.
+- An interrupted replacement of the llama.cpp runtime, the native image or music runtime, the managed ComfyUI, PyTorch or the uv inside localm leaves the previous one in use instead of an incomplete one.
+- A native image or music runtime that does not work on this machine no longer replaces the installed one.
+- `rollback.bat --yes` ends with the real exit code and no longer waits for a key press in a script or a scheduled run.
+- Requests localm makes to its own server on this machine no longer go through a configured proxy.
+- A vision model's projector is counted when localm sizes GPU offload and decides whether a model fits, so automatic placement no longer fills VRAM past what the card holds.
+- Changing a model's GPU settings, such as how many expert layers stay in system RAM, now changes how much free VRAM localm makes sure of before it loads the model again.
+- When `localm setup-llama --sha256` stops because the pinned llama.cpp build does not load, it now names the reason, such as a missing library.
+- On Windows, `localm setup-llama --backend hip` now works without AMD's HIP SDK installed: setup fetches the ROCm libraries and the GPU kernels the build needs from AMD's own packages.
+- Putting back an interrupted update no longer reports a process of localm as still running on a busy machine when it could have ended it.
+- Reading a Knowledge collection while another localm process saves it no longer fails on Windows with a permission error, marks the collection as corrupt, or drops to keyword-only search.
+- `localm make-launcher --force` run from a running LocaLM.exe now really refreshes the launcher's Python, and says what it could not replace and how to finish instead of reporting success.
+- `localm setup-llama --tag` with a tag that does not exist now says the release does not exist, instead of calling it a flaky connection and suggesting a retry.
+- `localm setup-sdcpp` prints a refused backend once, and keeps the native runtime's device lines off the console while it tests the install.
+- In coder plan mode, a tool that plan mode refused is no longer reported as failed; a model that keeps asking for one is stopped with a message that says the tool never ran.
+- A start of localm whose list of running processes cannot be loaded no longer stops: it writes the damaged file back from the signed release (or installs a missing package through the repair of the installed parts), says what it repaired, and otherwise starts anyway and says how to repair it.
+- `localm integrity --repair` and Settings > Updates > Integrity > Repair now repair the native runtime too, by installing it again for the installed backend and build, and say why and what to run when that cannot run.
+- When the first start after an update by localm 0.3.2 to 0.3.4b4 finds the update broken and puts the previous version back, the previous version now starts by itself with the same command, instead of asking you to start localm again.
+- The backup a localm 0.3.2 update left, which localm cannot prove belongs to this install, is now shown in Settings > System > Updates with a Remove button, and `localm update --remove-old-backup` removes it.
 
 ### Security
 - Reading a PDF (chat attachments and Knowledge) uses pypdf 7.1.1, which limits how much memory a crafted PDF can take.
