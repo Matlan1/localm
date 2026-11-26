@@ -9,6 +9,7 @@ the managed ComfyUI installs the same wheels.
 from __future__ import annotations
 
 import re
+import shlex
 import sys
 import tomllib
 from pathlib import Path
@@ -16,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from localm import hwdetect
+from localm.media import managed_comfy_fresh as fresh
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -77,7 +79,6 @@ def test_the_gpu_extra_and_its_wheel_sources_pin_the_hwdetect_wheels():
                                           ("AMD Radeon RX 9070 XT", "gfx120x")])
 def test_the_managed_comfyui_installs_the_hwdetect_wheels_of_each_family(monkeypatch, card,
                                                                         family):
-    from localm.media import managed_comfy_fresh as fresh
     monkeypatch.setattr(sys, "platform", "win32")
     det = hwdetect.Detection(vendors=["amd"], gpu_names=card.lower(), probe_ok=True)
     spec = fresh.comfy_torch_spec(det)
@@ -127,8 +128,6 @@ def _amd_install_args():
     """(where, family, pip arguments) of every AMD Windows PyTorch install: setup's
     torch-args for the families it installs from AMD's index, and the managed
     ComfyUI's for every family."""
-    import shlex
-    from localm.media import managed_comfy_fresh as fresh
     for card, family in (("AMD Radeon RX 6800", "gfx103x"), ("AMD Radeon RX 7900 XTX", "gfx110x"),
                          ("AMD Radeon RX 9070 XT", "gfx120x")):
         det = hwdetect.Detection(vendors=["amd"], gpu_names=card.lower(), probe_ok=True)
@@ -159,7 +158,6 @@ def test_every_amd_package_comes_from_its_family_index_alone(monkeypatch):
 
 @pytest.mark.parametrize("card", ["amd radeon rx 7900 xtx", "amd radeon rx 9070 xt"])
 def test_the_amd_torch_args_resolve_without_the_project_configuration(monkeypatch, card):
-    import shlex
     monkeypatch.setattr(sys, "platform", "win32")
     det = hwdetect.Detection(vendors=["amd"], gpu_names=card, probe_ok=True)
     args = shlex.split(hwdetect.torch_pip_args("amd-rocm", det), posix=True)
