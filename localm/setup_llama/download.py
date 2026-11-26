@@ -19,6 +19,7 @@ from typing import Optional
 from localm.http_ssl import RedirectDowngradeRefused
 from localm.netpolicy import NetworkPolicyError
 from localm.setup_llama._common import console
+from localm.setup_llama.pins import _PINNED_TAG, _ROCM_CPU_TAG, _ROCM_TAG
 import localm.setup_llama as _sl
 
 # A prebuilt llama runtime archive is many megabytes. Anything below this
@@ -190,7 +191,7 @@ def _http_error_message(url: str, e: urllib.error.HTTPError) -> str:
     status = f"HTTP {e.code}: {e.reason}" if e.reason else f"HTTP {e.code}"
     if e.code in (404, 410):
         tag = _release_tag(url)
-        if tag is not None and tag in (_sl._PINNED_TAG, _sl._ROCM_TAG, _sl._ROCM_CPU_TAG):
+        if tag is not None and tag in (_PINNED_TAG, _ROCM_TAG, _ROCM_CPU_TAG):
             what = (f"{tag} is a release localm pins, and this archive of it is "
                     "missing, so retrying will not help. Please report it with "
                     "'localm bug-report'.")

@@ -221,10 +221,10 @@ def test_install_steps_and_the_failure_reach_the_debug_log(media_runtime, monkey
     _refuse_rename(monkeypatch, lambda src, dst: True)
     with caplog.at_level(logging.INFO, logger="localm"), pytest.raises(provision_error):
         install(force=True)
-    warnings = [r for r in caplog.records
-                if r.name == "localm" and r.levelno == logging.WARNING]
-    failures = [r for r in warnings if "was refused" not in r.getMessage()]
-    assert len(failures) == 1 and "failed" in failures[0].getMessage()
+    failures = [r for r in caplog.records
+                if r.name == "localm" and "installing the" in r.getMessage()
+                and "failed" in r.getMessage()]
+    assert len(failures) == 1 and failures[0].levelno == logging.INFO
 
 
 def test_a_runtime_that_cannot_be_put_back_is_installed_again(media_runtime, monkeypatch):

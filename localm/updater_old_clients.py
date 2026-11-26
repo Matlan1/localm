@@ -1287,7 +1287,27 @@ def _alive(pid: int) -> bool:
         return False
     except OSError:
         return True
-    return True
+    return not _is_zombie(int(pid))
+
+
+def _is_zombie(pid: int) -> bool:
+    """Whether *pid* has exited and its parent has not yet collected it (a signal-0
+    probe still succeeds for it); False when that cannot be told."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            return fh.read().decode("utf-8", "replace").rpartition(")")[2].split()[0] == "Z"
+    except FileNotFoundError:
+        if sys.platform.startswith("linux"):
+            return False
+    except (OSError, IndexError):
+        return False
+    import subprocess
+    try:
+        out = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True,
+                             text=True, timeout=10).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return out.startswith("Z")
 
 
 def _answers_on(port: int) -> bool:
