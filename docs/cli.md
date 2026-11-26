@@ -1335,6 +1335,9 @@ localm update --list            # list every release you can install
 localm update --to 0.3.0        # install that release, older or newer than yours
 localm update --to 0.3.0 -y --allow-unverified   # non-interactive, even if its signature does not verify
 localm update --repair          # bring the dependencies, native runtime and components to the installed version
+localm integrity                # list the files that differ from the installed release
+localm integrity --keep [PATH...]     # keep your changed files: they are no longer reported
+localm integrity --repair [PATH...]   # write the differing files again from the signed release
 localm bug-report -m "..."      # generate an editable bug report and offer to send it to the maintainer
 localm bug-report -m "what I did" -e "what I expected" -w "what happened" --send   # non-interactive, send immediately
 localm feedback -m "..."        # write feedback and offer to send it to the maintainer (--suggestion for a suggestion)
@@ -1369,6 +1372,8 @@ runtime and the components. When a step fails, every part is put back to the ver
 you had. `localm doctor` and Settings > System > Updates list any part that differs from the
 installed version (for example after an older version's own rollback), and
 `localm update --repair` or Settings > System > Updates > Repair brings each one to it.
+
+`localm integrity` compares localm's files with the list of the installed release (the list every signed release carries). It reads a file in full only when its size or time changed since the last check (`--full` reads every file), names each file that differs or is missing, and exits 1 while one does. `--keep` records those files (or the PATHS you name) as yours: they are listed apart and no longer reported, until a release changes them. `--repair` downloads the signed build of the installed version, checks its signature, and writes exactly those files from it. The native runtime is compared with the list written when it was installed, by size and time (in full with `--full`); `localm setup-llama` installs it again. A server checks at every start, in the background shortly after it is up, unless Settings > System > Updates > Check integrity at startup is off; then nothing is read at startup. Show a notice when files differ decides whether a difference is announced. A bug report says how many files differ, never which.
 
 `rollback.bat` / `rollback.sh` and the automatic rollback after a failed health check
 have to work when localm itself cannot start, so they put back the code, the packages

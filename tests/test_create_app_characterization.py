@@ -207,6 +207,10 @@ _KERNEL_ROUTES = {
     ("api", "POST", "/api/update/apply"): ("scope:config:write",),
     ("api", "GET", "/api/update/parts"): ("scope:config:read",),
     ("api", "POST", "/api/update/repair"): ("scope:config:write",),
+    ("api", "GET", "/api/integrity"): ("scope:config:read",),
+    ("api", "POST", "/api/integrity/check"): ("scope:config:write",),
+    ("api", "POST", "/api/integrity/keep"): ("scope:config:write",),
+    ("api", "POST", "/api/integrity/repair"): ("scope:config:write",),
     ("api", "GET", "/api/update/rollback"): ("scope:config:read",),
     ("api", "POST", "/api/update/rollback"): ("scope:config:write",),
     # routes/chat.py
