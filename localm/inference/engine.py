@@ -623,7 +623,7 @@ class Engine:
                 f"{self.display_name} was not kept loaded: plugin {plugin!r}, "
                 f"whose backend runs it, was disabled while it loaded")
 
-    def _next_load_backend(self, method: str):
+    def _next_load_backend(self, method: str) -> Optional[Callable[..., Any]]:
         """The bound *method* of the backend the next load runs, or None when
         this engine's backend has no callable *method*. That backend is the
         current one until its first load; after it, the next load is a reload,
