@@ -160,6 +160,8 @@ class Update(Install):
 def _end(*procs: subprocess.Popen) -> list:
     out = []
     for proc in procs:
+        if proc.stdin is not None and proc.stdin.closed:
+            proc.stdin = None   # communicate flushes an open stdin on POSIX
         try:
             out.append(proc.communicate(timeout=180))
         except subprocess.TimeoutExpired:

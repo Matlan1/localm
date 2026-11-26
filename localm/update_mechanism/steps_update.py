@@ -122,7 +122,7 @@ class Preparing(steps.Work):
         super().__exit__(*exc)
 
 
-def prepare(update: Preparing, *, uv, home, env: Mapping, say: Say) -> dict:
+def prepare(update: steps.Place, *, uv, home, env: Mapping, say: Say) -> dict:
     """Fetch and test everything the steps of *update* need, inside its block. *home* is
     the data folder; *uv* the full path of the uv to run. Writes only below ``<id>`` and
     the same id's folder in the component folders it prepares, and the download caches;

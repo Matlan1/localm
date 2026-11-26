@@ -82,7 +82,14 @@ def test_rollback_probe_without_a_backup_reports_none_for_both(home):
 
 @pytest.fixture
 def applying(home, monkeypatch):
-    """An updater that reports a newer release; apply() is stubbed per test."""
+    """An updater that reports a newer release; apply() is stubbed per test. The build
+    ships no program of its own, so the route installs it with ``updater.apply``
+    (``updater_handoff.Prepared.legacy``)."""
+    from pathlib import Path
+
+    from localm import updater_handoff
+    monkeypatch.setattr(updater_handoff, "prepare", lambda *_a, **_k: updater_handoff.Prepared(
+        Path("."), "0" * 32, "", "", None, True, None, False, None, legacy=True))
     monkeypatch.setattr(updater, "available", lambda: True)
     monkeypatch.setattr(updater, "check", lambda: {
         "newer": True, "current": "0.1.0", "asset": {"id": "a1"}, "signature": None})

@@ -22,7 +22,10 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
+
+if TYPE_CHECKING:
+    from localm.update_mechanism.steps_update import Preparing
 
 from localm._update_parent import HANDED_OFF  # noqa: F401  (``localm update`` exits with it)
 
@@ -58,7 +61,7 @@ class Prepared:
     #: the update (:func:`restart_servers`); their entries in :attr:`processes` carry
     #: ``"restarts": True``.
     servers: dict = field(default_factory=dict)
-    _work: object = None
+    _work: Optional[Preparing] = None
 
     def restarting(self) -> list:
         """``[key, purpose]`` of each other server that restarts into the update."""
@@ -183,8 +186,10 @@ def _run_check(program: Path, root: Path, update_id: str, say: Callable[[str], N
         errors="replace", **_hidden())
     assert proc.stderr is not None
 
+    stderr = proc.stderr
+
     def read() -> None:
-        for line in proc.stderr:
+        for line in stderr:
             if line.strip():
                 say(line.rstrip())
 
@@ -374,7 +379,8 @@ def hand_off(prepared: Prepared, *, mode: str, confirmed: list, watch: Optional[
         proc.stdin.write(json.dumps(handoff) + "\n")
         proc.stdin.close()
         answer: list = []
-        reader = threading.Thread(target=lambda: answer.append(proc.stdout.readline()),
+        stdout = proc.stdout
+        reader = threading.Thread(target=lambda: answer.append(stdout.readline()),
                                   daemon=True)
         reader.start()
         reader.join(READY_S)

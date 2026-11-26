@@ -88,7 +88,7 @@ def wait() -> int:
             with open(os.path.join(folder, name), encoding="utf-8") as f:
                 result = json.loads(f.read(1024 * 1024))
             os.unlink(os.path.join(folder, name))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             result = None
     if not isinstance(result, dict):
         _say("The update ended without saying how. Run `localm update --check` to see "

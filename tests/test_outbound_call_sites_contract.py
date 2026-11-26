@@ -41,6 +41,8 @@ _CLASSIFIED = {
     ("gpu_registry.py", "_post_json"): "peer",
     ("http_ssl.py", "_open"): "fixed-host",
     ("inference/_hang_alarm.py", "_probe_once"): "self",
+    # The applier cannot import localm (``-I -S``); it asks the server it let through.
+    ("update_mechanism/applier.py", "whoami"): "self",
     ("inference/http_engine.py", "HttpEngine.context_capacity"): "operator-cli",
     ("inference/http_engine.py", "HttpEngine.chat_stream"): "operator-cli",
     ("inference/http_engine.py", "remote_model_status"): "operator-cli",

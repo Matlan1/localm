@@ -68,6 +68,15 @@ class Abandoned(Exception):
     """The update was not started: nothing of the install was changed."""
 
 
+def _procs():
+    """The process record of this build (``localm/procs.py`` beside this package).
+    Raises :class:`Abandoned` when the build has none."""
+    procs = shared.also("procs")
+    if procs is None:
+        raise Abandoned("this build cannot list the processes of localm")
+    return procs
+
+
 # --------------------------------------------------------------------- check
 
 def check(root, update_id: str, say: Callable[[str], None]) -> int:
@@ -293,7 +302,7 @@ class Applier:
         """End the processes of localm the user agreed to end and those the starter
         started. Raises :class:`Abandoned`, naming each process nobody agreed to end and
         each one that does not end."""
-        procs = shared.also("procs")
+        procs = _procs()
         root = self.proot
         holders = shared.apply_update.rm_holders
         running = procs.list(root, holders=holders)
@@ -370,12 +379,12 @@ class Applier:
         return f"localm {h['new']} did not answer within {ANSWER_S:.0f} s ({seen})"
 
     def _primary_runs(self) -> bool:
-        procs = shared.also("procs")
+        procs = _procs()
         return any(f"{e.pid}-{e.start}" == self.primary for e in procs.list(self.proot))
 
     def _end_primary(self) -> None:
         """End the server that was let through, with what it started."""
-        procs = shared.also("procs")
+        procs = _procs()
         for e in procs.list(self.proot):
             if f"{e.pid}-{e.start}" == self.primary:
                 for child in [*procs.descendants(e, self.proot), e]:
@@ -387,7 +396,7 @@ class Applier:
         if not argv:
             return
         import subprocess
-        flags = ({"creationflags": subprocess.CREATE_NO_WINDOW
+        flags: dict = ({"creationflags": subprocess.CREATE_NO_WINDOW
                   | subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
                  else {"start_new_session": True})
         try:
@@ -432,7 +441,11 @@ def whoami(url: str) -> str:
         ctx.verify_mode = ssl.CERT_NONE
         handlers.append(urllib.request.HTTPSHandler(context=ctx))
     with urllib.request.build_opener(*handlers).open(url, timeout=5) as r:
-        return str(json.loads(r.read(65536)).get("version") or "")
+        try:
+            said = json.loads(r.read(65536))
+        except RecursionError:
+            raise ValueError("the answer of /whoami is nested too deeply") from None
+        return str(said.get("version") or "") if isinstance(said, dict) else ""
 
 
 def try_again(text: str, answers, say: Callable[[str], None] = restoring.say) -> bool:
@@ -473,7 +486,10 @@ def read_handoff(stream) -> dict:
     """The hand-off on *stream*, each value of the type it has to have, its versions plain
     version strings and its data folder the one this program was started with (only
     :func:`data_folder` is used). Raises ValueError."""
-    raw = json.loads(stream.readline(1024 * 1024) or "null")
+    try:
+        raw = json.loads(stream.readline(1024 * 1024) or "null")
+    except RecursionError:
+        raise ValueError("the hand-off of the update is nested too deeply") from None
     if not isinstance(raw, dict) or not HANDOFF_KEYS <= set(raw) <= HANDOFF_KEYS | MORE_KEYS:
         raise ValueError("the hand-off of the update is not complete")
 

@@ -1869,7 +1869,7 @@ def last_result(*, since: float = 0.0) -> Optional[dict]:
     try:
         raw = _json.loads((_updates_dir(create=False) / applier.RESULT).read_text(
             encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     if not isinstance(raw, dict) or float(raw.get("at") or 0) < since:
         return None
