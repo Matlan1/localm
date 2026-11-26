@@ -533,12 +533,11 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/api/update/apply", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def update_apply_ep(request: Request):
         """Install the latest update: download, verify and check it, then hand it over
-        to its update program and restart into it (:func:`_hand_over`). Only an
-        explicit request applies an update; localm never updates itself. An update that
-        was not started is reported as an error, never as success. The build to install
-        is chosen by the server from the latest release, not taken from the request.
-        The ``error``, ``notes`` and ``edited`` fields are path-scrubbed for a caller
-        other than the local operator.
+        to its update program and restart into it. Only an explicit request applies an
+        update; localm never updates itself. An update that was not started is reported
+        as an error, never as success. The build to install is chosen by the server from
+        the latest release, not taken from the request. The ``error``, ``notes`` and
+        ``edited`` fields are path-scrubbed for a caller other than the local operator.
 
         A JSON body ``{"version": V}`` installs release V instead, older ones
         included. That form needs an owner (admin) key (403 otherwise) and answers

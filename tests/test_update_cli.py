@@ -132,7 +132,8 @@ def test_update_apply_failure_is_surfaced(monkeypatch):
     monkeypatch.setattr(updater_handoff, "prepare", boom)
     r = CliRunner().invoke(main, ["update", "--yes"])
     assert r.exit_code == 1
-    assert "Update failed" in r.output and "its check ended with 1" in r.output
+    output = " ".join(r.output.split())
+    assert "Update failed" in output and "its check ended with 1" in output
 
 
 def test_an_update_not_started_by_the_localm_command_changes_nothing(monkeypatch):
