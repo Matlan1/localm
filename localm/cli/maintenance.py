@@ -564,19 +564,18 @@ def _install_with_applier(asset_id, signature, *, yes: bool, target_version=None
                               f"nothing else that is running: "
                               f"{escape(updater_handoff.describe(ended))}. Close them, or run "
                               "the update without --yes and agree.")
-                prepared.discard()
                 sys.exit(1)
             if not yes and not (sys.stdin.isatty()
                                 and click.confirm("  Restart or end them and update?",
                                                   default=False)):
                 console.print("[dim]Not installed.[/dim]")
-                prepared.discard()
                 sys.exit(1)
         for rel in prepared.edited:
             console.print(f"[yellow]You changed {escape(rel)}:[/yellow] your version is kept "
                           "in .localm-update/kept.")
         updater_handoff.hand_off(prepared, mode="command",
                                  confirmed=[p["key"] for p in prepared.processes],
+                                 ask=not yes and sys.stdin.isatty() and sys.stderr.isatty(),
                                  say=_say_step)
     except BaseException:
         prepared.discard()

@@ -152,7 +152,8 @@ def prepare(asset_id, *, signature=None, target_version=None, allow_unverified=F
         try:
             found = json.loads((work.path / "check.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            found = {"refused": f"the check of the new version ended with {code}"}
+            found = {"refused": f"the check of the new version did not end within {CHECK_S:.0f} s"
+                     if code == -1 else f"the check of the new version ended with {code}"}
         if code != 0 or found.get("refused"):
             raise LocalmError("the update was not started; nothing was changed",
                               reason=str(found.get("refused") or f"its check ended with {code}"))
@@ -181,14 +182,43 @@ def _run_check(program: Path, root: Path, update_id: str, say: Callable[[str], N
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding="utf-8",
         errors="replace", **_hidden())
     assert proc.stderr is not None
-    for line in proc.stderr:
-        if line.strip():
-            say(line.rstrip())
+
+    def read() -> None:
+        for line in proc.stderr:
+            if line.strip():
+                say(line.rstrip())
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
     try:
-        return proc.wait(timeout=CHECK_S)
+        code = proc.wait(timeout=CHECK_S)
     except subprocess.TimeoutExpired:
         proc.kill()
-        return proc.wait()
+        proc.wait()
+        say(f"The check of the new version did not end within {CHECK_S:.0f} s.")
+        code = None
+    reader.join(5)
+    return code if code is not None else -1
+
+
+#: In ``<data folder>/logs``: what the program of a build said while it carried out an
+#: update for a server (``hand_off`` mode ``server``).
+APPLIER_LOG = "update-applier.log"
+
+
+def _applier_log():
+    """:data:`APPLIER_LOG`, open for appending, when localm may write a diagnostic trace
+    (``audit.diagnostics_allowed``); else None, as when it cannot be opened (logged)."""
+    from localm.audit import diagnostics_allowed
+    from localm.debuglog import logger, logs_dir
+    if not diagnostics_allowed():
+        return None
+    try:
+        logs_dir().mkdir(parents=True, exist_ok=True)
+        return open(logs_dir() / APPLIER_LOG, "a", encoding="utf-8")
+    except OSError as e:
+        logger.warning("the program of the update logs nothing: %s", e)
+        return None
 
 
 def _key(entry) -> str:
@@ -272,6 +302,8 @@ def restart_servers(prepared: Prepared, say: Callable[[str], None]) -> None:
     """Ask each other server of *prepared* to restart (``POST /v1/server/restart``); it
     then waits for the update at the gate of ``localm/__init__.py`` and runs the new
     version after it. One that does not is ended by the applier and named there."""
+    if not prepared.servers:
+        return
     import requests
 
     from localm.selfclient import self_request
@@ -294,13 +326,16 @@ def describe(processes: list) -> str:
 
 
 def hand_off(prepared: Prepared, *, mode: str, confirmed: list, watch: Optional[dict] = None,
-             relaunch: Optional[list] = None, say: Optional[Callable[[str], None]] = None) -> None:
+             relaunch: Optional[list] = None, ask: bool = False,
+             say: Optional[Callable[[str], None]] = None) -> None:
     """Start the applier of *prepared* and return once it holds the update (its record
     is written) and the other servers were asked to restart (:func:`restart_servers`).
     *confirmed* are the keys of the processes the user agreed to end or restart.
     *mode* ``server``: this server restarts next (*watch* is ``{"host", "port",
     "scheme"}``, *relaunch* its command line); ``command``: this process exits with
-    :data:`HANDED_OFF`. Raises LocalmError with the update discarded."""
+    :data:`HANDED_OFF`; with *ask*, the user at its terminal is asked "Try again" or
+    "Cancel" about a file another program holds or a process that does not end. Raises
+    LocalmError with the update discarded."""
     from localm import config, procs, updater
     from localm.bugreport import LocalmError
     from localm.update_mechanism import shared
@@ -317,18 +352,24 @@ def hand_off(prepared: Prepared, *, mode: str, confirmed: list, watch: Optional[
                 updater._backup_data_for_downgrade(prepared.new)
         handoff = {"mode": mode, "starter": _key(me), "confirmed": list(confirmed),
                    "home": str(config.HOME_DIR), "old": prepared.old, "new": prepared.new,
-                   "watch": watch, "relaunch": relaunch, "restarting": prepared.restarting(),
-                   "ancestors": ancestors(prepared.root)}
+                   "watch": watch, "restarting": prepared.restarting(),
+                   "ancestors": ancestors(prepared.root), "ask": bool(ask)}
         program = prepared.root / ".localm-update" / prepared.id / "applier" / shared._PACKAGE.name
         flags = _hidden() if mode == "server" else (
             {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
             else {"start_new_session": True})
-        proc = procs.start(
-            [base_python(), "-I", "-S", str(program), "apply", str(prepared.root), prepared.id],
-            purpose="update", cwd=str(prepared.root), env=_env(config.HOME_DIR),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL if mode == "server" else None,
-            text=True, encoding="utf-8", errors="replace", **flags)
+        log = _applier_log() if mode == "server" else None
+        try:
+            proc = procs.start(
+                [base_python(), "-I", "-S", str(program), "apply", str(prepared.root),
+                 prepared.id, *map(str, relaunch or ())],
+                purpose="update", cwd=str(prepared.root), env=_env(config.HOME_DIR),
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=(log or subprocess.DEVNULL) if mode == "server" else None,
+                text=True, encoding="utf-8", errors="replace", **flags)
+        finally:
+            if log is not None:
+                log.close()
         assert proc.stdin is not None and proc.stdout is not None
         proc.stdin.write(json.dumps(handoff) + "\n")
         proc.stdin.close()

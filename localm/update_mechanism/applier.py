@@ -8,8 +8,8 @@ The installed version extracts the release into ``<id>/new``, copies this packag
   (:func:`.steps_update.prepare`) and lists the files of the user the update replaces.
   It writes only below ``<id>`` (and the download caches) and changes nothing of the
   install. Result in ``<id>/check.json``; exit status 0, else refused with the reason.
-- ``apply <root> <id>``, as the last act of the installed version: reads the hand-off
-  (:data:`HANDOFF_KEYS`) as one JSON line on standard input, takes the lock, writes the
+- ``apply <root> <id> [<command line>]``, as the last act of the installed version: reads
+  the hand-off (:data:`HANDOFF_KEYS`) as one JSON line on standard input, takes the lock, writes the
   record in phase ENDING and prints ``ready`` on standard output. Then it waits until
   the process that goes on for the user (the server after its restart, or the waiting
   ``localm update``) reports at the gate of ``localm/__init__.py``, ends what was
@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -41,16 +42,17 @@ RESULT = "update-result.json"
 #: ``starter``: ``<pid>-<start>`` of the process that starts this one; ``confirmed``:
 #: the same of each process the user agreed to end; ``home``: the data folder;
 #: ``old``, ``new``: the versions; ``watch``: ``{"host", "port", "scheme"}`` of the
-#: server; ``relaunch``: its command line, to start the old version again when the
-#: new one was let through and failed.
-HANDOFF_KEYS = frozenset({"mode", "starter", "confirmed", "home", "old", "new", "watch",
-                          "relaunch"})
+#: server. The command line that starts the old version again, when the new one was let
+#: through and failed, follows the id on the command line of ``apply``.
+HANDOFF_KEYS = frozenset({"mode", "starter", "confirmed", "home", "old", "new", "watch"})
 #: The keys a hand-off may carry besides :data:`HANDOFF_KEYS`. ``restarting``:
 #: ``[<pid>-<start>, purpose]`` of each other server that was asked to restart into the
 #: update.
 #: ``ancestors``: ``<pid>-<start>`` of each process above the starter, which goes on
 #: running (the one that shows the window of the app) and is neither ended nor named.
-MORE_KEYS = frozenset({"restarting", "ancestors"})
+#: ``ask``: true when, in mode ``command``, the user is at the terminal of ``localm
+#: update`` and is asked "Try again" or "Cancel" about what is in the way.
+MORE_KEYS = frozenset({"restarting", "ancestors", "ask"})
 SERVER, COMMAND = "server", "command"
 #: Seconds the process that goes on for the user has to report at the gate.
 ARRIVE_S = 120.0
@@ -59,6 +61,7 @@ RESTART_S = 30.0
 #: Seconds a restarted server has to answer with the new version.
 ANSWER_S = 180.0
 _LINES = 40
+_VERSION = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}")
 
 
 class Abandoned(Exception):
@@ -117,9 +120,10 @@ def _protect(root: Path) -> list:
 class Applier:
     """One update being carried out; see the module."""
 
-    def __init__(self, root, update_id: str, handoff: dict) -> None:
+    def __init__(self, root, update_id: str, handoff: dict, relaunch=()) -> None:
         self.root, self.id, self.h = Path(root), update_id, handoff
-        self.home = Path(handoff["home"])
+        self.home = data_folder()
+        self.relaunch = [str(a) for a in relaunch]
         self.env = {k: v for k, v in os.environ.items()
                     if not k.startswith(("LOCALM_UPDATE_",))}
         self.env["LOCALM_HOME"] = str(self.home)
@@ -127,6 +131,13 @@ class Applier:
         self.proot = disk.short_path(disk.real_folder(self.root))
         self.primary: Optional[str] = None
         self.let_through = False
+        #: Asks the user about what is in the way (a held file, a process that does not
+        #: end): True to try again, False to cancel. None: nobody is asked.
+        self.ask: Optional[Callable[[str], bool]] = (
+            terminal_ask() if handoff.get("ask") and handoff["mode"] == COMMAND else None)
+
+    def _held(self, held) -> bool:
+        return self.ask is not None and self.ask(f"{held}. Close that program, then try again.")
 
     def say(self, text: str) -> None:
         self.lines = [*self.lines, text][-_LINES:]
@@ -141,7 +152,15 @@ class Applier:
         try:
             self.primary = self._wait_for_primary()
             self._wait_for_restarts()
-            self._end_others()
+            while True:
+                try:
+                    self._end_others()
+                    break
+                except Abandoned as e:
+                    if self.ask is None or not self.ask(
+                            f"{e}. Close them, then try again; cancel leaves localm "
+                            f"{h['old']} as it is."):
+                        raise
         except (Abandoned, OSError) as e:
             steps_update.discard(self.root, self.id)
             job.restore(lock)
@@ -157,10 +176,11 @@ class Applier:
             plan = mover.plan_files(self.root, self.id, new["files"],
                                     old["files"] if old else None, protect=_protect(self.root))
             mover.write_plan(self.root, self.id, plan)
-            mover.forward(self.root, self.id, plan, ask=None)
+            ask = self._held if self.ask is not None else None
+            mover.forward(self.root, self.id, plan, ask=ask)
             job.advance(lock, job.STEPS)
             carried = steps_update.run(lock, self.id, uv=uv, home=self.home, env=self.env,
-                                       say=self.say)
+                                       say=self.say, ask=ask)
             job.advance(lock, job.STARTING)
             self.say(f"Starting localm {h['new']}...")
             why = steps_probe.probe(steps_update.steps_packages.python_in(self.root / ".venv"),
@@ -170,7 +190,7 @@ class Applier:
                 why = self._let_primary_through()
             if why:
                 raise mover.Refused(why)
-            done = job.finish(lock)
+            done = job.finish(lock, ask=ask)
         except (*steps.STEP_ERRORS, steps.Failed) as e:
             return self._back(lock, uv, getattr(e, "reason", None) or str(e))
         except BaseException as e:
@@ -194,7 +214,8 @@ class Applier:
             self._end_primary()
         try:
             back = steps_update.put_back(lock, uv=uv, env=self.env, say=self.say,
-                                         network=restoring.network(self.root))
+                                         network=restoring.network(self.root),
+                                         ask=self._held if self.ask is not None else None)
         except steps.STEP_ERRORS as e:
             back = job.Result("failed", [str(e)])
         steps_update.discard(self.root, self.id)
@@ -362,7 +383,7 @@ class Applier:
 
     def _relaunch(self) -> None:
         """Start the old version again with the server's command line."""
-        argv = self.h.get("relaunch")
+        argv = self.relaunch
         if not argv:
             return
         import subprocess
@@ -414,19 +435,72 @@ def whoami(url: str) -> str:
         return str(json.loads(r.read(65536)).get("version") or "")
 
 
+def try_again(text: str, answers, say: Callable[[str], None] = restoring.say) -> bool:
+    """Say *text* and ask "Try again" or "Cancel", reading the answer from the lines of
+    *answers*. True to try again; the end of *answers* counts as cancel."""
+    say(text)
+    while True:
+        say("  [T] Try again   [C] Cancel")
+        answer = answers.readline()
+        if not answer:
+            return False
+        if answer.strip().lower()[:1] in ("t", "c"):
+            return answer.strip().lower().startswith("t")
+
+
+def terminal_ask() -> Optional[Callable[[str], bool]]:
+    """:func:`try_again` at the terminal this program shares with the ``localm update``
+    that waits for it (``CONIN$`` on Windows, ``/dev/tty`` elsewhere); None when there
+    is none."""
+    try:
+        answers = open("CONIN$" if os.name == "nt" else "/dev/tty", encoding="utf-8",
+                       errors="replace")
+    except OSError:
+        return None
+    return lambda text: try_again(text, answers)
+
+
+def data_folder() -> Path:
+    """The data folder this program was started with (``LOCALM_HOME``). Raises
+    ValueError."""
+    named = os.environ.get("LOCALM_HOME", "").strip()
+    if not named:
+        raise ValueError("the update was started without its data folder (LOCALM_HOME)")
+    return Path(os.path.expanduser(named)).absolute()
+
+
 def read_handoff(stream) -> dict:
-    """The hand-off on *stream*. Raises ValueError."""
+    """The hand-off on *stream*, each value of the type it has to have, its versions plain
+    version strings and its data folder the one this program was started with (only
+    :func:`data_folder` is used). Raises ValueError."""
     raw = json.loads(stream.readline(1024 * 1024) or "null")
-    if not isinstance(raw, dict) or not HANDOFF_KEYS <= set(raw) <= HANDOFF_KEYS | MORE_KEYS \
-            or raw["mode"] not in (SERVER, COMMAND) or not isinstance(raw["confirmed"], list) \
-            or not all(isinstance(r, list) and len(r) == 2
-                       for r in raw.get("restarting") or ()):
+    if not isinstance(raw, dict) or not HANDOFF_KEYS <= set(raw) <= HANDOFF_KEYS | MORE_KEYS:
         raise ValueError("the hand-off of the update is not complete")
+
+    def keys(value) -> bool:
+        return isinstance(value, list) and all(isinstance(k, str) for k in value)
+
+    watch = raw["watch"]
+    if raw["mode"] not in (SERVER, COMMAND) or not isinstance(raw["starter"], str) \
+            or not keys(raw["confirmed"]) or not keys(raw.get("ancestors") or []) \
+            or not all(isinstance(r, list) and len(r) == 2 and keys(r)
+                       for r in raw.get("restarting") or ()) \
+            or not all(isinstance(raw[v], str) and _VERSION.fullmatch(raw[v])
+                       for v in ("old", "new")) \
+            or not isinstance(raw["home"], str) or not isinstance(raw.get("ask", False), bool) \
+            or not (watch is None or (isinstance(watch, dict) and all(
+                isinstance(watch.get(k), t) or watch.get(k) is None
+                for k, t in (("host", str), ("port", int), ("scheme", str))))):
+        raise ValueError("the hand-off of the update is not what it has to be")
+    if os.path.normcase(str(Path(os.path.expanduser(raw["home"])).absolute())) \
+            != os.path.normcase(str(data_folder())):
+        raise ValueError("the hand-off names another data folder than LOCALM_HOME")
     return raw
 
 
-def apply(root, update_id: str) -> int:
-    """``apply``: see the module. Returns the exit status."""
+def apply(root, update_id: str, relaunch=()) -> int:
+    """``apply``: see the module; *relaunch* is the command line that follows the id.
+    Returns the exit status."""
     try:
         handoff = read_handoff(sys.stdin)
         with job.Lock(root) as lock:
@@ -434,7 +508,7 @@ def apply(root, update_id: str) -> int:
             print("ready", flush=True)
             sys.stdout.close()
             sys.stdout = None   # type: ignore[assignment]
-            result = Applier(root, update_id, handoff).run(lock)
+            result = Applier(root, update_id, handoff, relaunch).run(lock)
     except job.Busy as e:
         restoring.say(f"The update cannot be made: {e}")
         return restoring.BUSY

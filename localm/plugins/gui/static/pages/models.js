@@ -2414,6 +2414,15 @@ function _overlayAfterUpdate(d, before) {
     d.data_backup ? 6000 : 800);
 }
 
+// The server names the other processes of LocaLM an update restarts or ends; the same
+// request again is the agreement to that.
+async function _agreeToProcesses(d, out) {
+  const ok = await confirmDangerAsync(t("settings.update.processesTitle"), d.error || "",
+    t("settings.update.processesConfirm"));
+  if (!ok && out) out.textContent = t("settings.update.notInstalled");
+  return ok;
+}
+
 export async function updateApply() {
   const out = $("update-status"), btn = $("update-apply");
   if (btn) btn.disabled = true;
@@ -2423,6 +2432,10 @@ export async function updateApply() {
     const r = await fetch("/api/update/apply", { method: "POST", headers: authHeaders() });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.detail || r.statusText);
+    if (d.needs_confirmation === "processes") {
+      if (await _agreeToProcesses(d, out)) return await updateApply();
+      return;
+    }
     if (d.applied) {
       const version = d.version || "";
       if (out) {
@@ -2535,6 +2548,10 @@ async function _postSelectedVersion(rel, extra) {
       if (!ok) { if (out) out.textContent = t("settings.update.notInstalled"); return; }
       return await _postSelectedVersion(rel, { allow_unverified: true, sha256: d.sha256 });
     }
+    if (d.needs_confirmation === "processes") {
+      if (await _agreeToProcesses(d, out)) return await _postSelectedVersion(rel, extra);
+      return;
+    }
     if (d.applied) {
       const version = d.version || rel.version;
       if (out) {
@@ -2611,9 +2628,14 @@ export async function updateRollback() {
       if (btn) btn.disabled = true;
       if (out) { out.hidden = false; out.textContent = t("settings.rollback.rollingBack"); }
       try {
-        const r = await fetch("/api/update/rollback",
-                              { method: "POST", headers: authHeaders() });
-        const d = await r.json().catch(() => ({}));
+        let r = await fetch("/api/update/rollback",
+                            { method: "POST", headers: authHeaders() });
+        let d = await r.json().catch(() => ({}));
+        if (r.ok && d.needs_confirmation === "processes") {
+          if (!(await _agreeToProcesses(d, out))) { if (btn) btn.disabled = false; return; }
+          r = await fetch("/api/update/rollback", { method: "POST", headers: authHeaders() });
+          d = await r.json().catch(() => ({}));
+        }
         if (!r.ok) throw new Error(d.detail || r.statusText);
         if (out) {
           out.textContent = t("settings.rollback.rolledBackTo",

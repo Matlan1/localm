@@ -420,8 +420,26 @@ def register(app: FastAPI, ctx) -> None:
 
     #: Seconds within which a second press of Update confirms the processes it ends.
     _CONFIRM_S = 600.0
+    #: Held while an update is prepared through the program its build ships.
+    _handing = asyncio.Lock()
 
     async def _with_applier(request: Request, asset_id, **kwargs):
+        """:func:`_hand_over` for one press at a time: 409 while another press is
+        preparing an update or one was handed over, with the reply's notes, files and
+        error shown to this caller as :func:`path_formatter` does."""
+        if _handing.locked() or getattr(app.state, "update_handed_off", False):
+            raise HTTPException(409, "An update of localm is already being started.")
+        async with _handing:
+            res = await _hand_over(request, asset_id, **kwargs)
+        if res is not None:
+            show = _hs.path_formatter(request)
+            for key in ("notes", "edited"):
+                res[key] = [show(v) for v in res.get(key) or ()]
+            if res.get("error"):
+                res["error"] = show(res["error"])
+        return res
+
+    async def _hand_over(request: Request, asset_id, **kwargs):
         """Install the build *asset_id* through the program it ships
         (``localm.updater_handoff``): prepare and check it, then restart into it. When
         other processes of localm run, an owner's first press answers ``{applied: false,
@@ -461,12 +479,13 @@ def register(app: FastAPI, ctx) -> None:
                                  "processes of localm: "
                                  f"{updater_handoff.describe(prepared.processes)}. A server "
                                  "restarts into the new version by itself; a chat or a command "
-                                 "ends; an MCP server is started again by its client. Press "
-                                 "Update now again to continue."}
+                                 "ends; an MCP server is started again by its client. The "
+                                 "same request again restarts or ends them and updates."}
         port = getattr(app.state, "instance_port", None)
         prepared.watch = {"host": _watchdog_probe_host(getattr(app.state, "bind_host", None)),
                           "port": port,
                           "scheme": getattr(app.state, "instance_scheme", None) or "http"}
+        app.state.update_handed_off = True
         _request_restart(port=port, instance_id=getattr(app.state, "instance_id", None),
                          update=prepared)
         return {"applied": True, "version": prepared.new, "restarting": True,
@@ -579,8 +598,6 @@ def register(app: FastAPI, ctx) -> None:
         try:
             handed = await _with_applier(request, asset["id"], signature=info.get("signature"))
             if handed is not None:
-                if handed.get("error"):
-                    handed["error"] = _hs.path_formatter(request)(handed["error"])
                 return handed
             res = await asyncio.to_thread(
                 _probes_held, updater.apply, asset["id"], signature=info.get("signature"),
@@ -688,9 +705,8 @@ def register(app: FastAPI, ctx) -> None:
         back = await asyncio.to_thread(updater.rollback_info)
         if back.get("reinstall"):
             res = await _apply_selected(request, {"version": back["version"]})
-            if not res.get("applied"):
-                raise HTTPException(409 if res.get("needs_confirmation") else 500,
-                                    res.get("error") or res.get("reason")
+            if not res.get("applied") and not res.get("needs_confirmation"):
+                raise HTTPException(500, res.get("error") or res.get("reason")
                                     or f"{back['version']} could not be installed")
             return res
         target_version = back.get("version")

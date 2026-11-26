@@ -5,6 +5,7 @@ folder that holds this package, and the copy of it the applier runs from."""
 from __future__ import annotations
 
 import importlib.util
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -42,18 +43,45 @@ def also(name: str):
 
 def copy_applier(localm_dir, dest) -> Path:
     """Copy the update mechanism of the build whose ``localm`` folder is
-    *localm_dir* into the new folder *dest*, with the modules it loads
-    (:data:`MODULES`) and, where the build has them, the ones the applier loads
-    (:data:`ALSO`), and return the folder to run. Raises OSError, also when *dest*
-    exists."""
+    *localm_dir* into the new folder *dest*, with the modules it loads and, where the
+    build has them, the ones the applier loads, as that build's own copy of this module
+    names them (its :data:`MODULES` and :data:`ALSO`; these when it names none), and
+    return the folder to run. Raises OSError, also when *dest* exists or a module it
+    loads is missing."""
     localm_dir, dest = Path(localm_dir), Path(dest)
+    needed, wanted = _lists_of(localm_dir / _PACKAGE.name / "shared.py")
     dest.mkdir(parents=True)
     run = dest / _PACKAGE.name
     shutil.copytree(localm_dir / _PACKAGE.name, run,
                     ignore=shutil.ignore_patterns("__pycache__"))
-    for name in MODULES:
-        shutil.copyfile(localm_dir / f"{name}.py", dest / f"{name}.py")
-    for name in ALSO:
-        if (localm_dir / f"{name}.py").is_file():
-            shutil.copyfile(localm_dir / f"{name}.py", dest / f"{name}.py")
+    found = set()
+    for entry in sorted(os.listdir(localm_dir)):
+        if entry.endswith(".py") and entry[:-3] in needed | wanted:
+            shutil.copyfile(localm_dir / entry, dest / entry)
+            found.add(entry[:-3])
+    missing = sorted(needed - found)
+    if missing:
+        raise OSError(f"the build has no {', '.join(n + '.py' for n in missing)}")
     return run
+
+
+def _lists_of(path: Path) -> tuple:
+    """``(MODULES, ALSO)`` as sets, as the module at *path* assigns them as literal
+    tuples of names; the lists of this copy for each it does not."""
+    import ast
+    out = {"MODULES": set(MODULES), "ALSO": set(ALSO)}
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, SyntaxError):
+        return out["MODULES"], out["ALSO"]
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                and isinstance(node.targets[0], ast.Name) and node.targets[0].id in out:
+            try:
+                names = ast.literal_eval(node.value)
+            except ValueError:
+                continue
+            if isinstance(names, tuple) and all(
+                    isinstance(n, str) and n.isidentifier() for n in names):
+                out[node.targets[0].id] = set(names)
+    return out["MODULES"], out["ALSO"]

@@ -14,6 +14,9 @@ import sys
 WORK = "LOCALM_UPDATE_WORK"
 #: The exit status of the child once the update is handed over.
 HANDED_OFF = 75
+#: Seconds this process waits, after the gate let it through, for the update to give
+#: up its lock.
+LOCK_S = 600.0
 #: Arguments with which ``localm update`` installs nothing.
 _READ_ONLY = frozenset({"--check", "--list", "--help", "-h", "--repair"})
 _PROGRAMS = frozenset({"localm", "localm.exe", "__main__.py", "localm-script.py"})
@@ -66,16 +69,27 @@ def wait() -> int:
         os.environ["LOCALM_UPDATE_PRIMARY"] = update
         localm._gate(procs.current())
         import time
-        deadline = time.monotonic() + 600
-        while localm._held(folder) and time.monotonic() < deadline:
+        deadline = time.monotonic() + LOCK_S
+        while localm._held(folder):
+            if time.monotonic() >= deadline:
+                _say(f"The update still runs after {LOCK_S:.0f} s. `localm update --check` "
+                     "says which version is installed once it has ended.")
+                return 1
             time.sleep(0.2)
-    path = os.path.join(folder, f"result-{update}.json")
+    result = None
     try:
-        with open(path, encoding="utf-8") as f:
-            result = json.loads(f.read(1024 * 1024))
-        os.unlink(path)
-    except (OSError, ValueError):
-        result = None
+        # The result is found among the names in the folder, never by a path made of the
+        # id the record holds.
+        names = [n for n in os.listdir(folder) if n == f"result-{update}.json"]
+    except OSError:
+        names = []
+    for name in names:
+        try:
+            with open(os.path.join(folder, name), encoding="utf-8") as f:
+                result = json.loads(f.read(1024 * 1024))
+            os.unlink(os.path.join(folder, name))
+        except (OSError, ValueError):
+            result = None
     if not isinstance(result, dict):
         _say("The update ended without saying how. Run `localm update --check` to see "
              "which version is installed.")
