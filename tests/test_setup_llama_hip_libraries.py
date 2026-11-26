@@ -403,6 +403,14 @@ def test_kernel_data_checks_cover_the_added_folder(tmp_path, monkeypatch):
            "entirely" in sl.blas_kernel_problems(target)
 
 
+def test_the_backend_note_says_what_the_hip_build_needs_per_platform(monkeypatch):
+    from localm.setup_llama import provision
+    monkeypatch.setattr(provision.sys, "platform", "win32")
+    assert provision._hip_backend_note() == "AMD ROCm build + ROCm libraries from AMD's packages"
+    monkeypatch.setattr(provision.sys, "platform", "linux")
+    assert provision._hip_backend_note() == "AMD ROCm build (needs the ROCm/HIP runtime present)"
+
+
 def _confirm_script():
     import importlib.util
     path = Path(__file__).resolve().parents[1] / "scripts" / "confirm_llama_runtime.py"
