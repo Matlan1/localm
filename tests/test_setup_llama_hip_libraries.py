@@ -260,7 +260,7 @@ def test_a_failed_download_leaves_no_partial_set(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sl, "_download", refuse)
     assert sl.supply_hip_libraries(target) is None
     assert "connection reset" in capsys.readouterr().out
-    assert not (target / ROCM).exists()
+    assert not (target / ROCM).exists() and not (target / f"{ROCM}.tmp").exists()
 
 
 def test_a_wheel_member_that_escapes_is_refused(tmp_path, monkeypatch, capsys):
@@ -271,18 +271,71 @@ def test_a_wheel_member_that_escapes_is_refused(tmp_path, monkeypatch, capsys):
     assert not (tmp_path / "evil.dll").exists() and not (target / ROCM).exists()
 
 
-@pytest.mark.parametrize("has", ["hipblas.dll", f"{ROCM}/bin/hipblas.dll", "no ggml-hip"])
+def test_a_wheel_member_with_a_colon_is_refused(tmp_path, monkeypatch, capsys):
+    target = _build(tmp_path)
+    _Wheels(tmp_path, monkeypatch,
+            device_extra={"_rocm_sdk_libraries/bin/rocblas/library/x.dat:stream": b"x"})
+    assert sl.supply_hip_libraries(target) is None
+    assert "unsafe path" in capsys.readouterr().out
+    assert not (target / ROCM).exists()
+
+
+def _complete_set(target: Path, archs=("gfx1030",)) -> None:
+    (target / ROCM / "bin").mkdir(parents=True, exist_ok=True)
+    (target / ROCM / "bin" / "hipblas.dll").write_bytes(_pe([]))
+    (target / ROCM / sl.HIP_LIBRARIES_MARKER).write_text(
+        json.dumps({"rocm": "10.0.0", "archs": list(archs)}), encoding="utf-8")
+
+
+@pytest.mark.parametrize("has", ["hipblas.dll", "complete set", "no ggml-hip"])
 def test_a_build_that_needs_nothing_downloads_nothing(tmp_path, monkeypatch, has):
     target = _build(tmp_path)
     wheels = _Wheels(tmp_path, monkeypatch)
     if has == "no ggml-hip":
         (target / "ggml-hip.dll").unlink()
+    elif has == "complete set":
+        _complete_set(target)
     else:
-        (target / has).parent.mkdir(parents=True, exist_ok=True)
         (target / has).write_bytes(_pe([]))
     assert not sl.needs_hip_libraries(target)
     assert sl.supply_hip_libraries(target) is None
     assert wheels.urls == []
+
+
+def test_a_set_without_its_marker_is_added_again_and_not_loaded(tmp_path, monkeypatch):
+    target = _build(tmp_path)
+    wheels = _Wheels(tmp_path, monkeypatch)
+    hip_bin = target / ROCM / "bin"
+    hip_bin.mkdir(parents=True)
+    (hip_bin / "hipblas.dll").write_bytes(_pe([]))
+    (hip_bin / "left-over.dll").write_bytes(_pe([]))
+    assert _loader.hip_library_dirs(target) == []
+    assert sl.needs_hip_libraries(target)
+    assert sl.supply_hip_libraries(target) == _NEEDED
+    assert len(wheels.urls) == 2
+    assert not (hip_bin / "left-over.dll").exists()
+    assert (target / ROCM / sl.HIP_LIBRARIES_MARKER).is_file()
+    assert _loader.hip_library_dirs(target) == [hip_bin]
+
+
+@pytest.mark.parametrize("detected, needed", [
+    (["gfx1030"], False),
+    (["gfx1030", "gfx906"], False),
+    (["gfx1030", "gfx1100"], True),
+])
+def test_a_set_lacking_the_kernels_of_a_gpu_now_present_is_added_again(
+        tmp_path, monkeypatch, detected, needed):
+    target = _build(tmp_path)
+    wheels = _Wheels(tmp_path, monkeypatch, archs=("gfx1030", "gfx1100"))
+    _complete_set(target, archs=("gfx1030",))
+    monkeypatch.setattr(sl, "hip_gpu_archs", lambda t: list(detected))
+    assert sl.needs_hip_libraries(target) is needed
+    if needed:
+        assert sl.supply_hip_libraries(target) == _NEEDED
+        packs = sorted(p.name for p in (target / ROCM / ".kpack").iterdir())
+        assert packs == ["blas_lib_gfx1030.kpack", "blas_lib_gfx1100.kpack"]
+    else:
+        assert wheels.urls == []
 
 
 # --------------------------------------------------------------------------- #
@@ -451,6 +504,8 @@ def test_the_loader_finds_the_added_folder(tmp_path):
     target = _build(tmp_path)
     assert _loader.hip_library_dirs(target) == []
     (target / ROCM / "bin").mkdir(parents=True)
+    assert _loader.hip_library_dirs(target) == []
+    (target / ROCM / sl.HIP_LIBRARIES_MARKER).write_text("{}", encoding="utf-8")
     assert _loader.hip_library_dirs(target) == [target / ROCM / "bin"]
     assert _loader.hip_library_dirs(None) == []
 
@@ -505,5 +560,6 @@ def test_a_load_failure_looks_in_the_added_folder_too(tmp_path, monkeypatch):
     hip_bin.mkdir(parents=True)
     for name, imports in _LIBRARIES.items():
         (hip_bin / name).write_bytes(_pe(imports))
+    (target / ROCM / sl.HIP_LIBRARIES_MARKER).write_text("{}", encoding="utf-8")
     assert _loader.missing_dll_clause(target, [target / "ggml-hip.dll"]) is None
     assert pe_deps.imported_dlls(target / "ggml-hip.dll")[1] == "hipblas.dll"

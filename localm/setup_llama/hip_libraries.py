@@ -17,6 +17,7 @@ search path (``_loader.hip_library_dirs``).
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -31,12 +32,12 @@ from localm import pe_deps
 from localm.debuglog import logger
 from localm.setup_llama._common import console
 from localm.setup_llama.download import ArtifactError, _validate_archive
-from localm.setup_llama.library_files import HIP_LIBRARIES_DIR
+from localm.setup_llama.library_files import HIP_LIBRARIES_DIR, HIP_LIBRARIES_MARKER
 from localm.setup_llama.pins import _HIP_SDK_INDEX
 import localm.setup_llama as _sl
 
-# Records, inside HIP_LIBRARIES_DIR, which ROCm release and GPU kernels were added.
-HIP_LIBRARIES_MARKER = ".localm-hip-libraries"
+# The folder the set is assembled in before it is renamed to HIP_LIBRARIES_DIR.
+_ASSEMBLY_DIR = HIP_LIBRARIES_DIR + ".tmp"
 
 # The folder all files of both wheels sit under.
 _WHEEL_ROOT = "_rocm_sdk_libraries/"
@@ -60,15 +61,45 @@ def _hip_images(target: Path) -> list[Path]:
     return sorted(p for p in target.glob("ggml-hip*.dll") if p.is_file())
 
 
+def recorded_archs(target: Path) -> Optional[list[str]]:
+    """The GPU architectures the ``HIP_LIBRARIES_MARKER`` of *target*'s
+    ``HIP_LIBRARIES_DIR`` records, or None when that folder holds no hipblas.dll
+    or no readable marker."""
+    folder = target / HIP_LIBRARIES_DIR
+    try:
+        if not (folder / "bin" / _HIPBLAS).is_file():
+            return None
+        record = json.loads((folder / HIP_LIBRARIES_MARKER).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    archs = record.get("archs") if isinstance(record, dict) else None
+    if not isinstance(archs, list):
+        return None
+    return [str(a) for a in archs]
+
+
 def needs_hip_libraries(target: Path) -> bool:
-    """Whether a ggml-hip library in *target* imports hipblas.dll and neither
-    *target* nor its ``HIP_LIBRARIES_DIR/bin`` holds it."""
+    """Whether a ggml-hip library in *target* imports hipblas.dll, *target*
+    does not hold it, and *target*'s ``HIP_LIBRARIES_DIR`` is not a complete set
+    for this machine: missing, without its marker (:func:`recorded_archs`), or
+    lacking the kernels of a GPU now reported (:func:`hip_gpu_archs`) that the
+    pins cover. A GPU question that fails keeps a complete set (logged)."""
     images = _hip_images(target)
-    if not images:
+    if not images or (target / _HIPBLAS).is_file():
         return False
-    if any((d / _HIPBLAS).is_file() for d in (target, target / HIP_LIBRARIES_DIR / "bin")):
+    if not any(_HIPBLAS in (n.lower() for n in pe_deps.imported_dlls(p)) for p in images):
         return False
-    return any(_HIPBLAS in (n.lower() for n in pe_deps.imported_dlls(p)) for p in images)
+    recorded = recorded_archs(target)
+    if recorded is None:
+        return True
+    try:
+        detected = _sl.hip_gpu_archs(target)
+    except HipLibrariesError as e:
+        logger.warning("hip build: kept the ROCm libraries in place, the GPU check failed: %s", e)
+        return False
+    found = rocm_release(target)
+    pinned = _sl._HIP_SDK_WHEELS.get(found[0], {}).get("devices", {}) if found else {}
+    return any(a in pinned and a not in recorded for a in detected)
 
 
 def rocm_release(target: Path) -> Optional[tuple[str, tuple]]:
@@ -119,8 +150,7 @@ def _fetch_wheel(url: str, dest: Path, size: int, sha256: str) -> None:
 
 def _safe_member(name: str) -> bool:
     parts = Path(name).parts
-    return not (name.startswith(("/", "\\")) or ".." in parts
-                or (len(name) > 1 and name[1] == ":"))
+    return not (name.startswith(("/", "\\")) or ".." in parts or ":" in name)
 
 
 def _library_closure(wheel: zipfile.ZipFile, target: Path) -> dict[str, str]:
@@ -172,11 +202,14 @@ def _device_members(wheel: zipfile.ZipFile) -> dict[str, str]:
 
 
 def _add(target: Path, release: str, version: tuple, archs: list[str]) -> list[str]:
-    """Download and place the libraries and the kernels of *archs*. Returns the
-    DLL names added. Raises."""
+    """Download the libraries and the kernels of *archs* into ``_ASSEMBLY_DIR``
+    of *target*, write the marker, and rename the folder to
+    ``HIP_LIBRARIES_DIR``. Returns the DLL names added. Raises."""
     spec = _sl._HIP_SDK_WHEELS[release]
     lib_name, lib_size, lib_sha = spec["libraries"]
-    dest = target / HIP_LIBRARIES_DIR
+    dest = target / _ASSEMBLY_DIR
+    if dest.exists():
+        shutil.rmtree(dest)
     record = {"rocm": spec["version"], "hip_runtime": ".".join(map(str, version)),
               "archs": archs, "wheels": {lib_name: lib_sha}}
     with tempfile.TemporaryDirectory() as tmp:
@@ -199,6 +232,7 @@ def _add(target: Path, release: str, version: tuple, archs: list[str]) -> list[s
             wheel_path.unlink()
             record["wheels"][name] = sha
     (dest / HIP_LIBRARIES_MARKER).write_text(json.dumps(record, indent=1), encoding="utf-8")
+    os.replace(dest, target / HIP_LIBRARIES_DIR)
     return sorted(closure)
 
 
@@ -254,12 +288,15 @@ def supply_hip_libraries(target: Path) -> Optional[list[str]]:
             console.print(f"[yellow]No ROCm {release} kernels are pinned for "
                           f"{', '.join(other)}; the hip build runs on "
                           f"{', '.join(covered)} only.[/yellow]")
+        stale = target / HIP_LIBRARIES_DIR
+        if stale.exists():
+            shutil.rmtree(stale)
         console.print(f"[dim]Adding AMD's ROCm {wheels[release]['version']} libraries and "
                       f"the {', '.join(covered)} kernels the hip build needs (no HIP SDK "
                       "install needed)[/dim]")
         added = _add(target, release, version, covered)
     except Exception as e:  # noqa: BLE001 - reported by _warn, provisioning continues
-        partial = target / HIP_LIBRARIES_DIR
+        partial = target / _ASSEMBLY_DIR
         shutil.rmtree(partial, ignore_errors=True)
         if partial.exists():
             logger.warning("hip build: could not remove the partial %s", partial)

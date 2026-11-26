@@ -96,6 +96,10 @@ _BLAS_LIBRARY_DIRS = ("rocblas", "hipblaslt", ".kpack")
 # "../.kpack" relative to its own DLL, so its DLL stays in "<dir>/bin".
 HIP_LIBRARIES_DIR = "rocm"
 
+# Written into HIP_LIBRARIES_DIR last, once every file of the set is in place:
+# which ROCm release and GPU kernels it holds. A folder without it is not used.
+HIP_LIBRARIES_MARKER = ".localm-hip-libraries"
+
 
 # Every subfolder of a runtime folder that belongs to the runtime: cleared with
 # it, checked for files in use, and replaced as a whole by an update.

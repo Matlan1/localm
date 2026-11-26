@@ -228,13 +228,15 @@ def rocm_runtime_dirs() -> list[Path]:
 def hip_library_dirs(binary_dir: Optional[Path]) -> list[Path]:
     """The folder of the ROCm libraries setup added to the runtime in
     *binary_dir* (``HIP_LIBRARIES_DIR/bin``, see setup_llama/hip_libraries.py),
-    as a one-element list, or ``[]`` when it has none."""
+    as a one-element list, or ``[]`` when it has none or the set has no
+    ``HIP_LIBRARIES_MARKER`` (an incomplete set)."""
     if binary_dir is None:
         return []
-    from localm.setup_llama.library_files import HIP_LIBRARIES_DIR
-    d = Path(binary_dir) / HIP_LIBRARIES_DIR / "bin"
+    from localm.setup_llama.library_files import HIP_LIBRARIES_DIR, HIP_LIBRARIES_MARKER
+    folder = Path(binary_dir) / HIP_LIBRARIES_DIR
+    d = folder / "bin"
     try:
-        return [d] if d.is_dir() else []
+        return [d] if d.is_dir() and (folder / HIP_LIBRARIES_MARKER).is_file() else []
     except OSError:
         return []
 
