@@ -26,7 +26,6 @@ from tests._old_client_update import old_client_update
 from tests._net_config import set_config
 from tests._update_signing import envelope, keyset
 
-_REAL_RUN = subprocess.run
 _PROGRAM = Path(sys.executable).read_bytes() if os.name == "nt" else b"trampoline"
 _PRIV = Ed25519PrivateKey.generate()
 _RECOVERY = [Ed25519PrivateKey.generate() for _ in range(3)]
@@ -1406,27 +1405,6 @@ def test_doctor_lists_the_parts_that_differ(monkeypatch):
 
 
 # ------------------------- the build's own finishing step ---------------------
-
-_FINISH_OK = """
-import json, os, sys
-old, new, klass, result = sys.argv[1:]
-print("finishing", old, "to", new, klass)
-with open(os.path.join("site-marker.json"), "w") as f:
-    json.dump({"argv": sys.argv[1:], "cwd": os.getcwd(), "isolated": sys.flags.isolated,
-               "utf8": sys.flags.utf8_mode}, f)
-with open(result, "w") as f:
-    json.dump({"took_over": %s}, f)
-"""
-
-_FINISH_CHANGES_THE_VENV_THEN = """
-import pathlib, shutil, sys
-site = pathlib.Path(%r)
-shutil.rmtree(site / "click")
-shutil.rmtree(site / "click-8.0.dist-info")
-print("removed click")
-%s
-"""
-
 
 def test_the_install_python_comes_before_the_running_one(tmp_path):
     assert updater_finish.interpreter(tmp_path) == sys.executable

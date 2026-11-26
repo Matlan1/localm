@@ -27,18 +27,6 @@ def _opener(payload, status=200):
     return op
 
 
-def _write_pyproject(d, deps, *, extras=None, requires_python="==3.12.*"):
-    lines = ['[project]', 'name = "localm"', 'version = "0.1.0"',
-             f'requires-python = "{requires_python}"',
-             'dependencies = [' + ", ".join(f'"{x}"' for x in deps) + ']']
-    content = "\n".join(lines) + "\n"
-    if extras:
-        content += "[project.optional-dependencies]\n"
-        for name, items in extras.items():
-            content += f'{name} = [' + ", ".join(f'"{x}"' for x in items) + ']\n'
-    (d / "pyproject.toml").write_text(content, encoding="utf-8")
-
-
 # ------------------------------- endpoint -------------------------------
 
 def test_endpoint_reuses_bugreport_config(monkeypatch):
@@ -289,7 +277,7 @@ def test_opting_out_after_an_rc_does_not_strand_or_downgrade(monkeypatch):
 def test_refuse_downgrade_unaffected_by_the_new_comparable_signal(monkeypatch):
     """_version.comparable() is a signal for CLI/API messaging only;
     _refuse_downgrade calls is_newer() directly. An unparseable *new_version* -
-    attacker-controlled input to apply(), via a compromised or MITM'd proxy
+    attacker-controlled input to an update, via a compromised or MITM'd proxy
     response - stays REFUSED."""
     from localm.bugreport import LocalmError
     monkeypatch.setattr(_version, "read_version", lambda: "0.1.5")
@@ -314,8 +302,6 @@ def test_refuse_downgrade_refuses_when_the_installed_version_is_unreadable(
     with pytest.raises(LocalmError, match="installed localm version"):
         updater._refuse_downgrade("9.9.9")
 
-
-# ------------------------------ classify --------------------------------
 
 # ------------------------------ download --------------------------------
 
@@ -353,12 +339,12 @@ def test_download_refuses_non_https_endpoint(tmp_path, monkeypatch):
         updater.download(7, tmp_path / "build.zip")           # opener=None -> urllib path
 
 
-# ------------------------- apply / rollback -----------------------------
+# ------------------------- prepare / rollback -----------------------------
 #
-# apply() verifies an Ed25519 signature over the downloaded build against a pinned
-# public key BEFORE extracting/swapping, and refuses a non-newer build (anti-
-# rollback). These tests pin a THROWAWAY keypair and sign the fixture build, so they
-# exercise the real gate rather than disabling it.
+# An update verifies an Ed25519 signature over the downloaded build against a pinned
+# public key BEFORE extracting it, and refuses a non-newer build (anti-rollback).
+# These tests pin a THROWAWAY keypair and sign the fixture build, so they exercise
+# the real gate rather than disabling it.
 
 _TEST_PRIV = Ed25519PrivateKey.generate()
 _TEST_RECOVERY = [Ed25519PrivateKey.generate() for _ in range(3)]
@@ -392,7 +378,7 @@ def _signed_build(version, deps):
 
 @pytest.fixture
 def sig_env(monkeypatch):
-    """Pin the test signing key and an OLDER running version so apply()'s signature
+    """Pin the test signing key and an OLDER running version so an update's signature
     gate and anti-rollback accept the 0.2.0 fixture builds."""
     monkeypatch.setattr(updater, "_PINNED_KEYSET",
                         keyset(1, [_TEST_PRIV], _TEST_RECOVERY))
@@ -436,22 +422,6 @@ def _config(monkeypatch, tmp_path):
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
 
 
-def _signed_build_without_lock(version, deps):
-    import io
-    import zipfile
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as z:
-        z.writestr("VERSION", version)
-        z.writestr("pyproject.toml", _pyproject_str(deps))
-        z.writestr("localm/__init__.py", f"# {version}")
-    data = buf.getvalue()
-
-    def opener(url, headers, timeout, dest):
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(data)
-    return opener, envelope(data, [_TEST_PRIV])
-
-
 def test_apply_under_net_mode_off_is_refused_before_anything_is_downloaded(
         tmp_path, monkeypatch, sig_env, no_uv):
     _config(monkeypatch, tmp_path)
@@ -467,26 +437,6 @@ def test_apply_under_net_mode_off_is_refused_before_anything_is_downloaded(
     assert ei.value.stage == "network_off"
     assert downloads == []
     assert ran == [] and (inst / "VERSION").read_text().strip() == "0.1.0"
-
-
-def _counting_swaps(monkeypatch):
-    from localm import _apply_update as au
-    swaps = []
-    real = au.swap_with_backup
-    monkeypatch.setattr(au, "swap_with_backup", lambda *a, **k: swaps.append(a) or real(*a, **k))
-    return swaps
-
-
-def _plan_a_runtime_reprovision(monkeypatch):
-    """Make apply() plan a runtime re-provision; returns the list of stop calls."""
-    from localm import updater_runtime
-    stopped = []
-    monkeypatch.setattr(updater_runtime, "plan", lambda staged, installed: {
-        "reprovision": True, "source": "release", "backend": "cpu", "current": "b1",
-        "target": "b2", "pins": {}, "note": "the cpu runtime is re-provisioned (b1 -> b2)"})
-    monkeypatch.setattr(updater_runtime, "stop_own_holders",
-                        lambda *a, **k: stopped.append(a) or [])
-    return stopped
 
 
 def test_deps_env_points_a_contained_install_at_its_own_cache(tmp_path, monkeypatch):
@@ -676,32 +626,6 @@ def test_rollback_last_treats_a_hostile_manifest_as_unreadable(
     assert "unreadable" in caplog.text
     assert (install / "existing.txt").read_text(encoding="utf-8") == "OLD-preapply"
     assert (install / "brand_new").exists()
-
-
-# --------------- apply() single-flight / concurrency ----------------------
-#
-# apply() takes a cross-process mkdir lock (_apply_lock) and uses a unique
-# per-run scratch directory (_new_run_dir) whose backup is promoted to the
-# stable path only after that run's own swap has succeeded (_promote_backup).
-
-def _setup_apply_env(tmp_path, monkeypatch):
-    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
-    home = tmp_path / "home"
-    monkeypatch.setattr("localm.config.home_dir", lambda: home)
-    return home, _fake_install(tmp_path, deps=("click",))
-
-
-# ------------------------ spawn_health_watchdog ---------------------------
-#
-# spawn_health_watchdog() never actually runs scripts/update_watchdog.py in these
-# tests - it injects a fake `popen` (matching apply()'s download_opener/runner
-# convention) and asserts what would have been launched.
-
-def _capturing_popen(calls):
-    def popen(argv, **kwargs):
-        calls.append((argv, kwargs))
-        return object()   # a stand-in Popen handle; spawn_health_watchdog ignores it
-    return popen
 
 
 def test_is_site_packages_install_recognises_a_pip_install():
