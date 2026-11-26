@@ -93,7 +93,8 @@ class Install:
         um.write(root / ".localm-update" / ID / "new",
                  {**NEW, "update-package.json": _statement(NEW, "2")})
         if applier:
-            shared.copy_applier(REPO / "localm", root / ".localm-update" / ID / "applier")
+            um.no_window(shared.copy_applier(REPO / "localm",
+                                             root / ".localm-update" / ID / "applier"))
 
     @property
     def record(self) -> Path:

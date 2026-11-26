@@ -36,6 +36,9 @@ UNUSABLE_EXIT = 79
 #: replaced, the one it installed, and the runtimes it kept (JSON).
 RECORD_FROM, RECORD_TO, RECORD_KEPT = "LOCALM_RECORD_FROM", "LOCALM_RECORD_TO", "LOCALM_RECORD_KEPT"
 RUNTIME, FOLDERS, COMFYUI = "runtime", "folders", "comfyui"
+#: The note of an update into a release that ships no update program (``prepare`` *older*).
+OLDER_NOTE = ("The native runtime, the other components and PyTorch are brought to what this "
+              "version pins when it starts.")
 _PART_KEYS = {RUNTIME: {"label", "name", "beside", "backend", "from", "to", "keep", "folders"},
               FOLDERS: {"label"}, COMFYUI: {"label", "removed", "packages"}}
 
@@ -122,7 +125,8 @@ class Preparing(steps.Work):
         super().__exit__(*exc)
 
 
-def prepare(update: steps.Place, *, uv, home, env: Mapping, say: Say) -> dict:
+def prepare(update: steps.Place, *, uv, home, env: Mapping, say: Say,
+            older: bool = False) -> dict:
     """Fetch and test everything the steps of *update* need, inside its block. *home* is
     the data folder; *uv* the full path of the uv to run. Writes only below ``<id>`` and
     the same id's folder in the component folders it prepares, and the download caches;
@@ -130,12 +134,23 @@ def prepare(update: steps.Place, *, uv, home, env: Mapping, say: Say) -> dict:
     steps, also on disk for :func:`run`: ``{"sync", "torch", "uv", "parts", "kept",
     "notes", ...}``.
 
+    *older*: the new tree is a release that ships no update program of its own
+    (``updater_handoff.prepare`` gave it this one); only its Python packages are
+    prepared, and that release brings its runtime and components to its own pins at its
+    first start, as every such release does.
+
     Raises :class:`.mover.Refused` (the update cannot be made; nothing changed) and
     OSError."""
     root, update_id, work = update.root, update.id, update.path
     future = steps_packages.Future(root, update_id, uv, env=env, say=say)
     extras = steps_packages.used_extras(root, future.tree, uv, env=env)
     sync = future.sync(extras)
+    if older:
+        spec = {"sync": sync, "format": FORMAT, "torch": [], "uv": None, "parts": [],
+                "kept": [], "notes": [OLDER_NOTE]}
+        _check(spec)
+        disk.write_json(work / STEPS_FILE, spec)
+        return spec
     tree, python = str(future.tree), future.python
     code, last = run_child(
         [python, "-m", "localm", "_update-prepare", "--root", disk.short_path(Path(root)),
@@ -352,10 +367,15 @@ def put_back(lock: job.Lock, *, uv, env: Mapping, say: Say, network: bool = True
     return steps.put_back(lambda: job.restore(lock, wait_s=wait_s, ask=ask), reinstall, repair)
 
 
-def record(root, *, old: str, new: str, kept: list, home, env: Mapping, say: Say) -> Optional[str]:
+def record(root, *, old: str, new: str, kept: list, home, env: Mapping, say: Say,
+           older: bool = False) -> Optional[str]:
     """After the update ended as done: let the new version record what changed (its
     install record, the runtime history, the runtimes *kept* of :class:`Run`). Returns
-    None, or why that failed; the update stays done."""
+    None, or why that failed; the update stays done. *older* (:func:`prepare`): that
+    release has no such command and records its own parts when it starts; nothing is
+    run."""
+    if older:
+        return None
     python = steps_packages.python_in(Path(root) / ".venv")
     told = {**child_env(env, root, home, ""), RECORD_FROM: str(old), RECORD_TO: str(new),
             RECORD_KEPT: json.dumps(kept)}

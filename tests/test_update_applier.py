@@ -351,7 +351,9 @@ def test_a_server_asked_to_restart_is_waited_for_and_runs_the_new_version_after_
 
 def test_a_restart_names_the_server_it_restarts_from_for_the_next_process_only(monkeypatch):
     """``_execv_restart`` hands ``<pid>-<start>`` of this server to its re-exec
-    (``LOCALM_RESTARTED_FROM``) and takes it back when os.execv raises."""
+    (``LOCALM_RESTARTED_FROM``) in the environment it passes to os.execve, and never
+    puts it into this process's environment, where a child that another thread starts
+    meanwhile would inherit it."""
     import localm.inference.http_server as hs
     from localm import instances, procs
     monkeypatch.delenv("LOCALM_RESTARTED_FROM", raising=False)
@@ -359,14 +361,14 @@ def test_a_restart_names_the_server_it_restarts_from_for_the_next_process_only(m
     monkeypatch.setattr(instances, "restore_own", lambda removed: None)
     seen = []
 
-    def execv(exe, argv):
-        seen.append(os.environ.get("LOCALM_RESTARTED_FROM"))
+    def execv(exe, argv, env=None):
+        seen.append((os.environ.get("LOCALM_RESTARTED_FROM"), env.get("LOCALM_RESTARTED_FROM")))
         raise OSError("not in a test")
-    monkeypatch.setattr(os, "execv", execv)
+    monkeypatch.setattr(os, "execve", execv)
     with pytest.raises(OSError):
         hs._execv_restart(None, None)
     me = procs.current()
-    assert me is not None and seen == [f"{me.pid}-{me.start}"]
+    assert me is not None and seen == [(None, f"{me.pid}-{me.start}")]
     assert "LOCALM_RESTARTED_FROM" not in os.environ
 
 

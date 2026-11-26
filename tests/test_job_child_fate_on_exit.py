@@ -302,8 +302,8 @@ class TestExitPathsInvokeIt:
             "nothing else reaps it")
 
     def test_do_restart_terminates_the_child(self, a_running_child, monkeypatch):
-        monkeypatch.setattr(os, "execv",
-                            lambda exe, argv: (_ for _ in ()).throw(SystemExit(0)))
+        monkeypatch.setattr(os, "execve",
+                            lambda exe, argv, env=None: (_ for _ in ()).throw(SystemExit(0)))
         with pytest.raises(SystemExit):
             hs._do_restart()
         assert a_running_child.terminated or a_running_child.killed, (

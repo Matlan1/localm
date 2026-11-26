@@ -548,14 +548,16 @@ class Marks:
 
 def build(a: Area, step: str, number: int, new: Mapping, leaving: Iterable[str], *,
           identify: Callable[[Path], dict], edited: Callable[[str, dict], bool],
-          swap: Iterable[str] = (), keep_equal: bool = False) -> Plan:
+          swap: Iterable[str] = (), keep_equal: bool = False, last: bool = False) -> Plan:
     """The plan that puts the files *new* (``{path: identity}``, staged in the area's
     *new* folder) into *a* and takes the files *leaving* out, as far as they are
     there. Reads only.
 
     *identify* gives the identity of a file that is there, *edited* whether a file
     that goes is the user's own; an identity without a checksum gets that of the
-    content. *keep_equal*: a file that is already the new one stays. Raises :class:`Refused` for a path that is taken by something else,
+    content. *keep_equal*: a file that is already the new one stays.
+    *last*: the paths of *swap* go last instead of first, in that order, and those of them
+    that are removed after them. Raises :class:`Refused` for a path that is taken by something else,
     :class:`Unsafe` for one through a link, :class:`.disk.Held` or OSError."""
     swap = list(swap)
     wait = Wait()
@@ -593,8 +595,12 @@ def build(a: Area, step: str, number: int, new: Mapping, leaving: Iterable[str],
         _check_taken(a, rel, gone)
     first = sorted((op for op in changes if op.swap), key=lambda op: swap.index(op.path))
     rest = [op for op in changes if not op.swap]
-    return Plan(step, number, [*first, *(removes[r] for r in sorted(removes)), *rest],
-                _created(a, changes))
+    if last:
+        gone_last = [removes.pop(r) for r in [r for r in swap if r in removes]]
+        ops = [*(removes[r] for r in sorted(removes)), *rest, *first, *gone_last]
+    else:
+        ops = [*first, *(removes[r] for r in sorted(removes)), *rest]
+    return Plan(step, number, ops, _created(a, changes))
 
 
 #: What a start of localm, however it is made, runs until the gate (``localm/__init__.py``)
@@ -607,8 +613,17 @@ GATE_FILES = (
     "installer/gui.py")
 
 
+#: :data:`GATE_FILES` in the order they go last (``plan_files`` *last*): into a release
+#: without the gate the launchers go first and the gate itself, ``localm/__init__.py``,
+#: after them, so that every start before it still waits at the gate; ``localm/procs.py``,
+#: which that gate imports, goes after the gate.
+GATE_FILES_LAST = (*(f for f in GATE_FILES if f not in ("localm/__init__.py", "localm/procs.py")),
+                   "localm/__init__.py", "localm/procs.py")
+
+
 def plan_files(root, update_id: str, new_files: Mapping, old_files: Optional[Mapping] = None, *,
-               swap: Iterable[str] = GATE_FILES, protect: Iterable[str]) -> Plan:
+               swap: Iterable[str] = GATE_FILES, protect: Iterable[str],
+               last: bool = False) -> Plan:
     """The plan that turns the install at *root* into the release extracted in
     ``<id>/new``. Reads only.
 
@@ -616,7 +631,7 @@ def plan_files(root, update_id: str, new_files: Mapping, old_files: Optional[Map
     installed one to ``{"sha256", "size"}`` (the ``files`` of their statements).
     A file only *old_files* names is removed; with None nothing is removed and every
     file that differs counts as the user's own. *swap* are the paths that go first,
-    in that order, and are never absent. *protect* are the user's own folders below
+    in that order, and are never absent. With *last* they go last (:func:`build`). *protect* are the user's own folders below
     *root* besides the ones no update touches (a data or models folder kept there),
     relative to *root*; they are left alone with everything in them.
 
@@ -652,7 +667,7 @@ def plan_files(root, update_id: str, new_files: Mapping, old_files: Optional[Map
     plan = build(a, FILES, number, new,
                  [rel for rel in old_files or () if covered(rel)],
                  identify=lambda path: disk.content_identity(path, wait), edited=edited,
-                 swap=swap, keep_equal=True)
+                 swap=swap, keep_equal=True, last=last)
     for op in plan.ops:
         was = (old_files or {}).get(op.path) if op.edited else None
         op.release = [{k: was[k] for k in ("sha256", "size")}] if was else []

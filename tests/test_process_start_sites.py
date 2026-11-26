@@ -48,7 +48,7 @@ LOCALM = frozenset({
 LOCALM_ELSEWHERE = {
     "installer/gui.py:Wizard._launch:Popen": "LocaLM.exe gui",
     "localm/diagnostics.py:run_report_isolated:Popen": "python -c, imports localm.diagnostics",
-    "localm/inference/http_server.py:_execv_restart:execv": "python -m localm gui, same process",
+    "localm/inference/http_server.py:_execv_restart:execve": "python -m localm gui, same process",
     "localm/update_mechanism/steps_update.py:run_child:Popen":
         "python -m localm, waited for; or python -c import torch, waited for",
     "localm/update_mechanism/applier.py:Applier._relaunch:Popen":
@@ -68,6 +68,8 @@ TOOLS = {
     "localm/plugins/coder/tools/base.py:_run_cancellable:Popen": "a shell command",
     "localm/plugins/deps.py:_run_attempts:Popen": "uv, pip",
     "localm/updater_handoff.py:_run_check:Popen": "the check the update mechanism of a build runs",
+    "localm/update_mechanism/window.py:Window.start:Popen": "the small update window",
+    "localm/update_mechanism/window_tk.py:_command:run": "defaults, gsettings: the dark preference of the desktop",
     "localm/vc_runtime.py:run_installer:ShellExecuteExW": "Microsoft's runtime installer",
 }
 #: A program of the user: each of these goes through procs.open_for_user.

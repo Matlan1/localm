@@ -135,9 +135,22 @@ def new_tree(root: Path, new: dict = NEW) -> dict:
     return tree(root)
 
 
+#: The window program of the applier copies the tests run: it shows no window and says
+#: so, as the real one does where no window can be shown.
+WINDOWLESS = ('import json\n'
+             'print(json.dumps({"error": "no window in the tests"}), flush=True)\n')
+
+
+def no_window(run: Path) -> Path:
+    """The applier copy *run* (``update_mechanism``) with :data:`WINDOWLESS` as its window
+    program."""
+    (Path(run) / "window_tk.py").write_text(WINDOWLESS, encoding="utf-8")
+    return run
+
+
 def applier(dest: Path) -> Path:
-    """A copy of the update mechanism of this build at *dest*."""
-    return shared.copy_applier(REPO / "localm", dest)
+    """A copy of the update mechanism of this build at *dest*, showing no window."""
+    return no_window(shared.copy_applier(REPO / "localm", dest))
 
 
 def run(argv: list, **kw) -> subprocess.CompletedProcess:

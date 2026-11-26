@@ -92,12 +92,12 @@ class TestStopAndRestartRemoveTheEntry:
         iid, path = advertised
         seen = {}
 
-        def _fake_execv(exe, argv):
+        def _fake_execv(exe, argv, env=None):
             seen["listed"] = path.exists()
             raise SystemExit(0)
 
         monkeypatch.setattr(http_server, "_engine", None)
-        monkeypatch.setattr(os, "execv", _fake_execv)
+        monkeypatch.setattr(os, "execve", _fake_execv)
         with pytest.raises(SystemExit):
             http_server._do_restart(instance_id=iid)
         assert seen == {"listed": False}, (
@@ -106,7 +106,7 @@ class TestStopAndRestartRemoveTheEntry:
     def test_a_failed_re_exec_writes_the_entry_back(self, advertised, monkeypatch):
         iid, path = advertised
         monkeypatch.setattr(http_server, "_engine", None)
-        monkeypatch.setattr(os, "execv", lambda exe, argv: (_ for _ in ()).throw(
+        monkeypatch.setattr(os, "execve", lambda exe, argv, env=None: (_ for _ in ()).throw(
             OSError("exec format error")))
         with pytest.raises(OSError):
             http_server._do_restart(instance_id=iid)
@@ -121,7 +121,7 @@ class TestStopAndRestartRemoveTheEntry:
         def _graceful_fails(**kw):
             raise RuntimeError("graceful restart failed")
 
-        def _fake_execv(exe, argv):
+        def _fake_execv(exe, argv, env=None):
             seen["listed"] = path.exists()
             raise SystemExit(0)
 
@@ -129,7 +129,7 @@ class TestStopAndRestartRemoveTheEntry:
         monkeypatch.setattr(http_server, "_mark_fds_noninheritable", lambda: None)
         monkeypatch.setattr(http_server, "_restart_argv",
                             lambda port=None: ["python", "-m", "localm"])
-        monkeypatch.setattr(os, "execv", _fake_execv)
+        monkeypatch.setattr(os, "execve", _fake_execv)
         app = SimpleNamespace(state=SimpleNamespace(instance_port=None,
                                                     instance_id=iid))
         with pytest.raises(SystemExit):
