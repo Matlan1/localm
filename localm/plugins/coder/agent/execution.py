@@ -202,6 +202,8 @@ class _ExecutionMixin:
 
         def _record_error(self, tool: str, output: str) -> None: ...
 
+        def _track_plan_refusal(self, call: Any, refusal: str) -> Any: ...
+
         _patch_overlay: PatchOverlay
         _patch_chunks: list[str]
 
