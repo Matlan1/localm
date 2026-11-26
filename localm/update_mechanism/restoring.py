@@ -211,7 +211,7 @@ def end_setup(root) -> int:
         say(f"{e}. The record of the interrupted update stays; run setup again once that "
             "has ended.")
         return BUSY
-    except (OSError, disk.Held) as e:
+    except (OSError, disk.Held, disk.Unsafe) as e:
         say(f"The record of the interrupted update could not be deleted: {e}. Run setup again.")
         return FAILED
 

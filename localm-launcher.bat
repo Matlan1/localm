@@ -19,7 +19,12 @@ call "%%GATE%%" && "%~dp0localm-launcher.bat" %* || (
 :update_gated
 set "LOCALM_GATE="
 set "GATE="
-cd /d "%~dp0"
+cd /d "%~dp0" || (
+    echo The launcher cannot run from a network folder: "%~dp0"
+    echo Copy the folder to a drive of this computer, or map the share to a drive letter.
+    pause
+    exit /b 1
+)
 
 if exist ".venv\Scripts\pythonw.exe" (
     start "" ".venv\Scripts\pythonw.exe" "launcher.pyw"

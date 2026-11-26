@@ -64,6 +64,15 @@ set "LOCALM_SETUP_GUI_INPLACE="
 set "LOCALM_SETUP_GUI_SELF="
 set "LOCALM_SETUP_GUI_CMD="
 for %%n in (1 2 3 4 5) do set "LOCALM_MSG%%n="
+cd /d "%~dp0" || goto :not_here
+goto :here
+:not_here
+set "LOCALM_MSG1=[!] The graphical setup cannot run from a network folder: %~dp0"
+set "LOCALM_MSG2=Copy the folder to a drive of this computer, or map the share to a drive letter, and run setup-gui.bat there."
+if not "%USEBOX%"=="1" echo   [!] The graphical setup cannot run from a network folder: "%~dp0"
+if "%USEBOX%"=="1" call :notify Error
+exit /b 1
+:here
 echo.
 echo   LocaLM graphical setup
 echo.

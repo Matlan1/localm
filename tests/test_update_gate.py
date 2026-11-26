@@ -844,7 +844,7 @@ def test_update_gate_bat_over_the_network(tmp_path):
 @nt_only
 @pytest.mark.parametrize("script,until", [
     ("setup.bat", "setlocal EnableDelayedExpansion"),
-    ("setup-gui.bat", 'set "LOCALM_SETUP_GUI_HIDDEN="'),
+    ("setup-gui.bat", "echo   LocaLM graphical setup"),
     ("localm-launcher.bat", 'if exist ".venv\\Scripts\\pythonw.exe"'),
     ("rollback.bat", "rem Prefer the clone's venv Python")])
 def test_a_batch_script_undoes_it_over_the_network(tmp_path, script, until):
@@ -859,8 +859,10 @@ def test_a_batch_script_undoes_it_over_the_network(tmp_path, script, until):
     inst.go(job.STEPS)
     done = _cmd(inst, f'call "{unc}\\{script}" --yes', LOCALM_SETUP_GUI_INPLACE="1")
     assert inst.is_old(), (done.stdout, done.stderr)
-    if script == "setup.bat":
+    if script in ("setup.bat", "setup-gui.bat", "localm-launcher.bat"):
         assert "cannot run from a network folder" in done.stdout and "BEGINS" not in done.stdout, done.stdout
+    if script == "setup.bat":
+        assert done.stdout.count("Press any key") <= 1, done.stdout
 
 
 _SETUPS = {"setup.bat": ("setlocal EnableDelayedExpansion", "[%LEFTUPDATE%]"),

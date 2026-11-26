@@ -57,10 +57,10 @@ set "LOCALM_GATE="
 cd /d "%~dp0" || goto :not_here
 goto :here
 :not_here
-echo  setup.bat cannot run from a network folder: %~dp0
+echo  setup.bat cannot run from a network folder: "%~dp0"
 echo  Copy the folder to a drive of this computer, or map the share to a drive letter,
 echo  and run setup.bat there.
-pause
+if not defined GATE pause
 exit /b 1
 :here
 setlocal EnableDelayedExpansion
