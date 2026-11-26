@@ -160,6 +160,8 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
         ("localm/update_mechanism/*.py", "*.bat", "*.sh", "launcher.pyw", "installer/gui.py"),
         "builds its install from the update mechanism and reads every launch script"),
     "tests/test_check_pins.py": (_LOCALM_PY, "greps every tracked localm/*.py for pin-shaped constants"),
+    "tests/test_procs_repair.py": (("localm/*",),
+                                   "copies the localm package into an install of its own and starts it"),
     "tests/test_embedding_model_writers_refuse_a_chat_model.py": (
         _LOCALM_PY, "reads every localm/*.py for embedding_model config writers"),
     "tests/test_streaming_response_closes_body.py": (_LOCALM_PY, "reads every localm/*.py for StreamingResponse uses"),
