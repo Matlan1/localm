@@ -86,6 +86,12 @@ def _record_provisioned_backend(target: Path, backend: str,
         (target / _BACKEND_MARKER).write_text(line + "\n", encoding="utf-8")
     except OSError:
         pass
+    from localm import runtime_files
+    try:
+        runtime_files.write(target)
+    except OSError as e:
+        logger.warning("could not write the list of the runtime files in %s, so the "
+                       "integrity check cannot compare them: %s", target, e)
 
 
 def _read_marker(target: Path) -> Optional[list]:

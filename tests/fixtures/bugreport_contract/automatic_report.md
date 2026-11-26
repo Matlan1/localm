@@ -38,6 +38,7 @@ Reason: backend said api_key=<redacted> reading C:\Users\<redacted>\Documents\lo
 - Backend (effective): cuda
 - Backend (requested): auto
 - Fetched CUDA runtime bundle: True
+- Files differing from the release: 4 (2 changed, 1 missing, 1 native runtime); 1 kept as the user's
 
 ## Configuration (safe subset)
 - binary_dir: C:\Users\<redacted>\localm\bin

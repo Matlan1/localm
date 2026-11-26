@@ -2026,6 +2026,7 @@ export async function refreshPluginCommands() {
     // nothing when there is no backup (the overwhelmingly common case).
     if (typeof window.__localmRollbackCheck === "function") window.__localmRollbackCheck();
     if (typeof window.__localmPartsCheck === "function") window.__localmPartsCheck();
+    if (typeof window.__localmIntegrityCheck === "function") window.__localmIntegrityCheck();
     const isSec = $("sec-issues");
     if (isSec) isSec.hidden = !data.issues_available;
     await loadClientPlugins(pluginState);

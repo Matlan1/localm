@@ -56,6 +56,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from localm import runtime_files
 from localm.debuglog import logger
 
 # Marker recording a completed selection: a small JSON file, never loaded as
@@ -64,8 +65,10 @@ _MARKER_NAME = ".localm-cpu-tier"
 _MARKER_SCHEMA = 1
 
 # Prefix for a rejected tier. It does not start with "libggml", so it falls
-# outside this module's candidate glob and _loader.py's _ggml_glob().
-_UNUSED_PREFIX = "_unused-"
+# outside this module's candidate glob and _loader.py's _ggml_glob(). The
+# integrity check's runtime list (runtime_files) counts a file under it as the
+# listed file of its own name.
+_UNUSED_PREFIX = runtime_files.PRUNED_PREFIX
 
 _CANDIDATE_GLOB = "libggml-cpu-*.so"
 

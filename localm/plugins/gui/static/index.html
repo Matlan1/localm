@@ -1353,6 +1353,30 @@
                 <div id="update-repair-status" class="sub" role="status" aria-live="polite" hidden></div>
               </div>
 
+              <!-- The GUI form of `localm integrity`: localm's files against the list of
+                   the installed release, with Repair and Keep my changes. -->
+              <div class="update-subsection" id="app-integrity-block">
+                <h4 class="update-sub-head" data-i18n="settings.integrity.subHead">Integrity</h4>
+                <div class="sub" data-i18n="settings.integrity.help">Compares localm's files with the list of the installed release. Repair writes the differing files again from the signed release; Keep my changes stops reporting them.</div>
+                <div class="sub" id="integrity-status" role="status" aria-live="polite" data-i18n="settings.integrity.notChecked">Not checked yet.</div>
+                <ul id="integrity-list" class="sub"></ul>
+                <div class="actions">
+                  <button class="btn-secondary" id="integrity-check" data-i18n="settings.integrity.checkButton">Check now</button>
+                  <button class="btn-secondary" id="integrity-full" data-i18n="settings.integrity.fullButton">Check every file in full</button>
+                  <button class="btn-secondary" id="integrity-repair" data-i18n="settings.integrity.repairButton" hidden>Repair</button>
+                  <button class="btn-secondary" id="integrity-keep" data-i18n="settings.integrity.keepButton" hidden>Keep my changes</button>
+                </div>
+                <div id="integrity-action-status" class="sub" role="status" aria-live="polite" hidden></div>
+                <!-- integrity_check_at_start / integrity_notice: schema-driven, rendered
+                     here by refreshSettingsPage's "core-Updates" case in settings.js. -->
+                <div id="integrity-settings-block" hidden>
+                  <div id="integrity-settings" class="settings-fields"></div>
+                  <div class="actions">
+                    <button class="btn-secondary" id="integrity-settings-save" data-i18n="settings.integrity.saveButton">Save integrity settings</button>
+                  </div>
+                </div>
+              </div>
+
               <!-- The GUI form of `localm make-launcher`. Its OWN sub-block, not part
                    of #app-update-block above: rebuilding the launcher has nothing to
                    do with the update proxy that block gates on. ALWAYS shown, like

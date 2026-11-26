@@ -2984,14 +2984,6 @@
         ],
         "./localm/inference/engine.py": [
             {
-                "code": "reportReturnType",
-                "range": {
-                    "startColumn": 15,
-                    "endColumn": 49,
-                    "lineCount": 1
-                }
-            },
-            {
                 "code": "reportCallIssue",
                 "range": {
                     "startColumn": 12,
@@ -6466,14 +6458,6 @@
                 "range": {
                     "startColumn": 43,
                     "endColumn": 61,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportArgumentType",
-                "range": {
-                    "startColumn": 44,
-                    "endColumn": 62,
                     "lineCount": 1
                 }
             },

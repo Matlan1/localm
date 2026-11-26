@@ -334,12 +334,19 @@ class EngineCache:
             raise ValueError(f"Model not found: {model_name!r}. "
                              f"Run 'localm list' to see registered models.")
         path, _hint = info
+        return Engine(str(path), display_name=model_name,
+                      mmproj_path=self._model_mmproj(model_name))
+
+    def _model_mmproj(self, model_name: str) -> Optional[str]:
+        """The projector a load of *model_name* attaches: the operator's own
+        model's recorded one for the operator-supplied model, else the
+        registered model's (``get_model_mmproj``); None when it has none."""
         from localm.model_manager import get_model_mmproj
         from localm.model_manager.registry import get_operator_model_mmproj
-        mmproj = (get_operator_model_mmproj(self.default_model)
-                  if self._operator_supplied(model_name)
-                  else get_model_mmproj(model_name))
-        return Engine(str(path), display_name=model_name, mmproj_path=mmproj)
+        default = self.default_model
+        if default is not None and self._operator_supplied(model_name):
+            return get_operator_model_mmproj(default)
+        return get_model_mmproj(model_name)
 
     def resolve_model(self, requested: Optional[str]) -> str:
         # A client-supplied name must be a registered one; the operator's own
@@ -763,7 +770,8 @@ class EngineCache:
 
     def _backend_need_bytes(self, name: str) -> Optional[int]:
         """Free VRAM a GGUF load of ``name`` needs for every layer to go on the
-        GPU, as the backend sizes it (``full_offload_vram_bytes``), or None when
+        GPU, as the backend sizes it (``full_offload_vram_bytes``) with the
+        projector the load attaches (``_model_mmproj``), or None when
         that is not known: an unregistered model, a backend that does not size
         its layers, or a sizing failure (logged at debug)."""
         try:
@@ -774,7 +782,8 @@ class EngineCache:
                     if self._operator_supplied(name) else get_model_info(name))
             if info is None:
                 return None
-            size = getattr(create_backend(str(info[0])), "full_offload_vram_bytes", None)
+            backend = create_backend(str(info[0]), mmproj_path=self._model_mmproj(name))
+            size = getattr(backend, "full_offload_vram_bytes", None)
             return size() if callable(size) else None
         except Exception as e:
             from localm.debuglog import logger

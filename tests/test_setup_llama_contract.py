@@ -37,6 +37,7 @@ import pytest
 from click.testing import CliRunner
 
 import localm.setup_llama as sl
+from localm import runtime_files
 from localm.setup_llama import pins
 from localm import config, cpu_backend_select, hwdetect, sysprog
 from localm.bugreport import LocalmError
@@ -227,10 +228,25 @@ class World:
             (self.lib / ".localm-backend").write_text(marker + "\n", encoding="utf-8")
 
     def files(self) -> list:
+        """The files in the runtime folder, the integrity check's list of the runtime
+        files aside. That list, when present, names exactly the runtime files there
+        (every file but localm's ``.localm-*`` records and the placeholders) with their
+        size and sha256."""
         if not self.lib.exists():
             return []
-        return sorted(p.relative_to(self.lib).as_posix()
-                      for p in self.lib.rglob("*") if p.is_file())
+        found = sorted(p.relative_to(self.lib).as_posix()
+                       for p in self.lib.rglob("*") if p.is_file())
+        listing = self.lib / runtime_files.NAME
+        if listing.is_file():
+            listed = json.loads(listing.read_text(encoding="utf-8"))["files"]
+            runtime = [f for f in found if not f.split("/")[0].startswith(".localm-")
+                       and f not in (".gitignore", ".gitkeep")]
+            assert sorted(listed) == runtime, "the runtime list names other files"
+            for rel, entry in listed.items():
+                data = (self.lib / rel).read_bytes()
+                assert (entry["size"], entry["sha256"]) == (
+                    len(data), hashlib.sha256(data).hexdigest()), rel
+        return [f for f in found if f != runtime_files.NAME]
 
     def marker(self) -> str | None:
         p = self.lib / ".localm-backend"
@@ -591,6 +607,7 @@ def test_linux_cpu_provision_copies_shared_objects_only(world):
               "OK - cpu runtime loads on this machine.", f"Native runtime ready -> {world.lib}")
     assert world.files() == [".localm-backend", "LICENSE.llama-cpp", "libggml-base.so.0",
                              "libggml-cpu.so", "libllama.so"]
+    assert (world.lib / runtime_files.NAME).is_file(), "no list of the runtime files"
     assert world.marker() == f"cpu {PIN}\n"
     assert world.requests == [f"{API}/{UPSTREAM}/releases/tags/{PIN}", url]
 
@@ -680,6 +697,7 @@ def test_windows_amd_rocm_provision_keeps_blas_kernel_layout(world, pin, note):
                              "ggml-cpu.dll", "ggml-hip.dll", "libomp.dll", "llama.dll",
                              "rocblas.dll", "rocblas/library/Kernels.so-000-gfx1030.hsaco",
                              "rocblas/library/TensileLibrary_gfx1030.dat", "rocm_kpack.dll"]
+    assert (world.lib / runtime_files.NAME).is_file(), "no list of the runtime files"
     assert (world.lib / ".kpack" / "blas_lib_gfx1030.kpack").read_bytes() == b"blas-pack"
     assert (world.lib / "ggml-cpu.dll").read_bytes() == b"cpu-haswell"
     assert (world.lib / "libomp.dll").read_bytes() == b"openmp"

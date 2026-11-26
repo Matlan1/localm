@@ -2765,7 +2765,10 @@ def _describe_load_placement(name: str, engine, evictions=()) -> str:
                        f" (full offload needs ~{need // mb} MB: weights "
                        f"{sizing.get('model_bytes', 0) // mb} + KV "
                        f"{sizing.get('kv_bytes', 0) // mb} + overhead "
-                       f"{sizing.get('overhead_bytes', 0) // mb})")
+                       f"{sizing.get('overhead_bytes', 0) // mb}")
+            if sizing.get("projector_bytes"):
+                detail += f", of which projector {sizing['projector_bytes'] // mb}"
+            detail += ")"
             if sizing.get("cause"):
                 detail += f" - {sizing['cause']}"
         elif sizing.get("mode") == "unmeasurable":
