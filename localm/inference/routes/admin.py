@@ -424,26 +424,37 @@ def register(app: FastAPI, ctx) -> None:
     async def _with_applier(request: Request, asset_id, **kwargs):
         """Install the build *asset_id* through the program it ships
         (``localm.updater_handoff``): prepare and check it, then restart into it. When
-        other processes of localm run, the first press answers ``{applied: false,
-        needs_confirmation: "processes", processes, error}`` naming them; a second press
-        within :data:`_CONFIRM_S` that finds the same ones is the agreement to end them,
-        and needs an owner. Returns None when the build ships no such program
-        (``updater.apply`` installs it then). Raises LocalmError or
+        other processes of localm run, an owner's first press answers ``{applied: false,
+        needs_confirmation: "processes", processes, error}`` naming them and keeps the
+        prepared update; the owner's second press for the same build within
+        :data:`_CONFIRM_S` that finds the same processes is the agreement to end them,
+        and uses what was prepared. Anyone else gets 403. Returns None when the build
+        ships no such program (``updater.apply`` installs it then). Raises LocalmError or
         ``updater.UnverifiedBuild``."""
         import time as _time
 
         from localm import updater_handoff
-        prepared = await asyncio.to_thread(_probes_held, updater_handoff.prepare, asset_id,
-                                           **kwargs)
+        target = (asset_id, kwargs.get("target_version"))
+        asked, app.state.update_confirm = getattr(app.state, "update_confirm", None), None
+        prepared = None
+        if asked and asked[1] == target and _time.monotonic() - asked[2] < _CONFIRM_S:
+            prepared = await asyncio.to_thread(updater_handoff.look_around, asked[3])
+        elif asked:
+            asked[3].discard()
+        if prepared is None:
+            prepared = await asyncio.to_thread(_probes_held, updater_handoff.prepare,
+                                               asset_id, **kwargs)
         if prepared.legacy:
             prepared.discard()
             return None
         keys = sorted(p["key"] for p in prepared.processes)
         if keys:
-            asked = getattr(app.state, "update_confirm", None)
-            if not (asked and asked[0] == keys and _time.monotonic() - asked[1] < _CONFIRM_S):
-                app.state.update_confirm = (keys, _time.monotonic())
+            if not _hs.caller_is_operator(request):
                 prepared.discard()
+                raise HTTPException(403, "Ending the other processes of localm for an update "
+                                         "requires an owner (admin) key.")
+            if not (asked and asked[3] is prepared and asked[0] == keys):
+                app.state.update_confirm = (keys, target, _time.monotonic(), prepared)
                 return {"applied": False, "needs_confirmation": "processes",
                         "processes": prepared.processes,
                         "error": f"The update to {prepared.new} restarts or ends these "
@@ -452,11 +463,6 @@ def register(app: FastAPI, ctx) -> None:
                                  "restarts into the new version by itself; a chat or a command "
                                  "ends; an MCP server is started again by its client. Press "
                                  "Update now again to continue."}
-            if not _hs.caller_is_operator(request):
-                prepared.discard()
-                raise HTTPException(403, "Ending the other processes of localm for an update "
-                                         "requires an owner (admin) key.")
-        app.state.update_confirm = None
         port = getattr(app.state, "instance_port", None)
         prepared.watch = {"host": _watchdog_probe_host(getattr(app.state, "bind_host", None)),
                           "port": port,

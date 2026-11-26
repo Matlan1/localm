@@ -176,8 +176,12 @@ class Applier:
         except BaseException as e:
             self._back(lock, uv, f"{type(e).__name__}: {e}")
             raise
-        why = steps_update.record(self.root, old=h["old"], new=h["new"], kept=carried.kept,
-                                  home=self.home, env=self.env, say=self.say)
+        try:
+            why = steps_update.record(self.root, old=h["old"], new=h["new"],
+                                      kept=carried.kept, home=self.home, env=self.env,
+                                      say=self.say)
+        except (*steps.STEP_ERRORS, ValueError) as e:
+            why = f"The record of what this update installed could not be written: {e}"
         return self._result("new", f"Updated to localm {h['new']}.",
                             notes=[*carried.notes, *done.notes, *([why] if why else [])])
 
@@ -196,10 +200,11 @@ class Applier:
         steps_update.discard(self.root, self.id)
         if back.state == "new":
             return self._result("new", f"Updated to localm {h['new']}.", notes=back.notes)
-        if back.errors:
+        if back.errors or back.state != "old":
+            errors = back.errors or [f"the way back ended as {back.state!r}"]
             return self._result(
                 "failed", f"The update to {h['new']} failed ({reason}), and localm {h['old']} "
-                f"could not be put back completely: " + "; ".join(back.errors),
+                f"could not be put back completely: " + "; ".join(errors),
                 notes=[*back.notes, *restoring.ways_out(self.root)])
         if self.let_through:
             self._relaunch()

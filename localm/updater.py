@@ -2164,8 +2164,9 @@ def rollback_info() -> dict:
     ``version`` is the backed-up build's VERSION, or None when the backup predates that
     file or it is unreadable (reported as unknown, never guessed from the running version).
 
-    An update carried out by the program its build ships keeps no backup once it is done.
-    Without a backup, when the last such update installed the running version, the way
+    An update carried out by the program its build ships keeps no backup once it is done;
+    when the last such update installed the running version and ended after any backup an
+    earlier update left (or there is none), the way
     back is to install the version it replaced as a chosen release: ``reinstall`` is True
     and ``version`` is that version.
 
@@ -2184,16 +2185,29 @@ def rollback_info() -> dict:
             version = None
     current = _version.read_version()
     reinstall = False
-    if not available:
-        last = last_result()
-        if (last and last.get("state") == "new" and last.get("from")
-                and _direction(str(last.get("to")), current) == "same"
-                and _direction(str(last["from"]), current) != "same"):
-            available, reinstall, version = True, True, str(last["from"])
+    last = last_result()
+    if (last and last.get("state") == "new" and last.get("from")
+            and _direction(str(last.get("to")), current) == "same"
+            and _direction(str(last["from"]), current) != "same"
+            and (not available or _later_than(last, backup_dir / au.BACKUP_RECORD))):
+        available, reinstall, version = True, True, str(last["from"])
     return {"available": available,
             "backup": str(backup_dir) if available and not reinstall else None,
             "version": version,
             "current": current, "reinstall": reinstall}
+
+
+def _later_than(result: dict, backup_record: Path) -> bool:
+    """Whether the update *result* (:func:`last_result`) ended after the backup whose
+    record is *backup_record* was made: that backup is then of an earlier update."""
+    try:
+        made = backup_record.stat().st_mtime
+    except OSError:
+        return True
+    try:
+        return float(result.get("at") or 0) > made
+    except (TypeError, ValueError):
+        return False
 
 
 def _restore_all(target: Path, backup_dir: Path, names, *, say=None, components=None,

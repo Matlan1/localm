@@ -376,6 +376,28 @@ def test_the_other_servers_of_this_install_are_asked_to_restart(tmp_path, monkey
         http.shutdown()
 
 
+@pytest.mark.parametrize("backup_is_older", [True, False])
+def test_going_back_reinstalls_what_the_last_update_replaced_not_an_older_backup(
+        updates_dir, monkeypatch, backup_is_older):
+    """A backup an earlier update of the old updater left (of 0.3.3) does not win over
+    the version the later update replaced; a backup made after that update does."""
+    from localm import _apply_update as au
+    from localm import updater
+    monkeypatch.setattr(updater._version, "read_version", lambda: "2")
+    monkeypatch.setattr(updater, "_backup_is_restorable", lambda _d: True)
+    monkeypatch.setattr(au, "backup_problem", lambda *_a: None)
+    backup = updates_dir / "backup"
+    backup.mkdir()
+    (backup / "VERSION").write_text("0.3.3", encoding="utf-8")
+    (backup / au.BACKUP_RECORD).write_text("{}", encoding="utf-8")
+    made = time.time() - (100 if backup_is_older else -100)
+    os.utime(backup / au.BACKUP_RECORD, (made, made))
+    _ended(updates_dir, "new")
+    info = updater.rollback_info()
+    assert info["reinstall"] is backup_is_older
+    assert info["version"] == ("1" if backup_is_older else "0.3.3")
+
+
 def _free_port() -> int:
     import socket
     with socket.socket() as sock:
@@ -466,6 +488,55 @@ def test_a_process_above_the_starter_goes_on_and_does_not_stop_the_update(update
     finally:
         launcher.stdin.close()
         _end(launcher)
+
+
+def test_only_an_owner_confirms_and_the_second_press_uses_what_the_first_prepared(
+        monkeypatch):
+    """``Update now`` while a chat runs: a press without an owner is refused and arms
+    nothing; the owner's first press names the processes and keeps the prepared update;
+    the owner's second press hands that same update over, without preparing it again."""
+    from unittest.mock import MagicMock
+
+    from fastapi.testclient import TestClient
+
+    import localm.inference.http_server as hs
+    from localm import updater, updater_handoff
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    owner, made, gone, handed = [False], [], [], []
+    chat = [{"key": "9-9", "pid": 9, "purpose": "chat", "restarts": False}]
+
+    def prepare(*_a, **_k):
+        p = updater_handoff.Prepared(Path("."), "0" * 32, "1", "2", None, True, None, False,
+                                     None, processes=list(chat))
+        p.discard = lambda: gone.append(p)
+        made.append(p)
+        return p
+
+    def look_around(p):
+        p.processes = list(chat)
+        return p
+
+    monkeypatch.setattr(hs, "_request_restart", lambda **k: handed.append(k.get("update")))
+    monkeypatch.setattr(hs, "caller_is_operator", lambda _r: owner[0])
+    monkeypatch.setattr(updater, "available", lambda: True)
+    monkeypatch.setattr(updater, "check", lambda: {
+        "current": "1", "latest": "v2", "newer": True, "notes": "", "asset": {"id": 3}})
+    monkeypatch.setattr(updater_handoff, "prepare", prepare)
+    monkeypatch.setattr(updater_handoff, "look_around", look_around)
+    engine = MagicMock()
+    engine.display_name, engine.loaded = "m", True
+    app = hs.create_app(engine)
+    replies = []
+    with TestClient(app) as client:
+        for who in (False, True, True):
+            owner[0] = who
+            replies.append(client.post("/api/update/apply", headers={
+                "Authorization": f"Bearer {app.state.shell_token}"}))
+    assert replies[0].status_code == 403 and gone == [made[0]]
+    assert replies[1].json()["needs_confirmation"] == "processes"
+    assert replies[2].json()["applied"] is True
+    assert len(made) == 2 and handed == [made[1]] and gone == [made[0]]
 
 
 def test_the_hand_off_must_be_complete():

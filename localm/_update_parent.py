@@ -35,7 +35,14 @@ def run(argv) -> int:
         code = subprocess.call([sys.executable, "-m", "localm", *argv[1:]], env=env)
     except KeyboardInterrupt:
         return 130
-    return wait() if code == HANDED_OFF else code
+    if code != HANDED_OFF:
+        return code
+    try:
+        return wait()
+    except KeyboardInterrupt:
+        _say("Stopped waiting. The update goes on; `localm update --check` says which "
+             "version is installed once it has ended.")
+        return 130
 
 
 def _say(text: str) -> None:
