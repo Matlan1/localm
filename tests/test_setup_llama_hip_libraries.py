@@ -413,6 +413,7 @@ def _confirm_script():
     return mod
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows hip build holds llama.dll")
 def test_the_runtime_confirmation_places_the_hip_build_as_an_install_does(tmp_path,
                                                                          monkeypatch):
     confirm = _confirm_script()
