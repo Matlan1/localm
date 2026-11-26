@@ -42,14 +42,18 @@ select the test files that reference __version__, name the VERSION, pyproject.to
 uv.lock or CHANGELOG.md files, or spell the old or the new version.
 
 A change to localm/config.py that only adds keys to DEFAULT_CONFIG (new key
-lines and their comment lines inserted inside the table, every existing key
-kept with its value and its place in the order, nothing else in the file
-changed) selects the tests that read the default table instead of every
-importer of the module: the test files named test_config*.py or
-test_settings*.py, the ones that name DEFAULT_CONFIG, validate_update or
-settings_schema, and the ones that name a new key. The tree scanners that read
+lines and their comment lines inserted inside the table, each new value a
+literal, every existing key kept with its value and its place in the order,
+nothing else in the file changed) selects the tests that read the default
+table instead of every importer of the module: the test files named
+test_config*.py or test_settings*.py, the ones that name DEFAULT_CONFIG,
+validate_update or settings_schema, and the ones that name a new key. They are
+added after the importers of the other changed modules are followed, so they
+never make --max-share leave one of those out. The tree scanners that read
 localm/*.py stay selected. Any other change to localm/config.py counts as a
-change to the module.
+change to the module. The addition is read against the base like a version
+bump: with --files the base is HEAD, so a committed change to the file is not
+seen.
 
 A change to tests/conftest.py affects every test file. So does a change to
 pyproject.toml or uv.lock outside the [project] requirement lists, the
@@ -777,7 +781,9 @@ def config_key_additions(old_source: str, new_source: str) -> set[str] | None:
     differs from *old_source* (two texts of localm/config.py): every line
     the new text adds lies between the table's opening and closing lines, no
     line is removed or changed, every old key keeps its value and its place in
-    the order, and the module is otherwise the same. None otherwise, when
+    the order, every new value is a literal (ast.literal_eval reads it, so it
+    names, calls and assigns nothing), and the module is otherwise the same.
+    None otherwise, when
     nothing is added, or when either text does not parse or has no single
     DEFAULT_CONFIG dict literal with string keys."""
     try:
@@ -794,9 +800,15 @@ def config_key_additions(old_source: str, new_source: str) -> set[str] | None:
     if not added or [k for k in new_keys if k not in added] != old_keys:
         return None
     old_values = {k: ast.dump(v) for k, v in zip(old_keys, old_table.values, strict=True)}
-    if any(ast.dump(v) != old_values[k]
-           for k, v in zip(new_keys, new_table.values, strict=True) if k not in added):
-        return None
+    for k, v in zip(new_keys, new_table.values, strict=True):
+        if k not in added:
+            if ast.dump(v) != old_values[k]:
+                return None
+            continue
+        try:
+            ast.literal_eval(v)
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+            return None
     # 0-based indices of the new text's lines strictly between the table's
     # opening line and its closing line.
     inside = range(new_table.lineno, (new_table.end_lineno or 0) - 1)
@@ -1054,10 +1066,6 @@ def select(changed: list[str], graph: Graph, depth: int = 0, base_ref: str = "HE
     config_keys = None
     if _CONFIG_MODULE in changed:
         config_keys = config_key_additions(_read_at(base_ref, _CONFIG_MODULE), _read(_CONFIG_MODULE))
-    if config_keys:
-        for t, whys in config_key_readers(graph, config_keys, test_text).items():
-            for why in whys:
-                add(t, why)
 
     if "pyproject.toml" in listed:
         readers = changed_tool_table_readers(_read_at(base_ref, "pyproject.toml"),
@@ -1134,6 +1142,10 @@ def select(changed: list[str], graph: Graph, depth: int = 0, base_ref: str = "HE
             add(t, label)
         for why in dependency_reasons.get(t, []):
             add(t, why)
+    if config_keys:
+        for t, whys in config_key_readers(graph, config_keys, test_text).items():
+            for why in whys:
+                add(t, why)
     return reasons
 
 

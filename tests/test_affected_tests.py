@@ -1232,6 +1232,19 @@ def test_a_config_key_addition_beside_another_change_keeps_that_changes_selectio
                                                "tests/test_patch.py"}
 
 
+def test_the_config_readers_never_make_max_share_leave_out_another_changes_importer(config_repo):
+    mod, root = config_repo
+    _edit(root, "localm/config.py", *_ADD_KEY)
+    _edit(root, "localm/b.py", "return 1", "return 2")
+    graph = mod.Graph()
+    assert len(graph.test_files) == 27
+    held = {}
+    selected = mod.select(["localm/config.py", "localm/b.py"], graph, depth=1, max_share=0.3, held=held)
+    assert selected["tests/test_a.py"] == ["imports localm.a (1 hop(s) from a change)"]
+    assert held == {}
+    assert _CONFIG_READERS <= set(selected)
+
+
 def test_a_config_key_addition_already_committed_is_seen_from_its_base(config_repo):
     mod, root = config_repo
     base = _git(root, "rev-parse", "HEAD").strip()
@@ -1269,6 +1282,13 @@ _ADDED_INSIDE = _CONFIG.replace('    "gamma": "x",\n', '    "gamma": "x",\n    #
     (_CONFIG, _CONFIG.replace('    "gamma": "x",\n', '    "gamma": "x",\n    "delta": 0,\n}\nX = 1\nY = {\n'),
      None),
     (_CONFIG, _CONFIG.replace("}\n", '    "delta": (\n'), None),
+    (_CONFIG, _CONFIG.replace("}\n", '    "delta": {"a": [1, -2.5, None, (True, "x")]},\n}\n'),
+     {"delta"}),
+    (_CONFIG, _CONFIG.replace("}\n", '    "delta": (OTHER := ()),\n}\n'), None),
+    (_CONFIG, _CONFIG.replace("}\n", '    "delta": os.getcwd(),\n}\n'), None),
+    (_CONFIG, _CONFIG.replace("}\n", '    "delta": OTHER,\n}\n'), None),
+    (_CONFIG, _CONFIG.replace("}\n", '    "delta": [OTHER],\n}\n'), None),
+    (_CONFIG, _CONFIG.replace("}\n", '    "delta": lambda: 0,\n}\n'), None),
     ("", _ADDED_INSIDE, None),
     (_CONFIG.replace("DEFAULT_CONFIG: dict = {", "DEFAULT_CONFIG = dict({").replace("}\n\n\n", "})\n\n\n"),
      _ADDED_INSIDE.replace("DEFAULT_CONFIG: dict = {", "DEFAULT_CONFIG = dict({").replace("}\n\n\n", "})\n\n\n"),
