@@ -37,7 +37,8 @@ uninstall treats a journaled shortcut or command it never got to record as if it
 been recorded (through the same checks). A step that was begun but never finished
 while it could touch the user's profile is reported as a note.
 
-Stdlib only, plus ``localm._home_cfg`` and ``localm.procs`` (stdlib only themselves).
+Stdlib only, plus ``localm._home_cfg`` and, inside the function that lists the files to
+remove, ``localm.procs`` (stdlib only themselves).
 """
 
 from __future__ import annotations
@@ -53,7 +54,7 @@ import time
 from pathlib import Path
 from typing import Iterable, Optional
 
-from localm import _home_cfg, procs
+from localm import _home_cfg
 
 MANIFEST_NAME = ".localm-install.json"
 PENDING_NAME = ".localm-uninstall-pending"
@@ -1735,6 +1736,7 @@ def _plan(root: Path, m: Optional[dict], *, purge_data: bool,
 
     # Scratch files setup.bat keeps in the clone while it runs, and the files that
     # name the running processes.
+    from localm import procs
     for scratch in (root / SETUP_TMP_NAME, root / procs.FOLDER):
         if scratch.exists() or _is_link(scratch):
             items.append(_Item(scratch, "data-entry", "remove"))

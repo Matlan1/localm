@@ -20,6 +20,8 @@ import importlib.util
 import tomllib
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -119,12 +121,15 @@ def test_package_root_importing_a_unit_fires(tmp_path, monkeypatch):
     assert "<root> -> util" in problems[0]
 
 
-def test_package_root_may_import_procs_which_imports_nothing(tmp_path, monkeypatch):
-    layering = _tiers(("app", ["app"]), ("low", ["procs", "util"]))
-    base = {"app.py": "", "util.py": "", "__init__.py": "from localm import procs\n"}
-    _, problems = _check(tmp_path, monkeypatch, {"procs.py": "import os\n"}, layering, base)
+@pytest.mark.parametrize("unit, tier", [("procs", "low"), ("procs_repair", "app")])
+def test_package_root_may_import_procs_and_its_repair_which_import_nothing(
+        tmp_path, monkeypatch, unit, tier):
+    layering = _tiers(("app", ["app", *([unit] if tier == "app" else [])]),
+                      ("low", [*([unit] if tier == "low" else []), "util"]))
+    base = {"app.py": "", "util.py": "", "__init__.py": f"from localm import {unit}\n"}
+    _, problems = _check(tmp_path, monkeypatch, {f"{unit}.py": "import os\n"}, layering, base)
     assert problems == []
-    _, problems = _check(tmp_path, monkeypatch, {"procs.py": "from localm import util\n"},
+    _, problems = _check(tmp_path, monkeypatch, {f"{unit}.py": "from localm import util\n"},
                          layering, base)
     assert any("imports util" in x for x in problems), problems
 

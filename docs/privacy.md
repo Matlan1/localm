@@ -276,7 +276,12 @@ number made from the ids of this machine and this folder, which is the same for 
 other folder; the file stays when the process ends and is deleted by a localm process
 that starts later, or that asks which processes run (one written by another machine or
 container, copied here with the folder, or, on a Linux system without a machine id,
-left from before a restart, stays). A process that waits while an update of localm is
+left from before a restart, stays). When `localm/procs.py` cannot be loaded at a start,
+the start repairs it in every session mode: it downloads the signed build of the installed
+version into `updates/integrity-repair/` in the data folder and deletes it after writing
+the damaged files back, or, for a missing Python package, runs the repair of the installed
+parts, which keeps a copy of the venv in `updates/` while it reinstalls the packages and
+deletes it after. A process that waits while an update of localm is
 not finished has an empty file in `.localm-update/` named after its process id and start
 time until it goes on; one that was ended while it waited leaves that file until the
 update is put back. After an older localm (0.3.2 to 0.3.4b4) installed this version with

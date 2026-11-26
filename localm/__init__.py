@@ -2,6 +2,8 @@
 """The first act of importing localm is to record this process (:mod:`localm.procs`).
 Reading the record of an update comes after it and before anything else of localm: an
 updater writes its record and then lists the processes, so one side sees the other.
+When the record cannot be imported, the gate decides without it, and then
+:mod:`localm.procs_repair` repairs it and records this process.
 
 While an update of this install is not finished, :func:`_gate` waits for it, or puts the
 old version back when nobody is updating, or ends this process. Run as a program
@@ -243,24 +245,42 @@ def _put_back(root: str, folder: str, update: str, window: bool) -> int:
 if __name__ == "__main__":
     _gate()
 else:
-    # An update into a release without this gate takes its localm/procs.py out, or puts that
-    # release's own in place, just before it replaces this file: without localm.procs, or
-    # with one that has no enter and current, the gate decides without the process record.
-    # Any other failure of the import is raised.
+    # Without a localm.procs that imports and has enter and current (an update into a
+    # release without this gate takes it out, or puts that release's own in place, just
+    # before it replaces this file; or the file is damaged), the gate decides without the
+    # process record, and localm.procs_repair repairs it after the gate.
+    _broken = None
     try:
         import localm.procs as _procs
-    except ModuleNotFoundError as _e:
-        if _e.name != "localm.procs":
-            raise
-        _procs = None
+    except Exception as _e:
+        _procs, _broken = None, _e
     _me = None
     if _procs is not None and callable(getattr(_procs, "enter", None)) \
             and callable(getattr(_procs, "current", None)):
         _me = _procs.enter, _procs.current, _procs.__file__
+    elif _procs is not None:
+        _broken = ImportError("localm.procs has no enter and current", name="localm.procs")
     if _me is not None:
         _me[0]()
     _round = globals().get("_round", 0) + 1
-    if _gate(_me[1]() if _me is not None else None) and _round < 3:
+    _again = _gate(_me[1]() if _me is not None else None) and _round < 3
+    if _broken is not None and not _again:
+        try:
+            from localm import procs_repair as _repair
+            _repair.repair_and_enter(_broken)
+        except Exception as _e:
+            _text = (f"the list of running processes (localm/procs.py) cannot be imported: "
+                     f"{type(_broken).__name__}: {_broken}, and its repair failed: "
+                     f"{type(_e).__name__}: {_e}. This start goes on without it, and a "
+                     f"command that needs it stops with this error; to repair it: 'localm "
+                     f"integrity --repair localm/procs.py localm/procs_repair.py'.")
+            _say(f"localm: {_text}")
+            try:
+                from localm.debuglog import defer_log as _defer
+                _defer(30, "procs repair: %s", _text)
+            except Exception as _e2:
+                _say(f"localm: the debug log cannot record this: {_e2!r}")
+    if _again:
         # The files just put in place are read instead of the ones this began with, whose
         # compiled copies may have the same size and time.
         import importlib.util
