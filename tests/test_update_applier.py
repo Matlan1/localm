@@ -146,6 +146,7 @@ class Update(Install):
             "restarting": list(restarting),
             "ancestors": list(ancestors)}) + "\n")
         proc.stdin.close()
+        proc.stdin = None   # communicate flushes an open stdin on POSIX
         assert proc.stdout.readline().strip() == "ready", proc.stderr.read()
         return proc
 
